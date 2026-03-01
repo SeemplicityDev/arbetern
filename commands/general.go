@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"regexp"
 	"strings"
 
 	"github.com/justmike1/ovad/github"
@@ -135,8 +136,9 @@ func (h *GeneralHandler) Execute(channelID, userID, text, responseURL, auditTS s
 			// tools are invoked (covers cases where initial intent detection
 			// didn't trigger the code model).
 			codeTools := map[string]bool{
-				"modify_file": true, "get_file_content": true,
-				"search_code": true, "search_files": true,
+				"modify_file": true, "regex_replace_file": true,
+				"get_file_content": true,
+				"search_code":      true, "search_files": true,
 				"list_directory": true, "get_pull_request": true,
 			}
 			if codeTools[tc.Function.Name] && h.codeModelsClient != nil && activeClient != h.codeModelsClient {
@@ -275,6 +277,25 @@ func (h *GeneralHandler) buildTools() []github.Tool {
 						"branch":{"type":"string","description":"Base branch name (optional, uses default branch if empty)"}
 					},
 					"required":["repo","path","old_content","new_content","description"]
+				}`),
+			},
+		},
+		{
+			Type: "function",
+			Function: github.ToolFunction{
+				Name:        "regex_replace_file",
+				Description: "Bulk-replace all matches of a regex pattern in a file. Use this instead of calling modify_file many times when you need to change many similar lines at once (e.g. 'change all image.tag values to latest', 'set all replicas to 3'). The tool reads the FULL file from GitHub, applies a Go-syntax regular expression replacement on ALL matches, then creates a branch, commits, and opens a PR. Multiple regex_replace_file / modify_file calls for the SAME repository are grouped into a SINGLE PR. Replacement string supports $1, $2, etc. for captured groups.",
+				Parameters: json.RawMessage(`{
+					"type":"object",
+					"properties":{
+						"repo":{"type":"string","description":"Repository name (without owner)"},
+						"path":{"type":"string","description":"File path within the repository"},
+						"pattern":{"type":"string","description":"Go (RE2) regular expression to match. Use capturing groups for partial replacements (e.g. '(tag:\\s*)\\S+' to capture the 'tag: ' prefix)."},
+						"replacement":{"type":"string","description":"Replacement string. Use $1, $2, etc. to reference captured groups (e.g. '${1}latest')."},
+						"description":{"type":"string","description":"Short description of what was changed (used as commit message and PR title)"},
+						"branch":{"type":"string","description":"Base branch name (optional, uses default branch if empty)"}
+					},
+					"required":["repo","path","pattern","replacement","description"]
 				}`),
 			},
 		},
@@ -796,6 +817,86 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		}
 		log.Printf("[user=%s channel=%s] additional commit to branch %s for PR: %s", userID, channelID, active.branchName, active.prURL)
 		return fmt.Sprintf("Changes committed to existing PR: %s", active.prURL)
+
+	case "regex_replace_file":
+		var args struct {
+			Repo        string `json:"repo"`
+			Path        string `json:"path"`
+			Pattern     string `json:"pattern"`
+			Replacement string `json:"replacement"`
+			Description string `json:"description"`
+			Branch      string `json:"branch"`
+		}
+		if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+			return fmt.Sprintf("Error parsing arguments: %v", err)
+		}
+		re, err := regexp.Compile(args.Pattern)
+		if err != nil {
+			return fmt.Sprintf("Error compiling regex pattern: %v", err)
+		}
+		owner, err := h.ghClient.ResolveOwner(ctx)
+		if err != nil {
+			return fmt.Sprintf("Error resolving owner: %v", err)
+		}
+		baseBranch := args.Branch
+		if baseBranch == "" {
+			baseBranch, err = h.ghClient.GetDefaultBranch(ctx, owner, args.Repo)
+			if err != nil {
+				return fmt.Sprintf("Error getting default branch: %v", err)
+			}
+		}
+
+		repoKey := owner + "/" + args.Repo
+		active := h.activeBranches[repoKey]
+
+		readBranch := baseBranch
+		if active != nil {
+			readBranch = active.branchName
+		}
+
+		fullContent, fileSHA, err := h.ghClient.GetFileContent(ctx, owner, args.Repo, args.Path, readBranch)
+		if err != nil {
+			return fmt.Sprintf("Error reading current file: %v", err)
+		}
+
+		updatedContent := re.ReplaceAllString(fullContent, args.Replacement)
+		if updatedContent == fullContent {
+			return "Error: regex pattern matched nothing in the file. Double-check the pattern and try again."
+		}
+		matches := len(re.FindAllStringIndex(fullContent, -1))
+		log.Printf("[user=%s channel=%s] regex_replace_file: %d matches of %q in %s/%s",
+			userID, channelID, matches, args.Pattern, args.Repo, args.Path)
+
+		if active == nil {
+			branchName := github.GenerateBranchName(h.agentID)
+			if err := h.ghClient.CreateBranch(ctx, owner, args.Repo, baseBranch, branchName); err != nil {
+				return fmt.Sprintf("Error creating branch: %v", err)
+			}
+			commitMsg := fmt.Sprintf("%s: %s", h.agentID, args.Description)
+			if err := h.ghClient.UpdateFile(ctx, owner, args.Repo, args.Path, branchName, commitMsg, []byte(updatedContent), fileSHA); err != nil {
+				return fmt.Sprintf("Error committing file: %v", err)
+			}
+			prTitle := fmt.Sprintf("%s: %s", h.agentID, args.Description)
+			prBody := fmt.Sprintf("Automated regex replacement requested via Slack by <@%s>.\n\nChange: %s\nPattern: `%s` → `%s`\nMatches replaced: %d", userID, args.Description, args.Pattern, args.Replacement, matches)
+			prURL, err := h.ghClient.CreatePullRequest(ctx, owner, args.Repo, baseBranch, branchName, prTitle, prBody)
+			if err != nil {
+				return fmt.Sprintf("Changes committed to branch %s but PR creation failed: %v", branchName, err)
+			}
+			h.activeBranches[repoKey] = &activeBranchInfo{
+				branchName: branchName,
+				baseBranch: baseBranch,
+				prURL:      prURL,
+			}
+			log.Printf("[user=%s channel=%s] PR created via regex_replace_file (%d matches): %s", userID, channelID, matches, prURL)
+			return fmt.Sprintf("Replaced %d matches. Pull request created: %s", matches, prURL)
+		}
+
+		commitMsg := fmt.Sprintf("%s: %s", h.agentID, args.Description)
+		if err := h.ghClient.UpdateFile(ctx, owner, args.Repo, args.Path, active.branchName, commitMsg, []byte(updatedContent), fileSHA); err != nil {
+			return fmt.Sprintf("Error committing file to existing branch: %v", err)
+		}
+		log.Printf("[user=%s channel=%s] regex_replace_file: additional commit to branch %s (%d matches) for PR: %s", userID, channelID, active.branchName, matches, active.prURL)
+		return fmt.Sprintf("Replaced %d matches. Changes committed to existing PR: %s", matches, active.prURL)
 
 	case "get_pull_request":
 		var args struct {
@@ -1425,6 +1526,10 @@ func isCodeIntent(text string) bool {
 		"update the file", "update file", "fix the code", "fix code", "fix the bug",
 		"create pr", "create a pr", "open pr", "open a pr", "pull request",
 		"refactor", "implement", "add feature", "write code", "patch",
+		// File changes (broad — catches "change all X to Y in file")
+		"change all", "update all", "set all", "replace all",
+		"change tag", "change version", "tag version",
+		"send me pr", "send pr",
 		// Code review & reading
 		"review", "look at", "check the code", "check code", "read the code", "read code",
 		"show me the code", "show the code", "show code", "code review",
@@ -1433,6 +1538,9 @@ func isCodeIntent(text string) bool {
 		"affected", "exposed", "security", "dependency", "dependencies",
 		"what does", "how does", "explain the code", "explain code",
 		"search code", "search the code", "find in code", "look for",
+		// File references (strong signals the request involves repo files)
+		".yaml", ".yml", ".json", ".tf", ".go", ".py", ".js", ".ts",
+		"dockerfile",
 	}
 	for _, kw := range codeKeywords {
 		if strings.Contains(text, kw) {
