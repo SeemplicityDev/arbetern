@@ -284,7 +284,7 @@ func (h *GeneralHandler) buildTools() []github.Tool {
 			Type: "function",
 			Function: github.ToolFunction{
 				Name:        "regex_replace_file",
-				Description: "Bulk-replace all matches of a regex pattern in a file. Use this instead of calling modify_file many times when you need to change many similar lines at once (e.g. 'change all image.tag values to latest', 'set all replicas to 3'). The tool reads the FULL file from GitHub, applies a Go-syntax regular expression replacement on ALL matches, then creates a branch, commits, and opens a PR. Multiple regex_replace_file / modify_file calls for the SAME repository are grouped into a SINGLE PR. Replacement string supports $1, $2, etc. for captured groups.",
+				Description: "Bulk-replace all matches of a SIMPLE regex pattern in a file. Best for uniform single-line replacements across a whole file (e.g. 'change all image.tag to latest'). Do NOT use for scoped/structural changes in a specific section — use modify_file instead for those. Keep patterns short and per-line. Avoid complex multi-line regex with (?:.|\\n)*? or lookaheads — if you need those, use modify_file. The tool reads the FULL file from GitHub, applies a Go RE2 regex replacement on ALL matches, creates a branch, commits, and opens a PR. Multiple calls for the same repo are grouped into a SINGLE PR. Replacement supports $1, $2 for captured groups.",
 				Parameters: json.RawMessage(`{
 					"type":"object",
 					"properties":{

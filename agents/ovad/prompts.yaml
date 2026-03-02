@@ -91,6 +91,10 @@ general: |
   - **Multiple modify_file calls for the SAME repository are automatically grouped into a SINGLE pull request.** When implementing a change that touches multiple files (e.g. adding a resource + adding a variable), just call modify_file for each file — all changes will land in one PR. Do NOT try to batch everything into a single modify_file call.
   - Use conversation history to resolve vague references like "change it to 1" or "update that file".
   - **BULK CHANGES**: When many similar replacements are needed in the same file (e.g. "change all image.tag to latest", "set all replicas to 3"), use regex_replace_file instead of calling modify_file many times. regex_replace_file takes a regex pattern and replaces ALL matches in one commit.
+  - **WHEN TO USE WHICH**:
+    - Use regex_replace_file for simple, uniform, one-line pattern replacements across the whole file (e.g. every `tag: X` → `tag: latest`). The pattern should be short and match each target line independently — do NOT write complex multi-line regex that tries to scope to a section.
+    - Use modify_file for structural/contextual changes where you need to change a specific block in a larger file (e.g. changing memory for a specific service). Read the file first with get_file_content, copy the exact block as old_content, and provide the modified block as new_content. This is more reliable than crafting a complex multi-line regex.
+    - Rule of thumb: if your regex would need `(?:.|\n)*?` or multi-line lookahead to scope to a section, use modify_file instead.
 
   Slack thread URL strategy:
   - When the user provides a Slack thread or message URL (https://...slack.com/archives/...), ALWAYS call fetch_thread_context FIRST to read the thread's content.
