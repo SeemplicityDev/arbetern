@@ -9,8 +9,10 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/justmike1/arbetern/atlassian"
@@ -161,6 +163,12 @@ func checkAgentRBAC(cache *groupMemberCache, slackClient *slack.Client, agentID,
 }
 
 const rbacDenyMessage = ":lock: Access denied — you are not a member of an authorized team for this agent. Contact your administrator if you need access."
+
+// Changelog source repository for the /api/changes endpoint.
+const (
+	changelogOwner = "justmike1"
+	changelogRepo  = "arbetern"
+)
 
 // buildHelpMessage generates the /arbetern help response from discovered agents.
 // Each agent gets a one-line entry extracted from the second line of its intro prompt.
@@ -861,13 +869,13 @@ func main() {
 		})
 	})
 
-	// API: latest changes (commits from justmike1/arbetern).
+	// API: latest changes (commits from the arbetern repo).
 	apiMux.HandleFunc("/api/changes", func(w http.ResponseWriter, r *http.Request) {
 		if ghClient == nil {
 			http.Error(w, "GitHub integration not configured", http.StatusServiceUnavailable)
 			return
 		}
-		commits, err := ghClient.ListCommits(r.Context(), "justmike1", "arbetern", 20)
+		commits, err := ghClient.ListCommits(r.Context(), changelogOwner, changelogRepo, 20)
 		if err != nil {
 			http.Error(w, fmt.Sprintf("failed to fetch commits: %v", err), http.StatusInternalServerError)
 			return
@@ -879,7 +887,31 @@ func main() {
 	http.Handle("/api/", ipWhitelist(uiCIDRs, apiMux))
 
 	log.Printf("arbetern server starting on :%s", cfg.Port)
-	if err := http.ListenAndServe(":"+cfg.Port, nil); err != nil {
-		log.Fatalf("server failed: %v", err)
+
+	srv := &http.Server{
+		Addr:         ":" + cfg.Port,
+		ReadTimeout:  30 * time.Second,
+		WriteTimeout: 90 * time.Second,
+		IdleTimeout:  120 * time.Second,
 	}
+
+	// Graceful shutdown on SIGTERM/SIGINT (Kubernetes pod termination).
+	shutdown := make(chan os.Signal, 1)
+	signal.Notify(shutdown, syscall.SIGTERM, syscall.SIGINT)
+
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("server failed: %v", err)
+		}
+	}()
+
+	sig := <-shutdown
+	log.Printf("received %s — shutting down gracefully (30s deadline)...", sig)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(ctx); err != nil {
+		log.Fatalf("graceful shutdown failed: %v", err)
+	}
+	log.Println("server stopped")
 }

@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"time"
 )
 
 const modelsAPIURL = "https://models.github.ai/inference/chat/completions"
@@ -18,6 +19,10 @@ const azureAPIVersion = "2024-10-21"
 
 // azureResponsesAPIVersion is the API version for the Responses API (codex models).
 const azureResponsesAPIVersion = "2025-04-01-preview"
+
+// maxResponseBody is the upper bound on response body reads to prevent OOM from
+// unexpectedly large upstream responses (10 MB).
+const maxResponseBody = 10 << 20
 
 type ModelsClient struct {
 	token      string
@@ -79,7 +84,7 @@ func NewModelsClient(token, model string) *ModelsClient {
 	return &ModelsClient{
 		token:      token,
 		model:      model,
-		httpClient: &http.Client{},
+		httpClient: &http.Client{Timeout: 120 * time.Second},
 	}
 }
 
@@ -89,7 +94,7 @@ func NewAzureModelsClient(endpoint, apiKey, deployment string) *ModelsClient {
 	endpoint = strings.TrimRight(endpoint, "/")
 	return &ModelsClient{
 		model:         deployment,
-		httpClient:    &http.Client{},
+		httpClient:    &http.Client{Timeout: 120 * time.Second},
 		azureEndpoint: endpoint,
 		azureAPIKey:   apiKey,
 	}
@@ -177,7 +182,7 @@ func (m *ModelsClient) doChat(ctx context.Context, messages []ChatMessage, tools
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
 	if err != nil {
 		return nil, fmt.Errorf("failed to read response body: %w", err)
 	}
@@ -428,7 +433,7 @@ func (m *ModelsClient) doResponses(ctx context.Context, messages []ChatMessage, 
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
 	if err != nil {
 		return nil, fmt.Errorf("failed to read responses body: %w", err)
 	}

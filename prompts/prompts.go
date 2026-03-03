@@ -9,14 +9,11 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const defaultPath = "agents/ovad/prompts.yaml"
 const defaultAgentsDir = "agents"
 const globalPromptsFile = "prompts.yaml"
 const agentConfigFile = "config.yaml"
 const customPromptsEnv = "CUSTOM_PROMPTS_DIR"
 const rbacOverrideEnv = "AGENT_RBAC_DIR"
-
-var store map[string]string
 
 // AgentConfig holds metadata and prompts for a single agent.
 type AgentConfig struct {
@@ -235,55 +232,6 @@ func (ap *AgentPrompts) SystemPrompt(specificKey string) string {
 // ID returns the agent identifier.
 func (ap *AgentPrompts) ID() string {
 	return ap.agentID
-}
-
-func Load(path string) error {
-	if path == "" {
-		path = os.Getenv("PROMPTS_FILE")
-	}
-	if path == "" {
-		path = defaultPath
-	}
-
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return fmt.Errorf("failed to read prompts file %s: %w", path, err)
-	}
-
-	parsed := make(map[string]string)
-	if err := yaml.Unmarshal(data, &parsed); err != nil {
-		return fmt.Errorf("failed to parse prompts file: %w", err)
-	}
-
-	store = parsed
-	return nil
-}
-
-func Get(key string) string {
-	if store == nil {
-		return ""
-	}
-	return store[key]
-}
-
-func MustGet(key string) string {
-	val := Get(key)
-	if val == "" {
-		panic(fmt.Sprintf("prompt %q not found in prompts file", key))
-	}
-	return val
-}
-
-// GetAllGlobal returns a copy of all loaded prompts from the global store.
-func GetAllGlobal() map[string]string {
-	if store == nil {
-		return nil
-	}
-	cp := make(map[string]string, len(store))
-	for k, v := range store {
-		cp[k] = v
-	}
-	return cp
 }
 
 // DiscoverAgents scans the agents directory and returns all agent configs.

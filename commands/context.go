@@ -3,6 +3,7 @@ package commands
 import (
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -180,12 +181,12 @@ func extractBlockURLs(blocks []slacklib.Block) []string {
 
 func tsToTime(ts string) (time.Time, error) {
 	parts := strings.SplitN(ts, ".", 2)
-	if len(parts) == 0 {
+	if len(parts) == 0 || parts[0] == "" {
 		return time.Time{}, fmt.Errorf("invalid timestamp")
 	}
-	var sec int64
-	for _, c := range parts[0] {
-		sec = sec*10 + int64(c-'0')
+	sec, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("invalid timestamp: %w", err)
 	}
 	return time.Unix(sec, 0), nil
 }
