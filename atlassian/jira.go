@@ -1692,3 +1692,157 @@ func (c *Client) UpdateIssueFields(issueKey string, fields map[string]interface{
 
 	return nil
 }
+
+// ---------------------------------------------------------------------------
+// Dashboards & Filters
+// ---------------------------------------------------------------------------
+
+// Dashboard represents a Jira dashboard.
+type Dashboard struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	Owner       struct {
+		DisplayName string `json:"displayName"`
+		AccountID   string `json:"accountId"`
+	} `json:"owner"`
+	View    string `json:"view"` // absolute URL to the dashboard in the UI
+	Ranking int    `json:"ranking,omitempty"`
+}
+
+// DashboardGadget represents a gadget on a Jira dashboard.
+type DashboardGadget struct {
+	ID        json.Number `json:"id"`
+	Title     string      `json:"title"`
+	ModuleKey string      `json:"moduleKey,omitempty"`
+	URI       string      `json:"uri,omitempty"`
+	Color     string      `json:"color,omitempty"`
+	Position  struct {
+		Row    int `json:"row"`
+		Column int `json:"column"`
+	} `json:"position"`
+}
+
+// FilterDetail represents a Jira saved filter.
+type FilterDetail struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	JQL         string `json:"jql"`
+	Owner       struct {
+		DisplayName string `json:"displayName"`
+		AccountID   string `json:"accountId"`
+	} `json:"owner"`
+	ViewURL    string `json:"viewUrl"`
+	Favourite  bool   `json:"favourite"`
+	SharePerms []struct {
+		Type string `json:"type"` // "global", "project", "group", etc.
+	} `json:"sharePermissions"`
+}
+
+// GetDashboard fetches a Jira dashboard by its numeric ID.
+func (c *Client) GetDashboard(dashboardID string) (*Dashboard, error) {
+	endpoint := fmt.Sprintf("%s/rest/api/3/dashboard/%s", c.baseURL, url.PathEscape(dashboardID))
+
+	req, err := http.NewRequest(http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set("Accept", "application/json")
+	if err := c.authRequest(req); err != nil {
+		return nil, err
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("dashboard request failed: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read dashboard response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("dashboard returned HTTP %d: %s", resp.StatusCode, string(body))
+	}
+
+	var dash Dashboard
+	if err := json.Unmarshal(body, &dash); err != nil {
+		return nil, fmt.Errorf("unmarshal dashboard: %w", err)
+	}
+	return &dash, nil
+}
+
+// GetDashboardGadgets fetches all gadgets configured on a Jira dashboard.
+func (c *Client) GetDashboardGadgets(dashboardID string) ([]DashboardGadget, error) {
+	endpoint := fmt.Sprintf("%s/rest/api/3/dashboard/%s/gadget", c.baseURL, url.PathEscape(dashboardID))
+
+	req, err := http.NewRequest(http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set("Accept", "application/json")
+	if err := c.authRequest(req); err != nil {
+		return nil, err
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("dashboard gadgets request failed: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read gadgets response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("dashboard gadgets returned HTTP %d: %s", resp.StatusCode, string(body))
+	}
+
+	var result struct {
+		Gadgets []DashboardGadget `json:"gadgets"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, fmt.Errorf("unmarshal gadgets: %w", err)
+	}
+	return result.Gadgets, nil
+}
+
+// GetFilter fetches a Jira saved filter by its numeric ID.
+func (c *Client) GetFilter(filterID string) (*FilterDetail, error) {
+	endpoint := fmt.Sprintf("%s/rest/api/3/filter/%s", c.baseURL, url.PathEscape(filterID))
+
+	req, err := http.NewRequest(http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set("Accept", "application/json")
+	if err := c.authRequest(req); err != nil {
+		return nil, err
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("filter request failed: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read filter response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("filter returned HTTP %d: %s", resp.StatusCode, string(body))
+	}
+
+	var filter FilterDetail
+	if err := json.Unmarshal(body, &filter); err != nil {
+		return nil, fmt.Errorf("unmarshal filter: %w", err)
+	}
+	return &filter, nil
+}

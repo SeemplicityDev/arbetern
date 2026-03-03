@@ -605,6 +605,37 @@ func (h *GeneralHandler) buildTools() []github.Tool {
 			},
 		})
 
+		// Dashboard & filter tools.
+		tools = append(tools, github.Tool{
+			Type: "function",
+			Function: github.ToolFunction{
+				Name:        "get_jira_dashboard",
+				Description: "Fetch a Jira dashboard by its numeric ID, including its name, owner, and all configured gadgets. Use this when a user shares a dashboard URL like https://org.atlassian.net/jira/dashboards/10014 — extract the numeric ID from the URL. Returns dashboard metadata and a list of gadgets with their titles and positions.",
+				Parameters: json.RawMessage(`{
+					"type":"object",
+					"properties":{
+						"dashboard_id":{"type":"string","description":"Numeric dashboard ID (e.g. '10014'). Extract from a dashboard URL: /jira/dashboards/<id>"}
+					},
+					"required":["dashboard_id"]
+				}`),
+			},
+		}, github.Tool{
+			Type: "function",
+			Function: github.ToolFunction{
+				Name:        "get_jira_filter",
+				Description: "Fetch a Jira saved filter by its numeric ID and optionally execute its JQL to return matching issues. Use this when a user shares a filter URL like https://org.atlassian.net/issues/?filter=11901 — extract the numeric ID. Returns the filter name, owner, JQL query, and (if run_jql is true) the issues matching that JQL.",
+				Parameters: json.RawMessage(`{
+					"type":"object",
+					"properties":{
+						"filter_id":{"type":"string","description":"Numeric filter ID (e.g. '11901'). Extract from a filter URL: /issues/?filter=<id>"},
+						"run_jql":{"type":"boolean","description":"If true, also execute the filter's JQL and return the matching issues (default: true)"},
+						"max_results":{"type":"integer","description":"Maximum issues to return when run_jql is true (default: 20, max: 50)"}
+					},
+					"required":["filter_id"]
+				}`),
+			},
+		})
+
 		// Confluence tools — share the same Atlassian client as Jira.
 		tools = append(tools, github.Tool{
 			Type: "function",
@@ -1488,6 +1519,124 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		fmt.Fprintf(&sb, "\nUse the accountId in JQL queries like: assignee = \"%s\"\n", users[0].AccountID)
 		log.Printf("[user=%s channel=%s] resolved Jira user %q -> %s (%s) via %s", userID, channelID, args.Name, users[0].DisplayName, users[0].AccountID, matchLabel)
 		return sb.String()
+
+	// ---- Dashboard & Filter tools ----
+
+	case "get_jira_dashboard":
+		if h.jiraClient == nil || !h.jiraClient.Ready() {
+			return "Error: Jira integration is not connected. It may still be initializing — please try again shortly."
+		}
+		var args struct {
+			DashboardID string `json:"dashboard_id"`
+		}
+		if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+			return fmt.Sprintf("Error parsing arguments: %v", err)
+		}
+		if args.DashboardID == "" {
+			return "Error: dashboard_id is required."
+		}
+		dash, err := h.jiraClient.GetDashboard(args.DashboardID)
+		if err != nil {
+			return fmt.Sprintf("Error fetching dashboard: %v", err)
+		}
+		gadgets, gadgetErr := h.jiraClient.GetDashboardGadgets(args.DashboardID)
+
+		var sb2 strings.Builder
+		fmt.Fprintf(&sb2, "*Dashboard: %s* (ID: %s)\n", dash.Name, dash.ID)
+		if dash.Description != "" {
+			fmt.Fprintf(&sb2, "Description: %s\n", dash.Description)
+		}
+		fmt.Fprintf(&sb2, "Owner: %s\n", dash.Owner.DisplayName)
+		if dash.View != "" {
+			fmt.Fprintf(&sb2, "URL: %s\n", dash.View)
+		}
+
+		if gadgetErr != nil {
+			fmt.Fprintf(&sb2, "\nGadgets: could not fetch (%v)\n", gadgetErr)
+		} else if len(gadgets) == 0 {
+			fmt.Fprintf(&sb2, "\nGadgets: none\n")
+		} else {
+			fmt.Fprintf(&sb2, "\nGadgets (%d):\n", len(gadgets))
+			for _, g := range gadgets {
+				title := g.Title
+				if title == "" {
+					title = g.ModuleKey
+				}
+				if title == "" {
+					title = "(untitled)"
+				}
+				fmt.Fprintf(&sb2, "  • %s (row %d, col %d)", title, g.Position.Row, g.Position.Column)
+				if g.Color != "" {
+					fmt.Fprintf(&sb2, " [%s]", g.Color)
+				}
+				sb2.WriteString("\n")
+			}
+		}
+		log.Printf("[user=%s channel=%s] fetched Jira dashboard %s (%s, %d gadgets)", userID, channelID, args.DashboardID, dash.Name, len(gadgets))
+		return sb2.String()
+
+	case "get_jira_filter":
+		if h.jiraClient == nil || !h.jiraClient.Ready() {
+			return "Error: Jira integration is not connected. It may still be initializing — please try again shortly."
+		}
+		var args struct {
+			FilterID   string `json:"filter_id"`
+			RunJQL     *bool  `json:"run_jql"`
+			MaxResults int    `json:"max_results"`
+		}
+		if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+			return fmt.Sprintf("Error parsing arguments: %v", err)
+		}
+		if args.FilterID == "" {
+			return "Error: filter_id is required."
+		}
+		filter, err := h.jiraClient.GetFilter(args.FilterID)
+		if err != nil {
+			return fmt.Sprintf("Error fetching filter: %v", err)
+		}
+
+		var sb3 strings.Builder
+		fmt.Fprintf(&sb3, "*Filter: %s* (ID: %s)\n", filter.Name, filter.ID)
+		if filter.Description != "" {
+			fmt.Fprintf(&sb3, "Description: %s\n", filter.Description)
+		}
+		fmt.Fprintf(&sb3, "Owner: %s\n", filter.Owner.DisplayName)
+		fmt.Fprintf(&sb3, "JQL: `%s`\n", filter.JQL)
+		if filter.ViewURL != "" {
+			fmt.Fprintf(&sb3, "URL: %s\n", filter.ViewURL)
+		}
+
+		// Default run_jql to true.
+		runJQL := args.RunJQL == nil || *args.RunJQL
+		if runJQL && filter.JQL != "" {
+			maxResults := args.MaxResults
+			if maxResults <= 0 {
+				maxResults = 20
+			}
+			if maxResults > 50 {
+				maxResults = 50
+			}
+			issues, searchErr := h.jiraClient.SearchIssuesJQL(filter.JQL, maxResults)
+			if searchErr != nil {
+				fmt.Fprintf(&sb3, "\nFilter JQL execution failed: %v\n", searchErr)
+			} else if len(issues) == 0 {
+				fmt.Fprintf(&sb3, "\nFilter JQL returned 0 issues.\n")
+			} else {
+				fmt.Fprintf(&sb3, "\nFilter results (%d issues):\n\n", len(issues))
+				for _, i := range issues {
+					fmt.Fprintf(&sb3, "• *%s* — %s\n  Status: %s | Type: %s | Priority: %s\n  Assignee: %s", i.Key, i.Summary, i.Status, i.IssueType, i.Priority, i.Assignee)
+					if i.Team != "" {
+						fmt.Fprintf(&sb3, " | Team: %s", i.Team)
+					}
+					if i.Sprint != "" {
+						fmt.Fprintf(&sb3, " | Sprint: %s", i.Sprint)
+					}
+					fmt.Fprintf(&sb3, " | Updated: %s\n  URL: %s\n\n", i.Updated, i.Browse)
+				}
+			}
+		}
+		log.Printf("[user=%s channel=%s] fetched Jira filter %s (%s, jql=%q)", userID, channelID, args.FilterID, filter.Name, filter.JQL)
+		return sb3.String()
 
 	// ---- Confluence tools ----
 
