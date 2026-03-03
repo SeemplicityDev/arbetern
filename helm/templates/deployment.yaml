@@ -105,12 +105,12 @@ spec:
                   name: {{ .Values.secretName }}
                   key: atlassian-client-secret
             {{- end }}
-            {{- if index .Values.secretValues "atlassian-project" }}
-            - name: ATLASSIAN_PROJECT
+            {{- if index .Values.secretValues "jira-project" }}
+            - name: JIRA_PROJECT
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.secretName }}
-                  key: atlassian-project
+                  key: jira-project
             {{- end }}
             {{- if index .Values.secretValues "slack-app-token" }}
             - name: SLACK_APP_TOKEN

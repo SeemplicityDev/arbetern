@@ -601,15 +601,15 @@ func main() {
 
 	if cfg.AtlassianConfigured() {
 		if cfg.AtlassianUseOAuth() {
-			jiraClient = atlassian.NewOAuthClient(cfg.AtlassianURL, cfg.AtlassianClientID, cfg.AtlassianClientSecret, cfg.AtlassianProject)
+			jiraClient = atlassian.NewOAuthClient(cfg.AtlassianURL, cfg.AtlassianClientID, cfg.AtlassianClientSecret, cfg.JiraProject)
 			if jiraClient.Ready() {
-				log.Printf("Atlassian integration enabled (OAuth): %s (default project: %s)", cfg.AtlassianURL, cfg.AtlassianProject)
+				log.Printf("Atlassian integration enabled (OAuth): %s (default project: %s)", cfg.AtlassianURL, cfg.JiraProject)
 			} else {
 				log.Printf("Atlassian integration configured (OAuth) but not yet connected — retrying in background")
 			}
 		} else {
-			jiraClient = atlassian.NewClient(cfg.AtlassianURL, cfg.AtlassianEmail, cfg.AtlassianAPIToken, cfg.AtlassianProject)
-			log.Printf("Atlassian integration enabled (Basic Auth): %s (default project: %s)", cfg.AtlassianURL, cfg.AtlassianProject)
+			jiraClient = atlassian.NewClient(cfg.AtlassianURL, cfg.AtlassianEmail, cfg.AtlassianAPIToken, cfg.JiraProject)
+			log.Printf("Atlassian integration enabled (Basic Auth): %s (default project: %s)", cfg.AtlassianURL, cfg.JiraProject)
 		}
 	}
 

@@ -61,7 +61,7 @@ Every layer — agent selection, intent routing, tool availability, model switch
 | `ATLASSIAN_URL` | no | Atlassian instance URL (e.g. `https://yourorg.atlassian.net`) |
 | `ATLASSIAN_EMAIL` | no | Atlassian service account email (Basic Auth) |
 | `ATLASSIAN_API_TOKEN` | no | Atlassian API token (Basic Auth) |
-| `ATLASSIAN_PROJECT` | no | Default Jira project key (e.g. `ENG`) |
+| `JIRA_PROJECT` | no | Default Jira project key (e.g. `ENG`) |
 | `ATLASSIAN_CLIENT_ID` | no | Atlassian OAuth 2.0 client ID (for client-credentials flow — alternative to Basic Auth with `ATLASSIAN_EMAIL`/`ATLASSIAN_API_TOKEN`) |
 | `ATLASSIAN_CLIENT_SECRET` | no | Atlassian OAuth 2.0 client secret |
 | `APP_URL` | no | Public app URL (used for Jira ticket stamps) |

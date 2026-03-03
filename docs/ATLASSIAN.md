@@ -13,7 +13,7 @@ Arbetern supports two authentication methods:
 | `ATLASSIAN_URL` | Your Atlassian instance URL (e.g. `https://yourorg.atlassian.net`) |
 | `ATLASSIAN_EMAIL` | The email address of the Atlassian account used for authentication |
 | `ATLASSIAN_API_TOKEN` | An Atlassian API token (not your account password) |
-| `ATLASSIAN_PROJECT` | *(optional)* Default Jira project key (e.g. `ENG`). If omitted, the bot will ask which project to use. |
+| `JIRA_PROJECT` | *(optional)* Default Jira project key (e.g. `ENG`). If omitted, the bot will ask which project to use. |
 
 ### Option B: OAuth 2.0 (client credentials)
 
@@ -22,7 +22,7 @@ Arbetern supports two authentication methods:
 | `ATLASSIAN_URL` | Your Atlassian instance URL (e.g. `https://yourorg.atlassian.net`) |
 | `ATLASSIAN_CLIENT_ID` | OAuth 2.0 client ID from your Atlassian Developer Console app |
 | `ATLASSIAN_CLIENT_SECRET` | OAuth 2.0 client secret |
-| `ATLASSIAN_PROJECT` | *(optional)* Default Jira project key (e.g. `ENG`) |
+| `JIRA_PROJECT` | *(optional)* Default Jira project key (e.g. `ENG`) |
 
 > **Note:** If both Basic Auth and OAuth credentials are configured, OAuth takes precedence.
 
@@ -114,7 +114,7 @@ secretValues:
   atlassian-url: "https://yourorg.atlassian.net"
   atlassian-email: "bot@yourorg.com"
   atlassian-api-token: "ATATT3x..."
-  atlassian-project: "ENG"
+  jira-project: "ENG"
 ```
 
 ### OAuth 2.0
@@ -124,7 +124,7 @@ secretValues:
   atlassian-url: "https://yourorg.atlassian.net"
   atlassian-client-id: "your-oauth-client-id"
   atlassian-client-secret: "your-oauth-client-secret"
-  atlassian-project: "ENG"
+  jira-project: "ENG"
 ```
 
 Or create the secret manually:
@@ -135,14 +135,14 @@ kubectl create secret generic arbetern-secrets \
   --from-literal=atlassian-url=https://yourorg.atlassian.net \
   --from-literal=atlassian-email=bot@yourorg.com \
   --from-literal=atlassian-api-token=ATATT3x... \
-  --from-literal=atlassian-project=ENG
+  --from-literal=jira-project=ENG
 
 # OAuth 2.0
 kubectl create secret generic arbetern-secrets \
   --from-literal=atlassian-url=https://yourorg.atlassian.net \
   --from-literal=atlassian-client-id=your-client-id \
   --from-literal=atlassian-client-secret=your-client-secret \
-  --from-literal=atlassian-project=ENG
+  --from-literal=jira-project=ENG
 ```
 ```
 

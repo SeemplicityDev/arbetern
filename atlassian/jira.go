@@ -471,7 +471,9 @@ func parseInlineMarkdown(text string) []adfInline {
 
 // CreateIssue creates a new issue in Jira and returns its details.
 func (c *Client) CreateIssue(input CreateIssueInput) (*Issue, error) {
-	if input.Project == "" {
+	// Always use the configured default project when set — prevents the
+	// LLM from accidentally creating tickets in the wrong project.
+	if c.projectKey != "" {
 		input.Project = c.projectKey
 	}
 	if input.Project == "" {

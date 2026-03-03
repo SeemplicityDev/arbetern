@@ -28,7 +28,7 @@ type Config struct {
 	AtlassianURL          string
 	AtlassianEmail        string
 	AtlassianAPIToken     string
-	AtlassianProject      string
+	JiraProject           string
 	AtlassianClientID     string
 	AtlassianClientSecret string
 	AppURL                string
@@ -79,7 +79,7 @@ func Load() (*Config, error) {
 		AtlassianURL:          os.Getenv("ATLASSIAN_URL"),
 		AtlassianEmail:        os.Getenv("ATLASSIAN_EMAIL"),
 		AtlassianAPIToken:     os.Getenv("ATLASSIAN_API_TOKEN"),
-		AtlassianProject:      os.Getenv("ATLASSIAN_PROJECT"),
+		JiraProject:           os.Getenv("JIRA_PROJECT"),
 		AtlassianClientID:     os.Getenv("ATLASSIAN_CLIENT_ID"),
 		AtlassianClientSecret: os.Getenv("ATLASSIAN_CLIENT_SECRET"),
 		AppURL:                os.Getenv("APP_URL"),

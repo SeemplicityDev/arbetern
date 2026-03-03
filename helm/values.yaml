@@ -55,7 +55,7 @@ secretValues:
   atlassian-url: ""           # e.g. "https://yourorg.atlassian.net"
   atlassian-email: ""         # Atlassian account email (Basic Auth)
   atlassian-api-token: ""     # Atlassian API token (Basic Auth)
-  atlassian-project: ""       # Default Jira project key (e.g. "ENG")
+  jira-project: ""            # Default Jira project key (e.g. "ENG")
   # Slack Socket Mode (optional – enables thread follow-ups without slash commands)
   slack-app-token: ""    # App-level token (xapp-...) with connections:write scope
   # NVD CVE API (optional — enables real-time CVE lookups for the security agent)

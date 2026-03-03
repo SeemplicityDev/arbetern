@@ -496,7 +496,6 @@ func (h *GeneralHandler) buildTools() []github.Tool {
 				Parameters: json.RawMessage(`{
 					"type":"object",
 					"properties":{
-						"project":{"type":"string","description":"Jira project key (e.g. 'ENG', 'QA'). Optional — uses the configured default if omitted."},
 						"summary":{"type":"string","description":"Short one-line title for the ticket."},
 						"description":{"type":"string","description":"Detailed, well-structured description using markdown formatting. Use ## for section headers, - for bullet points, 1) for numbered steps, **bold** for key terms, and backticks for code references. Organize into clear sections like Context, Scope, Test Plan, Acceptance Criteria, References, etc."},
 						"issue_type":{"type":"string","description":"Issue type: 'Task', 'Bug', 'Story', 'Epic', etc. Default: 'Task'."},
