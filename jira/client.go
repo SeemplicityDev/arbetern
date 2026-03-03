@@ -43,6 +43,7 @@ type Client struct {
 	cloudID      string // Atlassian cloud ID resolved from accessible-resources
 	accessToken  string
 	tokenExpiry  time.Time
+	connected    bool // true once OAuth handshake + cloud ID resolution succeeds
 	tokenMu      sync.RWMutex
 
 	// Cached custom field IDs (discovered lazily).
@@ -52,6 +53,7 @@ type Client struct {
 }
 
 // NewClient creates a Jira API client using Basic Auth (email + API token).
+// Basic Auth clients are always considered connected (no OAuth handshake required).
 func NewClient(baseURL, email, apiToken, defaultProject string) *Client {
 	cleanURL := strings.TrimRight(baseURL, "/")
 	return &Client{
@@ -62,13 +64,15 @@ func NewClient(baseURL, email, apiToken, defaultProject string) *Client {
 		projectKey: defaultProject,
 		httpClient: &http.Client{},
 		mode:       authBasic,
+		connected:  true,
 	}
 }
 
 // NewOAuthClient creates a Jira API client using OAuth 2.0 client credentials.
-// It fetches an initial access token, resolves the Atlassian cloud ID for the
-// given site URL, and rewrites the base URL to the OAuth API endpoint.
-func NewOAuthClient(baseURL, clientID, clientSecret, defaultProject string) (*Client, error) {
+// If the initial OAuth handshake or cloud-ID resolution fails the client is
+// returned in a disconnected state and a background goroutine retries every
+// 5 seconds until it succeeds.  The service is never blocked.
+func NewOAuthClient(baseURL, clientID, clientSecret, defaultProject string) *Client {
 	cleanURL := strings.TrimRight(baseURL, "/")
 	c := &Client{
 		siteURL:      cleanURL,
@@ -78,21 +82,57 @@ func NewOAuthClient(baseURL, clientID, clientSecret, defaultProject string) (*Cl
 		httpClient:   &http.Client{},
 		mode:         authOAuth,
 	}
+
+	if err := c.connectOAuth(); err != nil {
+		log.Printf("[jira] initial OAuth failed, will retry every 5s: %v", err)
+		go c.retryConnect()
+	}
+
+	return c
+}
+
+// connectOAuth performs the full OAuth handshake: token fetch + cloud-ID resolution.
+func (c *Client) connectOAuth() error {
 	if err := c.refreshToken(); err != nil {
-		return nil, fmt.Errorf("initial OAuth token fetch failed: %w", err)
+		return fmt.Errorf("token fetch: %w", err)
 	}
 	log.Printf("[jira] OAuth token acquired (expires %s)", c.tokenExpiry.Format(time.RFC3339))
 
-	// Resolve cloud ID so we use the correct OAuth API base URL.
 	cloudID, err := c.resolveCloudID()
 	if err != nil {
-		return nil, fmt.Errorf("failed to resolve Atlassian cloud ID for %s: %w", cleanURL, err)
+		return fmt.Errorf("cloud ID resolution for %s: %w", c.siteURL, err)
 	}
+
+	c.tokenMu.Lock()
 	c.cloudID = cloudID
 	c.baseURL = fmt.Sprintf("%s/%s", atlassianOAuthAPIBaseURL, cloudID)
-	log.Printf("[jira] OAuth cloud ID resolved: %s → %s", cleanURL, c.baseURL)
+	c.connected = true
+	c.tokenMu.Unlock()
 
-	return c, nil
+	log.Printf("[jira] OAuth cloud ID resolved: %s → %s", c.siteURL, c.baseURL)
+	return nil
+}
+
+// retryConnect attempts the full OAuth handshake every 5 seconds until it succeeds.
+func (c *Client) retryConnect() {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	for range ticker.C {
+		if err := c.connectOAuth(); err != nil {
+			log.Printf("[jira] OAuth retry failed: %v", err)
+			continue
+		}
+		log.Printf("[jira] OAuth connected after retry")
+		return
+	}
+}
+
+// Ready reports whether the client has successfully completed its OAuth
+// handshake (or is using Basic Auth, in which case it is always ready).
+func (c *Client) Ready() bool {
+	c.tokenMu.RLock()
+	defer c.tokenMu.RUnlock()
+	return c.connected
 }
 
 // resolveCloudID calls the Atlassian accessible-resources endpoint to find the
@@ -255,6 +295,10 @@ func (c *Client) refreshToken() error {
 // getAccessToken returns a valid OAuth access token, refreshing if needed.
 func (c *Client) getAccessToken() (string, error) {
 	c.tokenMu.RLock()
+	if !c.connected {
+		c.tokenMu.RUnlock()
+		return "", fmt.Errorf("jira client not connected (OAuth pending)")
+	}
 	token := c.accessToken
 	expiry := c.tokenExpiry
 	c.tokenMu.RUnlock()

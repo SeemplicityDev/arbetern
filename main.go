@@ -308,6 +308,7 @@ func refreshIntegrations(
 
 	// --- Jira ---
 	if cfg.JiraConfigured() {
+		jiraConnected := jiraClient != nil && jiraClient.Ready()
 		authMode := "Basic Auth"
 		if cfg.JiraUseOAuth() {
 			authMode = "OAuth 2.0"
@@ -321,9 +322,9 @@ func refreshIntegrations(
 		}
 		if cfg.JiraUseOAuth() {
 			jiraPerms = append(jiraPerms,
-				permission{Scope: "read:jira-work", Description: "OAuth scope: read issues, projects, and boards", Required: true, Granted: boolPtr(true)},
-				permission{Scope: "write:jira-work", Description: "OAuth scope: create and update issues", Required: true, Granted: boolPtr(true)},
-				permission{Scope: "read:jira-user", Description: "OAuth scope: read user profiles for assignee resolution", Required: true, Granted: boolPtr(true)},
+				permission{Scope: "read:jira-work", Description: "OAuth scope: read issues, projects, and boards", Required: true, Granted: boolPtr(jiraConnected)},
+				permission{Scope: "write:jira-work", Description: "OAuth scope: create and update issues", Required: true, Granted: boolPtr(jiraConnected)},
+				permission{Scope: "read:jira-user", Description: "OAuth scope: read user profiles for assignee resolution", Required: true, Granted: boolPtr(jiraConnected)},
 			)
 		}
 
@@ -333,7 +334,7 @@ func refreshIntegrations(
 				keys = append(keys, p.Scope)
 			}
 		}
-		if jiraClient != nil {
+		if jiraConnected {
 			if grants, err := jiraClient.GetMyPermissions(keys); err == nil {
 				known := make(map[string]bool, len(jiraPerms))
 				for i := range jiraPerms {
@@ -358,7 +359,7 @@ func refreshIntegrations(
 		result = append(result, integration{
 			ID:          "jira",
 			Name:        "Jira",
-			Configured:  true,
+			Configured:  jiraConnected,
 			AuthMode:    authMode,
 			Permissions: jiraPerms,
 		})
@@ -458,12 +459,13 @@ func refreshIntegrations(
 
 	// --- Salesforce ---
 	if cfg.SalesforceConfigured() {
+		sfConnected := sfClient != nil && sfClient.Ready()
 		sfPerms := []permission{
-			{Scope: "query", Description: "Execute SOQL queries (accounts, opportunities, contacts)", Required: true, Granted: boolPtr(true)},
-			{Scope: "describe", Description: "Describe SObject metadata (fields, types)", Required: true, Granted: boolPtr(true)},
+			{Scope: "query", Description: "Execute SOQL queries (accounts, opportunities, contacts)", Required: true, Granted: boolPtr(sfConnected)},
+			{Scope: "describe", Description: "Describe SObject metadata (fields, types)", Required: true, Granted: boolPtr(sfConnected)},
 		}
 		// Verify connectivity by checking identity.
-		if sfClient != nil {
+		if sfConnected {
 			if info, err := sfClient.GetIdentity(); err == nil {
 				sfPerms = append(sfPerms, permission{
 					Scope:       "identity",
@@ -476,7 +478,7 @@ func refreshIntegrations(
 		result = append(result, integration{
 			ID:          "salesforce",
 			Name:        "Salesforce",
-			Configured:  true,
+			Configured:  sfConnected,
 			AuthMode:    "OAuth 2.0 (Client Credentials)",
 			Permissions: sfPerms,
 		})
@@ -567,12 +569,12 @@ func main() {
 
 	if cfg.JiraConfigured() {
 		if cfg.JiraUseOAuth() {
-			var err error
-			jiraClient, err = jira.NewOAuthClient(cfg.JiraURL, cfg.JiraClientID, cfg.JiraClientSecret, cfg.JiraProject)
-			if err != nil {
-				log.Fatalf("Jira OAuth initialization failed: %v", err)
+			jiraClient = jira.NewOAuthClient(cfg.JiraURL, cfg.JiraClientID, cfg.JiraClientSecret, cfg.JiraProject)
+			if jiraClient.Ready() {
+				log.Printf("Jira integration enabled (OAuth): %s (default project: %s)", cfg.JiraURL, cfg.JiraProject)
+			} else {
+				log.Printf("Jira integration configured (OAuth) but not yet connected — retrying in background")
 			}
-			log.Printf("Jira integration enabled (OAuth): %s (default project: %s)", cfg.JiraURL, cfg.JiraProject)
 		} else {
 			jiraClient = jira.NewClient(cfg.JiraURL, cfg.JiraEmail, cfg.JiraAPIToken, cfg.JiraProject)
 			log.Printf("Jira integration enabled (Basic Auth): %s (default project: %s)", cfg.JiraURL, cfg.JiraProject)
@@ -590,14 +592,16 @@ func main() {
 	}
 
 	// Salesforce client — enables SOQL queries for the CS agent (Pulse).
+	// If the initial OAuth handshake fails the service continues and the client
+	// retries in the background every 5 seconds until it connects.
 	var sfClient *salesforce.Client
 	if cfg.SalesforceConfigured() {
-		var err error
-		sfClient, err = salesforce.NewClient(cfg.SFConsumerKey, cfg.SFConsumerSecret, cfg.SFLoginURL)
-		if err != nil {
-			log.Fatalf("Salesforce initialization failed: %v", err)
+		sfClient = salesforce.NewClient(cfg.SFConsumerKey, cfg.SFConsumerSecret, cfg.SFLoginURL)
+		if sfClient.Ready() {
+			log.Printf("Salesforce integration enabled (instance: %s)", sfClient.InstanceURL())
+		} else {
+			log.Printf("Salesforce integration configured but not yet connected — retrying in background")
 		}
-		log.Printf("Salesforce integration enabled (instance: %s)", sfClient.InstanceURL())
 	}
 
 	// Discover agents and register per-agent webhook routes (/<agent>/webhook).

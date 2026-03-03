@@ -16,3 +16,11 @@ type PromptProvider interface {
 	Get(key string) string
 	MustGet(key string) string
 }
+
+// OAuthClient is implemented by any integration client that uses OAuth and
+// may need a background retry before it becomes usable.
+type OAuthClient interface {
+	// Ready reports whether the client has successfully completed its OAuth
+	// handshake and is ready to serve requests.
+	Ready() bool
+}

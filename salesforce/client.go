@@ -31,12 +31,14 @@ type Client struct {
 	// Token management.
 	accessToken string
 	tokenExpiry time.Time
+	connected   bool // true once at least one OAuth token has been acquired
 	tokenMu     sync.RWMutex
 }
 
 // NewClient creates a Salesforce API client using the OAuth 2.0 client credentials flow.
-// It fetches an initial access token and resolves the instance URL.
-func NewClient(consumerKey, consumerSecret, loginURL string) (*Client, error) {
+// If the initial token fetch fails the client is still returned in a disconnected
+// state and a background goroutine retries every 5 seconds until it succeeds.
+func NewClient(consumerKey, consumerSecret, loginURL string) *Client {
 	if loginURL == "" {
 		loginURL = defaultLoginURL
 	}
@@ -49,12 +51,35 @@ func NewClient(consumerKey, consumerSecret, loginURL string) (*Client, error) {
 	}
 
 	if err := c.refreshToken(); err != nil {
-		return nil, fmt.Errorf("initial Salesforce token fetch failed: %w", err)
+		log.Printf("[salesforce] initial OAuth failed, will retry every 5s: %v", err)
+		go c.retryConnect()
+	} else {
+		c.tokenMu.Lock()
+		c.connected = true
+		c.tokenMu.Unlock()
+		log.Printf("[salesforce] OAuth token acquired, instance URL: %s (expires %s)",
+			c.instanceURL, c.tokenExpiry.Format(time.RFC3339))
 	}
-	log.Printf("[salesforce] OAuth token acquired, instance URL: %s (expires %s)",
-		c.instanceURL, c.tokenExpiry.Format(time.RFC3339))
 
-	return c, nil
+	return c
+}
+
+// retryConnect attempts to acquire an OAuth token every 5 seconds until it succeeds.
+func (c *Client) retryConnect() {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	for range ticker.C {
+		if err := c.refreshToken(); err != nil {
+			log.Printf("[salesforce] OAuth retry failed: %v", err)
+			continue
+		}
+		c.tokenMu.Lock()
+		c.connected = true
+		c.tokenMu.Unlock()
+		log.Printf("[salesforce] OAuth token acquired after retry, instance URL: %s (expires %s)",
+			c.instanceURL, c.tokenExpiry.Format(time.RFC3339))
+		return
+	}
 }
 
 // refreshToken fetches a new OAuth access token using the client credentials grant.
@@ -109,9 +134,20 @@ func (c *Client) refreshToken() error {
 	return nil
 }
 
+// Ready reports whether the client has successfully obtained at least one OAuth token.
+func (c *Client) Ready() bool {
+	c.tokenMu.RLock()
+	defer c.tokenMu.RUnlock()
+	return c.connected
+}
+
 // getAccessToken returns a valid OAuth access token, refreshing if needed.
 func (c *Client) getAccessToken() (string, error) {
 	c.tokenMu.RLock()
+	if !c.connected {
+		c.tokenMu.RUnlock()
+		return "", fmt.Errorf("salesforce client not connected (OAuth pending)")
+	}
 	token := c.accessToken
 	expiry := c.tokenExpiry
 	c.tokenMu.RUnlock()

@@ -453,8 +453,8 @@ func (h *GeneralHandler) buildTools() []github.Tool {
 		})
 	}
 
-	// Salesforce tools are only available when Salesforce is configured.
-	if h.sfClient != nil {
+	// Salesforce tools are only available when Salesforce is connected.
+	if h.sfClient != nil && h.sfClient.Ready() {
 		tools = append(tools, github.Tool{
 			Type: "function",
 			Function: github.ToolFunction{
@@ -484,8 +484,8 @@ func (h *GeneralHandler) buildTools() []github.Tool {
 		})
 	}
 
-	// Jira tools are only available when Jira is configured.
-	if h.jiraClient != nil {
+	// Jira tools are only available when Jira is connected.
+	if h.jiraClient != nil && h.jiraClient.Ready() {
 		tools = append(tools, github.Tool{
 			Type: "function",
 			Function: github.ToolFunction{
@@ -574,7 +574,7 @@ func (h *GeneralHandler) buildTools() []github.Tool {
 	})
 
 	// Jira user resolution tool — resolves a person's name/email to their Jira account ID.
-	if h.jiraClient != nil {
+	if h.jiraClient != nil && h.jiraClient.Ready() {
 		tools = append(tools, github.Tool{
 			Type: "function",
 			Function: github.ToolFunction{
@@ -1115,8 +1115,8 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		return fmt.Sprintf("Thread context (channel_id=%s, thread_ts=%s):\n\n%s", threadChannelID, threadTS, formatted)
 
 	case "create_jira_ticket":
-		if h.jiraClient == nil {
-			return "Error: Jira integration is not configured."
+		if h.jiraClient == nil || !h.jiraClient.Ready() {
+			return "Error: Jira integration is not connected. It may still be initializing — please try again shortly."
 		}
 		var args struct {
 			Project     string   `json:"project"`
@@ -1203,8 +1203,8 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		return fmt.Sprintf("Jira ticket created: *%s* — %s\nSummary: %s", issue.Key, issue.Browse, args.Summary)
 
 	case "list_jira_projects":
-		if h.jiraClient == nil {
-			return "Error: Jira integration is not configured."
+		if h.jiraClient == nil || !h.jiraClient.Ready() {
+			return "Error: Jira integration is not connected. It may still be initializing — please try again shortly."
 		}
 		projects, err := h.jiraClient.ListProjects()
 		if err != nil {
@@ -1217,8 +1217,8 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		return fmt.Sprintf("Jira projects (%d):\n%s", len(projects), strings.Join(projects, "\n"))
 
 	case "search_jira_issues":
-		if h.jiraClient == nil {
-			return "Error: Jira integration is not configured."
+		if h.jiraClient == nil || !h.jiraClient.Ready() {
+			return "Error: Jira integration is not connected. It may still be initializing — please try again shortly."
 		}
 		var args struct {
 			JQL        string `json:"jql"`
@@ -1258,8 +1258,8 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		return sb.String()
 
 	case "get_jira_issue":
-		if h.jiraClient == nil {
-			return "Error: Jira integration is not configured."
+		if h.jiraClient == nil || !h.jiraClient.Ready() {
+			return "Error: Jira integration is not connected. It may still be initializing — please try again shortly."
 		}
 		var args struct {
 			IssueKey string `json:"issue_key"`
@@ -1295,8 +1295,8 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		return sb.String()
 
 	case "update_jira_issue":
-		if h.jiraClient == nil {
-			return "Error: Jira integration is not configured."
+		if h.jiraClient == nil || !h.jiraClient.Ready() {
+			return "Error: Jira integration is not connected. It may still be initializing — please try again shortly."
 		}
 		var args struct {
 			IssueKey    string `json:"issue_key"`
@@ -1346,8 +1346,8 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 			user.ID, user.RealName, user.Profile.DisplayName, user.Profile.Email, user.Profile.Title)
 
 	case "resolve_jira_team":
-		if h.jiraClient == nil {
-			return "Error: Jira integration is not configured."
+		if h.jiraClient == nil || !h.jiraClient.Ready() {
+			return "Error: Jira integration is not connected. It may still be initializing — please try again shortly."
 		}
 		var args struct {
 			TeamName string `json:"team_name"`
@@ -1370,8 +1370,8 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		return fmt.Sprintf("Team resolved:\n  Display Name: %s\n  Team UUID: %s\n  JQL Clause: %s\n\nUse in JQL: \"%s\" = \"%s\"\nExample: \"%s\" = \"%s\" AND status = \"In Progress\" ORDER BY priority DESC", displayName, teamID, jqlClause, jqlClause, teamID, jqlClause, teamID)
 
 	case "resolve_jira_user":
-		if h.jiraClient == nil {
-			return "Error: Jira integration is not configured."
+		if h.jiraClient == nil || !h.jiraClient.Ready() {
+			return "Error: Jira integration is not connected. It may still be initializing — please try again shortly."
 		}
 		var args struct {
 			Name  string `json:"name"`
@@ -1503,8 +1503,8 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		return sb.String()
 
 	case "salesforce_query":
-		if h.sfClient == nil {
-			return "Error: Salesforce integration is not configured."
+		if h.sfClient == nil || !h.sfClient.Ready() {
+			return "Error: Salesforce integration is not connected. It may still be initializing — please try again shortly."
 		}
 		var args struct {
 			SOQL string `json:"soql"`
@@ -1550,8 +1550,8 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		}
 
 	case "salesforce_describe":
-		if h.sfClient == nil {
-			return "Error: Salesforce integration is not configured."
+		if h.sfClient == nil || !h.sfClient.Ready() {
+			return "Error: Salesforce integration is not connected. It may still be initializing — please try again shortly."
 		}
 		var args struct {
 			ObjectName string `json:"object_name"`
