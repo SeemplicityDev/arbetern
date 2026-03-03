@@ -666,12 +666,122 @@
       font-size: 12px;
     }
 
+    /* ── Agent Integration Badges ────────────────── */
+    .agent-integrations {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-top: 10px;
+    }
+
+    .agent-integration-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      font-size: 11px;
+      padding: 3px 8px;
+      border-radius: 6px;
+      background: var(--card-hover);
+      border: 1px solid var(--border);
+      color: var(--text-muted);
+      transition: all 0.15s ease;
+    }
+
+    .agent-integration-badge.planned {
+      border-style: dashed;
+      opacity: 0.6;
+    }
+
+    .agent-integration-badge svg {
+      width: 14px;
+      height: 14px;
+      flex-shrink: 0;
+    }
+
+    .agent-integration-badge .badge-label {
+      white-space: nowrap;
+    }
+
+    .agent-integration-badge .planned-tag {
+      font-size: 9px;
+      color: #a67c1a;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.3px;
+    }
+
+    /* ── Modal Integration Section ──────────────── */
+    .modal-integrations-section {
+      margin-bottom: 24px;
+    }
+
+    .modal-integrations-title {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--accent);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin-bottom: 10px;
+    }
+
+    .modal-integrations-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+      gap: 8px;
+    }
+
+    .modal-integration-item {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 12px;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+    }
+
+    .modal-integration-item.planned {
+      border-style: dashed;
+      opacity: 0.55;
+    }
+
+    .modal-integration-item svg {
+      width: 24px;
+      height: 24px;
+      flex-shrink: 0;
+    }
+
+    .modal-integration-item .mi-info {
+      display: flex;
+      flex-direction: column;
+      min-width: 0;
+    }
+
+    .modal-integration-item .mi-name {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .modal-integration-item .mi-status {
+      font-size: 11px;
+      color: var(--green);
+    }
+
+    .modal-integration-item.planned .mi-status {
+      color: #a67c1a;
+    }
+
     /* ── Responsive ─────────────────────────────── */
     @media (max-width: 640px) {
       header { padding: 16px; }
       main { padding: 20px 16px; }
       .agents-grid { grid-template-columns: 1fr; }
       .integrations-grid { grid-template-columns: 1fr; }
+      .modal-integrations-grid { grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -736,6 +846,51 @@
       '#06b6d4', '#3b82f6',
     ];
 
+    // ── Per-agent integration mapping ────────────
+    // Each entry: { id, name, planned? }
+    const AGENT_INTEGRATIONS = {
+      ovad:      [
+        { id: 'github', name: 'GitHub' },
+        { id: 'jira', name: 'Jira' },
+        { id: 'slack', name: 'Slack' },
+        { id: 'azure-openai', name: 'Azure OpenAI' },
+      ],
+      goldsai:   [
+        { id: 'github', name: 'GitHub' },
+        { id: 'nvd', name: 'NVD' },
+        { id: 'slack', name: 'Slack' },
+        { id: 'azure-openai', name: 'Azure OpenAI' },
+      ],
+      seihin:    [
+        { id: 'jira', name: 'Jira' },
+        { id: 'slack', name: 'Slack' },
+        { id: 'azure-openai', name: 'Azure OpenAI' },
+      ],
+      'agent-q': [
+        { id: 'github', name: 'GitHub' },
+        { id: 'jira', name: 'Jira' },
+        { id: 'slack', name: 'Slack' },
+        { id: 'azure-openai', name: 'Azure OpenAI' },
+      ],
+      pulse:     [
+        { id: 'jira', name: 'Jira' },
+        { id: 'slack', name: 'Slack' },
+        { id: 'azure-openai', name: 'Azure OpenAI' },
+        { id: 'salesforce', name: 'Salesforce', planned: true },
+        { id: 'chorus', name: 'Chorus', planned: true },
+      ],
+    };
+
+    // Mini SVG logos for compact badges (reuses INTEGRATION_LOGOS when available)
+    const BADGE_INTEGRATION_LOGOS = {
+      salesforce: `<svg viewBox="0 0 128 128"><path d="M53.3 22.4c5.7-5.9 13.6-9.6 22.4-9.6 11.4 0 21.4 6.2 26.7 15.5 4.6-2.1 9.7-3.2 15-3.2 20.1 0 36.4 16.3 36.4 36.4s-16.3 36.4-36.4 36.4c-3.2 0-6.3-.4-9.3-1.2-4.8 8.9-14.2 14.9-25 14.9-4.5 0-8.7-1.1-12.5-2.9-4.7 10.3-15.1 17.5-27.2 17.5-12 0-22.3-7.1-27.1-17.3-1.9.3-3.9.4-5.9.4C5 109.3-7.5 96.8-7.5 81c0-10.8 6-20.2 14.8-25.1-1.1-3.5-1.7-7.2-1.7-11.1 0-20.1 16.3-36.4 36.4-36.4 4.5 0 8.8.8 12.8 2.3" fill="#00A1E0" transform="translate(3.5 3)"/></svg>`,
+      chorus: `<svg viewBox="0 0 128 128"><circle cx="64" cy="64" r="56" fill="#4B0082"/><path d="M40 48c0-4.4 3.6-8 8-8s8 3.6 8 8v32c0 4.4-3.6 8-8 8s-8-3.6-8-8V48zm32 0c0-4.4 3.6-8 8-8s8 3.6 8 8v32c0 4.4-3.6 8-8 8s-8-3.6-8-8V48zM56 38c0-4.4 3.6-8 8-8s8 3.6 8 8v52c0 4.4-3.6 8-8 8s-8-3.6-8-8V38z" fill="#fff"/></svg>`,
+    };
+
+    function getIntegrationLogo(id) {
+      return INTEGRATION_LOGOS[id] || BADGE_INTEGRATION_LOGOS[id] || '';
+    }
+
     function hashColor(str) {
       let hash = 0;
       for (let i = 0; i < str.length; i++) {
@@ -781,8 +936,20 @@
             </div>
             <div class="agent-status"><span class="status-dot"></span> Active</div>
             <div class="agent-prompts-count">${promptCount} prompt${promptCount !== 1 ? 's' : ''}</div>
+            ${renderAgentBadges(agent.id)}
           </div>`;
       }).join('');
+    }
+
+    function renderAgentBadges(agentId) {
+      const integrations = AGENT_INTEGRATIONS[agentId];
+      if (!integrations || integrations.length === 0) return '';
+      const badges = integrations.map(ig => {
+        const logo = getIntegrationLogo(ig.id);
+        const cls = ig.planned ? ' planned' : '';
+        return `<span class="agent-integration-badge${cls}" title="${escapeHtml(ig.name)}${ig.planned ? ' (planned)' : ''}">${logo ? `${logo}` : ''}<span class="badge-label">${escapeHtml(ig.name)}</span>${ig.planned ? '<span class="planned-tag">soon</span>' : ''}</span>`;
+      }).join('');
+      return `<div class="agent-integrations">${badges}</div>`;
     }
 
     let agentsData = [];
@@ -803,10 +970,13 @@
       const prompts = agent.prompts || {};
       const keys = Object.keys(prompts);
 
+      // Build integrations section for the modal
+      const integrationsHtml = renderModalIntegrations(agent.id);
+
       if (keys.length === 0) {
-        body.innerHTML = '<p style="color:var(--text-muted);font-size:13px;">No prompts configured for this agent.</p>';
+        body.innerHTML = integrationsHtml + '<p style="color:var(--text-muted);font-size:13px;">No prompts configured for this agent.</p>';
       } else {
-        body.innerHTML = keys.map(key => `
+        body.innerHTML = integrationsHtml + keys.map(key => `
           <div class="prompt-section">
             <div class="prompt-label">${escapeHtml(key)}</div>
             <div class="prompt-content">${escapeHtml(prompts[key])}</div>
@@ -815,6 +985,29 @@
       }
 
       document.getElementById('modal-overlay').classList.add('active');
+    }
+
+    function renderModalIntegrations(agentId) {
+      const integrations = AGENT_INTEGRATIONS[agentId];
+      if (!integrations || integrations.length === 0) return '';
+      const items = integrations.map(ig => {
+        const logo = getIntegrationLogo(ig.id);
+        const cls = ig.planned ? ' planned' : '';
+        const statusText = ig.planned ? 'Planned' : 'Active';
+        return `
+          <div class="modal-integration-item${cls}">
+            ${logo ? logo : ''}
+            <div class="mi-info">
+              <span class="mi-name">${escapeHtml(ig.name)}</span>
+              <span class="mi-status">${ig.planned ? '◌' : '●'} ${statusText}</span>
+            </div>
+          </div>`;
+      }).join('');
+      return `
+        <div class="modal-integrations-section">
+          <div class="modal-integrations-title">Integrations</div>
+          <div class="modal-integrations-grid">${items}</div>
+        </div>`;
     }
 
     function closeModal() {
