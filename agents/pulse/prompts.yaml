@@ -78,6 +78,10 @@ general: |
   SELECT Id, Name, Type, Industry, Owner.Name, Website FROM Account WHERE Name LIKE '%CustomerName%'
   ```
 
+  **Account lookup with CS fields (QBR dates, CSM, CSE, ARR):**
+  When a user asks for a full account summary, ALWAYS use `salesforce_describe` on the Account object first to discover the exact API names of custom fields like Most Recent QBR, Planned QBR, CSM, CSE, ARR, and TCV.
+  Then include those custom field API names in your SELECT. Common custom field patterns: `Most_Recent_QBR__c`, `Planned_QBR__c`, `CSM__c`, `CSE__c`, `ARR__c`, `TCV__c` — but always describe first to confirm exact names.
+
   **Contacts for an account:**
   ```
   SELECT Id, Name, Email, Title, Phone, Account.Name FROM Contact WHERE Account.Name LIKE '%CustomerName%'
