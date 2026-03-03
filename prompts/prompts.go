@@ -34,25 +34,44 @@ type agentMeta struct {
 
 // AgentPrompts holds a per-agent prompt store with Get/MustGet methods.
 type AgentPrompts struct {
-	agentID string
-	store   map[string]string
+	agentID    string
+	store      map[string]string
+	globalKeys []string // ordered keys from agents/prompts.yaml
 }
 
 // loadGlobalPrompts reads the global prompts.yaml from the agents root directory.
-func loadGlobalPrompts(agentsDir string) (map[string]string, error) {
+// It returns the parsed key-value map and the keys in their original YAML order
+// so that SystemPrompt can assemble them deterministically.
+func loadGlobalPrompts(agentsDir string) (map[string]string, []string, error) {
 	path := filepath.Join(agentsDir, globalPromptsFile)
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, nil // no global prompts — not an error
+			return nil, nil, nil // no global prompts — not an error
 		}
-		return nil, fmt.Errorf("failed to read global prompts: %w", err)
+		return nil, nil, fmt.Errorf("failed to read global prompts: %w", err)
 	}
+
+	// Decode via yaml.Node to preserve key order (Go maps are unordered).
+	var doc yaml.Node
+	if err := yaml.Unmarshal(data, &doc); err != nil {
+		return nil, nil, fmt.Errorf("failed to parse global prompts: %w", err)
+	}
+
 	parsed := make(map[string]string)
-	if err := yaml.Unmarshal(data, &parsed); err != nil {
-		return nil, fmt.Errorf("failed to parse global prompts: %w", err)
+	var keys []string
+	if doc.Kind == yaml.DocumentNode && len(doc.Content) > 0 {
+		mapping := doc.Content[0]
+		if mapping.Kind == yaml.MappingNode {
+			for i := 0; i+1 < len(mapping.Content); i += 2 {
+				k := mapping.Content[i].Value
+				v := mapping.Content[i+1].Value
+				keys = append(keys, k)
+				parsed[k] = v
+			}
+		}
 	}
-	return parsed, nil
+	return parsed, keys, nil
 }
 
 // loadRBACOverride reads optional RBAC overrides for an agent from AGENT_RBAC_DIR.
@@ -137,7 +156,7 @@ func LoadAgent(agentID string) (*AgentPrompts, error) {
 	}
 
 	// Start with global prompts as the base.
-	merged, err := loadGlobalPrompts(agentsDir)
+	merged, globalKeys, err := loadGlobalPrompts(agentsDir)
 	if err != nil {
 		return nil, err
 	}
@@ -164,7 +183,7 @@ func LoadAgent(agentID string) (*AgentPrompts, error) {
 		appendCustomPrompts(merged, custom)
 	}
 
-	return &AgentPrompts{agentID: agentID, store: merged}, nil
+	return &AgentPrompts{agentID: agentID, store: merged, globalKeys: globalKeys}, nil
 }
 
 // Get returns the prompt for the given key, or empty string if not found.
@@ -194,6 +213,23 @@ func (ap *AgentPrompts) GetAll() map[string]string {
 		cp[k] = v
 	}
 	return cp
+}
+
+// SystemPrompt builds a system prompt by joining all global keys (in their
+// original YAML order) followed by the handler-specific key, separated by
+// double newlines. Adding a new key to agents/prompts.yaml automatically
+// includes it — no code changes required.
+func (ap *AgentPrompts) SystemPrompt(specificKey string) string {
+	parts := make([]string, 0, len(ap.globalKeys)+1)
+	for _, k := range ap.globalKeys {
+		if v := ap.Get(k); v != "" {
+			parts = append(parts, v)
+		}
+	}
+	if v := ap.Get(specificKey); v != "" {
+		parts = append(parts, v)
+	}
+	return strings.Join(parts, "\n\n")
 }
 
 // ID returns the agent identifier.
@@ -262,7 +298,7 @@ func DiscoverAgents(agentsDir string) ([]AgentConfig, error) {
 		agentsDir = defaultAgentsDir
 	}
 
-	globalPrompts, err := loadGlobalPrompts(agentsDir)
+	globalPrompts, _, err := loadGlobalPrompts(agentsDir)
 	if err != nil {
 		return nil, err
 	}

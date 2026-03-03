@@ -37,7 +37,7 @@ func (h *DebugHandler) Execute(channelID, userID, text, responseURL, auditTS str
 
 	workflowLogs := h.fetchWorkflowLogs(ctx, channelContext+"\n"+text, userID, channelID)
 
-	systemPrompt := h.prompts.MustGet("security") + "\n\n" + h.prompts.MustGet("debug")
+	systemPrompt := h.prompts.SystemPrompt("debug")
 
 	userPrompt := fmt.Sprintf("Here are the recent messages from the channel:\n\n%s\n\nUser request: %s", channelContext, text)
 	if workflowLogs != "" {

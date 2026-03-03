@@ -15,6 +15,9 @@ type SlackClient interface {
 type PromptProvider interface {
 	Get(key string) string
 	MustGet(key string) string
+	// SystemPrompt builds the full system prompt by joining all global keys
+	// (in YAML order) with the handler-specific key.
+	SystemPrompt(specificKey string) string
 }
 
 // OAuthClient is implemented by any integration client that uses OAuth and

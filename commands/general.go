@@ -156,7 +156,7 @@ func (h *GeneralHandler) Execute(channelID, userID, text, responseURL, auditTS s
 }
 
 func (h *GeneralHandler) systemPrompt() string {
-	return h.prompts.MustGet("security") + "\n\n" + h.prompts.MustGet("general")
+	return h.prompts.SystemPrompt("general")
 }
 
 func (h *GeneralHandler) buildTools() []github.Tool {
