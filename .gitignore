@@ -29,6 +29,9 @@ go.work.sum
 # env file
 .env
 
+# Generated during Docker build from github-linguist
+config/extensions.json
+
 # Editor/IDE
 # .idea/
 # .vscode/

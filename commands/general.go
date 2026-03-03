@@ -9,11 +9,32 @@ import (
 	"strings"
 
 	"github.com/justmike1/arbetern/atlassian"
+	"github.com/justmike1/arbetern/config"
 	"github.com/justmike1/arbetern/github"
 	"github.com/justmike1/arbetern/nvd"
 	"github.com/justmike1/arbetern/salesforce"
 	"github.com/justmike1/arbetern/slack"
 )
+
+// knownExtensions is the set of all known programming-language file extensions
+// sourced from github-linguist/linguist. Built once at init time.
+var knownExtensions map[string]bool
+
+// extensionRe matches tokens that look like file extensions (e.g. ".yaml", ".go")
+// or filenames with extensions (e.g. "main.go", "deploy.yaml") in user text.
+var extensionRe = regexp.MustCompile(`(?i)\.[a-z0-9_][a-z0-9_.]*`)
+
+func init() {
+	knownExtensions = make(map[string]bool, 1500)
+	var exts []string
+	if err := json.Unmarshal([]byte(config.ExtensionsRaw), &exts); err != nil {
+		// Empty or missing file — extension detection disabled.
+		return
+	}
+	for _, ext := range exts {
+		knownExtensions[strings.ToLower(ext)] = true
+	}
+}
 
 type GeneralHandler struct {
 	slackClient      SlackClient
@@ -1922,12 +1943,16 @@ func isCodeIntent(text string) bool {
 		"affected", "exposed", "security", "dependency", "dependencies",
 		"what does", "how does", "explain the code", "explain code",
 		"search code", "search the code", "find in code", "look for",
-		// File references (strong signals the request involves repo files)
-		".yaml", ".yml", ".json", ".tf", ".go", ".py", ".js", ".ts",
-		"dockerfile",
 	}
 	for _, kw := range codeKeywords {
 		if strings.Contains(text, kw) {
+			return true
+		}
+	}
+	// Check for known programming-language file extensions in the text
+	// (sourced from github-linguist — 1400+ extensions).
+	for _, match := range extensionRe.FindAllString(text, -1) {
+		if knownExtensions[strings.ToLower(match)] {
 			return true
 		}
 	}

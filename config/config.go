@@ -1,11 +1,19 @@
 package config
 
 import (
+	_ "embed"
 	"fmt"
 	"os"
 	"strconv"
 	"time"
 )
+
+// extensions.json is generated during the Docker build from github-linguist.
+// When building locally without the file, the embed yields an empty JSON array
+// and extension-based code-intent detection is silently skipped.
+//
+//go:embed extensions.json
+var ExtensionsRaw string
 
 const (
 	defaultPort             = "8080"
