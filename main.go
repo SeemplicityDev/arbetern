@@ -19,6 +19,7 @@ import (
 	"github.com/justmike1/arbetern/jira"
 	"github.com/justmike1/arbetern/nvd"
 	"github.com/justmike1/arbetern/prompts"
+	"github.com/justmike1/arbetern/salesforce"
 	"github.com/justmike1/arbetern/slack"
 )
 
@@ -210,6 +211,7 @@ func refreshIntegrations(
 	slackClient *slack.Client,
 	ghClient *github.Client,
 	jiraClient *jira.Client,
+	sfClient *salesforce.Client,
 	modelsClient *github.ModelsClient,
 	codeModelsClient *github.ModelsClient,
 ) {
@@ -454,6 +456,42 @@ func refreshIntegrations(
 		})
 	}
 
+	// --- Salesforce ---
+	if cfg.SalesforceConfigured() {
+		sfPerms := []permission{
+			{Scope: "query", Description: "Execute SOQL queries (accounts, opportunities, contacts)", Required: true, Granted: boolPtr(true)},
+			{Scope: "describe", Description: "Describe SObject metadata (fields, types)", Required: true, Granted: boolPtr(true)},
+		}
+		// Verify connectivity by checking identity.
+		if sfClient != nil {
+			if info, err := sfClient.GetIdentity(); err == nil {
+				sfPerms = append(sfPerms, permission{
+					Scope:       "identity",
+					Description: fmt.Sprintf("Authenticated as %s (%s)", info.DisplayName, info.Username),
+					Required:    false,
+					Granted:     boolPtr(true),
+				})
+			}
+		}
+		result = append(result, integration{
+			ID:          "salesforce",
+			Name:        "Salesforce",
+			Configured:  true,
+			AuthMode:    "OAuth 2.0 (Client Credentials)",
+			Permissions: sfPerms,
+		})
+	} else {
+		result = append(result, integration{
+			ID:         "salesforce",
+			Name:       "Salesforce",
+			Configured: false,
+			Permissions: []permission{
+				{Scope: "query", Description: "Execute SOQL queries (accounts, opportunities, contacts)", Required: true},
+				{Scope: "describe", Description: "Describe SObject metadata (fields, types)", Required: true},
+			},
+		})
+	}
+
 	integrationsMu.Lock()
 	integrationsCache = result
 	integrationsMu.Unlock()
@@ -467,16 +505,17 @@ func startIntegrationsRefresher(
 	slackClient *slack.Client,
 	ghClient *github.Client,
 	jiraClient *jira.Client,
+	sfClient *salesforce.Client,
 	modelsClient *github.ModelsClient,
 	codeModelsClient *github.ModelsClient,
 ) {
-	refreshIntegrations(cfg, slackClient, ghClient, jiraClient, modelsClient, codeModelsClient)
+	refreshIntegrations(cfg, slackClient, ghClient, jiraClient, sfClient, modelsClient, codeModelsClient)
 
 	go func() {
 		ticker := time.NewTicker(1 * time.Hour)
 		defer ticker.Stop()
 		for range ticker.C {
-			refreshIntegrations(cfg, slackClient, ghClient, jiraClient, modelsClient, codeModelsClient)
+			refreshIntegrations(cfg, slackClient, ghClient, jiraClient, sfClient, modelsClient, codeModelsClient)
 		}
 	}()
 }
@@ -550,6 +589,17 @@ func main() {
 		log.Printf("NVD integration enabled (no API key — rate-limited)")
 	}
 
+	// Salesforce client — enables SOQL queries for the CS agent (Pulse).
+	var sfClient *salesforce.Client
+	if cfg.SalesforceConfigured() {
+		var err error
+		sfClient, err = salesforce.NewClient(cfg.SFConsumerKey, cfg.SFConsumerSecret, cfg.SFLoginURL)
+		if err != nil {
+			log.Fatalf("Salesforce initialization failed: %v", err)
+		}
+		log.Printf("Salesforce integration enabled (instance: %s)", sfClient.InstanceURL())
+	}
+
 	// Discover agents and register per-agent webhook routes (/<agent>/webhook).
 	agents, err := prompts.DiscoverAgents("")
 	if err != nil {
@@ -560,7 +610,7 @@ func main() {
 	}
 
 	// Start background integration permission refresher (runs once now, then every hour).
-	startIntegrationsRefresher(cfg, slackClient, ghClient, jiraClient, modelsClient, codeModelsClient)
+	startIntegrationsRefresher(cfg, slackClient, ghClient, jiraClient, sfClient, modelsClient, codeModelsClient)
 
 	// Thread session store — enables follow-up replies in threads without /commands.
 	sessions := commands.NewSessionStore(cfg.ThreadSessionTTL)
@@ -586,7 +636,7 @@ func main() {
 		}
 
 		agentID := agent.ID // capture for closure
-		router := commands.NewRouter(slackClient, ghClient, modelsClient, codeModelsClient, jiraClient, nvdClient, ap, agent.ID, cfg.AppURL, sessions, cfg.MaxToolRounds)
+		router := commands.NewRouter(slackClient, ghClient, modelsClient, codeModelsClient, jiraClient, nvdClient, sfClient, ap, agent.ID, cfg.AppURL, sessions, cfg.MaxToolRounds)
 		routers[agent.ID] = router
 
 		// Wrap router.Handle with RBAC check.

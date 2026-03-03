@@ -17,6 +17,7 @@ An orchestration platform for AI agents in the enterprise. Each agent lives in i
 | **agent-q** | QA & Test Engineer | Analyzes test failures, reviews test coverage, suggests test cases, and triages flaky tests |
 | **goldsai** | Security Researcher | Assesses CVE impact on your codebase, audits dependencies, reviews code for vulnerabilities, and recommends remediation |
 | **seihin** (製品) | Sr. Technical Product Manager | Reviews and refines Jira tickets, rewrites descriptions with PM best practices, manages ticket quality at scale |
+| **pulse** | Customer Success Engineer | Tracks account health, surfaces renewal signals from Salesforce, manages CS workflows, and coordinates with Jira |
 
 ## Quick Start
 
@@ -49,6 +50,9 @@ An orchestration platform for AI agents in the enterprise. Each agent lives in i
 | `THREAD_SESSION_TTL` | no | Duration a thread session stays active (default: `3m`). Go duration format, e.g. `5m`, `2m30s` |
 | `MAX_TOOL_ROUNDS` | no | Max LLM tool-call rounds per request (default: `50`). Increase for complex multi-file tasks |
 | `NVD_API_KEY` | no | NVD (National Vulnerability Database) API key for CVE lookups. Get one free at <https://nvd.nist.gov/developers/request-an-api-key>. Without a key, requests are rate-limited (~5 req/30s vs ~50 req/30s with a key) |
+| `SF_CONSUMER_KEY` | no | Salesforce Connected App consumer key (OAuth 2.0 client credentials flow) |
+| `SF_CONSUMER_SECRET` | no | Salesforce Connected App consumer secret |
+| `SF_LOGIN_URL` | no | Salesforce login URL (default: `https://login.salesforce.com`). Use `https://test.salesforce.com` for sandbox orgs |
 | `CUSTOM_PROMPTS_DIR` | no | Directory containing custom prompt YAML files that are **appended** to built-in agent prompts. Used for org-specific context via Kubernetes ConfigMap. Set automatically by the Helm chart when `customPrompts` is configured |
 | `AGENT_RBAC_DIR` | no | Directory containing per-agent RBAC overrides (`<agent-id>.yaml` with `allowed_teams` list). Overrides `config.yaml` allowed_teams at deploy time. Set automatically by the Helm chart when `agentRBAC` is configured |
 | `UI_HEADER` | no | Custom header text for the web UI (default: `arbetern`) |
@@ -182,21 +186,30 @@ export AGENT_RBAC_DIR=/path/to/rbac
 
 ```
 main.go              # entrypoint, HTTP server, API
+middleware.go        # HTTP middleware (IP whitelist, CIDR parsing)
 agents/              # agent definitions (one directory per agent)
-  ovad/
-    prompts.yaml     # DevOps & SRE agent prompts
+  prompts.yaml       # global prompts shared by all agents (e.g. security)
   agent-q/
+    config.yaml      # agent metadata + RBAC config
     prompts.yaml     # QA & Test Engineering agent prompts
   goldsai/
+    config.yaml
     prompts.yaml     # Security Research agent prompts
+  ovad/
+    config.yaml
+    prompts.yaml     # DevOps & SRE agent prompts
+  pulse/
+    config.yaml
+    prompts.yaml     # Customer Success Engineering agent prompts
   seihin/
+    config.yaml
     prompts.yaml     # Sr. Technical Product Manager agent prompts
-  prompts.yaml       # global prompts shared by all agents (e.g. security)
-config/              # env var loading
 commands/            # intent routing, debug/general handlers
+config/              # env var loading
 github/              # GitHub API client + Models/Azure API client
 jira/                # Jira Cloud REST API client
 nvd/                 # NVD (National Vulnerability Database) CVE API client
+salesforce/          # Salesforce REST API client (SOQL queries, OAuth 2.0)
 slack/               # Slack webhook handler + response helpers
 prompts/             # YAML prompt loader + agent discovery
 ui/                  # embedded web UI (agent manager)
@@ -216,8 +229,9 @@ Global prompts (e.g. `security`) are defined in `agents/prompts.yaml` and inheri
 |---|---|---|
 | Slack | [docs/SLACK_BOT.md](docs/SLACK_BOT.md) | All agents |
 | GitHub | [docs/GITHUB_PAT.md](docs/GITHUB_PAT.md) | ovad, agent-q, goldsai |
-| Jira | [docs/JIRA.md](docs/JIRA.md) | seihin, ovad, agent-q, goldsai |
+| Jira | [docs/JIRA.md](docs/JIRA.md) | seihin, ovad, agent-q, goldsai, pulse |
 | NVD | [NVD API](https://nvd.nist.gov/developers) | goldsai |
+| Salesforce | SOQL Query API (OAuth 2.0 client credentials) | pulse |
 
 ## Contributing
 

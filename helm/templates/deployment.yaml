@@ -126,6 +126,25 @@ spec:
                   name: {{ .Values.secretName }}
                   key: nvd-api-key
             {{- end }}
+            {{- if index .Values.secretValues "sf-consumer-key" }}
+            - name: SF_CONSUMER_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: sf-consumer-key
+            - name: SF_CONSUMER_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: sf-consumer-secret
+            {{- end }}
+            {{- if index .Values.secretValues "sf-login-url" }}
+            - name: SF_LOGIN_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: sf-login-url
+            {{- end }}
             - name: GOMEMLIMIT
               value: {{ .Values.goRuntime.goMemLimit | quote }}
             - name: GOGC

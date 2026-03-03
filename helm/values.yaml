@@ -60,6 +60,10 @@ secretValues:
   slack-app-token: ""    # App-level token (xapp-...) with connections:write scope
   # NVD CVE API (optional — enables real-time CVE lookups for the security agent)
   nvd-api-key: ""        # Get one at https://nvd.nist.gov/developers/request-an-api-key
+  # Salesforce (optional — enables SOQL queries for the CS agent)
+  sf-consumer-key: ""    # Salesforce Connected App consumer key
+  sf-consumer-secret: "" # Salesforce Connected App consumer secret
+  # sf-login-url: ""     # Defaults to https://login.salesforce.com. Use https://test.salesforce.com for sandboxes.
 
 service:
   type: ClusterIP

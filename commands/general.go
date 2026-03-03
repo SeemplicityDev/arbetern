@@ -11,6 +11,7 @@ import (
 	"github.com/justmike1/arbetern/github"
 	"github.com/justmike1/arbetern/jira"
 	"github.com/justmike1/arbetern/nvd"
+	"github.com/justmike1/arbetern/salesforce"
 	"github.com/justmike1/arbetern/slack"
 )
 
@@ -21,6 +22,7 @@ type GeneralHandler struct {
 	codeModelsClient *github.ModelsClient
 	jiraClient       *jira.Client
 	nvdClient        *nvd.Client
+	sfClient         *salesforce.Client
 	contextProvider  *ContextProvider
 	memory           *ConversationMemory
 	prompts          PromptProvider
@@ -446,6 +448,37 @@ func (h *GeneralHandler) buildTools() []github.Tool {
 						"results_per_page":{"type":"integer","description":"Number of results to return (default: 5, max: 20)"}
 					},
 					"required":["keyword"]
+				}`),
+			},
+		})
+	}
+
+	// Salesforce tools are only available when Salesforce is configured.
+	if h.sfClient != nil {
+		tools = append(tools, github.Tool{
+			Type: "function",
+			Function: github.ToolFunction{
+				Name:        "salesforce_query",
+				Description: "Execute a SOQL query against Salesforce. Use this to query Accounts, Opportunities, Contacts, and other Salesforce objects. Returns structured records. SOQL is similar to SQL but queries Salesforce objects. IMPORTANT: Use relationship fields for joins (e.g. Account.Name on Opportunity, Owner.Name). Date literals like NEXT_N_DAYS:90, LAST_N_DAYS:30, TODAY, THIS_QUARTER are very useful. Always include Id in SELECT. Limit results to avoid large payloads (default LIMIT 50). Example queries:\n- Renewals in next 90 days: SELECT Id, Name, Account.Name, StageName, CloseDate, Amount, Owner.Name FROM Opportunity WHERE CloseDate = NEXT_N_DAYS:90 AND StageName != 'Closed Won' AND StageName != 'Closed Lost' AND Type = 'Renewal' ORDER BY CloseDate ASC\n- Account details: SELECT Id, Name, Type, Industry, Owner.Name, Website FROM Account WHERE Name LIKE '%CustomerName%'\n- Contacts for account: SELECT Id, Name, Email, Title, Phone, Account.Name FROM Contact WHERE Account.Name LIKE '%CustomerName%'",
+				Parameters: json.RawMessage(`{
+					"type":"object",
+					"properties":{
+						"soql":{"type":"string","description":"SOQL query string. Must include Id in SELECT. Use relationship fields for joins (e.g. Account.Name). Use date literals like NEXT_N_DAYS:90, TODAY. Add LIMIT clause to control result size."}
+					},
+					"required":["soql"]
+				}`),
+			},
+		}, github.Tool{
+			Type: "function",
+			Function: github.ToolFunction{
+				Name:        "salesforce_describe",
+				Description: "Describe a Salesforce object to discover its available fields, types, and labels. Use this when you need to explore object schema before writing a SOQL query — e.g., to find the correct field name for renewal date, health score, or custom fields. Common objects: Account, Opportunity, Contact, Case, Lead, Task, Event.",
+				Parameters: json.RawMessage(`{
+					"type":"object",
+					"properties":{
+						"object_name":{"type":"string","description":"Salesforce object API name (e.g. 'Account', 'Opportunity', 'Contact', 'Case')"}
+					},
+					"required":["object_name"]
 				}`),
 			},
 		})
@@ -1467,6 +1500,85 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 			sb.WriteString("\n---\n")
 		}
 		log.Printf("[user=%s channel=%s] searched NVD for '%s' (%d results)", userID, channelID, args.Keyword, total)
+		return sb.String()
+
+	case "salesforce_query":
+		if h.sfClient == nil {
+			return "Error: Salesforce integration is not configured."
+		}
+		var args struct {
+			SOQL string `json:"soql"`
+		}
+		if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+			return fmt.Sprintf("Error parsing arguments: %v", err)
+		}
+		if args.SOQL == "" {
+			return "Error: soql is required."
+		}
+		log.Printf("[user=%s channel=%s] executing SOQL: %s", userID, channelID, args.SOQL)
+		result, err := h.sfClient.Query(args.SOQL)
+		if err != nil {
+			return fmt.Sprintf("Error executing SOQL query: %v", err)
+		}
+		if len(result.Records) == 0 {
+			return fmt.Sprintf("No records found for query: %s", args.SOQL)
+		}
+		// Auto-detect object type and format accordingly.
+		soqlUpper := strings.ToUpper(args.SOQL)
+		switch {
+		case strings.Contains(soqlUpper, "FROM OPPORTUNITY"):
+			opps := salesforce.ParseOpportunities(result.Records)
+			log.Printf("[user=%s channel=%s] SOQL returned %d opportunities", userID, channelID, len(opps))
+			return salesforce.FormatOpportunities(opps)
+		case strings.Contains(soqlUpper, "FROM ACCOUNT"):
+			accounts := salesforce.ParseAccounts(result.Records)
+			log.Printf("[user=%s channel=%s] SOQL returned %d accounts", userID, channelID, len(accounts))
+			return salesforce.FormatAccounts(accounts)
+		case strings.Contains(soqlUpper, "FROM CONTACT"):
+			contacts := salesforce.ParseContacts(result.Records)
+			log.Printf("[user=%s channel=%s] SOQL returned %d contacts", userID, channelID, len(contacts))
+			return salesforce.FormatContacts(contacts)
+		default:
+			// Generic JSON output for other objects.
+			raw, _ := json.MarshalIndent(result.Records, "", "  ")
+			output := string(raw)
+			if len(output) > 8000 {
+				output = output[:8000] + "\n... (truncated)"
+			}
+			log.Printf("[user=%s channel=%s] SOQL returned %d records (generic)", userID, channelID, result.TotalSize)
+			return fmt.Sprintf("Query returned %d record(s):\n```\n%s\n```", result.TotalSize, output)
+		}
+
+	case "salesforce_describe":
+		if h.sfClient == nil {
+			return "Error: Salesforce integration is not configured."
+		}
+		var args struct {
+			ObjectName string `json:"object_name"`
+		}
+		if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+			return fmt.Sprintf("Error parsing arguments: %v", err)
+		}
+		if args.ObjectName == "" {
+			return "Error: object_name is required."
+		}
+		desc, err := h.sfClient.Describe(args.ObjectName)
+		if err != nil {
+			return fmt.Sprintf("Error describing %s: %v", args.ObjectName, err)
+		}
+		var sb strings.Builder
+		fmt.Fprintf(&sb, "*%s* (%s) — %d fields:\n\n", desc.Label, desc.Name, len(desc.Fields))
+		// Show only the most useful fields (skip internal/system fields).
+		shown := 0
+		for _, f := range desc.Fields {
+			if shown >= 60 {
+				fmt.Fprintf(&sb, "\n... and %d more fields (truncated)", len(desc.Fields)-shown)
+				break
+			}
+			fmt.Fprintf(&sb, "• `%s` — %s (%s)\n", f.Name, f.Label, f.Type)
+			shown++
+		}
+		log.Printf("[user=%s channel=%s] described Salesforce object %s (%d fields)", userID, channelID, args.ObjectName, len(desc.Fields))
 		return sb.String()
 
 	default:

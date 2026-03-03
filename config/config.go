@@ -36,6 +36,9 @@ type Config struct {
 	ThreadSessionTTL   time.Duration
 	MaxToolRounds      int
 	NVDAPIKey          string
+	SFConsumerKey      string
+	SFConsumerSecret   string
+	SFLoginURL         string // defaults to "https://login.salesforce.com"
 }
 
 // UseAzure returns true when Azure OpenAI credentials are configured.
@@ -55,6 +58,11 @@ func (c *Config) JiraConfigured() bool {
 // JiraUseOAuth returns true when OAuth 2.0 client credentials are configured.
 func (c *Config) JiraUseOAuth() bool {
 	return c.JiraClientID != "" && c.JiraClientSecret != ""
+}
+
+// SalesforceConfigured returns true when Salesforce consumer credentials are present.
+func (c *Config) SalesforceConfigured() bool {
+	return c.SFConsumerKey != "" && c.SFConsumerSecret != ""
 }
 
 func Load() (*Config, error) {
@@ -77,6 +85,9 @@ func Load() (*Config, error) {
 		AppURL:             os.Getenv("APP_URL"),
 		SlackAppToken:      os.Getenv("SLACK_APP_TOKEN"),
 		NVDAPIKey:          os.Getenv("NVD_API_KEY"),
+		SFConsumerKey:      os.Getenv("SF_CONSUMER_KEY"),
+		SFConsumerSecret:   os.Getenv("SF_CONSUMER_SECRET"),
+		SFLoginURL:         os.Getenv("SF_LOGIN_URL"),
 	}
 
 	if cfg.SlackBotToken == "" {
