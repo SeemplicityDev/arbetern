@@ -52,3 +52,11 @@ secretValues:
 #     general: |
 #       Our container base images are hosted in ECR at 123456789.dkr.ecr.us-east-1.amazonaws.com.
 #       All Python services must use Python >= 3.13.11.
+
+# Agent RBAC — restrict agent access by Slack user group IDs.
+# agentRBAC:
+#   pulse:
+#     - S0A6S3KNNLW   # CS team
+#   ovad:
+#     - S0A6S3KNNLW   # CS team
+#     - S0B7T4LOOLX   # DevOps

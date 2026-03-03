@@ -1,1 +1,5 @@
 name: Goldsai
+
+# RBAC: Slack user group IDs that can access this agent.
+# Empty list = open to everyone. Override via AGENT_RBAC_DIR in deployment.
+allowed_teams: []

@@ -134,6 +134,10 @@ spec:
             - name: CUSTOM_PROMPTS_DIR
               value: /etc/arbetern/custom-prompts
             {{- end }}
+            {{- if .Values.agentRBAC }}
+            - name: AGENT_RBAC_DIR
+              value: /etc/arbetern/agent-rbac
+            {{- end }}
           {{- with .Values.livenessProbe }}
           livenessProbe:
             {{- toYaml . | nindent 12 }}
@@ -158,6 +162,14 @@ spec:
               mountPath: /etc/arbetern/custom-prompts
               readOnly: true
           {{- end }}
+          {{- if .Values.agentRBAC }}
+          {{- if and (not .Values.volumeMounts) (not .Values.customPrompts) }}
+          volumeMounts:
+          {{- end }}
+            - name: agent-rbac
+              mountPath: /etc/arbetern/agent-rbac
+              readOnly: true
+          {{- end }}
       {{- with .Values.volumes }}
       volumes:
         {{- toYaml . | nindent 8 }}
@@ -169,6 +181,14 @@ spec:
         - name: custom-prompts
           configMap:
             name: {{ include "arbetern.fullname" . }}-custom-prompts
+      {{- end }}
+      {{- if .Values.agentRBAC }}
+      {{- if and (not .Values.volumes) (not .Values.customPrompts) }}
+      volumes:
+      {{- end }}
+        - name: agent-rbac
+          configMap:
+            name: {{ include "arbetern.fullname" . }}-agent-rbac
       {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:

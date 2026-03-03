@@ -142,6 +142,19 @@ volumesMounts: []
 #       Our container base images are hosted in ECR at 123456789.dkr.ecr.us-east-1.amazonaws.com.
 #       All Python services must use Python >= 3.13.11.
 customPrompts: {}
+# Agent RBAC — restrict agent access by Slack user group (subteam) IDs.
+# Each key is an agent ID; values are lists of Slack user group IDs.
+# When set, only members of the listed groups can use the agent.
+# REPLACES the config.yaml allowed_teams for that agent at deploy time.
+# Empty map = no restrictions (everyone can use all agents).
+# Example:
+# agentRBAC:
+#   pulse:
+#     - S0A6S3KNNLW   # CS team
+#   ovad:
+#     - S0A6S3KNNLW   # CS team
+#     - S0B7T4LOOLX   # DevOps team
+agentRBAC: {}
 nodeSelector: {}
 tolerations: []
 affinity: {}

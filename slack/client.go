@@ -109,6 +109,16 @@ func (c *Client) GetBotUserID() (string, error) {
 	return resp.UserID, nil
 }
 
+// GetUserGroupMembers returns the list of user IDs in a Slack user group (subteam).
+// Requires the usergroups:read scope on the bot token.
+func (c *Client) GetUserGroupMembers(groupID string) ([]string, error) {
+	members, err := c.api.GetUserGroupMembers(groupID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get members for user group %s: %w", groupID, err)
+	}
+	return members, nil
+}
+
 // GetBotScopes calls auth.test via a raw HTTP request and reads the
 // x-oauth-scopes response header to determine the bot token's granted scopes.
 func (c *Client) GetBotScopes() ([]string, error) {

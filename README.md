@@ -50,6 +50,7 @@ An orchestration platform for AI agents in the enterprise. Each agent lives in i
 | `MAX_TOOL_ROUNDS` | no | Max LLM tool-call rounds per request (default: `50`). Increase for complex multi-file tasks |
 | `NVD_API_KEY` | no | NVD (National Vulnerability Database) API key for CVE lookups. Get one free at <https://nvd.nist.gov/developers/request-an-api-key>. Without a key, requests are rate-limited (~5 req/30s vs ~50 req/30s with a key) |
 | `CUSTOM_PROMPTS_DIR` | no | Directory containing custom prompt YAML files that are **appended** to built-in agent prompts. Used for org-specific context via Kubernetes ConfigMap. Set automatically by the Helm chart when `customPrompts` is configured |
+| `AGENT_RBAC_DIR` | no | Directory containing per-agent RBAC overrides (`<agent-id>.yaml` with `allowed_teams` list). Overrides `config.yaml` allowed_teams at deploy time. Set automatically by the Helm chart when `agentRBAC` is configured |
 | `UI_HEADER` | no | Custom header text for the web UI (default: `arbetern`) |
 
 ### Run Locally
@@ -126,6 +127,56 @@ Set `CUSTOM_PROMPTS_DIR` to a directory containing `<agent-id>.yaml` files:
 export CUSTOM_PROMPTS_DIR=/path/to/custom-prompts
 # Create /path/to/custom-prompts/ovad.yaml with prompt key/value pairs
 ```
+
+## Agent RBAC (Team-Based Access Control)
+
+Restrict which Slack user groups (teams) can access each agent. When `allowed_teams` is set for an agent, only members of those Slack user groups can invoke it. Empty list = open to everyone.
+
+### Default Config (`agents/<id>/config.yaml`)
+
+Each agent's `config.yaml` has an `allowed_teams` field:
+
+```yaml
+name: Pulse
+allowed_teams:
+  - S0A6S3KNNLW   # CS team user group ID
+```
+
+### Override via Helm (Kubernetes ConfigMap)
+
+Add an `agentRBAC` section to your values file to override `config.yaml` at deploy time:
+
+```yaml
+agentRBAC:
+  pulse:
+    - S0A6S3KNNLW   # CS team
+  ovad:
+    - S0A6S3KNNLW   # CS team
+    - S0B7T4LOOLX   # DevOps team
+```
+
+The Helm chart creates a ConfigMap, mounts it, and sets `AGENT_RBAC_DIR` automatically.
+
+### Override via Environment Variable (local / Docker)
+
+Set `AGENT_RBAC_DIR` to a directory containing `<agent-id>.yaml` files:
+
+```bash
+export AGENT_RBAC_DIR=/path/to/rbac
+# Create /path/to/rbac/pulse.yaml:
+# allowed_teams:
+#   - S0A6S3KNNLW
+```
+
+### How it Works
+
+1. On each slash command, arbetern checks if the agent has `allowed_teams` configured
+2. If yes, it calls the Slack `usergroups.users.list` API to check if the user is a member of any allowed group
+3. Group memberships are cached for 5 minutes to avoid API spam
+4. Denied users see an ephemeral "Access denied" message
+5. Deploy overrides (`AGENT_RBAC_DIR`) **replace** (not merge) the `config.yaml` value
+
+> **Slack scope required:** `usergroups:read` — add this to your Slack app's OAuth scopes.
 
 ## Project Structure
 

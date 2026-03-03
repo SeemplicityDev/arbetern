@@ -60,6 +60,81 @@ func routerKeys(m map[string]*commands.Router) []string {
 	return keys
 }
 
+// ── RBAC — Slack user group membership check with caching ───────────────────
+
+type groupCacheEntry struct {
+	members map[string]bool
+	fetched time.Time
+}
+
+type groupMemberCache struct {
+	mu      sync.RWMutex
+	entries map[string]*groupCacheEntry
+	ttl     time.Duration
+}
+
+func newGroupMemberCache(ttl time.Duration) *groupMemberCache {
+	return &groupMemberCache{
+		entries: make(map[string]*groupCacheEntry),
+		ttl:     ttl,
+	}
+}
+
+// isMember checks if a user belongs to any of the given Slack user groups.
+// Results are cached per group for the configured TTL to avoid API spam.
+func (c *groupMemberCache) isMember(slackClient *slack.Client, userID string, groupIDs []string) bool {
+	for _, gid := range groupIDs {
+		if c.checkGroup(slackClient, userID, gid) {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *groupMemberCache) checkGroup(slackClient *slack.Client, userID, groupID string) bool {
+	c.mu.RLock()
+	entry, ok := c.entries[groupID]
+	if ok && time.Since(entry.fetched) < c.ttl {
+		c.mu.RUnlock()
+		return entry.members[userID]
+	}
+	c.mu.RUnlock()
+
+	// Fetch fresh membership from Slack API.
+	members, err := slackClient.GetUserGroupMembers(groupID)
+	if err != nil {
+		log.Printf("[rbac] failed to fetch members for group %s: %v", groupID, err)
+		return false // fail closed — deny on error
+	}
+
+	memberSet := make(map[string]bool, len(members))
+	for _, m := range members {
+		memberSet[m] = true
+	}
+
+	c.mu.Lock()
+	c.entries[groupID] = &groupCacheEntry{members: memberSet, fetched: time.Now()}
+	c.mu.Unlock()
+
+	log.Printf("[rbac] refreshed group %s: %d members", groupID, len(members))
+	return memberSet[userID]
+}
+
+// checkAgentRBAC returns true if the user is allowed to access the agent.
+// If the agent has no allowed_teams restriction (empty list), everyone is allowed.
+func checkAgentRBAC(cache *groupMemberCache, slackClient *slack.Client, agentID, userID string, allowedTeams []string) bool {
+	if len(allowedTeams) == 0 {
+		return true // no restriction
+	}
+	allowed := cache.isMember(slackClient, userID, allowedTeams)
+	if !allowed {
+		log.Printf("[rbac] DENIED user=%s agent=%s (allowed_teams=%v)", userID, agentID, allowedTeams)
+	}
+	return allowed
+}
+
+const rbacDenyMessage = ":lock: Access denied — you are not a member of an authorized team for this agent. Contact your administrator if you need access."
+
 // buildHelpMessage generates the /arbetern help response from discovered agents.
 // Each agent gets a one-line entry extracted from the second line of its intro prompt.
 func buildHelpMessage(agents []prompts.AgentConfig) string {
@@ -146,6 +221,7 @@ func refreshIntegrations(
 		{Scope: "im:history", Description: "Read message history in DMs", Required: false},
 		{Scope: "mpim:history", Description: "Read message history in group DMs", Required: false},
 		{Scope: "users:read", Description: "Read user profile information (name, email)", Required: true},
+		{Scope: "usergroups:read", Description: "Read user group membership for RBAC enforcement", Required: true},
 		{Scope: "commands", Description: "Register and receive slash commands", Required: true},
 		// Event subscriptions (required for Socket Mode thread follow-ups).
 		{Scope: "message.channels", Description: "Event: receive messages in public channels (Socket Mode)", Required: true},
@@ -490,6 +566,16 @@ func main() {
 	sessions := commands.NewSessionStore(cfg.ThreadSessionTTL)
 	log.Printf("Thread session TTL: %s", cfg.ThreadSessionTTL)
 
+	// RBAC: build agentID → allowedTeams map and group membership cache.
+	agentRBAC := make(map[string][]string, len(agents))
+	for _, agent := range agents {
+		agentRBAC[agent.ID] = agent.AllowedTeams
+		if len(agent.AllowedTeams) > 0 {
+			log.Printf("RBAC: agent %q restricted to teams %v", agent.ID, agent.AllowedTeams)
+		}
+	}
+	rbacCache := newGroupMemberCache(5 * time.Minute)
+
 	// Map of agentID → Router so the events handler can dispatch thread replies.
 	routers := make(map[string]*commands.Router, len(agents))
 
@@ -499,9 +585,19 @@ func main() {
 			log.Fatalf("failed to load prompts for agent %s: %v", agent.ID, err)
 		}
 
+		agentID := agent.ID // capture for closure
 		router := commands.NewRouter(slackClient, ghClient, modelsClient, codeModelsClient, jiraClient, nvdClient, ap, agent.ID, cfg.AppURL, sessions, cfg.MaxToolRounds)
 		routers[agent.ID] = router
-		handler := slack.NewHandler(cfg.SlackSigningSecret, router.Handle)
+
+		// Wrap router.Handle with RBAC check.
+		rbacHandler := func(channelID, userID, text, responseURL string) {
+			if !checkAgentRBAC(rbacCache, slackClient, agentID, userID, agentRBAC[agentID]) {
+				_ = slack.RespondToURL(responseURL, rbacDenyMessage, true)
+				return
+			}
+			router.Handle(channelID, userID, text, responseURL)
+		}
+		handler := slack.NewHandler(cfg.SlackSigningSecret, rbacHandler)
 
 		webhookPath := fmt.Sprintf("/%s/webhook", agent.ID)
 		http.Handle(webhookPath, handler)
@@ -554,6 +650,13 @@ func main() {
 					log.Printf("[socket-mode] unknown agent for command %q (known: %v)", command, routerKeys(routers))
 					return
 				}
+
+				// RBAC check.
+				if !checkAgentRBAC(rbacCache, slackClient, agentID, userID, agentRBAC[agentID]) {
+					_ = slack.RespondToURL(responseURL, rbacDenyMessage, true)
+					return
+				}
+
 				router.Handle(channelID, userID, text, responseURL)
 			},
 		)

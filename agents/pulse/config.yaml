@@ -1,1 +1,8 @@
 name: Pulse
+
+# RBAC: Slack user group IDs that can access this agent.
+# Empty list = open to everyone. Override via AGENT_RBAC_DIR in deployment.
+# Example: restrict to CS team only:
+#   allowed_teams:
+#     - S0A6S3KNNLW
+allowed_teams: []
