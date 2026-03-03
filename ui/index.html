@@ -106,6 +106,7 @@
       display: grid;
       grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
       gap: 16px;
+      margin-bottom: 36px;
     }
 
     /* ── Agent Card ─────────────────────────────── */
@@ -782,6 +783,69 @@
       .agents-grid { grid-template-columns: 1fr; }
       .integrations-grid { grid-template-columns: 1fr; }
       .modal-integrations-grid { grid-template-columns: 1fr; }
+      .changes-list { grid-template-columns: 1fr; }
+    }
+
+    /* ── Changes / Changelog ─────────────────────── */
+    .changes-list {
+      display: flex;
+      flex-direction: column;
+      gap: 0;
+      margin-bottom: 36px;
+    }
+
+    .change-item {
+      display: flex;
+      align-items: flex-start;
+      gap: 12px;
+      padding: 12px 16px;
+      border-bottom: 1px solid var(--border);
+      transition: background 0.15s ease;
+    }
+
+    .change-item:last-child {
+      border-bottom: none;
+    }
+
+    .change-item:hover {
+      background: var(--card-hover);
+    }
+
+    .change-sha {
+      font-family: 'SF Mono', SFMono-Regular, Consolas, 'Liberation Mono', Menlo, monospace;
+      font-size: 12px;
+      color: var(--accent);
+      background: var(--card);
+      border: 1px solid var(--border);
+      padding: 2px 8px;
+      border-radius: 4px;
+      text-decoration: none;
+      white-space: nowrap;
+      flex-shrink: 0;
+      transition: border-color 0.15s ease;
+    }
+
+    .change-sha:hover {
+      border-color: var(--accent);
+    }
+
+    .change-body {
+      flex: 1;
+      min-width: 0;
+    }
+
+    .change-message {
+      font-size: 13px;
+      color: var(--text);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .change-meta {
+      font-size: 11px;
+      color: var(--text-muted);
+      margin-top: 2px;
     }
   </style>
 </head>
@@ -810,6 +874,11 @@
         <div class="empty-state-icon">&#x1f916;</div>
         <p>Loading agents...</p>
       </div>
+    </div>
+
+    <div class="section-title">Changes</div>
+    <div class="changes-list" id="changes-list">
+      <div class="empty-state" style="padding:30px;"><p>Loading changes...</p></div>
     </div>
   </main>
 
@@ -852,6 +921,7 @@
       ovad:      [
         { id: 'github', name: 'GitHub' },
         { id: 'jira', name: 'Jira' },
+        { id: 'confluence', name: 'Confluence' },
         { id: 'slack', name: 'Slack' },
         { id: 'azure-openai', name: 'Azure OpenAI' },
       ],
@@ -863,17 +933,20 @@
       ],
       seihin:    [
         { id: 'jira', name: 'Jira' },
+        { id: 'confluence', name: 'Confluence' },
         { id: 'slack', name: 'Slack' },
         { id: 'azure-openai', name: 'Azure OpenAI' },
       ],
       'agent-q': [
         { id: 'github', name: 'GitHub' },
         { id: 'jira', name: 'Jira' },
+        { id: 'confluence', name: 'Confluence' },
         { id: 'slack', name: 'Slack' },
         { id: 'azure-openai', name: 'Azure OpenAI' },
       ],
       pulse:     [
         { id: 'jira', name: 'Jira' },
+        { id: 'confluence', name: 'Confluence' },
         { id: 'slack', name: 'Slack' },
         { id: 'azure-openai', name: 'Azure OpenAI' },
         { id: 'salesforce', name: 'Salesforce' },
@@ -883,7 +956,7 @@
 
     // Mini SVG logos for compact badges (reuses INTEGRATION_LOGOS when available)
     const BADGE_INTEGRATION_LOGOS = {
-      salesforce: `<svg viewBox="0 0 128 128"><path d="M53.3 22.4c5.7-5.9 13.6-9.6 22.4-9.6 11.4 0 21.4 6.2 26.7 15.5 4.6-2.1 9.7-3.2 15-3.2 20.1 0 36.4 16.3 36.4 36.4s-16.3 36.4-36.4 36.4c-3.2 0-6.3-.4-9.3-1.2-4.8 8.9-14.2 14.9-25 14.9-4.5 0-8.7-1.1-12.5-2.9-4.7 10.3-15.1 17.5-27.2 17.5-12 0-22.3-7.1-27.1-17.3-1.9.3-3.9.4-5.9.4C5 109.3-7.5 96.8-7.5 81c0-10.8 6-20.2 14.8-25.1-1.1-3.5-1.7-7.2-1.7-11.1 0-20.1 16.3-36.4 36.4-36.4 4.5 0 8.8.8 12.8 2.3" fill="#00A1E0" transform="translate(3.5 3)"/></svg>`,
+      salesforce: `<svg viewBox="0 0 128 128"><path d="M53.3 22.4c5.7-5.9 13.6-9.6 22.4-9.6 11.4 0 21.4 6.2 26.7 15.5 4.6-2.1 9.7-3.2 15-3.2 20.1 0 36.4 16.3 36.4 36.4s-16.3 36.4-36.4 36.4c-3.2 0-6.3-.4-9.3-1.2-4.8 8.9-14.2 14.9-25 14.9-4.5 0-8.7-1.1-12.5-2.9-4.7 10.3-15.1 17.5-27.2 17.5-12 0-22.3-7.1-27.1-17.3-1.9.3-3.9.4-5.9.4C5 109.3-7.5 96.8-7.5 81c0-10.8 6-20.2 14.8-25.1-1.1-3.5-1.7-7.2-1.7-11.1 0-20.1 16.3-36.4 36.4-36.4 4.5 0 8.8.8 12.8 2.3" fill="#00A1E0" transform="translate(3.5 3)"/><text x="64" y="74" text-anchor="middle" font-family="Arial,Helvetica,sans-serif" font-size="15" font-weight="700" fill="#fff">salesforce</text></svg>`,
       chorus: `<svg viewBox="0 0 128 128"><circle cx="64" cy="64" r="56" fill="#4B0082"/><path d="M40 48c0-4.4 3.6-8 8-8s8 3.6 8 8v32c0 4.4-3.6 8-8 8s-8-3.6-8-8V48zm32 0c0-4.4 3.6-8 8-8s8 3.6 8 8v32c0 4.4-3.6 8-8 8s-8-3.6-8-8V48zM56 38c0-4.4 3.6-8 8-8s8 3.6 8 8v52c0 4.4-3.6 8-8 8s-8-3.6-8-8V38z" fill="#fff"/></svg>`,
     };
 
@@ -1076,13 +1149,15 @@
       jira: `<svg viewBox="0 0 128 128"><defs><linearGradient id="jira-a" x1="22.034" y1="9.773" x2="17.118" y2="14.842" gradientTransform="scale(4)" gradientUnits="userSpaceOnUse"><stop offset=".18" stop-color="#0052cc"/><stop offset="1" stop-color="#2684ff"/></linearGradient><linearGradient id="jira-b" x1="16.641" y1="15.63" x2="10.957" y2="21.09" gradientTransform="scale(4)" gradientUnits="userSpaceOnUse"><stop offset=".18" stop-color="#0052cc"/><stop offset="1" stop-color="#2684ff"/></linearGradient></defs><path d="M122.146 62.19L68.17 8.214 64 4.07 21.32 46.746 4.07 63.996l17.25 17.25L64 123.93l42.07-42.066.61-.61zm-58.15-16.31L80.62 62.5H46.56zm0 36.74L46.56 65.5h34.06z" fill="#2684ff"/><path d="M64 45.88C63.46 28.17 49.68 13.79 32.07 12.5L2.17 42.4l18.56 18.56z" fill="url(#jira-a)"/><path d="M81.1 62.5L64 79.62c.52 17.83 14.47 32.3 32.19 33.46l29.64-29.64-18.56-18.56z" fill="url(#jira-b)"/></svg>`,
       'azure-openai': `<svg viewBox="0 0 128 128"><path d="M64 8L8 36v56l56 28 56-28V36zm0 8.5L112 40v48L64 111.5 16 88V40z" fill="#0078d4"/><path d="M64 20L20 44v40l44 22 44-22V44zm0 7l36 18v32L64 95 28 77V45z" fill="#50e6ff"/><circle cx="64" cy="64" r="12" fill="#0078d4"/></svg>`,
       nvd: `<svg viewBox="0 0 128 128"><path d="M64 8C33.1 8 8 33.1 8 64s25.1 56 56 56 56-25.1 56-56S94.9 8 64 8zm0 8c26.5 0 48 21.5 48 48S90.5 112 64 112 16 90.5 16 64s21.5-48 48-48z" fill="#1a3673"/><path d="M64 24c-22.1 0-40 17.9-40 40s17.9 40 40 40 40-17.9 40-40-17.9-40-40-40zm0 6c18.8 0 34 15.2 34 34S82.8 98 64 98 30 82.8 30 64s15.2-34 34-34z" fill="#2a5caa"/><path d="M52 52h24v8H60v8h12v8H60v16h-8V52zm28 0h8v40h-8V52z" fill="#1a3673"/></svg>`,
-      salesforce: `<svg viewBox="0 0 128 128"><path d="M53.3 22.4c5.7-5.9 13.6-9.6 22.4-9.6 11.4 0 21.4 6.2 26.7 15.5 4.6-2.1 9.7-3.2 15-3.2 20.1 0 36.4 16.3 36.4 36.4s-16.3 36.4-36.4 36.4c-3.2 0-6.3-.4-9.3-1.2-4.8 8.9-14.2 14.9-25 14.9-4.5 0-8.7-1.1-12.5-2.9-4.7 10.3-15.1 17.5-27.2 17.5-12 0-22.3-7.1-27.1-17.3-1.9.3-3.9.4-5.9.4C5 109.3-7.5 96.8-7.5 81c0-10.8 6-20.2 14.8-25.1-1.1-3.5-1.7-7.2-1.7-11.1 0-20.1 16.3-36.4 36.4-36.4 4.5 0 8.8.8 12.8 2.3" fill="#00A1E0" transform="translate(3.5 3)"/></svg>`,
+      salesforce: `<svg viewBox="0 0 128 128"><path d="M53.3 22.4c5.7-5.9 13.6-9.6 22.4-9.6 11.4 0 21.4 6.2 26.7 15.5 4.6-2.1 9.7-3.2 15-3.2 20.1 0 36.4 16.3 36.4 36.4s-16.3 36.4-36.4 36.4c-3.2 0-6.3-.4-9.3-1.2-4.8 8.9-14.2 14.9-25 14.9-4.5 0-8.7-1.1-12.5-2.9-4.7 10.3-15.1 17.5-27.2 17.5-12 0-22.3-7.1-27.1-17.3-1.9.3-3.9.4-5.9.4C5 109.3-7.5 96.8-7.5 81c0-10.8 6-20.2 14.8-25.1-1.1-3.5-1.7-7.2-1.7-11.1 0-20.1 16.3-36.4 36.4-36.4 4.5 0 8.8.8 12.8 2.3" fill="#00A1E0" transform="translate(3.5 3)"/><text x="64" y="74" text-anchor="middle" font-family="Arial,Helvetica,sans-serif" font-size="15" font-weight="700" fill="#fff">salesforce</text></svg>`,
+      confluence: `<svg viewBox="0 0 128 128"><path d="M9.26 101.37c-1.65 2.7-3.63 5.86-4.87 7.75a3.28 3.28 0 0 0 1.07 4.5l22.56 13.74a3.28 3.28 0 0 0 4.5-1.07c1.07-1.81 2.95-4.88 5-8.33 9.19-15.07 18.47-13.25 35.43-5.42l22.23 10.23a3.28 3.28 0 0 0 4.33-1.65l11.16-24.64a3.28 3.28 0 0 0-1.65-4.33C99.4 88.04 57.06 68.63 9.26 101.37z" fill="#2684FF"/><path d="M118.74 26.63c1.65-2.7 3.63-5.86 4.87-7.75a3.28 3.28 0 0 0-1.07-4.5L100.04.64a3.28 3.28 0 0 0-4.5 1.07c-1.07 1.81-2.95 4.88-5 8.33-9.19 15.07-18.47 13.25-35.43 5.42L33.13 5.31a3.28 3.28 0 0 0-4.33 1.65L17.64 31.6a3.28 3.28 0 0 0 1.65 4.33c9.11 4.17 51.45 23.49 99.45-9.3z" fill="#2684FF"/></svg>`,
     };
 
     const INTEGRATION_COLORS = {
       slack: '#4A154B',
       github: '#24292e',
       jira: '#0052CC',
+      confluence: '#2684FF',
       'azure-openai': '#0078d4',
       nvd: '#1a3673',
       salesforce: '#00A1E0',
@@ -1200,8 +1275,45 @@
       }
     }
 
+    function timeAgo(dateStr) {
+      const seconds = Math.floor((Date.now() - new Date(dateStr).getTime()) / 1000);
+      if (seconds < 60) return 'just now';
+      const minutes = Math.floor(seconds / 60);
+      if (minutes < 60) return `${minutes}m ago`;
+      const hours = Math.floor(minutes / 60);
+      if (hours < 24) return `${hours}h ago`;
+      const days = Math.floor(hours / 24);
+      if (days < 30) return `${days}d ago`;
+      return new Date(dateStr).toLocaleDateString();
+    }
+
+    async function loadChanges() {
+      const list = document.getElementById('changes-list');
+      try {
+        const resp = await fetch('/api/changes');
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const commits = await resp.json();
+        if (!commits || commits.length === 0) {
+          list.innerHTML = '<div class="empty-state" style="padding:30px;"><p>No changes found.</p></div>';
+          return;
+        }
+        list.innerHTML = commits.map(c => `
+          <div class="change-item">
+            <a class="change-sha" href="${escapeHtml(c.url)}" target="_blank" rel="noopener">${escapeHtml(c.sha)}</a>
+            <div class="change-body">
+              <div class="change-message" title="${escapeHtml(c.message)}">${escapeHtml(c.message)}</div>
+              <div class="change-meta">${escapeHtml(c.author)} · ${c.date ? timeAgo(c.date) : ''}</div>
+            </div>
+          </div>`).join('');
+      } catch (err) {
+        console.error('Failed to load changes:', err);
+        list.innerHTML = '<div class="empty-state" style="padding:30px;"><p>Failed to load changes.</p></div>';
+      }
+    }
+
     loadIntegrations();
     loadAgents();
+    loadChanges();
   </script>
 </body>
 </html>

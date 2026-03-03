@@ -306,7 +306,7 @@ func refreshIntegrations(
 		},
 	}
 
-	// --- Jira & Confluence ---
+	// --- Jira ---
 	if cfg.AtlassianConfigured() {
 		jiraConnected := jiraClient != nil && jiraClient.Ready()
 		authMode := "Basic Auth"
@@ -325,7 +325,6 @@ func refreshIntegrations(
 				permission{Scope: "read:jira-work", Description: "OAuth scope: read issues, projects, and boards", Required: true, Granted: boolPtr(jiraConnected)},
 				permission{Scope: "write:jira-work", Description: "OAuth scope: create and update issues", Required: true, Granted: boolPtr(jiraConnected)},
 				permission{Scope: "read:jira-user", Description: "OAuth scope: read user profiles for assignee resolution", Required: true, Granted: boolPtr(jiraConnected)},
-				permission{Scope: "read:confluence-content.all", Description: "OAuth scope: read Confluence pages and spaces", Required: false, Granted: boolPtr(jiraConnected)},
 			)
 		}
 
@@ -358,22 +357,54 @@ func refreshIntegrations(
 		}
 
 		result = append(result, integration{
-			ID:          "atlassian",
-			Name:        "Atlassian (Jira + Confluence)",
+			ID:          "jira",
+			Name:        "Jira",
 			Configured:  jiraConnected,
 			AuthMode:    authMode,
 			Permissions: jiraPerms,
 		})
+
+		// --- Confluence (shares the same Atlassian client) ---
+		confluencePerms := []permission{
+			{Scope: "read:confluence-content.all", Description: "Search and read Confluence pages and content", Required: true},
+			{Scope: "read:confluence-space.summary", Description: "List and browse Confluence spaces", Required: true},
+		}
+		if cfg.AtlassianUseOAuth() {
+			for i := range confluencePerms {
+				confluencePerms[i].Granted = boolPtr(jiraConnected)
+			}
+		} else {
+			// Basic Auth inherits all permissions of the account.
+			for i := range confluencePerms {
+				confluencePerms[i].Granted = boolPtr(jiraConnected)
+			}
+		}
+		result = append(result, integration{
+			ID:          "confluence",
+			Name:        "Confluence",
+			Configured:  jiraConnected,
+			AuthMode:    authMode,
+			Permissions: confluencePerms,
+		})
 	} else {
 		result = append(result, integration{
-			ID:         "atlassian",
-			Name:       "Atlassian (Jira + Confluence)",
+			ID:         "jira",
+			Name:       "Jira",
 			Configured: false,
 			Permissions: []permission{
 				{Scope: "BROWSE_PROJECTS", Description: "View projects, issues, and field metadata", Required: true},
 				{Scope: "CREATE_ISSUES", Description: "Create new issues (tickets, stories, bugs)", Required: true},
 				{Scope: "EDIT_ISSUES", Description: "Update issue descriptions, fields, and team assignments", Required: true},
 				{Scope: "ASSIGN_ISSUES", Description: "Search assignable users and set issue assignees", Required: false},
+			},
+		})
+		result = append(result, integration{
+			ID:         "confluence",
+			Name:       "Confluence",
+			Configured: false,
+			Permissions: []permission{
+				{Scope: "read:confluence-content.all", Description: "Search and read Confluence pages and content", Required: true},
+				{Scope: "read:confluence-space.summary", Description: "List and browse Confluence spaces", Required: true},
 			},
 		})
 	}
@@ -783,6 +814,21 @@ func main() {
 			"total_closed":  explicit,
 			"session_ttl":   cfg.ThreadSessionTTL.String(),
 		})
+	})
+
+	// API: latest changes (commits from justmike1/arbetern).
+	apiMux.HandleFunc("/api/changes", func(w http.ResponseWriter, r *http.Request) {
+		if ghClient == nil {
+			http.Error(w, "GitHub integration not configured", http.StatusServiceUnavailable)
+			return
+		}
+		commits, err := ghClient.ListCommits(r.Context(), "justmike1", "arbetern", 20)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("failed to fetch commits: %v", err), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(commits)
 	})
 
 	http.Handle("/api/", ipWhitelist(uiCIDRs, apiMux))

@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"fmt"
 	"log"
 	"sync"
 	"time"
@@ -177,6 +178,20 @@ func (s *SessionStore) expire(key string, sess *ThreadSession) {
 
 	log.Printf("[session] expired channel=%s thread=%s user=%s agent=%s duration=%s",
 		sess.ChannelID, sess.ThreadTS, sess.UserID, sess.AgentID, duration)
+
+	// Notify the user in the thread that the session has expired and how to continue.
+	if sess.Router != nil && sess.Router.slackClient != nil {
+		msg := fmt.Sprintf(
+			"_:hourglass: Thread session expired after %d min of inactivity._\n"+
+				"To continue this conversation, copy the link to this thread and paste it in a new `/%s` message — the bot will pick up the context automatically.\n"+
+				"_(Right-click the thread timestamp → Copy link)_",
+			int(s.ttl.Minutes()), sess.AgentID,
+		)
+		if err := sess.Router.slackClient.PostThreadReply(sess.ChannelID, sess.ThreadTS, msg); err != nil {
+			log.Printf("[session] failed to post expiry notice channel=%s thread=%s: %v",
+				sess.ChannelID, sess.ThreadTS, err)
+		}
+	}
 }
 
 // refresh resets the session timer and updates LastSeen.

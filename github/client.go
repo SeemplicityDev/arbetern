@@ -646,3 +646,54 @@ func (c *Client) RerunWorkflow(ctx context.Context, owner, repo string, runID in
 	}
 	return nil
 }
+
+// CommitSummary holds the essential fields of a Git commit.
+type CommitSummary struct {
+	SHA     string `json:"sha"`
+	Message string `json:"message"`
+	Author  string `json:"author"`
+	Date    string `json:"date"`
+	URL     string `json:"url"`
+}
+
+// ListCommits returns the latest commits for a repository (up to limit).
+func (c *Client) ListCommits(ctx context.Context, owner, repo string, limit int) ([]CommitSummary, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	opts := &gh.CommitsListOptions{
+		ListOptions: gh.ListOptions{PerPage: limit},
+	}
+	commits, _, err := c.api.Repositories.ListCommits(ctx, owner, repo, opts)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list commits for %s/%s: %w", owner, repo, err)
+	}
+
+	result := make([]CommitSummary, 0, len(commits))
+	for _, c := range commits {
+		msg := ""
+		author := ""
+		date := ""
+		if c.Commit != nil {
+			msg = c.Commit.GetMessage()
+			if c.Commit.Author != nil {
+				author = c.Commit.Author.GetName()
+				if c.Commit.Author.Date != nil {
+					date = c.Commit.Author.Date.Format(time.RFC3339)
+				}
+			}
+		}
+		// Use first line of commit message only.
+		if idx := strings.IndexByte(msg, '\n'); idx > 0 {
+			msg = msg[:idx]
+		}
+		result = append(result, CommitSummary{
+			SHA:     c.GetSHA()[:7],
+			Message: msg,
+			Author:  author,
+			Date:    date,
+			URL:     c.GetHTMLURL(),
+		})
+	}
+	return result, nil
+}
