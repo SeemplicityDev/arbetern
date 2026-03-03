@@ -16,29 +16,29 @@ const (
 )
 
 type Config struct {
-	SlackBotToken      string
-	SlackSigningSecret string
-	GitHubToken        string
-	GeneralModel       string // Default model/deployment for general queries.
-	CodeModel          string // Separate model/deployment for code-generation tasks (PRs, modify_file).
-	AzureEndpoint      string
-	AzureAPIKey        string
-	Port               string
-	UIAllowedCIDRs     string
-	JiraURL            string
-	JiraEmail          string
-	JiraAPIToken       string
-	JiraProject        string
-	JiraClientID       string
-	JiraClientSecret   string
-	AppURL             string
-	SlackAppToken      string
-	ThreadSessionTTL   time.Duration
-	MaxToolRounds      int
-	NVDAPIKey          string
-	SFConsumerKey      string
-	SFConsumerSecret   string
-	SFLoginURL         string // defaults to "https://login.salesforce.com"
+	SlackBotToken         string
+	SlackSigningSecret    string
+	GitHubToken           string
+	GeneralModel          string // Default model/deployment for general queries.
+	CodeModel             string // Separate model/deployment for code-generation tasks (PRs, modify_file).
+	AzureEndpoint         string
+	AzureAPIKey           string
+	Port                  string
+	UIAllowedCIDRs        string
+	AtlassianURL          string
+	AtlassianEmail        string
+	AtlassianAPIToken     string
+	AtlassianProject      string
+	AtlassianClientID     string
+	AtlassianClientSecret string
+	AppURL                string
+	SlackAppToken         string
+	ThreadSessionTTL      time.Duration
+	MaxToolRounds         int
+	NVDAPIKey             string
+	SFConsumerKey         string
+	SFConsumerSecret      string
+	SFLoginURL            string // defaults to "https://login.salesforce.com"
 }
 
 // UseAzure returns true when Azure OpenAI credentials are configured.
@@ -46,18 +46,18 @@ func (c *Config) UseAzure() bool {
 	return c.AzureEndpoint != "" && c.AzureAPIKey != ""
 }
 
-// JiraConfigured returns true when Jira credentials are present.
+// AtlassianConfigured returns true when Atlassian credentials are present.
 // Supports both Basic Auth (email + API token) and OAuth 2.0 (client ID + secret).
-func (c *Config) JiraConfigured() bool {
-	if c.JiraURL == "" {
+func (c *Config) AtlassianConfigured() bool {
+	if c.AtlassianURL == "" {
 		return false
 	}
-	return (c.JiraEmail != "" && c.JiraAPIToken != "") || (c.JiraClientID != "" && c.JiraClientSecret != "")
+	return (c.AtlassianEmail != "" && c.AtlassianAPIToken != "") || (c.AtlassianClientID != "" && c.AtlassianClientSecret != "")
 }
 
-// JiraUseOAuth returns true when OAuth 2.0 client credentials are configured.
-func (c *Config) JiraUseOAuth() bool {
-	return c.JiraClientID != "" && c.JiraClientSecret != ""
+// AtlassianUseOAuth returns true when OAuth 2.0 client credentials are configured.
+func (c *Config) AtlassianUseOAuth() bool {
+	return c.AtlassianClientID != "" && c.AtlassianClientSecret != ""
 }
 
 // SalesforceConfigured returns true when Salesforce consumer credentials are present.
@@ -67,27 +67,27 @@ func (c *Config) SalesforceConfigured() bool {
 
 func Load() (*Config, error) {
 	cfg := &Config{
-		SlackBotToken:      os.Getenv("SLACK_BOT_TOKEN"),
-		SlackSigningSecret: os.Getenv("SLACK_SIGNING_SECRET"),
-		GitHubToken:        os.Getenv("GITHUB_TOKEN"),
-		GeneralModel:       os.Getenv("GENERAL_MODEL"),
-		CodeModel:          os.Getenv("CODE_MODEL"),
-		AzureEndpoint:      os.Getenv("AZURE_OPEN_AI_ENDPOINT"),
-		AzureAPIKey:        os.Getenv("AZURE_API_KEY"),
-		Port:               os.Getenv("PORT"),
-		UIAllowedCIDRs:     os.Getenv("UI_ALLOWED_CIDRS"),
-		JiraURL:            os.Getenv("JIRA_URL"),
-		JiraEmail:          os.Getenv("JIRA_EMAIL"),
-		JiraAPIToken:       os.Getenv("JIRA_API_TOKEN"),
-		JiraProject:        os.Getenv("JIRA_PROJECT"),
-		JiraClientID:       os.Getenv("JIRA_CLIENT_ID"),
-		JiraClientSecret:   os.Getenv("JIRA_CLIENT_SECRET"),
-		AppURL:             os.Getenv("APP_URL"),
-		SlackAppToken:      os.Getenv("SLACK_APP_TOKEN"),
-		NVDAPIKey:          os.Getenv("NVD_API_KEY"),
-		SFConsumerKey:      os.Getenv("SF_CONSUMER_KEY"),
-		SFConsumerSecret:   os.Getenv("SF_CONSUMER_SECRET"),
-		SFLoginURL:         os.Getenv("SF_LOGIN_URL"),
+		SlackBotToken:         os.Getenv("SLACK_BOT_TOKEN"),
+		SlackSigningSecret:    os.Getenv("SLACK_SIGNING_SECRET"),
+		GitHubToken:           os.Getenv("GITHUB_TOKEN"),
+		GeneralModel:          os.Getenv("GENERAL_MODEL"),
+		CodeModel:             os.Getenv("CODE_MODEL"),
+		AzureEndpoint:         os.Getenv("AZURE_OPEN_AI_ENDPOINT"),
+		AzureAPIKey:           os.Getenv("AZURE_API_KEY"),
+		Port:                  os.Getenv("PORT"),
+		UIAllowedCIDRs:        os.Getenv("UI_ALLOWED_CIDRS"),
+		AtlassianURL:          os.Getenv("ATLASSIAN_URL"),
+		AtlassianEmail:        os.Getenv("ATLASSIAN_EMAIL"),
+		AtlassianAPIToken:     os.Getenv("ATLASSIAN_API_TOKEN"),
+		AtlassianProject:      os.Getenv("ATLASSIAN_PROJECT"),
+		AtlassianClientID:     os.Getenv("ATLASSIAN_CLIENT_ID"),
+		AtlassianClientSecret: os.Getenv("ATLASSIAN_CLIENT_SECRET"),
+		AppURL:                os.Getenv("APP_URL"),
+		SlackAppToken:         os.Getenv("SLACK_APP_TOKEN"),
+		NVDAPIKey:             os.Getenv("NVD_API_KEY"),
+		SFConsumerKey:         os.Getenv("SF_CONSUMER_KEY"),
+		SFConsumerSecret:      os.Getenv("SF_CONSUMER_SECRET"),
+		SFLoginURL:            os.Getenv("SF_LOGIN_URL"),
 	}
 
 	if cfg.SlackBotToken == "" {

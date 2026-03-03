@@ -76,41 +76,41 @@ spec:
                   name: {{ .Values.secretName }}
                   key: azure-api-key
             {{- end }}
-            {{- if index .Values.secretValues "jira-url" }}
-            - name: JIRA_URL
+            {{- if index .Values.secretValues "atlassian-url" }}
+            - name: ATLASSIAN_URL
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.secretName }}
-                  key: jira-url
-            - name: JIRA_EMAIL
+                  key: atlassian-url
+            - name: ATLASSIAN_EMAIL
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.secretName }}
-                  key: jira-email
-            - name: JIRA_API_TOKEN
+                  key: atlassian-email
+            - name: ATLASSIAN_API_TOKEN
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.secretName }}
-                  key: jira-api-token
+                  key: atlassian-api-token
             {{- end }}
-            {{- if index .Values.secretValues "jira-client-id" }}
-            - name: JIRA_CLIENT_ID
+            {{- if index .Values.secretValues "atlassian-client-id" }}
+            - name: ATLASSIAN_CLIENT_ID
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.secretName }}
-                  key: jira-client-id
-            - name: JIRA_CLIENT_SECRET
+                  key: atlassian-client-id
+            - name: ATLASSIAN_CLIENT_SECRET
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.secretName }}
-                  key: jira-client-secret
+                  key: atlassian-client-secret
             {{- end }}
-            {{- if index .Values.secretValues "jira-project" }}
-            - name: JIRA_PROJECT
+            {{- if index .Values.secretValues "atlassian-project" }}
+            - name: ATLASSIAN_PROJECT
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.secretName }}
-                  key: jira-project
+                  key: atlassian-project
             {{- end }}
             {{- if index .Values.secretValues "slack-app-token" }}
             - name: SLACK_APP_TOKEN

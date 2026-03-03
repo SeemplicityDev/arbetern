@@ -8,8 +8,8 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/justmike1/arbetern/atlassian"
 	"github.com/justmike1/arbetern/github"
-	"github.com/justmike1/arbetern/jira"
 	"github.com/justmike1/arbetern/nvd"
 	"github.com/justmike1/arbetern/salesforce"
 	"github.com/justmike1/arbetern/slack"
@@ -20,7 +20,7 @@ type GeneralHandler struct {
 	ghClient         *github.Client
 	modelsClient     *github.ModelsClient
 	codeModelsClient *github.ModelsClient
-	jiraClient       *jira.Client
+	jiraClient       *atlassian.Client
 	nvdClient        *nvd.Client
 	sfClient         *salesforce.Client
 	contextProvider  *ContextProvider
@@ -29,6 +29,7 @@ type GeneralHandler struct {
 	agentID          string
 	appURL           string
 	maxToolRounds    int
+	userContext      string
 	currentChannelID string
 	currentAuditTS   string
 	// activeBranches tracks branches created during this Execute() run.
@@ -68,6 +69,7 @@ func (h *GeneralHandler) Execute(channelID, userID, text, responseURL, auditTS s
 	systemMsg := h.systemPrompt()
 	systemMsg = strings.Replace(systemMsg, "{{MODEL}}", activeClient.Model(), 1)
 	systemMsg = strings.Replace(systemMsg, "{{USER_ID}}", userID, 1)
+	systemMsg = strings.Replace(systemMsg, "{{USER_CONTEXT}}", h.userContext, 1)
 	history := h.memory.GetHistory(channelID, userID)
 	if history != "" {
 		systemMsg += fmt.Sprintf("\n\nPrevious conversation with this user:\n%s", history)
@@ -601,6 +603,43 @@ func (h *GeneralHandler) buildTools() []github.Tool {
 					},
 					"required":["team_name"]
 				}`),
+			},
+		})
+
+		// Confluence tools — share the same Atlassian client as Jira.
+		tools = append(tools, github.Tool{
+			Type: "function",
+			Function: github.ToolFunction{
+				Name:        "search_confluence_pages",
+				Description: "Search Confluence pages using CQL (Confluence Query Language). Useful for finding documentation, runbooks, architecture decision records, and knowledge-base articles. Common CQL examples: 'text ~ \"deployment guide\"', 'space = DEV AND title ~ \"runbook\"', 'label = \"architecture\" AND type = page'. Returns page IDs, titles, and links — use get_confluence_page to fetch the full content of a matching page.",
+				Parameters: json.RawMessage(`{
+					"type":"object",
+					"properties":{
+						"cql":{"type":"string","description":"CQL query (e.g. 'text ~ \"kubernetes\" AND space = ENG')"},
+						"limit":{"type":"integer","description":"Max results (default 10, max 25)"}
+					},
+					"required":["cql"]
+				}`),
+			},
+		}, github.Tool{
+			Type: "function",
+			Function: github.ToolFunction{
+				Name:        "get_confluence_page",
+				Description: "Retrieve the full content of a Confluence page by its page ID. Returns the page title, body (in storage/XHTML format), and a web link. Use search_confluence_pages first to find the page ID.",
+				Parameters: json.RawMessage(`{
+					"type":"object",
+					"properties":{
+						"page_id":{"type":"string","description":"Confluence page ID (numeric string, e.g. '123456')"}
+					},
+					"required":["page_id"]
+				}`),
+			},
+		}, github.Tool{
+			Type: "function",
+			Function: github.ToolFunction{
+				Name:        "list_confluence_spaces",
+				Description: "List all Confluence spaces visible to the bot. Useful for discovering available spaces before searching for pages. Returns space keys, names, and types.",
+				Parameters:  json.RawMessage(`{"type":"object","properties":{}}`),
 			},
 		})
 	}
@@ -1150,7 +1189,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 			if err != nil {
 				log.Printf("[user=%s channel=%s] Jira user search failed for %q: %v", userID, channelID, args.Assignee, err)
 			} else if len(users) > 0 {
-				best, isGood := jira.BestUserMatch(users, args.Assignee)
+				best, isGood := atlassian.BestUserMatch(users, args.Assignee)
 				if isGood {
 					assigneeID = best.AccountID
 					log.Printf("[user=%s channel=%s] resolved assignee %q to user %s (%s)", userID, channelID, args.Assignee, best.DisplayName, assigneeID)
@@ -1178,7 +1217,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 			}
 		}
 
-		issue, err := h.jiraClient.CreateIssue(jira.CreateIssueInput{
+		issue, err := h.jiraClient.CreateIssue(atlassian.CreateIssueInput{
 			Project:     args.Project,
 			Summary:     args.Summary,
 			Description: args.Description,
@@ -1403,7 +1442,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 			}
 		}
 
-		var users []jira.JiraUser
+		var users []atlassian.JiraUser
 		var matchLabel string
 		for _, a := range attempts {
 			result, err := h.jiraClient.SearchUsersGeneral(a.query)
@@ -1450,6 +1489,91 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		fmt.Fprintf(&sb, "\nUse the accountId in JQL queries like: assignee = \"%s\"\n", users[0].AccountID)
 		log.Printf("[user=%s channel=%s] resolved Jira user %q -> %s (%s) via %s", userID, channelID, args.Name, users[0].DisplayName, users[0].AccountID, matchLabel)
 		return sb.String()
+
+	// ---- Confluence tools ----
+
+	case "search_confluence_pages":
+		if h.jiraClient == nil || !h.jiraClient.Ready() {
+			return "Error: Atlassian integration is not connected. It may still be initializing — please try again shortly."
+		}
+		var args struct {
+			CQL   string `json:"cql"`
+			Limit int    `json:"limit"`
+		}
+		if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+			return fmt.Sprintf("Error parsing arguments: %v", err)
+		}
+		if args.CQL == "" {
+			return "Error: cql is required."
+		}
+		if args.Limit <= 0 {
+			args.Limit = 10
+		}
+		results, err := h.jiraClient.SearchConfluencePages(args.CQL, args.Limit)
+		if err != nil {
+			return fmt.Sprintf("Error searching Confluence: %v", err)
+		}
+		if len(results) == 0 {
+			return fmt.Sprintf("No Confluence pages found matching CQL: %s", args.CQL)
+		}
+		log.Printf("[user=%s channel=%s] searched Confluence with CQL %q (%d results)", userID, channelID, args.CQL, len(results))
+		var sb2 strings.Builder
+		fmt.Fprintf(&sb2, "Found %d Confluence page(s):\n", len(results))
+		for _, r := range results {
+			link := r.WebURL
+			if link == "" {
+				link = "(no link)"
+			}
+			fmt.Fprintf(&sb2, "  • [%s] %s (id: %s) — %s\n", r.Type, r.Title, r.ID, link)
+		}
+		return sb2.String()
+
+	case "get_confluence_page":
+		if h.jiraClient == nil || !h.jiraClient.Ready() {
+			return "Error: Atlassian integration is not connected. It may still be initializing — please try again shortly."
+		}
+		var args struct {
+			PageID string `json:"page_id"`
+		}
+		if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+			return fmt.Sprintf("Error parsing arguments: %v", err)
+		}
+		if args.PageID == "" {
+			return "Error: page_id is required."
+		}
+		page, err := h.jiraClient.GetConfluencePage(args.PageID)
+		if err != nil {
+			return fmt.Sprintf("Error fetching Confluence page: %v", err)
+		}
+		body := page.Body
+		if len(body) > 12000 {
+			body = body[:12000] + "\n... (truncated — page content is longer than shown)"
+		}
+		link := page.WebURL
+		if link == "" {
+			link = "(no link)"
+		}
+		log.Printf("[user=%s channel=%s] fetched Confluence page %s (%q)", userID, channelID, page.ID, page.Title)
+		return fmt.Sprintf("Page: %s (id: %s, v%d)\nLink: %s\n\n%s", page.Title, page.ID, page.Version, link, body)
+
+	case "list_confluence_spaces":
+		if h.jiraClient == nil || !h.jiraClient.Ready() {
+			return "Error: Atlassian integration is not connected. It may still be initializing — please try again shortly."
+		}
+		spaces, err := h.jiraClient.ListConfluenceSpaces()
+		if err != nil {
+			return fmt.Sprintf("Error listing Confluence spaces: %v", err)
+		}
+		if len(spaces) == 0 {
+			return "No Confluence spaces found."
+		}
+		log.Printf("[user=%s channel=%s] listed %d Confluence spaces", userID, channelID, len(spaces))
+		var sb3 strings.Builder
+		fmt.Fprintf(&sb3, "Confluence spaces (%d):\n", len(spaces))
+		for _, s := range spaces {
+			fmt.Fprintf(&sb3, "  • %s (key: %s, type: %s)\n", s.Name, s.Key, s.Type)
+		}
+		return sb3.String()
 
 	case "lookup_cve":
 		if h.nvdClient == nil {

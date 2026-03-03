@@ -51,11 +51,11 @@ secretValues:
   # Azure OpenAI credentials (optional – when set the app uses Azure instead of GitHub Models)
   azure-openai-endpoint: ""
   azure-api-key: ""
-  # Jira integration (optional – when set the bot can create Jira tickets)
-  jira-url: ""           # e.g. "https://yourorg.atlassian.net"
-  jira-email: ""         # Atlassian account email
-  jira-api-token: ""     # Jira API token
-  jira-project: ""       # Default project key (e.g. "ENG")
+  # Atlassian integration (optional — enables Jira tickets + Confluence page reading)
+  atlassian-url: ""           # e.g. "https://yourorg.atlassian.net"
+  atlassian-email: ""         # Atlassian account email (Basic Auth)
+  atlassian-api-token: ""     # Atlassian API token (Basic Auth)
+  atlassian-project: ""       # Default Jira project key (e.g. "ENG")
   # Slack Socket Mode (optional – enables thread follow-ups without slash commands)
   slack-app-token: ""    # App-level token (xapp-...) with connections:write scope
   # NVD CVE API (optional — enables real-time CVE lookups for the security agent)

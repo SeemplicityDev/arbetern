@@ -58,12 +58,12 @@ Every layer — agent selection, intent routing, tool availability, model switch
 | `AZURE_OPEN_AI_ENDPOINT` | no | Azure OpenAI endpoint URL |
 | `AZURE_API_KEY` | no | Azure OpenAI API key |
 | `PORT` | no | HTTP port (default: `8080`) |
-| `JIRA_URL` | no | Jira instance URL (e.g. `https://yourorg.atlassian.net`) |
-| `JIRA_EMAIL` | no | Jira service account email |
-| `JIRA_API_TOKEN` | no | Jira API token |
-| `JIRA_PROJECT` | no | Default Jira project key (e.g. `ENG`) |
-| `JIRA_CLIENT_ID` | no | Jira OAuth 2.0 client ID (for client-credentials flow — alternative to Basic Auth with `JIRA_EMAIL`/`JIRA_API_TOKEN`) |
-| `JIRA_CLIENT_SECRET` | no | Jira OAuth 2.0 client secret |
+| `ATLASSIAN_URL` | no | Atlassian instance URL (e.g. `https://yourorg.atlassian.net`) |
+| `ATLASSIAN_EMAIL` | no | Atlassian service account email (Basic Auth) |
+| `ATLASSIAN_API_TOKEN` | no | Atlassian API token (Basic Auth) |
+| `ATLASSIAN_PROJECT` | no | Default Jira project key (e.g. `ENG`) |
+| `ATLASSIAN_CLIENT_ID` | no | Atlassian OAuth 2.0 client ID (for client-credentials flow — alternative to Basic Auth with `ATLASSIAN_EMAIL`/`ATLASSIAN_API_TOKEN`) |
+| `ATLASSIAN_CLIENT_SECRET` | no | Atlassian OAuth 2.0 client secret |
 | `APP_URL` | no | Public app URL (used for Jira ticket stamps) |
 | `UI_ALLOWED_CIDRS` | no | Comma-separated CIDRs allowed to access the UI |
 | `SLACK_APP_TOKEN` | no | Slack app-level token (`xapp-...`) for Socket Mode — enables thread follow-ups without slash commands (see [docs/SLACK_BOT.md](docs/SLACK_BOT.md#socket-mode-thread-follow-ups)) |
@@ -227,14 +227,14 @@ agents/              # agent definitions (one directory per agent)
 commands/            # intent routing, debug/general handlers
 config/              # env var loading
 github/              # GitHub API client + Models/Azure API client
-jira/                # Jira Cloud REST API client
+atlassian/           # Atlassian Cloud REST API client (Jira + Confluence)
 nvd/                 # NVD (National Vulnerability Database) CVE API client
 salesforce/          # Salesforce REST API client (SOQL queries, OAuth 2.0)
 slack/               # Slack webhook handler + response helpers
 prompts/             # YAML prompt loader + agent discovery
 ui/                  # embedded web UI (agent manager)
 helm/                # Helm chart
-docs/                # setup guides (Slack, GitHub PAT, Jira)
+docs/                # setup guides (Slack, GitHub PAT, Atlassian)
 ```
 
 ## Customizing Prompts
@@ -249,7 +249,7 @@ Global prompts (e.g. `security`) are defined in `agents/prompts.yaml` and inheri
 |---|---|---|
 | Slack | [docs/SLACK_BOT.md](docs/SLACK_BOT.md) | All agents |
 | GitHub | [docs/GITHUB_PAT.md](docs/GITHUB_PAT.md) | ovad, agent-q, goldsai |
-| Jira | [docs/JIRA.md](docs/JIRA.md) | seihin, ovad, agent-q, goldsai, pulse |
+| Atlassian (Jira + Confluence) | [docs/ATLASSIAN.md](docs/ATLASSIAN.md) | seihin, ovad, agent-q, goldsai, pulse |
 | NVD | [NVD API](https://nvd.nist.gov/developers) | goldsai |
 | Salesforce | SOQL Query API (OAuth 2.0 client credentials) | pulse |
 

@@ -6,8 +6,8 @@ import (
 	"math"
 	"strings"
 
+	"github.com/justmike1/arbetern/atlassian"
 	"github.com/justmike1/arbetern/github"
-	"github.com/justmike1/arbetern/jira"
 	"github.com/justmike1/arbetern/nvd"
 	"github.com/justmike1/arbetern/salesforce"
 	"github.com/justmike1/arbetern/slack"
@@ -18,7 +18,7 @@ type Router struct {
 	ghClient         *github.Client
 	modelsClient     *github.ModelsClient
 	codeModelsClient *github.ModelsClient
-	jiraClient       *jira.Client
+	jiraClient       *atlassian.Client
 	nvdClient        *nvd.Client
 	sfClient         *salesforce.Client
 	contextProvider  *ContextProvider
@@ -30,7 +30,7 @@ type Router struct {
 	maxToolRounds    int
 }
 
-func NewRouter(slackClient SlackClient, ghClient *github.Client, modelsClient *github.ModelsClient, codeModelsClient *github.ModelsClient, jiraClient *jira.Client, nvdClient *nvd.Client, sfClient *salesforce.Client, pp PromptProvider, agentID, appURL string, sessions *SessionStore, maxToolRounds int) *Router {
+func NewRouter(slackClient SlackClient, ghClient *github.Client, modelsClient *github.ModelsClient, codeModelsClient *github.ModelsClient, jiraClient *atlassian.Client, nvdClient *nvd.Client, sfClient *salesforce.Client, pp PromptProvider, agentID, appURL string, sessions *SessionStore, maxToolRounds int) *Router {
 	return &Router{
 		slackClient:      slackClient,
 		ghClient:         ghClient,
@@ -74,6 +74,8 @@ func (r *Router) Handle(channelID, userID, text, responseURL string) {
 
 	r.memory.AddUserMessage(channelID, userID, text)
 
+	userContext := r.resolveUserContext(userID)
+
 	lower := strings.ToLower(text)
 
 	switch {
@@ -92,12 +94,13 @@ func (r *Router) Handle(channelID, userID, text, responseURL string) {
 			contextProvider: r.contextProvider,
 			memory:          r.memory,
 			prompts:         r.prompts,
+			userContext:     userContext,
 		}
 		handler.Execute(channelID, userID, text, responseURL, auditTS)
 
 	default:
 		log.Printf("[user=%s channel=%s] routed to: general handler", userID, channelID)
-		handler := &GeneralHandler{slackClient: r.slackClient, ghClient: r.ghClient, modelsClient: r.modelsClient, codeModelsClient: r.codeModelsClient, jiraClient: r.jiraClient, nvdClient: r.nvdClient, sfClient: r.sfClient, contextProvider: r.contextProvider, memory: r.memory, prompts: r.prompts, agentID: r.agentID, appURL: r.appURL, maxToolRounds: r.maxToolRounds}
+		handler := &GeneralHandler{slackClient: r.slackClient, ghClient: r.ghClient, modelsClient: r.modelsClient, codeModelsClient: r.codeModelsClient, jiraClient: r.jiraClient, nvdClient: r.nvdClient, sfClient: r.sfClient, contextProvider: r.contextProvider, memory: r.memory, prompts: r.prompts, agentID: r.agentID, appURL: r.appURL, maxToolRounds: r.maxToolRounds, userContext: userContext}
 		handler.Execute(channelID, userID, text, responseURL, auditTS)
 	}
 
@@ -172,6 +175,31 @@ func (r *Router) replyError(responseURL, msg string) {
 	}
 }
 
+// resolveUserContext fetches Slack profile metadata for the requesting user.
+// Returns a human-readable summary that gets injected into the system prompt.
+// On failure it returns a minimal fallback so the pipeline never blocks.
+func (r *Router) resolveUserContext(userID string) string {
+	user, err := r.slackClient.GetUserInfo(userID)
+	if err != nil {
+		log.Printf("[user=%s] failed to resolve user context: %v", userID, err)
+		return fmt.Sprintf("Slack User ID: %s (profile lookup failed)", userID)
+	}
+	parts := []string{
+		fmt.Sprintf("Slack User ID: %s", user.ID),
+		fmt.Sprintf("Real Name: %s", user.RealName),
+	}
+	if user.Profile.DisplayName != "" {
+		parts = append(parts, fmt.Sprintf("Display Name: %s", user.Profile.DisplayName))
+	}
+	if user.Profile.Email != "" {
+		parts = append(parts, fmt.Sprintf("Email: %s", user.Profile.Email))
+	}
+	if user.Profile.Title != "" {
+		parts = append(parts, fmt.Sprintf("Title: %s", user.Profile.Title))
+	}
+	return strings.Join(parts, "\n  ")
+}
+
 // HandleThreadReply processes a user message posted in an active session thread.
 // It routes through the same command logic as a slash command, replying in-thread.
 func (r *Router) HandleThreadReply(channelID, threadTS, userID, text string) {
@@ -185,6 +213,8 @@ func (r *Router) HandleThreadReply(channelID, threadTS, userID, text string) {
 
 	r.memory.AddUserMessage(channelID, userID, text)
 
+	userContext := r.resolveUserContext(userID)
+
 	lower := strings.ToLower(text)
 
 	switch {
@@ -197,12 +227,13 @@ func (r *Router) HandleThreadReply(channelID, threadTS, userID, text string) {
 			contextProvider: r.contextProvider,
 			memory:          r.memory,
 			prompts:         r.prompts,
+			userContext:     userContext,
 		}
 		handler.Execute(channelID, userID, text, "", threadTS)
 
 	default:
 		log.Printf("[user=%s channel=%s thread=%s] thread routed to: general handler", userID, channelID, threadTS)
-		handler := &GeneralHandler{slackClient: r.slackClient, ghClient: r.ghClient, modelsClient: r.modelsClient, codeModelsClient: r.codeModelsClient, jiraClient: r.jiraClient, nvdClient: r.nvdClient, sfClient: r.sfClient, contextProvider: r.contextProvider, memory: r.memory, prompts: r.prompts, agentID: r.agentID, appURL: r.appURL, maxToolRounds: r.maxToolRounds}
+		handler := &GeneralHandler{slackClient: r.slackClient, ghClient: r.ghClient, modelsClient: r.modelsClient, codeModelsClient: r.codeModelsClient, jiraClient: r.jiraClient, nvdClient: r.nvdClient, sfClient: r.sfClient, contextProvider: r.contextProvider, memory: r.memory, prompts: r.prompts, agentID: r.agentID, appURL: r.appURL, maxToolRounds: r.maxToolRounds, userContext: userContext}
 		handler.Execute(channelID, userID, text, "", threadTS)
 	}
 }

@@ -13,10 +13,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/justmike1/arbetern/atlassian"
 	"github.com/justmike1/arbetern/commands"
 	"github.com/justmike1/arbetern/config"
 	"github.com/justmike1/arbetern/github"
-	"github.com/justmike1/arbetern/jira"
 	"github.com/justmike1/arbetern/nvd"
 	"github.com/justmike1/arbetern/prompts"
 	"github.com/justmike1/arbetern/salesforce"
@@ -210,7 +210,7 @@ func refreshIntegrations(
 	cfg *config.Config,
 	slackClient *slack.Client,
 	ghClient *github.Client,
-	jiraClient *jira.Client,
+	jiraClient *atlassian.Client,
 	sfClient *salesforce.Client,
 	modelsClient *github.ModelsClient,
 	codeModelsClient *github.ModelsClient,
@@ -306,11 +306,11 @@ func refreshIntegrations(
 		},
 	}
 
-	// --- Jira ---
-	if cfg.JiraConfigured() {
+	// --- Jira & Confluence ---
+	if cfg.AtlassianConfigured() {
 		jiraConnected := jiraClient != nil && jiraClient.Ready()
 		authMode := "Basic Auth"
-		if cfg.JiraUseOAuth() {
+		if cfg.AtlassianUseOAuth() {
 			authMode = "OAuth 2.0"
 		}
 		jiraPerms := []permission{
@@ -320,11 +320,12 @@ func refreshIntegrations(
 			{Scope: "ASSIGN_ISSUES", Description: "Search assignable users and set issue assignees", Required: false},
 			{Scope: "BROWSE_USERS", Description: "Search for Jira users by name or email (global permission)", Required: false},
 		}
-		if cfg.JiraUseOAuth() {
+		if cfg.AtlassianUseOAuth() {
 			jiraPerms = append(jiraPerms,
 				permission{Scope: "read:jira-work", Description: "OAuth scope: read issues, projects, and boards", Required: true, Granted: boolPtr(jiraConnected)},
 				permission{Scope: "write:jira-work", Description: "OAuth scope: create and update issues", Required: true, Granted: boolPtr(jiraConnected)},
 				permission{Scope: "read:jira-user", Description: "OAuth scope: read user profiles for assignee resolution", Required: true, Granted: boolPtr(jiraConnected)},
+				permission{Scope: "read:confluence-content.all", Description: "OAuth scope: read Confluence pages and spaces", Required: false, Granted: boolPtr(jiraConnected)},
 			)
 		}
 
@@ -357,16 +358,16 @@ func refreshIntegrations(
 		}
 
 		result = append(result, integration{
-			ID:          "jira",
-			Name:        "Jira",
+			ID:          "atlassian",
+			Name:        "Atlassian (Jira + Confluence)",
 			Configured:  jiraConnected,
 			AuthMode:    authMode,
 			Permissions: jiraPerms,
 		})
 	} else {
 		result = append(result, integration{
-			ID:         "jira",
-			Name:       "Jira",
+			ID:         "atlassian",
+			Name:       "Atlassian (Jira + Confluence)",
 			Configured: false,
 			Permissions: []permission{
 				{Scope: "BROWSE_PROJECTS", Description: "View projects, issues, and field metadata", Required: true},
@@ -506,7 +507,7 @@ func startIntegrationsRefresher(
 	cfg *config.Config,
 	slackClient *slack.Client,
 	ghClient *github.Client,
-	jiraClient *jira.Client,
+	jiraClient *atlassian.Client,
 	sfClient *salesforce.Client,
 	modelsClient *github.ModelsClient,
 	codeModelsClient *github.ModelsClient,
@@ -553,7 +554,7 @@ func main() {
 		}
 	}
 
-	var jiraClient *jira.Client
+	var jiraClient *atlassian.Client
 
 	// Validate configured models are accessible before proceeding.
 	if err := modelsClient.ValidateModel(context.Background()); err != nil {
@@ -567,17 +568,17 @@ func main() {
 		log.Printf("CODE_MODEL validated: %s", cfg.CodeModel)
 	}
 
-	if cfg.JiraConfigured() {
-		if cfg.JiraUseOAuth() {
-			jiraClient = jira.NewOAuthClient(cfg.JiraURL, cfg.JiraClientID, cfg.JiraClientSecret, cfg.JiraProject)
+	if cfg.AtlassianConfigured() {
+		if cfg.AtlassianUseOAuth() {
+			jiraClient = atlassian.NewOAuthClient(cfg.AtlassianURL, cfg.AtlassianClientID, cfg.AtlassianClientSecret, cfg.AtlassianProject)
 			if jiraClient.Ready() {
-				log.Printf("Jira integration enabled (OAuth): %s (default project: %s)", cfg.JiraURL, cfg.JiraProject)
+				log.Printf("Atlassian integration enabled (OAuth): %s (default project: %s)", cfg.AtlassianURL, cfg.AtlassianProject)
 			} else {
-				log.Printf("Jira integration configured (OAuth) but not yet connected — retrying in background")
+				log.Printf("Atlassian integration configured (OAuth) but not yet connected — retrying in background")
 			}
 		} else {
-			jiraClient = jira.NewClient(cfg.JiraURL, cfg.JiraEmail, cfg.JiraAPIToken, cfg.JiraProject)
-			log.Printf("Jira integration enabled (Basic Auth): %s (default project: %s)", cfg.JiraURL, cfg.JiraProject)
+			jiraClient = atlassian.NewClient(cfg.AtlassianURL, cfg.AtlassianEmail, cfg.AtlassianAPIToken, cfg.AtlassianProject)
+			log.Printf("Atlassian integration enabled (Basic Auth): %s (default project: %s)", cfg.AtlassianURL, cfg.AtlassianProject)
 		}
 	}
 

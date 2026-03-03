@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strings"
 
 	"github.com/justmike1/arbetern/github"
 	"github.com/justmike1/arbetern/slack"
@@ -18,6 +19,7 @@ type DebugHandler struct {
 	contextProvider *ContextProvider
 	memory          *ConversationMemory
 	prompts         PromptProvider
+	userContext     string
 }
 
 func (h *DebugHandler) Execute(channelID, userID, text, responseURL, auditTS string) {
@@ -38,6 +40,7 @@ func (h *DebugHandler) Execute(channelID, userID, text, responseURL, auditTS str
 	workflowLogs := h.fetchWorkflowLogs(ctx, channelContext+"\n"+text, userID, channelID)
 
 	systemPrompt := h.prompts.SystemPrompt("debug")
+	systemPrompt = strings.Replace(systemPrompt, "{{USER_CONTEXT}}", h.userContext, 1)
 
 	userPrompt := fmt.Sprintf("Here are the recent messages from the channel:\n\n%s\n\nUser request: %s", channelContext, text)
 	if workflowLogs != "" {

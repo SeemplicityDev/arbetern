@@ -1,6 +1,6 @@
-# Jira Integration
+# Atlassian Integration (Jira + Confluence)
 
-Arbetern can create Jira tickets directly from Slack conversations — for example, turning a generated test plan into a trackable task.
+Arbetern integrates with the Atlassian Cloud platform — creating Jira tickets from Slack conversations, searching and reading Confluence pages, and more.
 
 ## Required Credentials
 
@@ -10,19 +10,19 @@ Arbetern supports two authentication methods:
 
 | Environment Variable | Description |
 |---|---|
-| `JIRA_URL` | Your Atlassian instance URL (e.g. `https://yourorg.atlassian.net`) |
-| `JIRA_EMAIL` | The email address of the Atlassian account used for authentication |
-| `JIRA_API_TOKEN` | A Jira API token (not your account password) |
-| `JIRA_PROJECT` | *(optional)* Default project key (e.g. `ENG`). If omitted, the bot will ask which project to use. |
+| `ATLASSIAN_URL` | Your Atlassian instance URL (e.g. `https://yourorg.atlassian.net`) |
+| `ATLASSIAN_EMAIL` | The email address of the Atlassian account used for authentication |
+| `ATLASSIAN_API_TOKEN` | An Atlassian API token (not your account password) |
+| `ATLASSIAN_PROJECT` | *(optional)* Default Jira project key (e.g. `ENG`). If omitted, the bot will ask which project to use. |
 
 ### Option B: OAuth 2.0 (client credentials)
 
 | Environment Variable | Description |
 |---|---|
-| `JIRA_URL` | Your Atlassian instance URL (e.g. `https://yourorg.atlassian.net`) |
-| `JIRA_CLIENT_ID` | OAuth 2.0 client ID from your Atlassian Developer Console app |
-| `JIRA_CLIENT_SECRET` | OAuth 2.0 client secret |
-| `JIRA_PROJECT` | *(optional)* Default project key (e.g. `ENG`) |
+| `ATLASSIAN_URL` | Your Atlassian instance URL (e.g. `https://yourorg.atlassian.net`) |
+| `ATLASSIAN_CLIENT_ID` | OAuth 2.0 client ID from your Atlassian Developer Console app |
+| `ATLASSIAN_CLIENT_SECRET` | OAuth 2.0 client secret |
+| `ATLASSIAN_PROJECT` | *(optional)* Default Jira project key (e.g. `ENG`) |
 
 > **Note:** If both Basic Auth and OAuth credentials are configured, OAuth takes precedence.
 
@@ -53,7 +53,7 @@ Classic API tokens inherit all permissions of the account that created them, so 
 
 #### 3. Note the Account Email
 
-Use the email address associated with the Atlassian account that created the API token. This is the value for `JIRA_EMAIL`.
+Use the email address associated with the Atlassian account that created the API token. This is the value for `ATLASSIAN_EMAIL`.
 
 #### 4. Find Your Project Key
 
@@ -73,7 +73,9 @@ OAuth 2.0 is recommended when you want app-level access without tying credential
 
 #### 2. Configure Scopes
 
-In the app settings, go to **Permissions** → **Jira API** → **Configure** and add:
+In the app settings, go to **Permissions** and configure scopes for both Jira and Confluence:
+
+**Jira API** → **Configure**:
 
 | Scope | Why |
 |---|---|
@@ -81,11 +83,18 @@ In the app settings, go to **Permissions** → **Jira API** → **Configure** an
 | `write:jira-work` | Create and update issues |
 | `read:jira-user` | Resolve user accounts for assignee lookups |
 
+**Confluence API** → **Configure**:
+
+| Scope | Why |
+|---|---|
+| `read:confluence-content.all` | Search and read Confluence pages |
+| `read:confluence-space.summary` | List Confluence spaces |
+
 #### 3. Get Client Credentials
 
 Go to **Settings** in your app and copy:
-- **Client ID** → `JIRA_CLIENT_ID`
-- **Secret** → `JIRA_CLIENT_SECRET`
+- **Client ID** → `ATLASSIAN_CLIENT_ID`
+- **Secret** → `ATLASSIAN_CLIENT_SECRET`
 
 #### 4. Authorize the App
 
@@ -102,20 +111,20 @@ The app must be authorized for your Atlassian site:
 
 ```yaml
 secretValues:
-  jira-url: "https://yourorg.atlassian.net"
-  jira-email: "bot@yourorg.com"
-  jira-api-token: "ATATT3x..."
-  jira-project: "ENG"
+  atlassian-url: "https://yourorg.atlassian.net"
+  atlassian-email: "bot@yourorg.com"
+  atlassian-api-token: "ATATT3x..."
+  atlassian-project: "ENG"
 ```
 
 ### OAuth 2.0
 
 ```yaml
 secretValues:
-  jira-url: "https://yourorg.atlassian.net"
-  jira-client-id: "your-oauth-client-id"
-  jira-client-secret: "your-oauth-client-secret"
-  jira-project: "ENG"
+  atlassian-url: "https://yourorg.atlassian.net"
+  atlassian-client-id: "your-oauth-client-id"
+  atlassian-client-secret: "your-oauth-client-secret"
+  atlassian-project: "ENG"
 ```
 
 Or create the secret manually:
@@ -123,17 +132,18 @@ Or create the secret manually:
 ```bash
 # Basic Auth
 kubectl create secret generic arbetern-secrets \
-  --from-literal=jira-url=https://yourorg.atlassian.net \
-  --from-literal=jira-email=bot@yourorg.com \
-  --from-literal=jira-api-token=ATATT3x... \
-  --from-literal=jira-project=ENG
+  --from-literal=atlassian-url=https://yourorg.atlassian.net \
+  --from-literal=atlassian-email=bot@yourorg.com \
+  --from-literal=atlassian-api-token=ATATT3x... \
+  --from-literal=atlassian-project=ENG
 
 # OAuth 2.0
 kubectl create secret generic arbetern-secrets \
-  --from-literal=jira-url=https://yourorg.atlassian.net \
-  --from-literal=jira-client-id=your-client-id \
-  --from-literal=jira-client-secret=your-client-secret \
-  --from-literal=jira-project=ENG
+  --from-literal=atlassian-url=https://yourorg.atlassian.net \
+  --from-literal=atlassian-client-id=your-client-id \
+  --from-literal=atlassian-client-secret=your-client-secret \
+  --from-literal=atlassian-project=ENG
+```
 ```
 
 ## Required Jira Permissions
@@ -160,7 +170,7 @@ Classic API tokens inherit **all** permissions of the account, so using a person
 3. **Generate the API token** from the service account:
    - Log in as the service account at [id.atlassian.com](https://id.atlassian.com/manage-profile/security/api-tokens).
    - Create a classic API token (without scopes).
-   - Use this token as `JIRA_API_TOKEN` and the service account email as `JIRA_EMAIL`.
+   - Use this token as `ATLASSIAN_API_TOKEN` and the service account email as `ATLASSIAN_EMAIL`.
 
 > **Note:** If your Jira instance uses a custom permission scheme, verify that the *Member* role includes `BROWSE_PROJECTS` and `CREATE_ISSUES`. Check under **Jira Administration → Permission Schemes**.
 
@@ -175,6 +185,10 @@ Once configured, the bot exposes the following Jira tools to the LLM:
 | **search_jira_issues** | Search for issues using JQL (e.g., find all in-progress tickets for a user) |
 | **get_jira_issue** | Fetch full details of a specific issue by key (including description) |
 | **update_jira_issue** | Update an issue's summary and/or description |
+
+| **search_confluence_pages** | Search for Confluence pages by keyword |
+| **get_confluence_page** | Fetch the full content of a Confluence page by ID |
+| **list_confluence_spaces** | List available Confluence spaces |
 
 Example Slack commands:
 
