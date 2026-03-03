@@ -13,13 +13,13 @@ import (
 	"sync"
 	"time"
 
-	"github.com/justmike1/ovad/commands"
-	"github.com/justmike1/ovad/config"
-	"github.com/justmike1/ovad/github"
-	"github.com/justmike1/ovad/jira"
-	"github.com/justmike1/ovad/nvd"
-	"github.com/justmike1/ovad/prompts"
-	"github.com/justmike1/ovad/slack"
+	"github.com/justmike1/arbetern/commands"
+	"github.com/justmike1/arbetern/config"
+	"github.com/justmike1/arbetern/github"
+	"github.com/justmike1/arbetern/jira"
+	"github.com/justmike1/arbetern/nvd"
+	"github.com/justmike1/arbetern/prompts"
+	"github.com/justmike1/arbetern/slack"
 )
 
 //go:embed ui/*
@@ -58,6 +58,39 @@ func routerKeys(m map[string]*commands.Router) []string {
 		keys = append(keys, k)
 	}
 	return keys
+}
+
+// buildHelpMessage generates the /arbetern help response from discovered agents.
+// Each agent gets a one-line entry extracted from the second line of its intro prompt.
+func buildHelpMessage(agents []prompts.AgentConfig) string {
+	var b strings.Builder
+	b.WriteString("*arbetern* — AI Agent Platform\n\n")
+	b.WriteString("Available agents:\n")
+	for _, agent := range agents {
+		intro := agent.Prompts["intro"]
+		desc := extractIntroLine(intro)
+		fmt.Fprintf(&b, "• `/%s` — %s\n", agent.ID, desc)
+	}
+	b.WriteString("\nUse `/<agent> introduce yourself` for a full introduction from any agent.")
+	return b.String()
+}
+
+// extractIntroLine returns the second non-empty line from an intro prompt,
+// which is typically a one-sentence description of what the agent does.
+func extractIntroLine(intro string) string {
+	lines := strings.Split(intro, "\n")
+	count := 0
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		count++
+		if count == 2 {
+			return line
+		}
+	}
+	return "no description available"
 }
 
 // hasScope checks if a scope exists in a granted scopes list.
@@ -475,6 +508,14 @@ func main() {
 		log.Printf("Registered agent %q at %s", agent.ID, webhookPath)
 	}
 
+	// /arbetern help command — lists all available agents with a one-line description.
+	helpMessage := buildHelpMessage(agents)
+	http.Handle("/arbetern/webhook", slack.NewHandler(cfg.SlackSigningSecret, func(channelID, userID, text, responseURL string) {
+		log.Printf("[arbetern] user=%s channel=%s requested help", userID, channelID)
+		_ = slack.RespondToURL(responseURL, helpMessage, false)
+	}))
+	log.Printf("Registered /arbetern help command at /arbetern/webhook")
+
 	// Socket Mode — connects outbound to Slack for thread reply events.
 	// Requires SLACK_APP_TOKEN (xapp-...) with connections:write scope.
 	if cfg.SlackAppToken != "" {
@@ -500,6 +541,14 @@ func main() {
 			func(command, channelID, userID, text, responseURL string) {
 				// command is e.g. "/seihin" — strip the leading slash to get the agent ID.
 				agentID := strings.TrimPrefix(command, "/")
+
+				// /arbetern — project help, not an agent.
+				if agentID == "arbetern" {
+					log.Printf("[socket-mode] user=%s channel=%s requested /arbetern help", userID, channelID)
+					_ = slack.RespondToURL(responseURL, helpMessage, false)
+					return
+				}
+
 				router, ok := routers[agentID]
 				if !ok {
 					log.Printf("[socket-mode] unknown agent for command %q (known: %v)", command, routerKeys(routers))

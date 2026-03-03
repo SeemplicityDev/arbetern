@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/justmike1/ovad/github"
-	ovadslack "github.com/justmike1/ovad/slack"
+	"github.com/justmike1/arbetern/github"
+	"github.com/justmike1/arbetern/slack"
 )
 
 const channelHistoryLimit = 20
@@ -47,7 +47,7 @@ func (h *DebugHandler) Execute(channelID, userID, text, responseURL, auditTS str
 	response, err := h.modelsClient.Complete(ctx, systemPrompt, userPrompt)
 	if err != nil {
 		log.Printf("[user=%s channel=%s] LLM completion failed: %v", userID, channelID, err)
-		_ = ovadslack.RespondToURL(responseURL, fmt.Sprintf("Failed to analyze messages: %v", err), true)
+		_ = slack.RespondToURL(responseURL, fmt.Sprintf("Failed to analyze messages: %v", err), true)
 		return
 	}
 
@@ -63,7 +63,7 @@ func (h *DebugHandler) reply(channelID, responseURL, auditTS, text string) {
 		}
 		return
 	}
-	if err := ovadslack.RespondToURL(responseURL, text, false); err != nil {
+	if err := slack.RespondToURL(responseURL, text, false); err != nil {
 		log.Printf("[channel=%s] failed to respond: %v", channelID, err)
 	}
 }

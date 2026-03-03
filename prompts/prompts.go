@@ -13,6 +13,7 @@ const defaultPath = "agents/ovad/prompts.yaml"
 const defaultAgentsDir = "agents"
 const globalPromptsFile = "prompts.yaml"
 const agentConfigFile = "config.yaml"
+const customPromptsEnv = "CUSTOM_PROMPTS_DIR"
 
 var store map[string]string
 
@@ -51,6 +52,49 @@ func loadGlobalPrompts(agentsDir string) (map[string]string, error) {
 	return parsed, nil
 }
 
+// loadCustomPrompts reads optional custom prompts for an agent from CUSTOM_PROMPTS_DIR.
+// Supports two layouts:
+//   - Flat file:  CUSTOM_PROMPTS_DIR/<agentID>.yaml  (used by Kubernetes ConfigMap mounts)
+//   - Directory:  CUSTOM_PROMPTS_DIR/<agentID>/prompts.yaml
+//
+// Custom prompts are APPENDED to existing prompt keys (not overridden). New keys are added as-is.
+// This allows deployers to inject org-specific context without modifying the built-in prompts.
+func loadCustomPrompts(agentID string) map[string]string {
+	customDir := os.Getenv(customPromptsEnv)
+	if customDir == "" {
+		return nil
+	}
+	// Try flat file first (ConfigMap mount: <dir>/<agentID>.yaml).
+	path := filepath.Join(customDir, agentID+".yaml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		// Fall back to directory layout: <dir>/<agentID>/prompts.yaml.
+		path = filepath.Join(customDir, agentID, "prompts.yaml")
+		data, err = os.ReadFile(path)
+		if err != nil {
+			return nil // no custom prompts for this agent
+		}
+	}
+	parsed := make(map[string]string)
+	if err := yaml.Unmarshal(data, &parsed); err != nil {
+		return nil
+	}
+	return parsed
+}
+
+// appendCustomPrompts merges custom prompts into an existing prompt map.
+// For keys that already exist, the custom value is APPENDED (with a double newline separator).
+// For new keys, the custom value is added directly.
+func appendCustomPrompts(merged map[string]string, custom map[string]string) {
+	for k, v := range custom {
+		if existing, ok := merged[k]; ok {
+			merged[k] = existing + "\n\n" + v
+		} else {
+			merged[k] = v
+		}
+	}
+}
+
 // LoadAgent reads the prompts.yaml for the given agent and returns an AgentPrompts.
 // Global prompts from agents/prompts.yaml are loaded first; agent-specific prompts override them.
 func LoadAgent(agentID string) (*AgentPrompts, error) {
@@ -80,6 +124,11 @@ func LoadAgent(agentID string) (*AgentPrompts, error) {
 	}
 	for k, v := range parsed {
 		merged[k] = v
+	}
+
+	// Append custom prompts from CUSTOM_PROMPTS_DIR (org-specific context from ConfigMap).
+	if custom := loadCustomPrompts(agentID); custom != nil {
+		appendCustomPrompts(merged, custom)
 	}
 
 	return &AgentPrompts{agentID: agentID, store: merged}, nil
@@ -213,6 +262,11 @@ func DiscoverAgents(agentsDir string) ([]AgentConfig, error) {
 		}
 		for k, v := range parsed {
 			merged[k] = v
+		}
+
+		// Append custom prompts from CUSTOM_PROMPTS_DIR (org-specific context from ConfigMap).
+		if custom := loadCustomPrompts(entry.Name()); custom != nil {
+			appendCustomPrompts(merged, custom)
 		}
 
 		name := entry.Name()

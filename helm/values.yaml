@@ -127,7 +127,21 @@ autoscaling:
 
 volumes: []
 volumesMounts: []
-
+# Custom prompts — org-specific context appended to built-in agent prompts via ConfigMap.
+# Each key is an agent ID; values are prompt key/value pairs that get APPENDED (not overridden)
+# to the agent's existing prompts. This lets you inject deployment-specific context without
+# modifying the source prompts.yaml files.
+# Example:
+# customPrompts:
+#   ovad:
+#     general: |
+#       Our GitHub org is "acme-corp". Default repo for infra is "infra-live".
+#       Terraform state is in S3 bucket "acme-tf-state".
+#   goldsai:
+#     general: |
+#       Our container base images are hosted in ECR at 123456789.dkr.ecr.us-east-1.amazonaws.com.
+#       All Python services must use Python >= 3.13.11.
+customPrompts: {}
 nodeSelector: {}
 tolerations: []
 affinity: {}

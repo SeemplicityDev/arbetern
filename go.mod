@@ -1,4 +1,4 @@
-module github.com/justmike1/ovad
+module github.com/justmike1/arbetern
 
 go 1.25.0
 

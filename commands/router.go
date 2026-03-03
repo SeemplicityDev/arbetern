@@ -6,10 +6,10 @@ import (
 	"math"
 	"strings"
 
-	"github.com/justmike1/ovad/github"
-	"github.com/justmike1/ovad/jira"
-	"github.com/justmike1/ovad/nvd"
-	ovadslack "github.com/justmike1/ovad/slack"
+	"github.com/justmike1/arbetern/github"
+	"github.com/justmike1/arbetern/jira"
+	"github.com/justmike1/arbetern/nvd"
+	"github.com/justmike1/arbetern/slack"
 )
 
 type Router struct {
@@ -62,7 +62,7 @@ func (r *Router) Handle(channelID, userID, text, responseURL string) {
 		log.Printf("[agent=%s user=%s channel=%s] failed to post audit message: %v", r.agentID, userID, channelID, err)
 	}
 
-	_ = ovadslack.RespondToURL(responseURL, fmt.Sprintf("Processing request: _%s_", text), true)
+	_ = slack.RespondToURL(responseURL, fmt.Sprintf("Processing request: _%s_", text), true)
 
 	// Register a thread session so follow-up replies are auto-handled.
 	if auditTS != "" && r.sessions != nil {
@@ -164,7 +164,7 @@ func requiresAction(text string) bool {
 }
 
 func (r *Router) replyError(responseURL, msg string) {
-	if err := ovadslack.RespondToURL(responseURL, msg, true); err != nil {
+	if err := slack.RespondToURL(responseURL, msg, true); err != nil {
 		log.Printf("failed to send error to user: %v", err)
 	}
 }

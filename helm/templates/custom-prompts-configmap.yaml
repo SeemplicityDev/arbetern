@@ -1,0 +1,13 @@
+{{- if .Values.customPrompts }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "arbetern.fullname" . }}-custom-prompts
+  labels:
+    {{- include "arbetern.labels" . | nindent 4 }}
+data:
+  {{- range $agentID, $prompts := .Values.customPrompts }}
+  {{ $agentID }}.yaml: |
+    {{- $prompts | toYaml | nindent 4 }}
+  {{- end }}
+{{- end }}

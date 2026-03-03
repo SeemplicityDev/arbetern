@@ -8,10 +8,10 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/justmike1/ovad/github"
-	"github.com/justmike1/ovad/jira"
-	"github.com/justmike1/ovad/nvd"
-	ovadslack "github.com/justmike1/ovad/slack"
+	"github.com/justmike1/arbetern/github"
+	"github.com/justmike1/arbetern/jira"
+	"github.com/justmike1/arbetern/nvd"
+	"github.com/justmike1/arbetern/slack"
 )
 
 type GeneralHandler struct {
@@ -1512,7 +1512,7 @@ func (h *GeneralHandler) replyDefault(channelID, responseURL, auditTS, text stri
 		}
 		return
 	}
-	if err := ovadslack.RespondToURL(responseURL, text, false); err != nil {
+	if err := slack.RespondToURL(responseURL, text, false); err != nil {
 		log.Printf("[channel=%s] failed to respond: %v", channelID, err)
 	}
 }

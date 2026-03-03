@@ -49,6 +49,7 @@ An orchestration platform for AI agents in the enterprise. Each agent lives in i
 | `THREAD_SESSION_TTL` | no | Duration a thread session stays active (default: `3m`). Go duration format, e.g. `5m`, `2m30s` |
 | `MAX_TOOL_ROUNDS` | no | Max LLM tool-call rounds per request (default: `50`). Increase for complex multi-file tasks |
 | `NVD_API_KEY` | no | NVD (National Vulnerability Database) API key for CVE lookups. Get one free at <https://nvd.nist.gov/developers/request-an-api-key>. Without a key, requests are rate-limited (~5 req/30s vs ~50 req/30s with a key) |
+| `CUSTOM_PROMPTS_DIR` | no | Directory containing custom prompt YAML files that are **appended** to built-in agent prompts. Used for org-specific context via Kubernetes ConfigMap. Set automatically by the Helm chart when `customPrompts` is configured |
 | `UI_HEADER` | no | Custom header text for the web UI (default: `arbetern`) |
 
 ### Run Locally
@@ -93,6 +94,38 @@ Visit `/ui/` to see all registered agents. Click an agent card to view its promp
 4. Create a Slack slash command pointing to `https://<your-host>/<agent-name>/webhook`
 
 > **Note:** Each agent directory under `agents/` is automatically discovered at startup and registered with its own webhook route (`/<agent>/webhook`). Create a Slack slash command per agent pointing to the corresponding path.
+
+## Custom Prompts (Org-Specific Context)
+
+You can append org-specific context to any agent's prompts without modifying the built-in `agents/*/prompts.yaml` files. Custom prompts are **appended** to existing prompt keys — they never override the originals.
+
+### Via Helm (Kubernetes ConfigMap)
+
+Add a `customPrompts` section to your values file:
+
+```yaml
+customPrompts:
+  ovad:
+    general: |
+      Our GitHub org is "acme-corp". Default repo for infra is "infra-live".
+      Terraform state is in S3 bucket "acme-tf-state".
+      Production cluster is EKS "prod-us-east-1".
+  goldsai:
+    general: |
+      All Python services must use Python >= 3.13.11.
+      Container base images are in ECR at 123456789.dkr.ecr.us-east-1.amazonaws.com.
+```
+
+The Helm chart creates a ConfigMap, mounts it, and sets `CUSTOM_PROMPTS_DIR` automatically.
+
+### Via Environment Variable (local / Docker)
+
+Set `CUSTOM_PROMPTS_DIR` to a directory containing `<agent-id>.yaml` files:
+
+```bash
+export CUSTOM_PROMPTS_DIR=/path/to/custom-prompts
+# Create /path/to/custom-prompts/ovad.yaml with prompt key/value pairs
+```
 
 ## Project Structure
 
