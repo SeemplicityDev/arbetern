@@ -68,8 +68,15 @@ func (r *Router) Handle(channelID, userID, text, responseURL string) {
 	_ = slack.RespondToURL(responseURL, fmt.Sprintf("Processing request: _%s_", text), true)
 
 	// Register a thread session so follow-up replies are auto-handled.
+	// Acquire the processing lock so that any thread reply arriving while
+	// the initial request is still running is silently ignored (prevents
+	// casual chatter from triggering a second concurrent response).
 	if auditTS != "" && r.sessions != nil {
 		r.sessions.Open(channelID, auditTS, userID, r.agentID, r)
+		if sess := r.sessions.Lookup(channelID, auditTS); sess != nil {
+			sess.TryStartProcessing()
+			defer sess.DoneProcessing()
+		}
 	}
 
 	r.memory.AddUserMessage(channelID, userID, text)

@@ -22,8 +22,29 @@ type ThreadSession struct {
 	CreatedAt time.Time
 	LastSeen  time.Time
 
-	mu    sync.Mutex
-	timer *time.Timer
+	mu         sync.Mutex
+	timer      *time.Timer
+	processing bool
+}
+
+// TryStartProcessing attempts to mark the session as actively processing.
+// Returns false if the session is already handling a message — callers
+// should skip (or queue) their work to avoid concurrent responses.
+func (sess *ThreadSession) TryStartProcessing() bool {
+	sess.mu.Lock()
+	defer sess.mu.Unlock()
+	if sess.processing {
+		return false
+	}
+	sess.processing = true
+	return true
+}
+
+// DoneProcessing marks the session as idle so the next message can be handled.
+func (sess *ThreadSession) DoneProcessing() {
+	sess.mu.Lock()
+	defer sess.mu.Unlock()
+	sess.processing = false
 }
 
 // SessionStore tracks active thread sessions. Safe for concurrent use.

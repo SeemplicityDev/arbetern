@@ -61,6 +61,32 @@ func routerKeys(m map[string]*commands.Router) []string {
 	return keys
 }
 
+// containsNonBotMentions returns true when text contains Slack user mentions
+// (<@U…>) for users other than botUserID — indicating human-to-human
+// conversation that the bot should ignore.
+func containsNonBotMentions(text, botUserID string) bool {
+	for {
+		start := strings.Index(text, "<@")
+		if start == -1 {
+			return false
+		}
+		text = text[start+2:]
+		end := strings.IndexByte(text, '>')
+		if end == -1 {
+			return false
+		}
+		uid := text[:end]
+		// Handle <@U123|display_name> format.
+		if pipe := strings.IndexByte(uid, '|'); pipe >= 0 {
+			uid = uid[:pipe]
+		}
+		if uid != botUserID {
+			return true
+		}
+		text = text[end+1:]
+	}
+}
+
 // ── RBAC — Slack user group membership check with caching ───────────────────
 
 type groupCacheEntry struct {
@@ -715,6 +741,25 @@ func main() {
 				if sess == nil {
 					return // not a tracked thread
 				}
+
+				// Skip if the session is already processing a message.
+				// This prevents casual thread chatter from triggering a
+				// second concurrent response while the bot is still working.
+				if !sess.TryStartProcessing() {
+					log.Printf("[session] thread reply ignored (busy): channel=%s thread=%s user=%s",
+						channelID, threadTS, userID)
+					return
+				}
+				defer sess.DoneProcessing()
+
+				// Skip messages that @-mention non-bot users — they are
+				// human-to-human conversation, not directed at the bot.
+				if containsNonBotMentions(text, botUserID) {
+					log.Printf("[session] thread reply ignored (human conversation): channel=%s thread=%s user=%s",
+						channelID, threadTS, userID)
+					return
+				}
+
 				log.Printf("[session] thread reply channel=%s thread=%s user=%s text=%q",
 					channelID, threadTS, userID, text)
 				sess.Router.HandleThreadReply(channelID, threadTS, userID, text)
