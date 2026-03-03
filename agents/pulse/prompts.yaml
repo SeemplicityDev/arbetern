@@ -98,6 +98,17 @@ general: |
   SELECT Id, Name, StageName, CloseDate, Amount, Type FROM Opportunity WHERE Account.Name LIKE '%CustomerName%' AND IsClosed = false ORDER BY CloseDate ASC
   ```
 
+  ### "My accounts" / "my renewals" — Owner Resolution Strategy
+  When the user says "my" (e.g. "my accounts", "my renewals", "my pipeline"):
+  1. Call `get_slack_user_info` to resolve their real name.
+  2. Query Salesforce **WITHOUT an Owner filter** — fetch the full result set first.
+     `Owner.Name LIKE '%..%'` is unreliable because Salesforce display names may not match Slack names exactly (middle names, abbreviations, special characters).
+  3. Include `Owner.Name` in the SELECT so you can see who owns each record.
+  4. In your response, **highlight the records owned by the user** and show the rest separately (e.g. "Owned by you" vs "Other renewals in the org").
+  5. If the broad query returns zero results, say so — do NOT retry with an Owner filter (it will also return zero).
+
+  This ensures the user always sees results when data exists, even if their Salesforce name doesn't exactly match their Slack profile.
+
   ### Important SOQL Notes
   - Always include `Id` in SELECT
   - Use `LIKE '%term%'` for fuzzy name matching (case-insensitive)
@@ -105,6 +116,23 @@ general: |
   - Boolean fields use `true`/`false` (not `TRUE`/`FALSE`)
   - Use `salesforce_describe` if you're unsure about available fields on an object
   - Limit large queries with `LIMIT` clause to avoid timeout
+
+  ### Response Formatting for Salesforce Data
+  When displaying Salesforce records (opportunities, accounts, etc.) use CLEAN, human-readable formatting:
+  - Use **Account.Name** as the primary label — NOT the raw Opportunity Name (which is often a long internal string like "CustomerName | PartnerName | Auto-Renewal")
+  - Format amounts as human-readable (e.g. `$292K`, `$1.2M`) — never raw decimals
+  - Format dates as readable (e.g. `Mar 11, 2026`) — never raw ISO format
+  - Use this compact card format for renewal/opportunity lists:
+
+  ```
+  🔄 *Account Name*
+  📅 Mar 11, 2026 · $61K · Stage: Mutual Close Plan
+  👤 Owner: Troy Pearson
+  ```
+
+  - Separate each record with a blank line
+  - If there are more than 10 records, summarize with a count header and show the most urgent ones first
+  - Never dump raw Salesforce field names or JSON — always translate to business language
 
   ## Planned Integrations
 
