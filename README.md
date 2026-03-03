@@ -1,13 +1,29 @@
 # arbetern
 
 [![Stars](https://img.shields.io/github/stars/justmike1/arbetern?style=social)](https://github.com/justmike1/arbetern/stargazers)
-[![Go](https://img.shields.io/badge/Go-1.25+-00ADD8?logo=go&logoColor=white)](https://go.dev)
+[![Go](https://img.shields.io/badge/Go-1.26+-00ADD8?logo=go&logoColor=white)](https://go.dev)
 [![License](https://img.shields.io/github/license/justmike1/arbetern)](LICENSE)
 [![Docker](https://img.shields.io/badge/Docker-ready-2496ED?logo=docker&logoColor=white)](Dockerfile)
 
-*Yiddish for "workers."*
+*Yiddish for "workers." (with a typo, but it's cooler)*
 
 An orchestration platform for AI agents in the enterprise. Each agent lives in its own directory under `agents/`, with dedicated prompts and a defined professional scope. Arbetern provides the runtime, routing, UI, and integrations — agents bring the expertise.
+
+### Architecture — [Bernoulli Naive Bayes](https://en.wikipedia.org/wiki/Naive_Bayes_classifier) by Design
+
+Arbetern's end-to-end request resolution pipeline maps naturally to a **Bernoulli Naive Bayes** model. A user message enters as raw text and exits as a fully resolved response through a series of independent binary feature evaluations — no model-context protocol (MCP), no external orchestrator, no shared state bus.
+
+**1. Agent dispatch (prior selection).** Slack routes each slash command (`/ovad`, `/pulse`, `/goldsai`, …) to a dedicated HTTP handler. The agent ID acts as the **class prior** — it determines which prompt set, RBAC policy, and tool palette apply before any content is evaluated. Each agent is an isolated classifier with its own feature weights (prompts) and feature space (available tools).
+
+**2. Intent classification (binary feature scan).** The router inspects the lowercased message against keyword lists — each keyword is a **binary Bernoulli feature** (present = 1, absent = 0). Features are evaluated independently: `isIntroIntent` checks one feature set, `isDebugIntent` checks another, and `requiresAction` acts as a **conditional exclusion** (if action keywords fire, the debug class is suppressed). The first matching class wins — the `switch` ordering encodes implicit priors. No feature influences the evaluation of another, mirroring the Naive Bayes independence assumption.
+
+**3. Tool-loop execution (iterative posterior update).** The general handler enters a bounded loop: send the message + available tools to the LLM, receive tool calls, execute them, feed results back. Each iteration refines the response — analogous to **updating the posterior** as new evidence (tool results) arrives. The tool palette itself is feature-gated: each integration client exposes a `Ready()` boolean, and tools only appear in the LLM's function list when their feature is true. The LLM never sees tools for disconnected integrations, so the feature space dynamically shrinks or grows based on runtime state.
+
+**4. Model selection (feature-conditional class switch).** The system starts with the general model and dynamically switches to the code model when code-related tool calls are detected. This is a **conditional class reassignment** — the observation of a specific feature (code tool invocation) triggers a switch to a more specialized classifier mid-inference, without restarting the loop.
+
+**5. Thread sessions (temporal feature memory).** After the initial response, a session is registered on the Slack thread. Follow-up messages bypass the slash command and re-enter the same router with accumulated conversation history. This gives the classifier **temporal features** — prior messages act as additional binary evidence for subsequent classifications within the same session window.
+
+Every layer — agent selection, intent routing, tool availability, model switching, session continuity — operates as an independent binary decision. There is no sequential boosting (each stage does not correct the previous one), no ensemble voting (a single pass decides), and no external orchestration layer. The system is the product of independent feature states, which is the core assumption of Bernoulli Naive Bayes.
 
 ## Current Agents
 
@@ -23,7 +39,7 @@ An orchestration platform for AI agents in the enterprise. Each agent lives in i
 
 ### Prerequisites
 
-- Go 1.25+
+- Go 1.26+
 - A Slack app with a slash command pointing to `/<agent>/webhook` (see [docs/SLACK_BOT.md](docs/SLACK_BOT.md))
 - A GitHub PAT with repo access (see [docs/GITHUB_PAT.md](docs/GITHUB_PAT.md))
 - (Optional) Azure OpenAI credentials for LLM inference
@@ -44,6 +60,8 @@ An orchestration platform for AI agents in the enterprise. Each agent lives in i
 | `JIRA_EMAIL` | no | Jira service account email |
 | `JIRA_API_TOKEN` | no | Jira API token |
 | `JIRA_PROJECT` | no | Default Jira project key (e.g. `ENG`) |
+| `JIRA_CLIENT_ID` | no | Jira OAuth 2.0 client ID (for client-credentials flow — alternative to Basic Auth with `JIRA_EMAIL`/`JIRA_API_TOKEN`) |
+| `JIRA_CLIENT_SECRET` | no | Jira OAuth 2.0 client secret |
 | `APP_URL` | no | Public app URL (used for Jira ticket stamps) |
 | `UI_ALLOWED_CIDRS` | no | Comma-separated CIDRs allowed to access the UI |
 | `SLACK_APP_TOKEN` | no | Slack app-level token (`xapp-...`) for Socket Mode — enables thread follow-ups without slash commands (see [docs/SLACK_BOT.md](docs/SLACK_BOT.md#socket-mode-thread-follow-ups)) |
