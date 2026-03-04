@@ -12,7 +12,7 @@ RUN go mod download
 
 COPY . .
 
-RUN yq '[.[] | select(has("extensions")) | .extensions[]] | . + ["dockerfile"] | unique | sort' /tmp/languages.yml -o=json \
+RUN yq '[.[] | select(has("extensions")) | .extensions[]] | unique | sort' /tmp/languages.yml -o=json \
     > config/extensions.json
 
 RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /arbetern .
