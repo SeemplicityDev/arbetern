@@ -1,11 +1,13 @@
 package atlassian
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 )
 
@@ -265,4 +267,91 @@ func (c *Client) GetConfluencePageByTitle(spaceKey, title string) (*ConfluencePa
 		return nil, nil
 	}
 	return c.GetConfluencePage(results[0].ID)
+}
+
+// ---------------------------------------------------------------------------
+// Confluence URL / Tiny-Link Resolver
+// ---------------------------------------------------------------------------
+
+// ResolveConfluencePageID extracts a numeric Confluence page ID from various
+// input formats:
+//   - Numeric ID: "123456" → "123456"
+//   - Tiny link URL: https://site.atlassian.net/wiki/x/AQAF3Q → decoded page ID
+//   - Full page URL: .../spaces/SPACE/pages/123456/... → "123456"
+func ResolveConfluencePageID(input string) (string, error) {
+	input = strings.TrimSpace(input)
+	if input == "" {
+		return "", fmt.Errorf("empty page ID or URL")
+	}
+
+	// Already a numeric ID.
+	if _, err := strconv.ParseInt(input, 10, 64); err == nil {
+		return input, nil
+	}
+
+	// Try to parse as URL.
+	u, err := url.Parse(input)
+	if err != nil || u.Host == "" {
+		return "", fmt.Errorf("not a valid page ID or Confluence URL: %s", input)
+	}
+
+	segments := strings.Split(strings.Trim(u.Path, "/"), "/")
+
+	// Tiny link: /wiki/x/<code>  or  /x/<code>
+	for i, seg := range segments {
+		if seg == "x" && i+1 < len(segments) {
+			code := segments[i+1]
+			id, err := decodeTinyLink(code)
+			if err != nil {
+				return "", fmt.Errorf("failed to decode Confluence tiny link %q: %w", code, err)
+			}
+			return strconv.FormatInt(id, 10), nil
+		}
+	}
+
+	// Full URL: .../pages/<id>/...
+	for i, seg := range segments {
+		if seg == "pages" && i+1 < len(segments) {
+			candidate := segments[i+1]
+			if _, err := strconv.ParseInt(candidate, 10, 64); err == nil {
+				return candidate, nil
+			}
+		}
+	}
+
+	return "", fmt.Errorf("could not extract Confluence page ID from URL: %s", input)
+}
+
+// decodeTinyLink decodes a Confluence tiny-link code (base64-encoded page ID).
+// Confluence encodes the content ID as big-endian bytes, base64-encodes them,
+// and strips trailing '=' padding.
+func decodeTinyLink(code string) (int64, error) {
+	// Re-add base64 padding.
+	padded := code
+	if m := len(padded) % 4; m != 0 {
+		padded += strings.Repeat("=", 4-m)
+	}
+
+	data, err := base64.StdEncoding.DecodeString(padded)
+	if err != nil {
+		// Fall back to URL-safe alphabet.
+		data, err = base64.URLEncoding.DecodeString(padded)
+		if err != nil {
+			return 0, fmt.Errorf("base64 decode failed: %w", err)
+		}
+	}
+
+	if len(data) == 0 || len(data) > 8 {
+		return 0, fmt.Errorf("unexpected decoded length %d bytes", len(data))
+	}
+
+	// Big-endian bytes → int64.
+	var id int64
+	for _, b := range data {
+		id = (id << 8) | int64(b)
+	}
+	if id <= 0 {
+		return 0, fmt.Errorf("decoded page ID is not positive: %d", id)
+	}
+	return id, nil
 }

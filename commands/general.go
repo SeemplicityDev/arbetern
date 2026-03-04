@@ -763,11 +763,11 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 			Type: "function",
 			Function: llm.ToolFunction{
 				Name:        "get_confluence_page",
-				Description: "Retrieve the full content of a Confluence page by its page ID. Returns the page title, body (in storage/XHTML format), and a web link. Use search_confluence_pages first to find the page ID.",
+				Description: "Retrieve the full content of a Confluence page. Accepts a numeric page ID, a full Confluence page URL, or a Confluence short/tiny link (e.g. https://site.atlassian.net/wiki/x/AQAF3Q). Returns the page title, body (in storage/XHTML format), and a web link. Use search_confluence_pages first if you need to find a page by title or content.",
 				Parameters: json.RawMessage(`{
 					"type":"object",
 					"properties":{
-						"page_id":{"type":"string","description":"Confluence page ID (numeric string, e.g. '123456')"}
+						"page_id":{"type":"string","description":"Confluence page ID (numeric), full page URL, or tiny/short link URL (e.g. 'https://site.atlassian.net/wiki/x/AQAF3Q')"}
 					},
 					"required":["page_id"]
 				}`),
@@ -1797,7 +1797,12 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		if args.PageID == "" {
 			return "Error: page_id is required."
 		}
-		page, err := h.jiraClient.GetConfluencePage(args.PageID)
+		// Resolve URL or tiny link to numeric page ID.
+		pageID, err := atlassian.ResolveConfluencePageID(args.PageID)
+		if err != nil {
+			return fmt.Sprintf("Error resolving Confluence page: %v", err)
+		}
+		page, err := h.jiraClient.GetConfluencePage(pageID)
 		if err != nil {
 			return fmt.Sprintf("Error fetching Confluence page: %v", err)
 		}
