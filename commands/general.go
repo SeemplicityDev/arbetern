@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/justmike1/arbetern/atlassian"
+	"github.com/justmike1/arbetern/chorus"
 	"github.com/justmike1/arbetern/config"
 	"github.com/justmike1/arbetern/github"
 	"github.com/justmike1/arbetern/nvd"
@@ -44,6 +45,7 @@ type GeneralHandler struct {
 	jiraClient       *atlassian.Client
 	nvdClient        *nvd.Client
 	sfClient         *salesforce.Client
+	chorusClient     *chorus.Client
 	contextProvider  *ContextProvider
 	memory           *ConversationMemory
 	prompts          PromptProvider
@@ -502,6 +504,54 @@ func (h *GeneralHandler) buildTools() []github.Tool {
 						"object_name":{"type":"string","description":"Salesforce object API name (e.g. 'Account', 'Opportunity', 'Contact', 'Case')"}
 					},
 					"required":["object_name"]
+				}`),
+			},
+		})
+	}
+
+	// Chorus tools are only available when Chorus is connected.
+	if h.chorusClient != nil && h.chorusClient.Ready() {
+		tools = append(tools, github.Tool{
+			Type: "function",
+			Function: github.ToolFunction{
+				Name:        "chorus_list_meetings",
+				Description: "List meetings and calls recorded in Chorus within a date range. Returns meeting titles, dates, durations, and participants. Use this when the user asks about recent calls, meetings, or conversations for a customer or time period. Dates must be YYYY-MM-DD format.",
+				Parameters: json.RawMessage(`{
+					"type":"object",
+					"properties":{
+						"from":{"type":"string","description":"Start date in YYYY-MM-DD format (e.g. '2026-02-01')"},
+						"to":{"type":"string","description":"End date in YYYY-MM-DD format (e.g. '2026-03-01')"},
+						"limit":{"type":"integer","description":"Max results to return (default 50, max 100)"}
+					},
+					"required":["from","to"]
+				}`),
+			},
+		}, github.Tool{
+			Type: "function",
+			Function: github.ToolFunction{
+				Name:        "chorus_get_conversation",
+				Description: "Get detailed analytics for a specific Chorus meeting/call by its meeting ID. Returns the AI-generated summary, talk/listen ratio, sentiment, key topics, trackers (e.g. pricing, competitor mentions), action items, and participants. Use this after chorus_list_meetings to drill into a specific call.",
+				Parameters: json.RawMessage(`{
+					"type":"object",
+					"properties":{
+						"meeting_id":{"type":"string","description":"Chorus meeting ID (from chorus_list_meetings results)"}
+					},
+					"required":["meeting_id"]
+				}`),
+			},
+		}, github.Tool{
+			Type: "function",
+			Function: github.ToolFunction{
+				Name:        "chorus_list_deals",
+				Description: "List deals tracked by Chorus Momentum with engagement analytics. Returns deal name, account, amount, stage, close date, momentum score, meeting/email counts, and risk indicators. Use this when the user asks about deals, pipeline, deal momentum, or engagement activity on deals. Supports filtering by date range and owner.",
+				Parameters: json.RawMessage(`{
+					"type":"object",
+					"properties":{
+						"from":{"type":"string","description":"Start date in YYYY-MM-DD format — filter deals with activity after this date"},
+						"to":{"type":"string","description":"End date in YYYY-MM-DD format — filter deals with activity before this date"},
+						"owner":{"type":"string","description":"Filter by deal owner name or email (optional)"},
+						"limit":{"type":"integer","description":"Max results to return (default 50, max 100)"}
+					}
 				}`),
 			},
 		})
@@ -1873,6 +1923,81 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		}
 		log.Printf("[user=%s channel=%s] described Salesforce object %s (%d fields)", userID, channelID, args.ObjectName, len(desc.Fields))
 		return sb.String()
+
+	// ---- Chorus tools ----
+
+	case "chorus_list_meetings":
+		if h.chorusClient == nil || !h.chorusClient.Ready() {
+			return "Error: Chorus integration is not connected. Set CHORUS_API_TOKEN to enable it."
+		}
+		var args struct {
+			From  string `json:"from"`
+			To    string `json:"to"`
+			Limit int    `json:"limit"`
+		}
+		if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+			return fmt.Sprintf("Error parsing arguments: %v", err)
+		}
+		if args.From == "" || args.To == "" {
+			return "Error: from and to dates are required (YYYY-MM-DD)."
+		}
+		meetings, err := h.chorusClient.ListMeetings(args.From, args.To, args.Limit)
+		if err != nil {
+			return fmt.Sprintf("Error listing Chorus meetings: %v", err)
+		}
+		if len(meetings) == 0 {
+			return fmt.Sprintf("No Chorus meetings found between %s and %s.", args.From, args.To)
+		}
+		log.Printf("[user=%s channel=%s] listed %d Chorus meetings (%s → %s)", userID, channelID, len(meetings), args.From, args.To)
+		return chorus.FormatMeetings(meetings)
+
+	case "chorus_get_conversation":
+		if h.chorusClient == nil || !h.chorusClient.Ready() {
+			return "Error: Chorus integration is not connected. Set CHORUS_API_TOKEN to enable it."
+		}
+		var args struct {
+			MeetingID string `json:"meeting_id"`
+		}
+		if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+			return fmt.Sprintf("Error parsing arguments: %v", err)
+		}
+		if args.MeetingID == "" {
+			return "Error: meeting_id is required."
+		}
+		conv, err := h.chorusClient.GetConversation(args.MeetingID)
+		if err != nil {
+			return fmt.Sprintf("Error fetching Chorus conversation: %v", err)
+		}
+		log.Printf("[user=%s channel=%s] fetched Chorus conversation %s (%q)", userID, channelID, args.MeetingID, conv.Title)
+		return chorus.FormatConversation(conv)
+
+	case "chorus_list_deals":
+		if h.chorusClient == nil || !h.chorusClient.Ready() {
+			return "Error: Chorus integration is not connected. Set CHORUS_API_TOKEN to enable it."
+		}
+		var args struct {
+			From  string `json:"from"`
+			To    string `json:"to"`
+			Owner string `json:"owner"`
+			Limit int    `json:"limit"`
+		}
+		if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+			return fmt.Sprintf("Error parsing arguments: %v", err)
+		}
+		deals, err := h.chorusClient.ListDeals(chorus.DealsFilter{
+			From:  args.From,
+			To:    args.To,
+			Owner: args.Owner,
+			Limit: args.Limit,
+		})
+		if err != nil {
+			return fmt.Sprintf("Error listing Chorus deals: %v", err)
+		}
+		if len(deals) == 0 {
+			return "No Chorus deals found matching the filter."
+		}
+		log.Printf("[user=%s channel=%s] listed %d Chorus deals", userID, channelID, len(deals))
+		return chorus.FormatDeals(deals)
 
 	default:
 		return fmt.Sprintf("Unknown tool: %s", name)

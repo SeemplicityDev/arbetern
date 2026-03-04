@@ -145,6 +145,20 @@ spec:
                   name: {{ .Values.secretName }}
                   key: sf-login-url
             {{- end }}
+            {{- if index .Values.secretValues "chorus-api-token" }}
+            - name: CHORUS_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: chorus-api-token
+            {{- end }}
+            {{- if index .Values.secretValues "chorus-base-url" }}
+            - name: CHORUS_BASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: chorus-base-url
+            {{- end }}
             - name: GOMEMLIMIT
               value: {{ .Values.goRuntime.goMemLimit | quote }}
             - name: GOGC

@@ -35,7 +35,7 @@ Every layer — agent selection, intent routing, tool availability, model switch
 | **agent-q** | QA & Test Engineer | Analyzes test failures, reviews test coverage, suggests test cases, and triages flaky tests |
 | **goldsai** | Security Researcher | Assesses CVE impact on your codebase, audits dependencies, reviews code for vulnerabilities, and recommends remediation |
 | **seihin** (製品) | Sr. Technical Product Manager | Reviews and refines Jira tickets, rewrites descriptions with PM best practices, manages ticket quality at scale |
-| **pulse** | Customer Success Engineer | Tracks account health, surfaces renewal signals from Salesforce, manages CS workflows, and coordinates with Jira |
+| **pulse** | Customer Success Engineer | Tracks account health, surfaces renewal signals from Salesforce, analyzes call intelligence and deal momentum from Chorus, manages CS workflows, and coordinates with Jira |
 
 ## Quick Start
 
@@ -73,6 +73,8 @@ Every layer — agent selection, intent routing, tool availability, model switch
 | `SF_CONSUMER_KEY` | no | Salesforce Connected App consumer key (OAuth 2.0 client credentials flow) |
 | `SF_CONSUMER_SECRET` | no | Salesforce Connected App consumer secret |
 | `SF_LOGIN_URL` | no | Salesforce login URL (default: `https://login.salesforce.com`). Use `https://test.salesforce.com` for sandbox orgs |
+| `CHORUS_API_TOKEN` | no | Chorus (ZoomInfo) API token for call intelligence and deal momentum. Generated in Chorus → Personal Settings |
+| `CHORUS_BASE_URL` | no | Chorus API base URL (default: `https://chorus.ai`). Override for a custom or on-prem endpoint |
 | `CUSTOM_PROMPTS_DIR` | no | Directory containing custom prompt YAML files that are **appended** to built-in agent prompts. Used for org-specific context via Kubernetes ConfigMap. Set automatically by the Helm chart when `customPrompts` is configured |
 | `AGENT_RBAC_DIR` | no | Directory containing per-agent RBAC overrides (`<agent-id>.yaml` with `allowed_teams` list). Overrides `config.yaml` allowed_teams at deploy time. Set automatically by the Helm chart when `agentRBAC` is configured |
 | `UI_HEADER` | no | Custom header text for the web UI (default: `arbetern`) |
@@ -230,6 +232,7 @@ github/              # GitHub API client + Models/Azure API client
 atlassian/           # Atlassian Cloud REST API client (Jira + Confluence)
 nvd/                 # NVD (National Vulnerability Database) CVE API client
 salesforce/          # Salesforce REST API client (SOQL queries, OAuth 2.0)
+chorus/              # Chorus (ZoomInfo) REST API client (call intelligence, deal momentum)
 slack/               # Slack webhook handler + response helpers
 prompts/             # YAML prompt loader + agent discovery
 ui/                  # embedded web UI (agent manager)
@@ -252,6 +255,7 @@ Global prompts (e.g. `security`) are defined in `agents/prompts.yaml` and inheri
 | Atlassian (Jira + Confluence) | [docs/ATLASSIAN.md](docs/ATLASSIAN.md) | seihin, ovad, agent-q, goldsai, pulse |
 | NVD | [NVD API](https://nvd.nist.gov/developers) | goldsai |
 | Salesforce | SOQL Query API (OAuth 2.0 client credentials) | pulse |
+| Chorus / ZoomInfo | [docs/CHORUS.md](docs/CHORUS.md) | pulse |
 
 ## Contributing
 

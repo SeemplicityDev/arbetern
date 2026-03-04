@@ -47,6 +47,8 @@ type Config struct {
 	SFConsumerKey         string
 	SFConsumerSecret      string
 	SFLoginURL            string // defaults to "https://login.salesforce.com"
+	ChorusAPIToken        string
+	ChorusBaseURL         string // defaults to "https://chorus.ai"
 }
 
 // UseAzure returns true when Azure OpenAI credentials are configured.
@@ -73,6 +75,11 @@ func (c *Config) SalesforceConfigured() bool {
 	return c.SFConsumerKey != "" && c.SFConsumerSecret != ""
 }
 
+// ChorusConfigured returns true when a Chorus API token is present.
+func (c *Config) ChorusConfigured() bool {
+	return c.ChorusAPIToken != ""
+}
+
 func Load() (*Config, error) {
 	cfg := &Config{
 		SlackBotToken:         os.Getenv("SLACK_BOT_TOKEN"),
@@ -96,6 +103,8 @@ func Load() (*Config, error) {
 		SFConsumerKey:         os.Getenv("SF_CONSUMER_KEY"),
 		SFConsumerSecret:      os.Getenv("SF_CONSUMER_SECRET"),
 		SFLoginURL:            os.Getenv("SF_LOGIN_URL"),
+		ChorusAPIToken:        os.Getenv("CHORUS_API_TOKEN"),
+		ChorusBaseURL:         os.Getenv("CHORUS_BASE_URL"),
 	}
 
 	if cfg.SlackBotToken == "" {

@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/justmike1/arbetern/atlassian"
+	"github.com/justmike1/arbetern/chorus"
 	"github.com/justmike1/arbetern/commands"
 	"github.com/justmike1/arbetern/config"
 	"github.com/justmike1/arbetern/github"
@@ -246,6 +247,7 @@ func refreshIntegrations(
 	ghClient *github.Client,
 	jiraClient *atlassian.Client,
 	sfClient *salesforce.Client,
+	chorusClient *chorus.Client,
 	modelsClient *github.ModelsClient,
 	codeModelsClient *github.ModelsClient,
 ) {
@@ -560,6 +562,34 @@ func refreshIntegrations(
 		})
 	}
 
+	// --- Chorus ---
+	if cfg.ChorusConfigured() {
+		chorusConnected := chorusClient != nil && chorusClient.Ready()
+		chorusPerms := []permission{
+			{Scope: "engagements", Description: "List and search Chorus meetings/calls", Required: true, Granted: boolPtr(chorusConnected)},
+			{Scope: "conversations", Description: "Fetch detailed meeting analytics (summary, trackers, action items)", Required: true, Granted: boolPtr(chorusConnected)},
+			{Scope: "momentum/deals", Description: "List deals with momentum scores and engagement analytics", Required: true, Granted: boolPtr(chorusConnected)},
+		}
+		result = append(result, integration{
+			ID:          "chorus",
+			Name:        "Chorus",
+			Configured:  chorusConnected,
+			AuthMode:    "API Token",
+			Permissions: chorusPerms,
+		})
+	} else {
+		result = append(result, integration{
+			ID:         "chorus",
+			Name:       "Chorus",
+			Configured: false,
+			Permissions: []permission{
+				{Scope: "engagements", Description: "List and search Chorus meetings/calls", Required: true},
+				{Scope: "conversations", Description: "Fetch detailed meeting analytics", Required: true},
+				{Scope: "momentum/deals", Description: "List deals with momentum scores", Required: true},
+			},
+		})
+	}
+
 	integrationsMu.Lock()
 	integrationsCache = result
 	integrationsMu.Unlock()
@@ -574,16 +604,17 @@ func startIntegrationsRefresher(
 	ghClient *github.Client,
 	jiraClient *atlassian.Client,
 	sfClient *salesforce.Client,
+	chorusClient *chorus.Client,
 	modelsClient *github.ModelsClient,
 	codeModelsClient *github.ModelsClient,
 ) {
-	refreshIntegrations(cfg, slackClient, ghClient, jiraClient, sfClient, modelsClient, codeModelsClient)
+	refreshIntegrations(cfg, slackClient, ghClient, jiraClient, sfClient, chorusClient, modelsClient, codeModelsClient)
 
 	go func() {
 		ticker := time.NewTicker(1 * time.Hour)
 		defer ticker.Stop()
 		for range ticker.C {
-			refreshIntegrations(cfg, slackClient, ghClient, jiraClient, sfClient, modelsClient, codeModelsClient)
+			refreshIntegrations(cfg, slackClient, ghClient, jiraClient, sfClient, chorusClient, modelsClient, codeModelsClient)
 		}
 	}()
 }
@@ -670,6 +701,13 @@ func main() {
 		}
 	}
 
+	// Chorus (ZoomInfo) client — enables call intelligence and deal momentum for Pulse.
+	var chorusClient *chorus.Client
+	if cfg.ChorusConfigured() {
+		chorusClient = chorus.NewClient(cfg.ChorusAPIToken, cfg.ChorusBaseURL)
+		log.Printf("Chorus integration enabled")
+	}
+
 	// Discover agents and register per-agent webhook routes (/<agent>/webhook).
 	agents, err := prompts.DiscoverAgents("")
 	if err != nil {
@@ -680,7 +718,7 @@ func main() {
 	}
 
 	// Start background integration permission refresher (runs once now, then every hour).
-	startIntegrationsRefresher(cfg, slackClient, ghClient, jiraClient, sfClient, modelsClient, codeModelsClient)
+	startIntegrationsRefresher(cfg, slackClient, ghClient, jiraClient, sfClient, chorusClient, modelsClient, codeModelsClient)
 
 	// Thread session store — enables follow-up replies in threads without /commands.
 	sessions := commands.NewSessionStore(cfg.ThreadSessionTTL)
@@ -706,7 +744,7 @@ func main() {
 		}
 
 		agentID := agent.ID // capture for closure
-		router := commands.NewRouter(slackClient, ghClient, modelsClient, codeModelsClient, jiraClient, nvdClient, sfClient, ap, agent.ID, cfg.AppURL, sessions, cfg.MaxToolRounds)
+		router := commands.NewRouter(slackClient, ghClient, modelsClient, codeModelsClient, jiraClient, nvdClient, sfClient, chorusClient, ap, agent.ID, cfg.AppURL, sessions, cfg.MaxToolRounds)
 		routers[agent.ID] = router
 
 		// Wrap router.Handle with RBAC check.

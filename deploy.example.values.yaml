@@ -35,6 +35,9 @@ secretValues:
   # sf-consumer-key: "your-sf-consumer-key"
   # sf-consumer-secret: "your-sf-consumer-secret"
   # sf-login-url: "https://login.salesforce.com"  # use https://test.salesforce.com for sandboxes
+  # Chorus / ZoomInfo (optional — enables call intelligence and deal momentum for Pulse)
+  # chorus-api-token: "your-chorus-api-token"  # Chorus → Personal Settings → API Token
+  # chorus-base-url: "https://chorus.ai"        # override for on-prem / custom endpoint
 
 # ingress:
 #   enabled: true

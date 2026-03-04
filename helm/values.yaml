@@ -64,6 +64,9 @@ secretValues:
   sf-consumer-key: ""    # Salesforce Connected App consumer key
   sf-consumer-secret: "" # Salesforce Connected App consumer secret
   # sf-login-url: ""     # Defaults to https://login.salesforce.com. Use https://test.salesforce.com for sandboxes.
+  # Chorus / ZoomInfo (optional — enables call intelligence and deal momentum for CS agent)
+  chorus-api-token: ""   # Chorus API token from Personal Settings
+  # chorus-base-url: ""  # Defaults to https://chorus.ai
 
 service:
   type: ClusterIP
