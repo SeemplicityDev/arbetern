@@ -4,12 +4,16 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
 
 	"github.com/slack-go/slack"
 )
+
+// Response body size limit for reading error bodies.
+const maxErrorResponseBody = 1 << 20 // 1 MB
 
 type Client struct {
 	api   *slack.Client
@@ -127,7 +131,10 @@ func (c *Client) GetBotScopes() ([]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("slack auth.test request failed: %w", err)
 	}
-	defer func() { _ = resp.Body.Close() }()
+	defer func() {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+	}()
 
 	raw := resp.Header.Get("X-OAuth-Scopes")
 	if raw == "" {
@@ -166,10 +173,14 @@ func RespondToURL(responseURL, text string, ephemeral bool) error {
 	if err != nil {
 		return fmt.Errorf("failed to post to response_url: %w", err)
 	}
-	defer func() { _ = resp.Body.Close() }()
+	defer func() {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+	}()
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("response_url returned status %d", resp.StatusCode)
+		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorResponseBody))
+		return fmt.Errorf("response_url returned status %d: %s", resp.StatusCode, string(errBody))
 	}
 
 	return nil

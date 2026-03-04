@@ -13,6 +13,9 @@ import (
 
 const (
 	baseURL = "https://services.nvd.nist.gov/rest/json/cves/2.0"
+
+	// Response body size limit for io.LimitReader.
+	maxResponseBody = 5 << 20 // 5 MB
 )
 
 // Client talks to the NVD CVE API v2.0.
@@ -211,7 +214,7 @@ func (c *Client) get(ctx context.Context, params url.Values, target interface{})
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
 	if err != nil {
 		return fmt.Errorf("failed to read NVD response: %w", err)
 	}

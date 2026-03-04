@@ -43,7 +43,7 @@ func (c *Client) GetMyPermissions(keys []string) (map[string]bool, error) {
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
 		return nil, fmt.Errorf("mypermissions returned %d: %s", resp.StatusCode, string(body))
 	}
 
@@ -517,7 +517,7 @@ func (c *Client) CreateIssue(input CreateIssueInput) (*Issue, error) {
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	respBody, err := io.ReadAll(resp.Body)
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
 	if err != nil {
 		return nil, fmt.Errorf("read response: %w", err)
 	}
@@ -551,47 +551,60 @@ func (c *Client) CreateIssue(input CreateIssueInput) (*Issue, error) {
 }
 
 // ListProjects returns the keys of all projects visible to the authenticated user.
+// Paginates through all pages using startAt/maxResults offset pagination.
 func (c *Client) ListProjects() ([]string, error) {
-	url := fmt.Sprintf("%s/rest/api/3/project/search?maxResults=100&status=live", c.baseURL)
-	req, err := http.NewRequest(http.MethodGet, url, nil)
-	if err != nil {
-		return nil, fmt.Errorf("create request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	if err := c.authRequest(req); err != nil {
-		return nil, fmt.Errorf("auth request: %w", err)
+	var allKeys []string
+	startAt := 0
+
+	for {
+		reqURL := fmt.Sprintf("%s/rest/api/3/project/search?maxResults=%d&startAt=%d&status=live",
+			c.baseURL, jiraPageSize, startAt)
+		req, err := http.NewRequest(http.MethodGet, reqURL, nil)
+		if err != nil {
+			return nil, fmt.Errorf("create request: %w", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		if err := c.authRequest(req); err != nil {
+			return nil, fmt.Errorf("auth request: %w", err)
+		}
+
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("send request: %w", err)
+		}
+
+		respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
+		_ = resp.Body.Close()
+		if err != nil {
+			return nil, fmt.Errorf("read response: %w", err)
+		}
+
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			return nil, fmt.Errorf("jira API error (HTTP %d): %s", resp.StatusCode, string(respBody))
+		}
+
+		var result struct {
+			Values []struct {
+				Key  string `json:"key"`
+				Name string `json:"name"`
+			} `json:"values"`
+			IsLast bool `json:"isLast"`
+		}
+		if err := json.Unmarshal(respBody, &result); err != nil {
+			return nil, fmt.Errorf("unmarshal response: %w", err)
+		}
+
+		for _, p := range result.Values {
+			allKeys = append(allKeys, fmt.Sprintf("%s (%s)", p.Key, p.Name))
+		}
+
+		if result.IsLast || len(result.Values) == 0 {
+			break
+		}
+		startAt += len(result.Values)
 	}
 
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("send request: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("read response: %w", err)
-	}
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("jira API error (HTTP %d): %s", resp.StatusCode, string(respBody))
-	}
-
-	var result struct {
-		Values []struct {
-			Key  string `json:"key"`
-			Name string `json:"name"`
-		} `json:"values"`
-	}
-	if err := json.Unmarshal(respBody, &result); err != nil {
-		return nil, fmt.Errorf("unmarshal response: %w", err)
-	}
-
-	keys := make([]string, 0, len(result.Values))
-	for _, p := range result.Values {
-		keys = append(keys, fmt.Sprintf("%s (%s)", p.Key, p.Name))
-	}
-	return keys, nil
+	return allKeys, nil
 }
 
 // JiraUser represents a user returned by the Jira user search API.
@@ -646,7 +659,7 @@ func (c *Client) searchUsersRaw(query, project string) ([]JiraUser, error) {
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	respBody, err := io.ReadAll(resp.Body)
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
 	if err != nil {
 		return nil, fmt.Errorf("read response: %w", err)
 	}
@@ -805,7 +818,7 @@ func (c *Client) FindTeamFields() ([]TeamFieldInfo, error) {
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	respBody, err := io.ReadAll(resp.Body)
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
 	if err != nil {
 		return nil, fmt.Errorf("read response: %w", err)
 	}
@@ -887,7 +900,7 @@ func (c *Client) discoverExtraFields() {
 			return
 		}
 		defer func() { _ = resp.Body.Close() }()
-		body, _ := io.ReadAll(resp.Body)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 			return
 		}
@@ -1080,7 +1093,7 @@ func (c *Client) findTeamFromExistingIssues(field *TeamFieldInfo, query string) 
 			continue
 		}
 
-		respBody, err := io.ReadAll(resp.Body)
+		respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
 		_ = resp.Body.Close()
 		if err != nil || resp.StatusCode < 200 || resp.StatusCode >= 300 {
 			continue
@@ -1199,7 +1212,7 @@ func (c *Client) searchTeamsAPI(query string) (*teamSearchResult, error) {
 			continue
 		}
 
-		respBody, err := io.ReadAll(resp.Body)
+		respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
 		_ = resp.Body.Close()
 		if err != nil || resp.StatusCode < 200 || resp.StatusCode >= 300 {
 			continue
@@ -1329,7 +1342,7 @@ func (c *Client) ResolveUserViaIssues(displayName string) ([]JiraUser, error) {
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	respBody, err := io.ReadAll(resp.Body)
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
 	if err != nil {
 		return nil, fmt.Errorf("read response: %w", err)
 	}
@@ -1389,6 +1402,8 @@ func (c *Client) ResolveUserViaIssues(displayName string) ([]JiraUser, error) {
 }
 
 // SearchIssuesJQL searches for issues using JQL and returns a formatted summary.
+// Paginates through results using startAt/maxResults until all issues up to
+// maxResults are fetched (Jira caps each page at 100).
 func (c *Client) SearchIssuesJQL(jql string, maxResults int) ([]IssueSummary, error) {
 	if maxResults <= 0 {
 		maxResults = 20
@@ -1397,85 +1412,111 @@ func (c *Client) SearchIssuesJQL(jql string, maxResults int) ([]IssueSummary, er
 	for _, id := range c.extraFieldIDs() {
 		fields += "," + id
 	}
-	searchURL := fmt.Sprintf("%s/rest/api/3/search/jql?jql=%s&maxResults=%d&fields=%s",
-		c.baseURL, url.QueryEscape(jql), maxResults, fields)
 
-	req, err := http.NewRequest(http.MethodGet, searchURL, nil)
-	if err != nil {
-		return nil, fmt.Errorf("create request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	if err := c.authRequest(req); err != nil {
-		return nil, fmt.Errorf("auth request: %w", err)
+	var allIssues []IssueSummary
+	startAt := 0
+	pageSize := maxResults
+	if pageSize > jiraPageSize {
+		pageSize = jiraPageSize
 	}
 
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("send request: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
+	for {
+		searchURL := fmt.Sprintf("%s/rest/api/3/search/jql?jql=%s&startAt=%d&maxResults=%d&fields=%s",
+			c.baseURL, url.QueryEscape(jql), startAt, pageSize, fields)
 
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("read response: %w", err)
-	}
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("jira API error (HTTP %d): %s", resp.StatusCode, string(respBody))
-	}
-
-	var result struct {
-		Total  int `json:"total"`
-		Issues []struct {
-			Key    string          `json:"key"`
-			Fields json.RawMessage `json:"fields"`
-		} `json:"issues"`
-	}
-	if err := json.Unmarshal(respBody, &result); err != nil {
-		return nil, fmt.Errorf("unmarshal response: %w", err)
-	}
-
-	issues := make([]IssueSummary, 0, len(result.Issues))
-	for _, i := range result.Issues {
-		var fields struct {
-			Summary     string                        `json:"summary"`
-			Status      struct{ Name string }         `json:"status"`
-			Assignee    *struct{ DisplayName string } `json:"assignee"`
-			Priority    *struct{ Name string }        `json:"priority"`
-			IssueType   struct{ Name string }         `json:"issuetype"`
-			Updated     string                        `json:"updated"`
-			Description json.RawMessage               `json:"description"`
+		req, err := http.NewRequest(http.MethodGet, searchURL, nil)
+		if err != nil {
+			return nil, fmt.Errorf("create request: %w", err)
 		}
-		_ = json.Unmarshal(i.Fields, &fields)
-
-		assignee := ""
-		if fields.Assignee != nil {
-			assignee = fields.Assignee.DisplayName
+		req.Header.Set("Content-Type", "application/json")
+		if err := c.authRequest(req); err != nil {
+			return nil, fmt.Errorf("auth request: %w", err)
 		}
-		priority := ""
-		if fields.Priority != nil {
-			priority = fields.Priority.Name
+
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("send request: %w", err)
 		}
-		desc := adfToPlainText(fields.Description)
 
-		// Extract custom fields (Team, Sprint) from raw JSON.
-		team, sprint := c.extractCustomFields(i.Fields)
+		respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
+		_ = resp.Body.Close()
+		if err != nil {
+			return nil, fmt.Errorf("read response: %w", err)
+		}
 
-		issues = append(issues, IssueSummary{
-			Key:         i.Key,
-			Summary:     fields.Summary,
-			Status:      fields.Status.Name,
-			Assignee:    assignee,
-			Priority:    priority,
-			IssueType:   fields.IssueType.Name,
-			Updated:     fields.Updated,
-			Description: desc,
-			Browse:      fmt.Sprintf("%s/browse/%s", c.siteURL, i.Key),
-			Team:        team,
-			Sprint:      sprint,
-		})
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			return nil, fmt.Errorf("jira API error (HTTP %d): %s", resp.StatusCode, string(respBody))
+		}
+
+		var result struct {
+			StartAt int `json:"startAt"`
+			Total   int `json:"total"`
+			Issues  []struct {
+				Key    string          `json:"key"`
+				Fields json.RawMessage `json:"fields"`
+			} `json:"issues"`
+		}
+		if err := json.Unmarshal(respBody, &result); err != nil {
+			return nil, fmt.Errorf("unmarshal response: %w", err)
+		}
+
+		for _, i := range result.Issues {
+			var fields struct {
+				Summary     string                        `json:"summary"`
+				Status      struct{ Name string }         `json:"status"`
+				Assignee    *struct{ DisplayName string } `json:"assignee"`
+				Priority    *struct{ Name string }        `json:"priority"`
+				IssueType   struct{ Name string }         `json:"issuetype"`
+				Updated     string                        `json:"updated"`
+				Description json.RawMessage               `json:"description"`
+			}
+			_ = json.Unmarshal(i.Fields, &fields)
+
+			assignee := ""
+			if fields.Assignee != nil {
+				assignee = fields.Assignee.DisplayName
+			}
+			priority := ""
+			if fields.Priority != nil {
+				priority = fields.Priority.Name
+			}
+			desc := adfToPlainText(fields.Description)
+
+			team, sprint := c.extractCustomFields(i.Fields)
+
+			allIssues = append(allIssues, IssueSummary{
+				Key:         i.Key,
+				Summary:     fields.Summary,
+				Status:      fields.Status.Name,
+				Assignee:    assignee,
+				Priority:    priority,
+				IssueType:   fields.IssueType.Name,
+				Updated:     fields.Updated,
+				Description: desc,
+				Browse:      fmt.Sprintf("%s/browse/%s", c.siteURL, i.Key),
+				Team:        team,
+				Sprint:      sprint,
+			})
+		}
+
+		// Stop if we've reached the caller's desired count or exhausted results.
+		if len(allIssues) >= maxResults || startAt+len(result.Issues) >= result.Total || len(result.Issues) == 0 {
+			break
+		}
+		startAt += len(result.Issues)
+		// Shrink page size for the final page if needed.
+		remaining := maxResults - len(allIssues)
+		if remaining < pageSize {
+			pageSize = remaining
+		}
 	}
-	return issues, nil
+
+	// Trim to exact maxResults in case the last page overshoots.
+	if len(allIssues) > maxResults {
+		allIssues = allIssues[:maxResults]
+	}
+
+	return allIssues, nil
 }
 
 // GetIssue fetches a single Jira issue by key with full details.
@@ -1502,7 +1543,7 @@ func (c *Client) GetIssue(issueKey string) (*IssueSummary, error) {
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	respBody, err := io.ReadAll(resp.Body)
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
 	if err != nil {
 		return nil, fmt.Errorf("read response: %w", err)
 	}
@@ -1596,7 +1637,7 @@ func (c *Client) UpdateIssueDescription(issueKey, description string) error {
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		respBody, _ := io.ReadAll(resp.Body)
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
 		return fmt.Errorf("jira API error (HTTP %d): %s", resp.StatusCode, string(respBody))
 	}
 
@@ -1686,7 +1727,7 @@ func (c *Client) UpdateIssueFields(issueKey string, fields map[string]interface{
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		respBody, _ := io.ReadAll(resp.Body)
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
 		return fmt.Errorf("jira API error (HTTP %d): %s", resp.StatusCode, string(respBody))
 	}
 
@@ -1759,7 +1800,7 @@ func (c *Client) GetDashboard(dashboardID string) (*Dashboard, error) {
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
 	if err != nil {
 		return nil, fmt.Errorf("read dashboard response: %w", err)
 	}
@@ -1794,7 +1835,7 @@ func (c *Client) GetDashboardGadgets(dashboardID string) ([]DashboardGadget, err
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
 	if err != nil {
 		return nil, fmt.Errorf("read gadgets response: %w", err)
 	}
@@ -1831,7 +1872,7 @@ func (c *Client) GetFilter(filterID string) (*FilterDetail, error) {
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
 	if err != nil {
 		return nil, fmt.Errorf("read filter response: %w", err)
 	}

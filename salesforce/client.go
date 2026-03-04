@@ -15,6 +15,12 @@ import (
 const (
 	defaultAPIVersion = "v62.0"
 	defaultLoginURL   = "https://login.salesforce.com"
+
+	// Response body size limit for io.LimitReader.
+	maxResponseBody = 10 << 20 // 10 MB
+
+	// Safety cap on total records accumulated during pagination.
+	maxQueryRecords = 10_000
 )
 
 // Client provides access to the Salesforce REST API using OAuth 2.0 client credentials.
@@ -98,7 +104,7 @@ func (c *Client) refreshToken() error {
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
 	if err != nil {
 		return fmt.Errorf("read token response: %w", err)
 	}
@@ -197,6 +203,7 @@ type QueryResult struct {
 }
 
 // Query executes a SOQL query and returns all results (follows nextRecordsUrl automatically).
+// Accumulation is capped at 10 000 records to prevent unbounded memory growth.
 func (c *Client) Query(soql string) (*QueryResult, error) {
 	path := fmt.Sprintf("/services/data/%s/query?q=%s", c.apiVersion, url.QueryEscape(soql))
 
@@ -209,7 +216,7 @@ func (c *Client) Query(soql string) (*QueryResult, error) {
 			return nil, fmt.Errorf("query request failed: %w", err)
 		}
 
-		respBody, err := io.ReadAll(resp.Body)
+		respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
 		_ = resp.Body.Close()
 
 		if err != nil {
@@ -233,10 +240,14 @@ func (c *Client) Query(soql string) (*QueryResult, error) {
 		allRecords = append(allRecords, result.Records...)
 		totalSize = result.TotalSize
 
-		if result.Done || result.NextRecordsURL == "" {
+		if result.Done || result.NextRecordsURL == "" || len(allRecords) >= maxQueryRecords {
 			break
 		}
 		path = result.NextRecordsURL
+	}
+
+	if len(allRecords) > maxQueryRecords {
+		allRecords = allRecords[:maxQueryRecords]
 	}
 
 	return &QueryResult{
@@ -279,7 +290,7 @@ func (c *Client) Describe(objectName string) (*DescribeResult, error) {
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
 	if err != nil {
 		return nil, fmt.Errorf("read describe response: %w", err)
 	}
@@ -333,7 +344,7 @@ func (c *Client) GetIdentity() (*UserInfo, error) {
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
 	if err != nil {
 		return nil, fmt.Errorf("read identity response: %w", err)
 	}

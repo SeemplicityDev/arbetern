@@ -26,6 +26,14 @@ const (
 
 	// Confluence OAuth 2.0 API base URL (same cloud ID as Jira).
 	atlassianConfluenceOAuthBase = "https://api.atlassian.com/ex/confluence"
+
+	// Response body size limits for io.LimitReader.
+	maxResponseBody     = 10 << 20 // 10 MB — general API responses
+	maxAuthResponseBody = 5 << 20  // 5 MB  — OAuth / token responses
+
+	// Pagination page sizes.
+	jiraPageSize             = 100 // Jira caps maxResults at 100 per page
+	confluenceSpacesPageSize = 50
 )
 
 // Client provides access to the Atlassian Cloud REST APIs (Jira + Confluence).
@@ -152,7 +160,7 @@ func (c *Client) resolveCloudID() (string, error) {
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxAuthResponseBody))
 	if err != nil {
 		return "", fmt.Errorf("read response: %w", err)
 	}
@@ -215,7 +223,7 @@ func (c *Client) refreshToken() error {
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxAuthResponseBody))
 	if err != nil {
 		return fmt.Errorf("read token response: %w", err)
 	}

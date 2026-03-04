@@ -13,7 +13,20 @@ import (
 	"time"
 )
 
-const defaultBaseURL = "https://chorus.ai"
+const (
+	defaultBaseURL = "https://chorus.ai"
+
+	// Response body size limit for io.LimitReader.
+	maxResponseBody = 10 << 20 // 10 MB
+
+	// maxEngagementPages caps how many continuation pages we fetch.
+	// Kept low because each page is large and must fit in the LLM context window.
+	maxEngagementPages = 3
+
+	// maxFormattedEngagements limits how many engagements are formatted to keep
+	// the tool output within LLM context limits.
+	maxFormattedEngagements = 30
+)
 
 // Client provides access to the Chorus (ZoomInfo) REST API.
 // v3 endpoints use token auth; v1 endpoints use JSON:API format.
@@ -73,7 +86,7 @@ func (c *Client) execute(req *http.Request) ([]byte, error) {
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	data, err := io.ReadAll(resp.Body)
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
 	if err != nil {
 		return nil, fmt.Errorf("read chorus response: %w", err)
 	}
@@ -141,10 +154,6 @@ type engagementsPage struct {
 	ContinuationKey string       `json:"continuation_key"`
 	Engagements     []Engagement `json:"engagements"`
 }
-
-// maxEngagementPages caps how many continuation pages we fetch.
-// Kept low because each page is large and must fit in the LLM context window.
-const maxEngagementPages = 3
 
 // EngagementFilter controls the query parameters sent to GET /v3/engagements.
 // All fields are optional; only non-zero values are added to the request.
@@ -564,10 +573,6 @@ func FormatConversation(conv *Conversation) string {
 
 	return sb.String()
 }
-
-// maxFormattedEngagements limits how many engagements are formatted to keep
-// the tool output within LLM context limits.
-const maxFormattedEngagements = 30
 
 // FormatEngagements renders a compact summary of engagements for the LLM.
 // Keeps only the fields essential for analysis: title, date, duration,

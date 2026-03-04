@@ -38,40 +38,56 @@ type ConfluenceSpace struct {
 }
 
 // ListConfluenceSpaces returns all Confluence spaces the authenticated user can see.
+// Paginates using cursor-based _links.next from the Confluence v2 API.
 func (c *Client) ListConfluenceSpaces() ([]ConfluenceSpace, error) {
 	base := c.confluenceBaseURL()
-	endpoint := fmt.Sprintf("%s/api/v2/spaces?limit=50&sort=name", base)
+	nextURL := fmt.Sprintf("%s/api/v2/spaces?limit=%d&sort=name", base, confluenceSpacesPageSize)
 
-	req, err := http.NewRequest("GET", endpoint, nil)
-	if err != nil {
-		return nil, fmt.Errorf("build request: %w", err)
-	}
-	req.Header.Set("Accept", "application/json")
-	if err := c.authRequest(req); err != nil {
-		return nil, err
+	var allSpaces []ConfluenceSpace
+	for nextURL != "" {
+		req, err := http.NewRequest("GET", nextURL, nil)
+		if err != nil {
+			return nil, fmt.Errorf("build request: %w", err)
+		}
+		req.Header.Set("Accept", "application/json")
+		if err := c.authRequest(req); err != nil {
+			return nil, err
+		}
+
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("list spaces request failed: %w", err)
+		}
+
+		respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
+		_ = resp.Body.Close()
+		if err != nil {
+			return nil, fmt.Errorf("read response: %w", err)
+		}
+		if resp.StatusCode != http.StatusOK {
+			return nil, fmt.Errorf("list spaces returned HTTP %d: %s", resp.StatusCode, string(respBody))
+		}
+
+		var result struct {
+			Results []ConfluenceSpace `json:"results"`
+			Links   struct {
+				Next string `json:"next"`
+			} `json:"_links"`
+		}
+		if err := json.Unmarshal(respBody, &result); err != nil {
+			return nil, fmt.Errorf("parse spaces: %w", err)
+		}
+
+		allSpaces = append(allSpaces, result.Results...)
+
+		if result.Links.Next == "" || len(result.Results) == 0 {
+			break
+		}
+		// _links.next is a relative path; prepend the base URL.
+		nextURL = base + result.Links.Next
 	}
 
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("list spaces request failed: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("read response: %w", err)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("list spaces returned HTTP %d: %s", resp.StatusCode, string(respBody))
-	}
-
-	var result struct {
-		Results []ConfluenceSpace `json:"results"`
-	}
-	if err := json.Unmarshal(respBody, &result); err != nil {
-		return nil, fmt.Errorf("parse spaces: %w", err)
-	}
-	return result.Results, nil
+	return allSpaces, nil
 }
 
 // ConfluenceSearchResult represents a page returned by the Confluence search (CQL).
@@ -110,7 +126,7 @@ func (c *Client) SearchConfluencePages(cql string, limit int) ([]ConfluenceSearc
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	respBody, err := io.ReadAll(resp.Body)
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
 	if err != nil {
 		return nil, fmt.Errorf("read response: %w", err)
 	}
@@ -187,7 +203,7 @@ func (c *Client) GetConfluencePage(pageID string) (*ConfluencePage, error) {
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	respBody, err := io.ReadAll(resp.Body)
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
 	if err != nil {
 		return nil, fmt.Errorf("read response: %w", err)
 	}
