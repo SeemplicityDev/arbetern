@@ -566,9 +566,10 @@ func refreshIntegrations(
 	if cfg.ChorusConfigured() {
 		chorusConnected := chorusClient != nil && chorusClient.Ready()
 		chorusPerms := []permission{
-			{Scope: "engagements", Description: "List and search Chorus meetings/calls", Required: true, Granted: boolPtr(chorusConnected)},
-			{Scope: "conversations", Description: "Fetch detailed meeting analytics (summary, trackers, action items)", Required: true, Granted: boolPtr(chorusConnected)},
-			{Scope: "momentum/deals", Description: "List deals with momentum scores and engagement analytics", Required: true, Granted: boolPtr(chorusConnected)},
+			{Scope: "engagements", Description: "List and search Chorus conversations, meetings, and calls via v3 API", Required: true, Granted: boolPtr(chorusConnected)},
+			{Scope: "conversations/:id", Description: "Fetch detailed conversation analytics (summary, trackers, action items, deal)", Required: true, Granted: boolPtr(chorusConnected)},
+			{Scope: "sales-qualifications", Description: "Extract and retrieve Sales Qualification Framework (MEDDIC) analysis from call transcripts", Required: false, Granted: boolPtr(chorusConnected)},
+			{Scope: "sales-qualifications/writeback-crm", Description: "Write back qualification-derived field updates to CRM", Required: false, Granted: boolPtr(chorusConnected)},
 		}
 		result = append(result, integration{
 			ID:          "chorus",
@@ -583,9 +584,10 @@ func refreshIntegrations(
 			Name:       "Chorus",
 			Configured: false,
 			Permissions: []permission{
-				{Scope: "engagements", Description: "List and search Chorus meetings/calls", Required: true},
-				{Scope: "conversations", Description: "Fetch detailed meeting analytics", Required: true},
-				{Scope: "momentum/deals", Description: "List deals with momentum scores", Required: true},
+				{Scope: "engagements", Description: "List and search Chorus conversations, meetings, and calls via v3 API", Required: true},
+				{Scope: "conversations/:id", Description: "Fetch detailed conversation analytics", Required: true},
+				{Scope: "sales-qualifications", Description: "Extract and retrieve MEDDIC analysis from call transcripts", Required: false},
+				{Scope: "sales-qualifications/writeback-crm", Description: "Write back qualification-derived field updates to CRM", Required: false},
 			},
 		})
 	}

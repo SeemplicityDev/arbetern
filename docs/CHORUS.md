@@ -44,13 +44,24 @@ go run .
 
 ## API Endpoints Used
 
-Arbetern uses the Chorus REST API v3:
+Arbetern uses two Chorus API versions:
+
+**v3** — primary, used for listing/searching conversations (engagements):
 
 | Endpoint | Method | Description |
 |---|---|---|
-| `/api/v3/engagements` | GET | List meetings within a date range |
-| `/api/v3/conversations/{meetingId}` | GET | Get detailed analytics for a specific meeting |
-| `/api/v3/momentum/deals` | POST | List deals with momentum scores and risk indicators |
+| `/v3/engagements` | GET | List conversations with rich filters (date, duration, type, participant, team, disposition, trackers) |
+
+**v1 (JSON:API)** — used for single-conversation detail and sales qualifications:
+
+| Endpoint | Method | Description |
+|---|---|---|
+| `/api/v1/conversations/:id` | GET | Get detailed analytics for a specific conversation |
+| `/api/v1/sales-qualifications` | POST | Extract Sales Qualification Framework (MEDDIC) data from a recording |
+| `/api/v1/sales-qualifications/:recording_id` | GET | Retrieve previously extracted SQF analysis |
+| `/api/v1/sales-qualifications/actions/writeback-crm` | POST | Write qualification-derived field updates back to CRM |
+
+> **Note:** The v3 `/engagements` endpoint is the canonical way to list/search conversations. The v1 `/conversations/:id` endpoint is only for fetching full detail on a single conversation.
 
 ## Available Tools
 
@@ -58,20 +69,28 @@ Once configured, the Pulse agent exposes the following Chorus tools:
 
 | Tool | Description |
 |---|---|
-| **chorus_list_meetings** | List meetings/calls within a date range. Returns title, participants, duration, and link |
-| **chorus_get_conversation** | Get detailed analytics for a specific meeting — summary, talk ratio, sentiment, topics, action items, trackers, and participants |
-| **chorus_list_deals** | List deals from Chorus Momentum with scores, activity counts, risk indicators, and stage info |
+| **chorus_list_conversations** | List/search conversations via v3 API. Supports filters: date range, duration, engagement type, participant email, user/team IDs, disposition, trackers. Returns compact summaries with meeting notes, action items, participants, and opportunity info |
+| **chorus_get_conversation** | Get full details for a specific conversation by ID (v1 API) — recording analytics, deal info, participants with roles/titles, trackers, action items, and metrics |
+| **chorus_create_sales_qualification** | Extract MEDDIC / Sales Qualification Framework data from a recording. Returns structured fields with supporting quotes |
+| **chorus_get_sales_qualification** | Retrieve a previously extracted Sales Qualification analysis by recording ID |
+| **chorus_writeback_crm** | Write qualification-derived field updates back to CRM (e.g. Salesforce Opportunity) |
 
 ## Example Slack Commands
 
 ```
-/pulse give me all deals from the last month
-/pulse what are my biggest deals closing this quarter
 /pulse show me meetings from last week
-/pulse get conversation details for meeting abc-123
-/pulse what deals have low momentum scores
+/pulse what conversations happened with Acme in the last month
+/pulse get conversation details for ID abc123
+/pulse give me all deals from the last 30 days
+/pulse which deals are closing this quarter
 /pulse summarize call activity for the Acme account
+/pulse show me calls with john@acme.com
+/pulse run MEDDIC analysis on recording abc123
+/pulse get the sales qualification for my last call with Acme
+/pulse write back MEDDIC fields to the Salesforce opportunity
 ```
+
+> When users ask about "deals", Pulse lists Chorus conversations and extracts embedded deal/opportunity data from engagements that have linked CRM deals.
 
 ## Combining with Salesforce
 
@@ -83,4 +102,4 @@ Chorus works best alongside Salesforce. When both integrations are configured, P
 /pulse prepare a QBR summary for the Acme account with call insights and pipeline data
 ```
 
-The LLM automatically decides which tools to invoke — no special syntax needed.
+The LLM uses `chorus_list_conversations` to find calls with embedded deal data, then `salesforce_query` for CRM opportunity details, and presents a unified view.

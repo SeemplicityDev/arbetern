@@ -514,44 +514,80 @@ func (h *GeneralHandler) buildTools() []github.Tool {
 		tools = append(tools, github.Tool{
 			Type: "function",
 			Function: github.ToolFunction{
-				Name:        "chorus_list_meetings",
-				Description: "List meetings and calls recorded in Chorus within a date range. Returns meeting titles, dates, durations, and participants. Use this when the user asks about recent calls, meetings, or conversations for a customer or time period. Dates must be YYYY-MM-DD format.",
+				Name:        "chorus_list_conversations",
+				Description: "List Chorus conversations (meetings, calls, recordings, emails) matching optional filters. This is the primary tool for ANY Chorus query — listings, deal data, engagement activity, participant searches, etc. Returns summaries with meeting notes, action items, participants, trackers, and opportunity info. Dates use ISO-8601 (e.g. '2026-02-01T00:00:00Z'). Optimize which params you pass based on the user's request.",
 				Parameters: json.RawMessage(`{
 					"type":"object",
 					"properties":{
-						"from":{"type":"string","description":"Start date in YYYY-MM-DD format (e.g. '2026-02-01')"},
-						"to":{"type":"string","description":"End date in YYYY-MM-DD format (e.g. '2026-03-01')"},
-						"limit":{"type":"integer","description":"Max results to return (default 50, max 100)"}
-					},
-					"required":["from","to"]
+						"min_date":{"type":"string","description":"Start of date range (ISO-8601)"},
+						"max_date":{"type":"string","description":"End of date range (ISO-8601)"},
+						"min_duration":{"type":"number","description":"Minimum meeting duration in seconds"},
+						"max_duration":{"type":"number","description":"Maximum meeting duration in seconds"},
+						"engagement_type":{"type":"string","description":"Type of engagement (e.g. 'dialer')"},
+						"content_type":{"type":"string","description":"Content type filter (e.g. 'email_opened')"},
+						"participants_email":{"type":"string","description":"Filter by participant email address"},
+						"user_id":{"type":"string","description":"Comma-separated owner User ID(s)"},
+						"team_id":{"type":"string","description":"Comma-separated Team ID(s) for engagement owner"},
+						"engagement_id":{"type":"string","description":"Comma-separated engagement IDs to fetch specific records"},
+						"with_trackers":{"type":"boolean","description":"Return tracker information with results (default false)"},
+						"disposition_connected":{"type":"boolean","description":"Filter for connected calls only"},
+						"disposition_voicemail":{"type":"boolean","description":"Filter for voicemail calls only"}
+					}
 				}`),
 			},
 		}, github.Tool{
 			Type: "function",
 			Function: github.ToolFunction{
 				Name:        "chorus_get_conversation",
-				Description: "Get detailed analytics for a specific Chorus meeting/call by its meeting ID. Returns the AI-generated summary, talk/listen ratio, sentiment, key topics, trackers (e.g. pricing, competitor mentions), action items, and participants. Use this after chorus_list_meetings to drill into a specific call.",
+				Description: "Get full details for a specific Chorus conversation by its ID. Returns recording analytics, deal info, account, participants with roles/titles, trackers, action items, metrics, and summary. Use this after chorus_list_conversations to drill into a specific call.",
 				Parameters: json.RawMessage(`{
 					"type":"object",
 					"properties":{
-						"meeting_id":{"type":"string","description":"Chorus meeting ID (from chorus_list_meetings results)"}
+						"conversation_id":{"type":"string","description":"Chorus conversation ID (from chorus_list_conversations results)"}
 					},
-					"required":["meeting_id"]
+					"required":["conversation_id"]
 				}`),
 			},
 		}, github.Tool{
 			Type: "function",
 			Function: github.ToolFunction{
-				Name:        "chorus_list_deals",
-				Description: "List deals tracked by Chorus Momentum with engagement analytics. Returns deal name, account, amount, stage, close date, momentum score, meeting/email counts, and risk indicators. Use this when the user asks about deals, pipeline, deal momentum, or engagement activity on deals. Supports filtering by date range and owner.",
+				Name:        "chorus_create_sales_qualification",
+				Description: "Extract Sales Qualification Framework data (e.g. MEDDIC) from a Chorus call transcript by recording ID. This triggers AI analysis of the recording and returns structured qualification fields with supporting quotes. Use this when the user wants to analyze a call for sales qualification criteria.",
 				Parameters: json.RawMessage(`{
 					"type":"object",
 					"properties":{
-						"from":{"type":"string","description":"Start date in YYYY-MM-DD format — filter deals with activity after this date"},
-						"to":{"type":"string","description":"End date in YYYY-MM-DD format — filter deals with activity before this date"},
-						"owner":{"type":"string","description":"Filter by deal owner name or email (optional)"},
-						"limit":{"type":"integer","description":"Max results to return (default 50, max 100)"}
-					}
+						"recording_id":{"type":"string","description":"Chorus recording/conversation ID to analyze"}
+					},
+					"required":["recording_id"]
+				}`),
+			},
+		}, github.Tool{
+			Type: "function",
+			Function: github.ToolFunction{
+				Name:        "chorus_get_sales_qualification",
+				Description: "Retrieve a previously extracted Sales Qualification Framework analysis by recording ID. Returns MEDDIC (or other framework) fields, supporting quotes, meeting notes, and next steps. Use this to check if a qualification analysis already exists before creating a new one.",
+				Parameters: json.RawMessage(`{
+					"type":"object",
+					"properties":{
+						"recording_id":{"type":"string","description":"Chorus recording/conversation ID"}
+					},
+					"required":["recording_id"]
+				}`),
+			},
+		}, github.Tool{
+			Type: "function",
+			Function: github.ToolFunction{
+				Name:        "chorus_writeback_crm",
+				Description: "Write sales-qualification-derived field updates back to the CRM (e.g. Salesforce). Updates opportunity fields based on insights extracted from Chorus call analysis. Use this after reviewing sales qualification data to push updates to CRM records.",
+				Parameters: json.RawMessage(`{
+					"type":"object",
+					"properties":{
+						"meeting_id":{"type":"string","description":"Chorus meeting/recording ID that the CRM changes are derived from"},
+						"opportunity_id":{"type":"string","description":"CRM opportunity ID to update"},
+						"object_type":{"type":"string","description":"CRM object type (default: Opportunity)","enum":["Opportunity"]},
+						"crm_changes":{"type":"array","description":"Array of field changes to write back","items":{"type":"object","properties":{"field_name":{"type":"string"},"new_value":{"type":"string"},"previous_value":{"type":"string"}},"required":["field_name","new_value"]}}
+					},
+					"required":["meeting_id","opportunity_id","crm_changes"]
 				}`),
 			},
 		})
@@ -1926,78 +1962,148 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 
 	// ---- Chorus tools ----
 
-	case "chorus_list_meetings":
+	case "chorus_list_conversations":
 		if h.chorusClient == nil || !h.chorusClient.Ready() {
 			return "Error: Chorus integration is not connected. Set CHORUS_API_TOKEN to enable it."
 		}
 		var args struct {
-			From  string `json:"from"`
-			To    string `json:"to"`
-			Limit int    `json:"limit"`
+			MinDate              string  `json:"min_date"`
+			MaxDate              string  `json:"max_date"`
+			MinDuration          float64 `json:"min_duration"`
+			MaxDuration          float64 `json:"max_duration"`
+			EngagementType       string  `json:"engagement_type"`
+			ContentType          string  `json:"content_type"`
+			ParticipantsEmail    string  `json:"participants_email"`
+			UserID               string  `json:"user_id"`
+			TeamID               string  `json:"team_id"`
+			EngagementID         string  `json:"engagement_id"`
+			WithTrackers         bool    `json:"with_trackers"`
+			DispositionConnected bool    `json:"disposition_connected"`
+			DispositionVoicemail bool    `json:"disposition_voicemail"`
 		}
 		if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
 			return fmt.Sprintf("Error parsing arguments: %v", err)
 		}
-		if args.From == "" || args.To == "" {
-			return "Error: from and to dates are required (YYYY-MM-DD)."
-		}
-		meetings, err := h.chorusClient.ListMeetings(args.From, args.To, args.Limit)
+		engagements, err := h.chorusClient.ListEngagements(chorus.EngagementFilter{
+			MinDate:              args.MinDate,
+			MaxDate:              args.MaxDate,
+			MinDuration:          args.MinDuration,
+			MaxDuration:          args.MaxDuration,
+			EngagementType:       args.EngagementType,
+			ContentType:          args.ContentType,
+			ParticipantsEmail:    args.ParticipantsEmail,
+			UserID:               args.UserID,
+			TeamID:               args.TeamID,
+			EngagementID:         args.EngagementID,
+			WithTrackers:         args.WithTrackers,
+			DispositionConnected: args.DispositionConnected,
+			DispositionVoicemail: args.DispositionVoicemail,
+		})
 		if err != nil {
-			return fmt.Sprintf("Error listing Chorus meetings: %v", err)
+			return fmt.Sprintf("Error listing Chorus conversations: %v", err)
 		}
-		if len(meetings) == 0 {
-			return fmt.Sprintf("No Chorus meetings found between %s and %s.", args.From, args.To)
+		if len(engagements) == 0 {
+			return "No Chorus conversations found matching the filter."
 		}
-		log.Printf("[user=%s channel=%s] listed %d Chorus meetings (%s → %s)", userID, channelID, len(meetings), args.From, args.To)
-		return chorus.FormatMeetings(meetings)
+		log.Printf("[user=%s channel=%s] listed %d Chorus conversations", userID, channelID, len(engagements))
+		return chorus.FormatEngagements(engagements)
 
 	case "chorus_get_conversation":
 		if h.chorusClient == nil || !h.chorusClient.Ready() {
 			return "Error: Chorus integration is not connected. Set CHORUS_API_TOKEN to enable it."
 		}
 		var args struct {
-			MeetingID string `json:"meeting_id"`
+			ConversationID string `json:"conversation_id"`
 		}
 		if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
 			return fmt.Sprintf("Error parsing arguments: %v", err)
 		}
-		if args.MeetingID == "" {
-			return "Error: meeting_id is required."
+		if args.ConversationID == "" {
+			return "Error: conversation_id is required."
 		}
-		conv, err := h.chorusClient.GetConversation(args.MeetingID)
+		conv, err := h.chorusClient.GetConversation(args.ConversationID)
 		if err != nil {
 			return fmt.Sprintf("Error fetching Chorus conversation: %v", err)
 		}
-		log.Printf("[user=%s channel=%s] fetched Chorus conversation %s (%q)", userID, channelID, args.MeetingID, conv.Title)
+		log.Printf("[user=%s channel=%s] fetched Chorus conversation %s (%q)", userID, channelID, args.ConversationID, conv.Attributes.Name)
 		return chorus.FormatConversation(conv)
 
-	case "chorus_list_deals":
+	case "chorus_create_sales_qualification":
 		if h.chorusClient == nil || !h.chorusClient.Ready() {
 			return "Error: Chorus integration is not connected. Set CHORUS_API_TOKEN to enable it."
 		}
 		var args struct {
-			From  string `json:"from"`
-			To    string `json:"to"`
-			Owner string `json:"owner"`
-			Limit int    `json:"limit"`
+			RecordingID string `json:"recording_id"`
 		}
 		if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
 			return fmt.Sprintf("Error parsing arguments: %v", err)
 		}
-		deals, err := h.chorusClient.ListDeals(chorus.DealsFilter{
-			From:  args.From,
-			To:    args.To,
-			Owner: args.Owner,
-			Limit: args.Limit,
-		})
+		if args.RecordingID == "" {
+			return "Error: recording_id is required."
+		}
+		sq, err := h.chorusClient.CreateSalesQualification(args.RecordingID)
 		if err != nil {
-			return fmt.Sprintf("Error listing Chorus deals: %v", err)
+			return fmt.Sprintf("Error creating sales qualification: %v", err)
 		}
-		if len(deals) == 0 {
-			return "No Chorus deals found matching the filter."
+		log.Printf("[user=%s channel=%s] created sales qualification for recording %s", userID, channelID, args.RecordingID)
+		return chorus.FormatSalesQualification(sq)
+
+	case "chorus_get_sales_qualification":
+		if h.chorusClient == nil || !h.chorusClient.Ready() {
+			return "Error: Chorus integration is not connected. Set CHORUS_API_TOKEN to enable it."
 		}
-		log.Printf("[user=%s channel=%s] listed %d Chorus deals", userID, channelID, len(deals))
-		return chorus.FormatDeals(deals)
+		var args struct {
+			RecordingID string `json:"recording_id"`
+		}
+		if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+			return fmt.Sprintf("Error parsing arguments: %v", err)
+		}
+		if args.RecordingID == "" {
+			return "Error: recording_id is required."
+		}
+		sq, err := h.chorusClient.GetSalesQualification(args.RecordingID)
+		if err != nil {
+			return fmt.Sprintf("Error fetching sales qualification: %v", err)
+		}
+		log.Printf("[user=%s channel=%s] fetched sales qualification for recording %s", userID, channelID, args.RecordingID)
+		return chorus.FormatSalesQualification(sq)
+
+	case "chorus_writeback_crm":
+		if h.chorusClient == nil || !h.chorusClient.Ready() {
+			return "Error: Chorus integration is not connected. Set CHORUS_API_TOKEN to enable it."
+		}
+		var args struct {
+			MeetingID     string `json:"meeting_id"`
+			OpportunityID string `json:"opportunity_id"`
+			ObjectType    string `json:"object_type"`
+			CRMChanges    []struct {
+				FieldName     string `json:"field_name"`
+				NewValue      string `json:"new_value"`
+				PreviousValue string `json:"previous_value"`
+			} `json:"crm_changes"`
+		}
+		if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+			return fmt.Sprintf("Error parsing arguments: %v", err)
+		}
+		if args.MeetingID == "" || args.OpportunityID == "" || len(args.CRMChanges) == 0 {
+			return "Error: meeting_id, opportunity_id, and at least one crm_changes entry are required."
+		}
+		if args.ObjectType == "" {
+			args.ObjectType = "Opportunity"
+		}
+		changes := make([]chorus.CRMChange, len(args.CRMChanges))
+		for i, ch := range args.CRMChanges {
+			changes[i] = chorus.CRMChange{
+				FieldName:     ch.FieldName,
+				NewValue:      ch.NewValue,
+				PreviousValue: ch.PreviousValue,
+			}
+		}
+		if err := h.chorusClient.WritebackCRM(args.MeetingID, args.ObjectType, args.OpportunityID, changes); err != nil {
+			return fmt.Sprintf("Error writing back CRM fields: %v", err)
+		}
+		log.Printf("[user=%s channel=%s] wrote back %d CRM changes for meeting %s", userID, channelID, len(changes), args.MeetingID)
+		return fmt.Sprintf("Successfully wrote %d CRM field update(s) for opportunity %s from meeting %s.", len(changes), args.OpportunityID, args.MeetingID)
 
 	default:
 		return fmt.Sprintf("Unknown tool: %s", name)

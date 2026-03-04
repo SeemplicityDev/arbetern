@@ -188,7 +188,7 @@ func (m *ModelsClient) doChat(ctx context.Context, messages []ChatMessage, tools
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("LLM API returned %d: %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf("LLM API returned %d: %s", resp.StatusCode, extractAPIErrorMessage(body))
 	}
 
 	var chatResp ChatResponse
@@ -220,6 +220,7 @@ type responsesRequest struct {
 	Instructions string               `json:"instructions,omitempty"`
 	Model        string               `json:"model"`
 	Tools        []responsesTool      `json:"tools,omitempty"`
+	Truncation   string               `json:"truncation,omitempty"` // "auto" or "disabled"
 }
 
 // responsesTool is the tool definition format for the Azure Responses API.
@@ -406,6 +407,7 @@ func (m *ModelsClient) doResponses(ctx context.Context, messages []ChatMessage, 
 		Instructions: instructions,
 		Model:        m.model,
 		Tools:        chatToolsToResponsesTools(tools),
+		Truncation:   "auto",
 	}
 
 	payload, err := json.Marshal(reqBody)
@@ -439,7 +441,7 @@ func (m *ModelsClient) doResponses(ctx context.Context, messages []ChatMessage, 
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("responses API returned %d: %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf("responses API returned %d: %s", resp.StatusCode, extractAPIErrorMessage(body))
 	}
 
 	var rr responsesResponse
@@ -452,6 +454,25 @@ func (m *ModelsClient) doResponses(ctx context.Context, messages []ChatMessage, 
 	}
 
 	return responsesOutputToChatResponse(&rr), nil
+}
+
+// extractAPIErrorMessage attempts to parse an OpenAI-style JSON error body
+// and return just the human-readable message. Falls back to the raw body if
+// parsing fails.
+func extractAPIErrorMessage(body []byte) string {
+	var parsed struct {
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(body, &parsed); err == nil && parsed.Error.Message != "" {
+		return parsed.Error.Message
+	}
+	// Truncate long raw bodies to keep log lines reasonable.
+	if len(body) > 300 {
+		return string(body[:300]) + "…"
+	}
+	return string(body)
 }
 
 func NewChatMessage(role, content string) ChatMessage {
