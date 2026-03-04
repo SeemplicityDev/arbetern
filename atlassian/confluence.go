@@ -137,8 +137,12 @@ func (c *Client) SearchConfluencePages(cql string, limit int) ([]ConfluenceSearc
 	results := make([]ConfluenceSearchResult, 0, len(raw.Results))
 	for _, r := range raw.Results {
 		webURL := r.Links.WebUI
-		if r.Links.Base != "" && webURL != "" {
-			webURL = r.Links.Base + webURL
+		base := r.Links.Base
+		if base == "" {
+			base = strings.TrimRight(c.siteURL, "/") + "/wiki"
+		}
+		if webURL != "" {
+			webURL = base + webURL
 		}
 		results = append(results, ConfluenceSearchResult{
 			ID:     r.ID,
@@ -214,8 +218,12 @@ func (c *Client) GetConfluencePage(pageID string) (*ConfluencePage, error) {
 	}
 
 	webURL := raw.Links.WebUI
-	if raw.Links.Base != "" && webURL != "" {
-		webURL = raw.Links.Base + webURL
+	base = raw.Links.Base
+	if base == "" {
+		base = strings.TrimRight(c.siteURL, "/")
+	}
+	if webURL != "" {
+		webURL = base + webURL
 	}
 
 	return &ConfluencePage{
