@@ -323,7 +323,7 @@ func ResolveConfluencePageID(input string) (string, error) {
 }
 
 // decodeTinyLink decodes a Confluence tiny-link code (base64-encoded page ID).
-// Confluence encodes the content ID as big-endian bytes, base64-encodes them,
+// Confluence encodes the content ID as little-endian bytes, base64-encodes them,
 // and strips trailing '=' padding.
 func decodeTinyLink(code string) (int64, error) {
 	// Re-add base64 padding.
@@ -345,10 +345,10 @@ func decodeTinyLink(code string) (int64, error) {
 		return 0, fmt.Errorf("unexpected decoded length %d bytes", len(data))
 	}
 
-	// Big-endian bytes → int64.
+	// Little-endian bytes → int64.
 	var id int64
-	for _, b := range data {
-		id = (id << 8) | int64(b)
+	for i := len(data) - 1; i >= 0; i-- {
+		id = (id << 8) | int64(data[i])
 	}
 	if id <= 0 {
 		return 0, fmt.Errorf("decoded page ID is not positive: %d", id)
