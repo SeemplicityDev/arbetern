@@ -228,7 +228,8 @@ agents/              # agent definitions (one directory per agent)
     prompts.yaml     # Sr. Technical Product Manager agent prompts
 commands/            # intent routing, debug/general handlers
 config/              # env var loading
-github/              # GitHub API client + Models/Azure API client
+github/              # GitHub REST API client (repos, PRs, files, workflows)
+llm/                 # LLM inference client + tool types (Azure OpenAI, GitHub Models)
 atlassian/           # Atlassian Cloud REST API client (Jira + Confluence)
 nvd/                 # NVD (National Vulnerability Database) CVE API client
 salesforce/          # Salesforce REST API client (SOQL queries, OAuth 2.0)

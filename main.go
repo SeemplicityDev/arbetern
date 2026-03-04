@@ -20,6 +20,7 @@ import (
 	"github.com/justmike1/arbetern/commands"
 	"github.com/justmike1/arbetern/config"
 	"github.com/justmike1/arbetern/github"
+	"github.com/justmike1/arbetern/llm"
 	"github.com/justmike1/arbetern/nvd"
 	"github.com/justmike1/arbetern/prompts"
 	"github.com/justmike1/arbetern/salesforce"
@@ -248,8 +249,8 @@ func refreshIntegrations(
 	jiraClient *atlassian.Client,
 	sfClient *salesforce.Client,
 	chorusClient *chorus.Client,
-	modelsClient *github.ModelsClient,
-	codeModelsClient *github.ModelsClient,
+	modelsClient *llm.Client,
+	codeModelsClient *llm.Client,
 ) {
 	// --- Slack ---
 	slackPerms := []permission{
@@ -607,8 +608,8 @@ func startIntegrationsRefresher(
 	jiraClient *atlassian.Client,
 	sfClient *salesforce.Client,
 	chorusClient *chorus.Client,
-	modelsClient *github.ModelsClient,
-	codeModelsClient *github.ModelsClient,
+	modelsClient *llm.Client,
+	codeModelsClient *llm.Client,
 ) {
 	refreshIntegrations(cfg, slackClient, ghClient, jiraClient, sfClient, chorusClient, modelsClient, codeModelsClient)
 
@@ -634,19 +635,19 @@ func main() {
 		ghClient = github.NewClient(cfg.GitHubToken)
 	}
 
-	var modelsClient *github.ModelsClient
-	var codeModelsClient *github.ModelsClient
+	var modelsClient *llm.Client
+	var codeModelsClient *llm.Client
 	if cfg.UseAzure() {
-		modelsClient = github.NewAzureModelsClient(cfg.AzureEndpoint, cfg.AzureAPIKey, cfg.GeneralModel)
+		modelsClient = llm.NewAzureClient(cfg.AzureEndpoint, cfg.AzureAPIKey, cfg.GeneralModel)
 		log.Printf("Using Azure OpenAI backend: %s (general: %s)", cfg.AzureEndpoint, cfg.GeneralModel)
-		codeModelsClient = github.NewAzureModelsClient(cfg.AzureEndpoint, cfg.AzureAPIKey, cfg.CodeModel)
+		codeModelsClient = llm.NewAzureClient(cfg.AzureEndpoint, cfg.AzureAPIKey, cfg.CodeModel)
 		if cfg.CodeModel != cfg.GeneralModel {
 			log.Printf("Code model (Azure): %s", cfg.CodeModel)
 		}
 	} else {
-		modelsClient = github.NewModelsClient(cfg.GitHubToken, cfg.GeneralModel)
+		modelsClient = llm.NewClient(cfg.GitHubToken, cfg.GeneralModel)
 		log.Printf("Using GitHub Models backend (general: %s)", cfg.GeneralModel)
-		codeModelsClient = github.NewModelsClient(cfg.GitHubToken, cfg.CodeModel)
+		codeModelsClient = llm.NewClient(cfg.GitHubToken, cfg.CodeModel)
 		if cfg.CodeModel != cfg.GeneralModel {
 			log.Printf("Code model (GitHub): %s", cfg.CodeModel)
 		}

@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/justmike1/arbetern/github"
+	"github.com/justmike1/arbetern/llm"
 	"github.com/justmike1/arbetern/slack"
 )
 
@@ -15,7 +16,7 @@ const channelHistoryLimit = 20
 type DebugHandler struct {
 	slackClient     SlackClient
 	ghClient        *github.Client
-	modelsClient    *github.ModelsClient
+	modelsClient    *llm.Client
 	contextProvider *ContextProvider
 	memory          *ConversationMemory
 	prompts         PromptProvider

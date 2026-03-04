@@ -12,6 +12,7 @@ import (
 	"github.com/justmike1/arbetern/chorus"
 	"github.com/justmike1/arbetern/config"
 	"github.com/justmike1/arbetern/github"
+	"github.com/justmike1/arbetern/llm"
 	"github.com/justmike1/arbetern/nvd"
 	"github.com/justmike1/arbetern/salesforce"
 	"github.com/justmike1/arbetern/slack"
@@ -40,8 +41,8 @@ func init() {
 type GeneralHandler struct {
 	slackClient      SlackClient
 	ghClient         *github.Client
-	modelsClient     *github.ModelsClient
-	codeModelsClient *github.ModelsClient
+	modelsClient     *llm.Client
+	codeModelsClient *llm.Client
 	jiraClient       *atlassian.Client
 	nvdClient        *nvd.Client
 	sfClient         *salesforce.Client
@@ -107,9 +108,9 @@ func (h *GeneralHandler) Execute(channelID, userID, text, responseURL, auditTS s
 		systemMsg += fmt.Sprintf("\n\nGitHub Actions workflow run details and logs (auto-fetched from URLs found in your message):\n\n%s", workflowLogs)
 	}
 
-	messages := []github.ChatMessage{
-		github.NewChatMessage("system", systemMsg),
-		github.NewChatMessage("user", text),
+	messages := []llm.ChatMessage{
+		llm.NewChatMessage("system", systemMsg),
+		llm.NewChatMessage("user", text),
 	}
 
 	repliedInThread := false
@@ -147,7 +148,7 @@ func (h *GeneralHandler) Execute(channelID, userID, text, responseURL, auditTS s
 			return
 		}
 
-		messages = append(messages, github.ChatMessage{
+		messages = append(messages, llm.ChatMessage{
 			Role:      "assistant",
 			ToolCalls: choice.Message.ToolCalls,
 		})
@@ -155,7 +156,7 @@ func (h *GeneralHandler) Execute(channelID, userID, text, responseURL, auditTS s
 		for _, tc := range choice.Message.ToolCalls {
 			log.Printf("[user=%s channel=%s] LLM called tool: %s(%s)", userID, channelID, tc.Function.Name, tc.Function.Arguments)
 			result := h.executeTool(ctx, channelID, userID, auditTS, tc.Function.Name, tc.Function.Arguments)
-			messages = append(messages, github.NewToolResultMessage(tc.ID, result))
+			messages = append(messages, llm.NewToolResultMessage(tc.ID, result))
 			if tc.Function.Name == "reply_in_thread" && !strings.HasPrefix(result, "Error") {
 				repliedInThread = true
 			}
@@ -184,11 +185,11 @@ func (h *GeneralHandler) systemPrompt() string {
 	return h.prompts.SystemPrompt("general")
 }
 
-func (h *GeneralHandler) buildTools() []github.Tool {
-	tools := []github.Tool{
+func (h *GeneralHandler) buildTools() []llm.Tool {
+	tools := []llm.Tool{
 		{
 			Type: "function",
-			Function: github.ToolFunction{
+			Function: llm.ToolFunction{
 				Name:        "list_org_repos",
 				Description: "List all repositories in the GitHub organization that the bot has access to.",
 				Parameters:  json.RawMessage(`{"type":"object","properties":{}}`),
@@ -196,7 +197,7 @@ func (h *GeneralHandler) buildTools() []github.Tool {
 		},
 		{
 			Type: "function",
-			Function: github.ToolFunction{
+			Function: llm.ToolFunction{
 				Name:        "list_user_repos",
 				Description: "List all repositories accessible by the authenticated GitHub user.",
 				Parameters:  json.RawMessage(`{"type":"object","properties":{}}`),
@@ -204,7 +205,7 @@ func (h *GeneralHandler) buildTools() []github.Tool {
 		},
 		{
 			Type: "function",
-			Function: github.ToolFunction{
+			Function: llm.ToolFunction{
 				Name:        "get_file_content",
 				Description: "Read the content of a file from a GitHub repository.",
 				Parameters: json.RawMessage(`{
@@ -220,7 +221,7 @@ func (h *GeneralHandler) buildTools() []github.Tool {
 		},
 		{
 			Type: "function",
-			Function: github.ToolFunction{
+			Function: llm.ToolFunction{
 				Name:        "get_repo_default_branch",
 				Description: "Get the default branch name of a repository.",
 				Parameters: json.RawMessage(`{
@@ -234,7 +235,7 @@ func (h *GeneralHandler) buildTools() []github.Tool {
 		},
 		{
 			Type: "function",
-			Function: github.ToolFunction{
+			Function: llm.ToolFunction{
 				Name:        "get_authenticated_user",
 				Description: "Get the GitHub username of the authenticated bot user.",
 				Parameters:  json.RawMessage(`{"type":"object","properties":{}}`),
@@ -242,7 +243,7 @@ func (h *GeneralHandler) buildTools() []github.Tool {
 		},
 		{
 			Type: "function",
-			Function: github.ToolFunction{
+			Function: llm.ToolFunction{
 				Name:        "resolve_owner",
 				Description: "Resolve the GitHub organization or user that owns repositories.",
 				Parameters:  json.RawMessage(`{"type":"object","properties":{}}`),
@@ -250,7 +251,7 @@ func (h *GeneralHandler) buildTools() []github.Tool {
 		},
 		{
 			Type: "function",
-			Function: github.ToolFunction{
+			Function: llm.ToolFunction{
 				Name:        "fetch_channel_context",
 				Description: "Fetch recent messages from the current Slack channel for additional context about the ongoing conversation.",
 				Parameters:  json.RawMessage(`{"type":"object","properties":{}}`),
@@ -258,7 +259,7 @@ func (h *GeneralHandler) buildTools() []github.Tool {
 		},
 		{
 			Type: "function",
-			Function: github.ToolFunction{
+			Function: llm.ToolFunction{
 				Name:        "search_files",
 				Description: "Search for files in a repository by name or path pattern. Returns all file paths containing the search term. Use this FIRST when looking for a specific file — it is much faster than navigating directories one by one.",
 				Parameters: json.RawMessage(`{
@@ -274,7 +275,7 @@ func (h *GeneralHandler) buildTools() []github.Tool {
 		},
 		{
 			Type: "function",
-			Function: github.ToolFunction{
+			Function: llm.ToolFunction{
 				Name:        "list_directory",
 				Description: "List the files and subdirectories at a path in a GitHub repository. Use this when get_file_content fails because a path is a directory, or when you need to discover what files exist under a path.",
 				Parameters: json.RawMessage(`{
@@ -290,7 +291,7 @@ func (h *GeneralHandler) buildTools() []github.Tool {
 		},
 		{
 			Type: "function",
-			Function: github.ToolFunction{
+			Function: llm.ToolFunction{
 				Name:        "modify_file",
 				Description: "Modify a file in a GitHub repository using a safe find-and-replace approach. Provide the exact text to find (old_content) and the replacement text (new_content). The tool reads the FULL file from GitHub, performs the replacement, then creates a branch, commits, and opens a PR. Multiple modify_file calls for the SAME repository are automatically grouped into a SINGLE pull request — so when implementing a change that touches several files, just call modify_file for each file and all changes will land in one PR. IMPORTANT: old_content must be an exact substring of the current file — include enough surrounding lines (3-5) will ensure a unique match. Only the matched section is replaced; the rest of the file is preserved.",
 				Parameters: json.RawMessage(`{
@@ -309,7 +310,7 @@ func (h *GeneralHandler) buildTools() []github.Tool {
 		},
 		{
 			Type: "function",
-			Function: github.ToolFunction{
+			Function: llm.ToolFunction{
 				Name:        "regex_replace_file",
 				Description: "Bulk-replace all matches of a SIMPLE regex pattern in a file. Best for uniform single-line replacements across a whole file (e.g. 'change all image.tag to latest'). Do NOT use for scoped/structural changes in a specific section — use modify_file instead for those. Keep patterns short and per-line. Avoid complex multi-line regex with (?:.|\\n)*? or lookaheads — if you need those, use modify_file. The tool reads the FULL file from GitHub, applies a Go RE2 regex replacement on ALL matches, creates a branch, commits, and opens a PR. Multiple calls for the same repo are grouped into a SINGLE PR. Replacement supports $1, $2 for captured groups.",
 				Parameters: json.RawMessage(`{
@@ -328,7 +329,7 @@ func (h *GeneralHandler) buildTools() []github.Tool {
 		},
 		{
 			Type: "function",
-			Function: github.ToolFunction{
+			Function: llm.ToolFunction{
 				Name:        "get_pull_request",
 				Description: "Get details, changed files, and diff of a GitHub pull request by number or URL. Use this to analyze what a PR changed, understand code patterns introduced or removed, and find old/new usage patterns.",
 				Parameters: json.RawMessage(`{
@@ -344,7 +345,7 @@ func (h *GeneralHandler) buildTools() []github.Tool {
 		},
 		{
 			Type: "function",
-			Function: github.ToolFunction{
+			Function: llm.ToolFunction{
 				Name:        "list_pull_requests",
 				Description: "List recent pull requests in a repository. Useful for finding relevant PRs by title, discovering recent changes, or identifying the PR that introduced a particular change.",
 				Parameters: json.RawMessage(`{
@@ -360,7 +361,7 @@ func (h *GeneralHandler) buildTools() []github.Tool {
 		},
 		{
 			Type: "function",
-			Function: github.ToolFunction{
+			Function: llm.ToolFunction{
 				Name:        "search_code",
 				Description: "Search for code content within a GitHub repository. Unlike search_files (which matches file names/paths), this searches inside file contents. Use this to find usages of functions, classes, patterns, imports, or any code string across the entire repository. Returns matching files with code fragments showing the context around each match.",
 				Parameters: json.RawMessage(`{
@@ -375,7 +376,7 @@ func (h *GeneralHandler) buildTools() []github.Tool {
 		},
 		{
 			Type: "function",
-			Function: github.ToolFunction{
+			Function: llm.ToolFunction{
 				Name:        "get_workflow_run",
 				Description: "Fetch details and logs for a GitHub Actions workflow run. Use this PROACTIVELY whenever you see a failed CI/CD notification, a GitHub Actions URL, or the user mentions a build/deploy/pipeline failure. Returns the run status, jobs, steps, annotations, and actual log output for any failed jobs so you can diagnose the root cause.",
 				Parameters: json.RawMessage(`{
@@ -389,7 +390,7 @@ func (h *GeneralHandler) buildTools() []github.Tool {
 		},
 		{
 			Type: "function",
-			Function: github.ToolFunction{
+			Function: llm.ToolFunction{
 				Name:        "rerun_failed_jobs",
 				Description: "Re-run only the failed jobs (and their dependent jobs) in a GitHub Actions workflow run. This is equivalent to clicking 'Re-run failed jobs' in the GitHub Actions UI. Use this when the user asks to retry, rerun, or re-trigger a failed workflow. Only works on completed runs that have at least one failed job.",
 				Parameters: json.RawMessage(`{
@@ -403,7 +404,7 @@ func (h *GeneralHandler) buildTools() []github.Tool {
 		},
 		{
 			Type: "function",
-			Function: github.ToolFunction{
+			Function: llm.ToolFunction{
 				Name:        "rerun_workflow",
 				Description: "Re-run an entire GitHub Actions workflow run (all jobs, not just failed ones). This is equivalent to clicking 'Re-run all jobs' in the GitHub Actions UI. Use this when the user wants to completely re-trigger a workflow from scratch.",
 				Parameters: json.RawMessage(`{
@@ -417,7 +418,7 @@ func (h *GeneralHandler) buildTools() []github.Tool {
 		},
 		{
 			Type: "function",
-			Function: github.ToolFunction{
+			Function: llm.ToolFunction{
 				Name:        "reply_in_thread",
 				Description: "Post a message as a threaded reply to a specific Slack message. Use this when the user asks you to reply inside someone's thread or respond to a particular message. You need the thread_ts of the target message from the channel context. IMPORTANT: Messages marked [BOT] are this bot's own messages — never reply to those. Always use the thread_ts of the HUMAN user's message (e.g. the person mentioned by name like 'Shahar', 'John', etc.).",
 				Parameters: json.RawMessage(`{
@@ -432,7 +433,7 @@ func (h *GeneralHandler) buildTools() []github.Tool {
 		},
 		{
 			Type: "function",
-			Function: github.ToolFunction{
+			Function: llm.ToolFunction{
 				Name:        "fetch_thread_context",
 				Description: "Fetch the full conversation from a Slack thread URL. Use this FIRST whenever the user provides a Slack thread/message link (https://...slack.com/archives/...) to read the thread's content before acting on it (e.g., creating a Jira ticket, summarizing, replying). Returns all messages in the thread. The response also includes the channel_id and thread_ts so you can reply_in_thread afterwards.",
 				Parameters: json.RawMessage(`{
@@ -448,9 +449,9 @@ func (h *GeneralHandler) buildTools() []github.Tool {
 
 	// NVD CVE lookup tools are always available (NVD client is always created).
 	if h.nvdClient != nil {
-		tools = append(tools, github.Tool{
+		tools = append(tools, llm.Tool{
 			Type: "function",
-			Function: github.ToolFunction{
+			Function: llm.ToolFunction{
 				Name:        "lookup_cve",
 				Description: "Look up a specific CVE by its ID from the NVD (National Vulnerability Database). Returns full details: description, CVSS scores, affected products (CPEs), weaknesses (CWEs), and references. ALWAYS call this tool FIRST when the user mentions a CVE ID (e.g. CVE-2025-13836) to get authoritative data before searching code.",
 				Parameters: json.RawMessage(`{
@@ -461,9 +462,9 @@ func (h *GeneralHandler) buildTools() []github.Tool {
 					"required":["cve_id"]
 				}`),
 			},
-		}, github.Tool{
+		}, llm.Tool{
 			Type: "function",
-			Function: github.ToolFunction{
+			Function: llm.ToolFunction{
 				Name:        "search_cve",
 				Description: "Search NVD for CVEs by keyword. Returns matching CVEs with their descriptions and CVSS scores. Useful for finding CVEs related to a specific library, product, or vulnerability type when you don't have the exact CVE ID.",
 				Parameters: json.RawMessage(`{
@@ -480,9 +481,9 @@ func (h *GeneralHandler) buildTools() []github.Tool {
 
 	// Salesforce tools are only available when Salesforce is connected.
 	if h.sfClient != nil && h.sfClient.Ready() {
-		tools = append(tools, github.Tool{
+		tools = append(tools, llm.Tool{
 			Type: "function",
-			Function: github.ToolFunction{
+			Function: llm.ToolFunction{
 				Name:        "salesforce_query",
 				Description: "Execute a SOQL query against Salesforce. Use this to query Accounts, Opportunities, Contacts, and other Salesforce objects. Returns structured records. SOQL is similar to SQL but queries Salesforce objects. IMPORTANT: Use relationship fields for joins (e.g. Account.Name on Opportunity, Owner.Name). Date literals like NEXT_N_DAYS:90, LAST_N_DAYS:30, TODAY, THIS_QUARTER are very useful. Always include Id in SELECT. Limit results to avoid large payloads (default LIMIT 50). Example queries:\n- Renewals in next 90 days: SELECT Id, Name, Account.Name, StageName, CloseDate, Amount, Owner.Name FROM Opportunity WHERE CloseDate = NEXT_N_DAYS:90 AND StageName != 'Closed Won' AND StageName != 'Closed Lost' AND Type = 'Renewal' ORDER BY CloseDate ASC\n- Account details: SELECT Id, Name, Type, Industry, Owner.Name, Website FROM Account WHERE Name LIKE '%CustomerName%'\n- Contacts for account: SELECT Id, Name, Email, Title, Phone, Account.Name FROM Contact WHERE Account.Name LIKE '%CustomerName%'",
 				Parameters: json.RawMessage(`{
@@ -493,9 +494,9 @@ func (h *GeneralHandler) buildTools() []github.Tool {
 					"required":["soql"]
 				}`),
 			},
-		}, github.Tool{
+		}, llm.Tool{
 			Type: "function",
-			Function: github.ToolFunction{
+			Function: llm.ToolFunction{
 				Name:        "salesforce_describe",
 				Description: "Describe a Salesforce object to discover its available fields, types, and labels. Use this when you need to explore object schema before writing a SOQL query — e.g., to find the correct field name for renewal date, health score, or custom fields. Common objects: Account, Opportunity, Contact, Case, Lead, Task, Event.",
 				Parameters: json.RawMessage(`{
@@ -511,9 +512,9 @@ func (h *GeneralHandler) buildTools() []github.Tool {
 
 	// Chorus tools are only available when Chorus is connected.
 	if h.chorusClient != nil && h.chorusClient.Ready() {
-		tools = append(tools, github.Tool{
+		tools = append(tools, llm.Tool{
 			Type: "function",
-			Function: github.ToolFunction{
+			Function: llm.ToolFunction{
 				Name:        "chorus_list_conversations",
 				Description: "List Chorus conversations (meetings, calls, recordings, emails) matching optional filters. This is the primary tool for ANY Chorus query — listings, deal data, engagement activity, participant searches, etc. Returns summaries with meeting notes, action items, participants, trackers, and opportunity info. Dates use ISO-8601 (e.g. '2026-02-01T00:00:00Z'). Optimize which params you pass based on the user's request.",
 				Parameters: json.RawMessage(`{
@@ -535,9 +536,9 @@ func (h *GeneralHandler) buildTools() []github.Tool {
 					}
 				}`),
 			},
-		}, github.Tool{
+		}, llm.Tool{
 			Type: "function",
-			Function: github.ToolFunction{
+			Function: llm.ToolFunction{
 				Name:        "chorus_get_conversation",
 				Description: "Get full details for a specific Chorus conversation by its ID. Returns recording analytics, deal info, account, participants with roles/titles, trackers, action items, metrics, and summary. Use this after chorus_list_conversations to drill into a specific call.",
 				Parameters: json.RawMessage(`{
@@ -548,9 +549,9 @@ func (h *GeneralHandler) buildTools() []github.Tool {
 					"required":["conversation_id"]
 				}`),
 			},
-		}, github.Tool{
+		}, llm.Tool{
 			Type: "function",
-			Function: github.ToolFunction{
+			Function: llm.ToolFunction{
 				Name:        "chorus_create_sales_qualification",
 				Description: "Extract Sales Qualification Framework data (e.g. MEDDIC) from a Chorus call transcript by recording ID. This triggers AI analysis of the recording and returns structured qualification fields with supporting quotes. Use this when the user wants to analyze a call for sales qualification criteria.",
 				Parameters: json.RawMessage(`{
@@ -561,9 +562,9 @@ func (h *GeneralHandler) buildTools() []github.Tool {
 					"required":["recording_id"]
 				}`),
 			},
-		}, github.Tool{
+		}, llm.Tool{
 			Type: "function",
-			Function: github.ToolFunction{
+			Function: llm.ToolFunction{
 				Name:        "chorus_get_sales_qualification",
 				Description: "Retrieve a previously extracted Sales Qualification Framework analysis by recording ID. Returns MEDDIC (or other framework) fields, supporting quotes, meeting notes, and next steps. Use this to check if a qualification analysis already exists before creating a new one.",
 				Parameters: json.RawMessage(`{
@@ -574,9 +575,9 @@ func (h *GeneralHandler) buildTools() []github.Tool {
 					"required":["recording_id"]
 				}`),
 			},
-		}, github.Tool{
+		}, llm.Tool{
 			Type: "function",
-			Function: github.ToolFunction{
+			Function: llm.ToolFunction{
 				Name:        "chorus_writeback_crm",
 				Description: "Write sales-qualification-derived field updates back to the CRM (e.g. Salesforce). Updates opportunity fields based on insights extracted from Chorus call analysis. Use this after reviewing sales qualification data to push updates to CRM records.",
 				Parameters: json.RawMessage(`{
@@ -595,9 +596,9 @@ func (h *GeneralHandler) buildTools() []github.Tool {
 
 	// Jira tools are only available when Jira is connected.
 	if h.jiraClient != nil && h.jiraClient.Ready() {
-		tools = append(tools, github.Tool{
+		tools = append(tools, llm.Tool{
 			Type: "function",
-			Function: github.ToolFunction{
+			Function: llm.ToolFunction{
 				Name:        "create_jira_ticket",
 				Description: "Create a Jira ticket (issue). Use this when the user asks to create a ticket, task, story, or bug from the conversation content (e.g., a test plan, action item, or bug report). Populate the summary and description from the relevant content discussed in the conversation. IMPORTANT: Format the description using markdown — use # for headers, - for bullet lists, 1) for numbered lists, **bold** for emphasis, and `code` for inline code. Structure the ticket professionally with clear sections (e.g., ## Context, ## Scope, ## Acceptance Criteria). If the user asks to assign the ticket to a person, use the assignee field. If the user asks to assign to a team, use the team field. Both can be used at the same time.",
 				Parameters: json.RawMessage(`{
@@ -613,16 +614,16 @@ func (h *GeneralHandler) buildTools() []github.Tool {
 					"required":["summary","description"]
 				}`),
 			},
-		}, github.Tool{
+		}, llm.Tool{
 			Type: "function",
-			Function: github.ToolFunction{
+			Function: llm.ToolFunction{
 				Name:        "list_jira_projects",
 				Description: "List all Jira projects visible to the bot. Use this to discover available project keys before creating a ticket.",
 				Parameters:  json.RawMessage(`{"type":"object","properties":{}}`),
 			},
-		}, github.Tool{
+		}, llm.Tool{
 			Type: "function",
-			Function: github.ToolFunction{
+			Function: llm.ToolFunction{
 				Name:        "search_jira_issues",
 				Description: "Search for Jira issues using JQL (Jira Query Language). IMPORTANT: Jira Cloud does NOT reliably support searching by display name. Before searching by assignee, you MUST first call resolve_jira_user to get the user's Jira account ID, then use that account ID in JQL (e.g. assignee = 'accountId'). Common JQL examples: 'assignee = \"712020:abc-def\" AND status = \"In Progress\"', 'project = ENG AND status = \"To Do\"'. When searching for a specific user's tickets: 1) call get_slack_user_info to get their real name, 2) call resolve_jira_user with that name to get the Jira account ID, 3) use the account ID in the JQL query.",
 				Parameters: json.RawMessage(`{
@@ -634,9 +635,9 @@ func (h *GeneralHandler) buildTools() []github.Tool {
 					"required":["jql"]
 				}`),
 			},
-		}, github.Tool{
+		}, llm.Tool{
 			Type: "function",
-			Function: github.ToolFunction{
+			Function: llm.ToolFunction{
 				Name:        "get_jira_issue",
 				Description: "Get full details of a specific Jira issue by its key (e.g. 'ENG-123'). Returns summary, description, status, assignee, priority, labels, and more.",
 				Parameters: json.RawMessage(`{
@@ -647,9 +648,9 @@ func (h *GeneralHandler) buildTools() []github.Tool {
 					"required":["issue_key"]
 				}`),
 			},
-		}, github.Tool{
+		}, llm.Tool{
 			Type: "function",
-			Function: github.ToolFunction{
+			Function: llm.ToolFunction{
 				Name:        "update_jira_issue",
 				Description: "Update a Jira issue's description or summary. Use this to rewrite, refine, or improve ticket descriptions. IMPORTANT: Format the new description using markdown — use # for headers, - for bullet lists, 1) for numbered lists, **bold** for emphasis. Structure it professionally with clear sections.",
 				Parameters: json.RawMessage(`{
@@ -666,9 +667,9 @@ func (h *GeneralHandler) buildTools() []github.Tool {
 	}
 
 	// Slack user info tool is always available.
-	tools = append(tools, github.Tool{
+	tools = append(tools, llm.Tool{
 		Type: "function",
-		Function: github.ToolFunction{
+		Function: llm.ToolFunction{
 			Name:        "get_slack_user_info",
 			Description: "Get the real name and profile information of a Slack user by their user ID. Use this to resolve the current user's real name for Jira queries. The user_id is available from the conversation context (the person who sent the command).",
 			Parameters: json.RawMessage(`{
@@ -683,9 +684,9 @@ func (h *GeneralHandler) buildTools() []github.Tool {
 
 	// Jira user resolution tool — resolves a person's name/email to their Jira account ID.
 	if h.jiraClient != nil && h.jiraClient.Ready() {
-		tools = append(tools, github.Tool{
+		tools = append(tools, llm.Tool{
 			Type: "function",
-			Function: github.ToolFunction{
+			Function: llm.ToolFunction{
 				Name:        "resolve_jira_user",
 				Description: "Search for a Jira user by name and/or email and return their account ID. IMPORTANT: Jira Cloud JQL does NOT reliably support searching by display name (e.g. assignee = 'Mike Joseph' may return zero results). You MUST call this tool first to get the user's Jira account ID, then use that account ID in JQL queries (e.g. assignee = 'accountId'). This is the ONLY reliable way to find issues by assignee in Jira Cloud. ALWAYS pass both name AND email (from get_slack_user_info) for best results — email-based search is the most reliable.",
 				Parameters: json.RawMessage(`{
@@ -697,9 +698,9 @@ func (h *GeneralHandler) buildTools() []github.Tool {
 					"required":["name"]
 				}`),
 			},
-		}, github.Tool{
+		}, llm.Tool{
 			Type: "function",
-			Function: github.ToolFunction{
+			Function: llm.ToolFunction{
 				Name:        "resolve_jira_team",
 				Description: "Resolve a Jira team name to its UUID and JQL clause name. The Jira Teams integration field uses UUIDs, NOT display names, in JQL. You MUST call this tool first when searching for a team's tickets — it returns the JQL clause (e.g. 'Team[Team]') and team UUID. Then use the result in JQL like: '\"Team[Team]\" = \"<uuid>\"'. Example: resolve_jira_team({\"team_name\": \"DevOps\"}) → clause='Team[Team]', uuid='d6c2ac7c-...', then search with JQL '\"Team[Team]\" = \"d6c2ac7c-...\" AND status = \"In Progress\"'.",
 				Parameters: json.RawMessage(`{
@@ -713,9 +714,9 @@ func (h *GeneralHandler) buildTools() []github.Tool {
 		})
 
 		// Dashboard & filter tools.
-		tools = append(tools, github.Tool{
+		tools = append(tools, llm.Tool{
 			Type: "function",
-			Function: github.ToolFunction{
+			Function: llm.ToolFunction{
 				Name:        "get_jira_dashboard",
 				Description: "Fetch a Jira dashboard by its numeric ID, including its name, owner, and all configured gadgets. Use this when a user shares a dashboard URL like https://org.atlassian.net/jira/dashboards/10014 — extract the numeric ID from the URL. Returns dashboard metadata and a list of gadgets with their titles and positions.",
 				Parameters: json.RawMessage(`{
@@ -726,9 +727,9 @@ func (h *GeneralHandler) buildTools() []github.Tool {
 					"required":["dashboard_id"]
 				}`),
 			},
-		}, github.Tool{
+		}, llm.Tool{
 			Type: "function",
-			Function: github.ToolFunction{
+			Function: llm.ToolFunction{
 				Name:        "get_jira_filter",
 				Description: "Fetch a Jira saved filter by its numeric ID and optionally execute its JQL to return matching issues. Use this when a user shares a filter URL like https://org.atlassian.net/issues/?filter=11901 — extract the numeric ID. Returns the filter name, owner, JQL query, and (if run_jql is true) the issues matching that JQL.",
 				Parameters: json.RawMessage(`{
@@ -744,9 +745,9 @@ func (h *GeneralHandler) buildTools() []github.Tool {
 		})
 
 		// Confluence tools — share the same Atlassian client as Jira.
-		tools = append(tools, github.Tool{
+		tools = append(tools, llm.Tool{
 			Type: "function",
-			Function: github.ToolFunction{
+			Function: llm.ToolFunction{
 				Name:        "search_confluence_pages",
 				Description: "Search Confluence pages using CQL (Confluence Query Language). Useful for finding documentation, runbooks, architecture decision records, and knowledge-base articles. Common CQL examples: 'text ~ \"deployment guide\"', 'space = DEV AND title ~ \"runbook\"', 'label = \"architecture\" AND type = page'. Returns page IDs, titles, and links — use get_confluence_page to fetch the full content of a matching page.",
 				Parameters: json.RawMessage(`{
@@ -758,9 +759,9 @@ func (h *GeneralHandler) buildTools() []github.Tool {
 					"required":["cql"]
 				}`),
 			},
-		}, github.Tool{
+		}, llm.Tool{
 			Type: "function",
-			Function: github.ToolFunction{
+			Function: llm.ToolFunction{
 				Name:        "get_confluence_page",
 				Description: "Retrieve the full content of a Confluence page by its page ID. Returns the page title, body (in storage/XHTML format), and a web link. Use search_confluence_pages first to find the page ID.",
 				Parameters: json.RawMessage(`{
@@ -771,9 +772,9 @@ func (h *GeneralHandler) buildTools() []github.Tool {
 					"required":["page_id"]
 				}`),
 			},
-		}, github.Tool{
+		}, llm.Tool{
 			Type: "function",
-			Function: github.ToolFunction{
+			Function: llm.ToolFunction{
 				Name:        "list_confluence_spaces",
 				Description: "List all Confluence spaces visible to the bot. Useful for discovering available spaces before searching for pages. Returns space keys, names, and types.",
 				Parameters:  json.RawMessage(`{"type":"object","properties":{}}`),

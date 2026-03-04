@@ -9,6 +9,7 @@ import (
 	"github.com/justmike1/arbetern/atlassian"
 	"github.com/justmike1/arbetern/chorus"
 	"github.com/justmike1/arbetern/github"
+	"github.com/justmike1/arbetern/llm"
 	"github.com/justmike1/arbetern/nvd"
 	"github.com/justmike1/arbetern/salesforce"
 	"github.com/justmike1/arbetern/slack"
@@ -17,8 +18,8 @@ import (
 type Router struct {
 	slackClient      SlackClient
 	ghClient         *github.Client
-	modelsClient     *github.ModelsClient
-	codeModelsClient *github.ModelsClient
+	modelsClient     *llm.Client
+	codeModelsClient *llm.Client
 	jiraClient       *atlassian.Client
 	nvdClient        *nvd.Client
 	sfClient         *salesforce.Client
@@ -32,7 +33,7 @@ type Router struct {
 	maxToolRounds    int
 }
 
-func NewRouter(slackClient SlackClient, ghClient *github.Client, modelsClient *github.ModelsClient, codeModelsClient *github.ModelsClient, jiraClient *atlassian.Client, nvdClient *nvd.Client, sfClient *salesforce.Client, chorusClient *chorus.Client, pp PromptProvider, agentID, appURL string, sessions *SessionStore, maxToolRounds int) *Router {
+func NewRouter(slackClient SlackClient, ghClient *github.Client, modelsClient *llm.Client, codeModelsClient *llm.Client, jiraClient *atlassian.Client, nvdClient *nvd.Client, sfClient *salesforce.Client, chorusClient *chorus.Client, pp PromptProvider, agentID, appURL string, sessions *SessionStore, maxToolRounds int) *Router {
 	return &Router{
 		slackClient:      slackClient,
 		ghClient:         ghClient,
