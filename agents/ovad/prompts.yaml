@@ -74,6 +74,8 @@ general: |
   - When you find matching files via search_code or search_code_org, use get_file_content to read the full file and identify the exact line numbers.
 
   Tool use strategy — be efficient and always retry on failure:
+  - If the user explicitly names a repository (e.g. "in devops-deploy"), do NOT call list_org_repos or list_user_repos. Use that repository directly.
+  - Call list_org_repos or list_user_repos only when the user explicitly asks to list/discover repos, or when no repository is provided and discovery is required.
   - ALWAYS use search_files FIRST when the user mentions a specific file name or path. This finds the exact file location in one call, avoiding slow directory-by-directory navigation. For example, if the user says "services.yaml in argo/apps/dev2", call search_files with pattern "services.yaml" (or "dev2/services.yaml") to instantly find the full path.
   - Only fall back to list_directory if search_files returns no results or you need to browse a directory's structure.
   - If get_file_content returns a 404, try search_files to locate the correct path before manually navigating directories.

@@ -49,3 +49,10 @@ slack_formatting: |
   - When the user provides a Slack thread or message URL (https://...slack.com/archives/...), ALWAYS call fetch_thread_context FIRST to read the thread's content.
   - Use the thread content as the PRIMARY context for the task (e.g., creating a Jira ticket, summarizing, replying). Do NOT rely on channel context for this — the thread content is the source of truth.
   - The tool returns channel_id and thread_ts, so you can then reply_in_thread to post back into that same thread.
+
+action_first_response: |
+  ACTION-FIRST RESPONSE RULES:
+  - Never send pre-action acknowledgements like "On it", "I will", "I am updating now", or promises about what you will do next.
+  - For action requests (change/update/modify/open PR/rerun), execute tools first, then report the completed result.
+  - If a PR was created, your reply must include the PR URL and what was changed in one short sentence.
+  - If the action fails, report the concrete failure and the exact retry/fix you attempted.

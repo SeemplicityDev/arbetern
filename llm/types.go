@@ -6,6 +6,8 @@ package llm
 import (
 	"encoding/json"
 	"fmt"
+	"os"
+	"strings"
 )
 
 // Tool describes a function the LLM can invoke during a tool-use loop.
@@ -77,38 +79,18 @@ func NewToolResultMessage(toolCallID, content string) ChatMessage {
 }
 
 // FormatUsageStamp returns a short Slack-formatted line showing token usage and
-// estimated cost. Returns an empty string if usage is nil.
+// model metadata. Returns an empty string unless explicitly enabled.
 func FormatUsageStamp(u *Usage, model string) string {
 	if u == nil || u.TotalTokens == 0 {
 		return ""
 	}
-	// Rough cost estimates per 1K tokens (input/output blended).
-	// These are approximate and will need updating as pricing changes.
-	costPer1K := 0.005 // default fallback
-	switch {
-	case contains(model, "codex"):
-		costPer1K = 0.015
-	case contains(model, "gpt-5"):
-		costPer1K = 0.01
-	case contains(model, "gpt-4o"):
-		costPer1K = 0.005
-	case contains(model, "gpt-4"):
-		costPer1K = 0.01
+	// Usage stamp is opt-in to avoid noisy Slack replies.
+	if !strings.EqualFold(strings.TrimSpace(os.Getenv("SHOW_USAGE_STAMP")), "true") {
+		return ""
 	}
-	cost := float64(u.TotalTokens) / 1000.0 * costPer1K
-	return fmt.Sprintf("\n\n_:bar_chart: %s | tokens: %d (in: %d, out: %d) | ~$%.4f_",
-		model, u.TotalTokens, u.PromptTokens, u.CompletionTokens, cost)
-}
-
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && stringContains(s, substr)
-}
-
-func stringContains(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
+	if u.PromptTokens > 0 || u.CompletionTokens > 0 {
+		return fmt.Sprintf("\n\n_:bar_chart: %s | tokens: %d (in: %d, out: %d)_",
+			model, u.TotalTokens, u.PromptTokens, u.CompletionTokens)
 	}
-	return false
+	return fmt.Sprintf("\n\n_:bar_chart: %s | tokens: %d_", model, u.TotalTokens)
 }

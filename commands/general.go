@@ -204,7 +204,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 			Type: "function",
 			Function: llm.ToolFunction{
 				Name:        "list_org_repos",
-				Description: "List all repositories in the GitHub organization that the bot has access to.",
+				Description: "List all repositories in the GitHub organization that the bot has access to. Use ONLY when the user explicitly asks to list/discover repos, or when no repository was provided and repo discovery is required.",
 				Parameters:  json.RawMessage(`{"type":"object","properties":{}}`),
 			},
 		},
@@ -212,7 +212,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 			Type: "function",
 			Function: llm.ToolFunction{
 				Name:        "list_user_repos",
-				Description: "List all repositories accessible by the authenticated GitHub user.",
+				Description: "List all repositories accessible by the authenticated GitHub user. Use ONLY when the user explicitly asks to list/discover repos, or when no repository was provided and repo discovery is required.",
 				Parameters:  json.RawMessage(`{"type":"object","properties":{}}`),
 			},
 		},
