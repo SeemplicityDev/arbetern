@@ -114,6 +114,8 @@ func (h *GeneralHandler) Execute(channelID, userID, text, responseURL, auditTS s
 	}
 
 	repliedInThread := false
+	toolCallsMade := false
+	blockedPreActionAcks := 0
 
 	// Track cumulative token usage across all LLM rounds.
 	var totalUsage llm.Usage
@@ -146,6 +148,22 @@ func (h *GeneralHandler) Execute(channelID, userID, text, responseURL, auditTS s
 		choice := resp.Choices[0]
 
 		if len(choice.Message.ToolCalls) == 0 {
+			// Guardrail: prevent placeholder acknowledgements like "I'm checking..."
+			// from being posted for code/repo actions before any tool execution.
+			if !toolCallsMade && isCodeIntent(strings.ToLower(text)) && isPreActionAck(choice.Message.Content) {
+				blockedPreActionAcks++
+				log.Printf("[user=%s channel=%s] blocked pre-action ack reply (%d); forcing tool execution retry", userID, channelID, blockedPreActionAcks)
+				if blockedPreActionAcks >= 3 {
+					h.replyDefault(channelID, responseURL, auditTS, "I couldn't complete this yet because tool execution did not start. Please retry the same request; I'll return only completed results from tool outputs.")
+					return
+				}
+				messages = append(messages,
+					llm.NewChatMessage("assistant", choice.Message.Content),
+					llm.NewChatMessage("user", "Do not send pre-action acknowledgements. Start tool execution now. Return only completed results from tool outputs (or a concrete tool error after attempted execution)."),
+				)
+				continue
+			}
+
 			log.Printf("[user=%s channel=%s] general query completed successfully", userID, channelID)
 			h.memory.SetAssistantResponse(channelID, userID, choice.Message.Content)
 			stamp := llm.FormatUsageStamp(&totalUsage, activeClient.Model())
@@ -168,6 +186,7 @@ func (h *GeneralHandler) Execute(channelID, userID, text, responseURL, auditTS s
 
 		for _, tc := range choice.Message.ToolCalls {
 			log.Printf("[user=%s channel=%s] LLM called tool: %s(%s)", userID, channelID, tc.Function.Name, tc.Function.Arguments)
+			toolCallsMade = true
 			result := h.executeTool(ctx, channelID, userID, auditTS, tc.Function.Name, tc.Function.Arguments)
 			messages = append(messages, llm.NewToolResultMessage(tc.ID, result))
 			if tc.Function.Name == "reply_in_thread" && !strings.HasPrefix(result, "Error") {
@@ -2316,4 +2335,10 @@ func isCodeIntent(text string) bool {
 		}
 	}
 	return false
+}
+
+var preActionAckRe = regexp.MustCompile(`(?i)\b(on it|i(?:'|’)m\s+(checking|looking|working|updating|investigating)|i\s+will|i(?:'|’)ll|we\s+will|will\s+return|let me check|let me take a look)\b`)
+
+func isPreActionAck(text string) bool {
+	return preActionAckRe.MatchString(strings.TrimSpace(text))
 }
