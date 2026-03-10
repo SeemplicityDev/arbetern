@@ -79,6 +79,7 @@ type responsesInputItem struct {
 type responsesResponse struct {
 	ID     string                `json:"id"`
 	Output []responsesOutputItem `json:"output"`
+	Usage  *Usage                `json:"usage,omitempty"`
 	Error  *struct {
 		Message string `json:"message"`
 	} `json:"error,omitempty"`
@@ -199,5 +200,6 @@ func responsesOutputToChatResponse(rr *responsesResponse) *ChatResponse {
 	}
 
 	cr.Choices = append(cr.Choices, choice)
+	cr.Usage = rr.Usage
 	return cr
 }

@@ -115,6 +115,9 @@ func (h *GeneralHandler) Execute(channelID, userID, text, responseURL, auditTS s
 
 	repliedInThread := false
 
+	// Track cumulative token usage across all LLM rounds.
+	var totalUsage llm.Usage
+
 	rounds := h.maxToolRounds
 	if rounds <= 0 {
 		rounds = 50
@@ -128,6 +131,12 @@ func (h *GeneralHandler) Execute(channelID, userID, text, responseURL, auditTS s
 			return
 		}
 
+		if resp.Usage != nil {
+			totalUsage.PromptTokens += resp.Usage.PromptTokens
+			totalUsage.CompletionTokens += resp.Usage.CompletionTokens
+			totalUsage.TotalTokens += resp.Usage.TotalTokens
+		}
+
 		if len(resp.Choices) == 0 {
 			log.Printf("[user=%s channel=%s] LLM returned no choices", userID, channelID)
 			h.replyDefault(channelID, responseURL, auditTS, "No response from the model.")
@@ -139,12 +148,16 @@ func (h *GeneralHandler) Execute(channelID, userID, text, responseURL, auditTS s
 		if len(choice.Message.ToolCalls) == 0 {
 			log.Printf("[user=%s channel=%s] general query completed successfully", userID, channelID)
 			h.memory.SetAssistantResponse(channelID, userID, choice.Message.Content)
+			stamp := llm.FormatUsageStamp(&totalUsage, activeClient.Model())
 			// If we already replied in a specific thread, don't send a redundant follow-up.
 			if repliedInThread {
 				log.Printf("[user=%s channel=%s] skipping reply (already replied in thread)", userID, channelID)
+				if stamp != "" {
+					_ = h.slackClient.PostThreadReply(channelID, auditTS, stamp)
+				}
 				return
 			}
-			h.replyDefault(channelID, responseURL, auditTS, choice.Message.Content)
+			h.replyDefault(channelID, responseURL, auditTS, choice.Message.Content+stamp)
 			return
 		}
 
@@ -166,7 +179,7 @@ func (h *GeneralHandler) Execute(channelID, userID, text, responseURL, auditTS s
 			codeTools := map[string]bool{
 				"modify_file": true, "regex_replace_file": true,
 				"get_file_content": true,
-				"search_code":      true, "search_files": true,
+				"search_code":      true, "search_code_org": true, "search_files": true,
 				"list_directory": true, "get_pull_request": true,
 			}
 			if codeTools[tc.Function.Name] && h.codeModelsClient != nil && activeClient != h.codeModelsClient {
@@ -377,6 +390,20 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 		{
 			Type: "function",
 			Function: llm.ToolFunction{
+				Name:        "search_code_org",
+				Description: "Search for code content across ALL repositories in the GitHub organization in a single call. Use this instead of search_code when the user asks to find usages, secrets, patterns, or code across multiple repos, the entire org, or 'every repo'. This is MUCH faster and more complete than calling search_code repo by repo. Returns matching files grouped by repository with code fragments.",
+				Parameters: json.RawMessage(`{
+					"type":"object",
+					"properties":{
+						"query":{"type":"string","description":"Code search query. The pattern to find across all org repos (e.g., 'clickhouse_connection', 'get_aws_secret'). Supports GitHub code search qualifiers like 'language:python', 'path:src/', 'extension:py'."}
+					},
+					"required":["query"]
+				}`),
+			},
+		},
+		{
+			Type: "function",
+			Function: llm.ToolFunction{
 				Name:        "get_workflow_run",
 				Description: "Fetch details and logs for a GitHub Actions workflow run. Use this PROACTIVELY whenever you see a failed CI/CD notification, a GitHub Actions URL, or the user mentions a build/deploy/pipeline failure. Returns the run status, jobs, steps, annotations, and actual log output for any failed jobs so you can diagnose the root cause.",
 				Parameters: json.RawMessage(`{
@@ -428,6 +455,23 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 						"text":{"type":"string","description":"The message text to post as a threaded reply. Supports Slack markdown formatting."}
 					},
 					"required":["thread_ts","text"]
+				}`),
+			},
+		},
+		{
+			Type: "function",
+			Function: llm.ToolFunction{
+				Name:        "upload_snippet",
+				Description: "Upload a text file snippet to Slack. Use this instead of posting a long message when the content is large (e.g., full search results with file paths and code lines, log dumps, CSV data, large code blocks). The snippet appears as a collapsible file attachment in the channel/thread, keeping the conversation clean. PREFER this over reply_in_thread or plain messages whenever the output would exceed ~30 lines or ~2000 characters. Ideal for: org-wide search results, full file listings, detailed tables, log output, code dumps.",
+				Parameters: json.RawMessage(`{
+					"type":"object",
+					"properties":{
+						"content":{"type":"string","description":"The text content of the snippet."},
+						"filename":{"type":"string","description":"Filename for the snippet (e.g. 'search-results.txt', 'clickhouse-usages.csv', 'report.md'). Use an appropriate extension."},
+						"title":{"type":"string","description":"Display title for the snippet in Slack (e.g. 'clickhouse_connection usages across org')."},
+						"filetype":{"type":"string","description":"Slack file type for syntax highlighting (e.g. 'text', 'markdown', 'csv', 'python', 'yaml', 'json'). Default: 'text'."}
+					},
+					"required":["content","filename","title"]
 				}`),
 			},
 		},
@@ -1199,6 +1243,48 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		log.Printf("[user=%s channel=%s] searched code in %s for '%s' (%d matches)", userID, channelID, args.Repo, args.Query, len(results))
 		return sb.String()
 
+	case "search_code_org":
+		var args struct {
+			Query string `json:"query"`
+		}
+		if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+			return fmt.Sprintf("Error parsing arguments: %v", err)
+		}
+		owner, err := h.ghClient.ResolveOwner(ctx)
+		if err != nil {
+			return fmt.Sprintf("Error resolving owner: %v", err)
+		}
+		results, err := h.ghClient.SearchCodeOrg(ctx, owner, args.Query)
+		if err != nil {
+			return fmt.Sprintf("Error searching code across org: %v", err)
+		}
+		if len(results) == 0 {
+			return fmt.Sprintf("No code matches found for '%s' across the org. Try different search terms or broader patterns.", args.Query)
+		}
+		// Group results by repo for a clear summary.
+		repoResults := make(map[string][]github.CodeSearchResult)
+		var repoOrder []string
+		for _, r := range results {
+			if _, seen := repoResults[r.Repo]; !seen {
+				repoOrder = append(repoOrder, r.Repo)
+			}
+			repoResults[r.Repo] = append(repoResults[r.Repo], r)
+		}
+		var sb strings.Builder
+		fmt.Fprintf(&sb, "Code search results for '%s' across org '%s' (%d matches in %d repos):\n", args.Query, owner, len(results), len(repoOrder))
+		for _, repo := range repoOrder {
+			hits := repoResults[repo]
+			fmt.Fprintf(&sb, "\n=== %s (%d matches) ===\n", repo, len(hits))
+			for _, r := range hits {
+				fmt.Fprintf(&sb, "  • %s\n    %s\n", r.File, r.URL)
+				for _, frag := range r.Fragments {
+					fmt.Fprintf(&sb, "    ```\n    %s\n    ```\n", frag)
+				}
+			}
+		}
+		log.Printf("[user=%s channel=%s] searched code across org '%s' for '%s' (%d matches in %d repos)", userID, channelID, owner, args.Query, len(results), len(repoOrder))
+		return sb.String()
+
 	case "get_workflow_run":
 		var args struct {
 			URL string `json:"url"`
@@ -1268,6 +1354,31 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		}
 		log.Printf("[user=%s channel=%s] posted thread reply to ts=%s", userID, channelID, args.ThreadTS)
 		return "Successfully posted reply in thread."
+
+	case "upload_snippet":
+		var args struct {
+			Content  string `json:"content"`
+			Filename string `json:"filename"`
+			Title    string `json:"title"`
+			Filetype string `json:"filetype"`
+		}
+		if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+			return fmt.Sprintf("Error parsing arguments: %v", err)
+		}
+		if args.Filetype == "" {
+			args.Filetype = "text"
+		}
+		// Post snippet in the current thread if we have one, otherwise in the channel.
+		threadTS := ""
+		if h.currentAuditTS != "" {
+			threadTS = h.currentAuditTS
+		}
+		fileID, err := h.slackClient.UploadFileSnippet(channelID, threadTS, args.Filename, args.Title, args.Content, args.Filetype)
+		if err != nil {
+			return fmt.Sprintf("Error uploading snippet: %v", err)
+		}
+		log.Printf("[user=%s channel=%s] uploaded file snippet %s (%s)", userID, channelID, fileID, args.Filename)
+		return fmt.Sprintf("Successfully uploaded snippet '%s' as %s.", args.Title, args.Filename)
 
 	case "fetch_thread_context":
 		var args struct {
@@ -2160,7 +2271,7 @@ func (h *GeneralHandler) replyDefault(channelID, responseURL, auditTS, text stri
 }
 
 // isCodeIntent returns true when the user's message suggests code modification,
-// code review, file reading, or PR creation — tasks that benefit from the specialised CODE_MODEL.
+// code review, file reading, or any GitHub interaction — tasks that benefit from the specialised CODE_MODEL.
 func isCodeIntent(text string) bool {
 	codeKeywords := []string{
 		// Code modification
@@ -2180,6 +2291,17 @@ func isCodeIntent(text string) bool {
 		"affected", "exposed", "security", "dependency", "dependencies",
 		"what does", "how does", "explain the code", "explain code",
 		"search code", "search the code", "find in code", "look for",
+		// Org-wide / cross-repo search
+		"every repo", "all repo", "across repo", "across the org",
+		"which service", "which repo", "which project",
+		"find usages", "find usage", "find all", "give me a list",
+		"who uses", "what uses", "check every",
+		// GitHub interactions — always use code model for any repo/GitHub work
+		"repo", "repository", "branch", "commit", "merge",
+		"github", "workflow", "pipeline", "ci/cd", "cicd",
+		"actions", "deploy", "deployment",
+		"file", "directory", "folder", "path",
+		"secret", "config", "configuration",
 	}
 	for _, kw := range codeKeywords {
 		if strings.Contains(text, kw) {

@@ -74,8 +74,9 @@ func (c *Client) Model() string {
 	return c.model
 }
 
-// Complete sends a simple system+user prompt pair and returns the text response.
-func (c *Client) Complete(ctx context.Context, systemPrompt, userPrompt string) (string, error) {
+// Complete sends a simple system+user prompt pair and returns the text response
+// along with token usage information.
+func (c *Client) Complete(ctx context.Context, systemPrompt, userPrompt string) (string, *Usage, error) {
 	messages := []ChatMessage{
 		{Role: "system", Content: systemPrompt},
 		{Role: "user", Content: userPrompt},
@@ -84,22 +85,22 @@ func (c *Client) Complete(ctx context.Context, systemPrompt, userPrompt string) 
 	if c.isResponsesModel() {
 		resp, err := c.doResponses(ctx, messages, nil)
 		if err != nil {
-			return "", err
+			return "", nil, err
 		}
 		if len(resp.Choices) == 0 {
-			return "", fmt.Errorf("responses API returned no output")
+			return "", nil, fmt.Errorf("responses API returned no output")
 		}
-		return resp.Choices[0].Message.Content, nil
+		return resp.Choices[0].Message.Content, resp.Usage, nil
 	}
 
 	resp, err := c.doChat(ctx, messages, nil)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	if len(resp.Choices) == 0 {
-		return "", fmt.Errorf("GitHub Models returned no choices")
+		return "", nil, fmt.Errorf("GitHub Models returned no choices")
 	}
-	return resp.Choices[0].Message.Content, nil
+	return resp.Choices[0].Message.Content, resp.Usage, nil
 }
 
 // CompleteWithTools sends messages and tool definitions, returning the LLM's
@@ -173,7 +174,7 @@ func (c *Client) doChat(ctx context.Context, messages []ChatMessage, tools []Too
 // ValidateModel verifies that the configured model/deployment is accessible
 // by sending a minimal completion request.
 func (c *Client) ValidateModel(ctx context.Context) error {
-	_, err := c.Complete(ctx, "ping", "reply with ok")
+	_, _, err := c.Complete(ctx, "ping", "reply with ok")
 	if err != nil {
 		return fmt.Errorf("model/deployment %q is not accessible: %w", c.model, err)
 	}

@@ -24,6 +24,7 @@
 | `commands` | Register and receive slash commands |
 | `channels:history` | Read messages from public channels |
 | `chat:write` | Post responses to channels |
+| `files:write` | Upload file snippets to channels (large search results, reports, code blocks) |
 | `users:read` | Resolve Slack user IDs to real names (used by agents like Seihin to look up the user's identity for Jira queries) |
 
 ## Step 3: Create the Slash Command

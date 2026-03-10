@@ -12,6 +12,7 @@ env:
   UI_HEADER: "arbetern"
   APP_URL: "https://your-app-url.example.com"
   GENERAL_MODEL: "gpt-4o"
+  # CODE_MODEL: "gpt-4o"  # Separate model for code tasks (search, file edits, PRs). Defaults to GENERAL_MODEL.
   # UI_ALLOWED_CIDRS: "0.0.0.0/0"
 
 secretValues:

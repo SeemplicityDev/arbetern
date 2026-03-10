@@ -150,6 +150,27 @@ func (c *Client) GetBotScopes() ([]string, error) {
 	return scopes, nil
 }
 
+// UploadFileSnippet uploads a text snippet as a Slack file using the V2 API.
+// It posts the snippet into the given channel (and optionally a thread).
+func (c *Client) UploadFileSnippet(channelID, threadTS, filename, title, content, filetype string) (string, error) {
+	params := slack.UploadFileV2Parameters{
+		Channel:     channelID,
+		Content:     content,
+		FileSize:    len(content),
+		Filename:    filename,
+		Title:       title,
+		SnippetType: filetype,
+	}
+	if threadTS != "" {
+		params.ThreadTimestamp = threadTS
+	}
+	summary, err := c.api.UploadFileV2(params)
+	if err != nil {
+		return "", fmt.Errorf("failed to upload file snippet: %w", err)
+	}
+	return summary.ID, nil
+}
+
 type webhookPayload struct {
 	ResponseType string `json:"response_type"`
 	Text         string `json:"text"`

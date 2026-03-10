@@ -421,6 +421,49 @@ func (c *Client) SearchCode(ctx context.Context, owner, repo, query string) ([]C
 	return allMatches, nil
 }
 
+// SearchCodeOrg searches for code content across all repositories in a GitHub
+// organization. This is much more efficient than calling SearchCode per-repo
+// when the user wants to find usages across the entire org.
+// Paginates through all results (up to GitHub's 1000-result limit) and requests text-match fragments.
+func (c *Client) SearchCodeOrg(ctx context.Context, org, query string) ([]CodeSearchResult, error) {
+	q := fmt.Sprintf("%s org:%s", query, org)
+
+	var allMatches []CodeSearchResult
+	opts := &gh.SearchOptions{
+		TextMatch:   true,
+		ListOptions: gh.ListOptions{PerPage: 100},
+	}
+
+	for {
+		results, resp, err := c.api.Search.Code(ctx, q, opts)
+		if err != nil {
+			if len(allMatches) > 0 {
+				break
+			}
+			return nil, fmt.Errorf("failed to search code in org: %w", err)
+		}
+
+		for _, r := range results.CodeResults {
+			match := CodeSearchResult{
+				File: r.GetPath(),
+				Repo: r.GetRepository().GetFullName(),
+				URL:  r.GetHTMLURL(),
+			}
+			for _, frag := range r.TextMatches {
+				match.Fragments = append(match.Fragments, frag.GetFragment())
+			}
+			allMatches = append(allMatches, match)
+		}
+
+		if resp.NextPage == 0 {
+			break
+		}
+		opts.Page = resp.NextPage
+	}
+
+	return allMatches, nil
+}
+
 // CodeSearchResult represents a single code search hit.
 type CodeSearchResult struct {
 	File      string

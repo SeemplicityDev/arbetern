@@ -48,7 +48,7 @@ func (h *DebugHandler) Execute(channelID, userID, text, responseURL, auditTS str
 		userPrompt += fmt.Sprintf("\n\nI also fetched the GitHub Actions workflow run details and logs for URLs found in the messages:\n\n%s", workflowLogs)
 	}
 
-	response, err := h.modelsClient.Complete(ctx, systemPrompt, userPrompt)
+	response, usage, err := h.modelsClient.Complete(ctx, systemPrompt, userPrompt)
 	if err != nil {
 		log.Printf("[user=%s channel=%s] LLM completion failed: %v", userID, channelID, err)
 		_ = slack.RespondToURL(responseURL, fmt.Sprintf("Failed to analyze messages: %v", err), true)
@@ -57,7 +57,8 @@ func (h *DebugHandler) Execute(channelID, userID, text, responseURL, auditTS str
 
 	log.Printf("[user=%s channel=%s] debug analysis completed successfully", userID, channelID)
 	h.memory.SetAssistantResponse(channelID, userID, response)
-	h.reply(channelID, responseURL, auditTS, response)
+	stamp := llm.FormatUsageStamp(usage, h.modelsClient.Model())
+	h.reply(channelID, responseURL, auditTS, response+stamp)
 }
 
 func (h *DebugHandler) reply(channelID, responseURL, auditTS, text string) {
