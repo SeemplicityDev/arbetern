@@ -79,13 +79,12 @@ func NewToolResultMessage(toolCallID, content string) ChatMessage {
 }
 
 // FormatUsageStamp returns a short Slack-formatted line showing token usage and
-// model metadata. Returns an empty string unless explicitly enabled.
+// model metadata. Enabled by default; set SHOW_USAGE_STAMP=false to disable.
 func FormatUsageStamp(u *Usage, model string) string {
 	if u == nil || u.TotalTokens == 0 {
 		return ""
 	}
-	// Usage stamp is opt-in to avoid noisy Slack replies.
-	if !strings.EqualFold(strings.TrimSpace(os.Getenv("SHOW_USAGE_STAMP")), "true") {
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("SHOW_USAGE_STAMP")), "false") {
 		return ""
 	}
 	if u.PromptTokens > 0 || u.CompletionTokens > 0 {

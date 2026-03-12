@@ -49,6 +49,10 @@ type Config struct {
 	SFLoginURL            string // defaults to "https://login.salesforce.com"
 	ChorusAPIToken        string
 	ChorusBaseURL         string // defaults to "https://chorus.ai"
+	DDAPIKeyUS            string // Datadog US (datadoghq.com)
+	DDAppKeyUS            string
+	DDAPIKeyEU            string // Datadog EU (datadoghq.eu)
+	DDAppKeyEU            string
 }
 
 // UseAzure returns true when Azure OpenAI credentials are configured.
@@ -80,6 +84,21 @@ func (c *Config) ChorusConfigured() bool {
 	return c.ChorusAPIToken != ""
 }
 
+// DatadogConfigured returns true when at least one Datadog site (US or EU) has credentials.
+func (c *Config) DatadogConfigured() bool {
+	return c.DatadogUSConfigured() || c.DatadogEUConfigured()
+}
+
+// DatadogUSConfigured returns true when US Datadog credentials are present.
+func (c *Config) DatadogUSConfigured() bool {
+	return c.DDAPIKeyUS != "" && c.DDAppKeyUS != ""
+}
+
+// DatadogEUConfigured returns true when EU Datadog credentials are present.
+func (c *Config) DatadogEUConfigured() bool {
+	return c.DDAPIKeyEU != "" && c.DDAppKeyEU != ""
+}
+
 func Load() (*Config, error) {
 	cfg := &Config{
 		SlackBotToken:         os.Getenv("SLACK_BOT_TOKEN"),
@@ -105,6 +124,10 @@ func Load() (*Config, error) {
 		SFLoginURL:            os.Getenv("SF_LOGIN_URL"),
 		ChorusAPIToken:        os.Getenv("CHORUS_API_TOKEN"),
 		ChorusBaseURL:         os.Getenv("CHORUS_BASE_URL"),
+		DDAPIKeyUS:            os.Getenv("DD_API_KEY_US"),
+		DDAppKeyUS:            os.Getenv("DD_APP_KEY_US"),
+		DDAPIKeyEU:            os.Getenv("DD_API_KEY_EU"),
+		DDAppKeyEU:            os.Getenv("DD_APP_KEY_EU"),
 	}
 
 	if cfg.SlackBotToken == "" {

@@ -67,6 +67,12 @@ secretValues:
   # Chorus / ZoomInfo (optional — enables call intelligence and deal momentum for CS agent)
   chorus-api-token: ""   # Chorus API token from Personal Settings
   # chorus-base-url: ""  # Defaults to https://chorus.ai
+  # Datadog (optional — enables log search, monitor inspection, and infrastructure visibility)
+  # Supports dual-site: configure US, EU, or both. Site is inferred from user prompts/URLs.
+  # dd-api-key-us: ""   # Datadog US API key (datadoghq.com)
+  # dd-app-key-us: ""   # Datadog US Application key
+  # dd-api-key-eu: ""   # Datadog EU API key (datadoghq.eu)
+  # dd-app-key-eu: ""   # Datadog EU Application key
 
 service:
   type: ClusterIP

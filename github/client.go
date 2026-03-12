@@ -139,8 +139,8 @@ func (c *Client) CreatePullRequest(ctx context.Context, owner, repo, baseBranch,
 	return created.GetHTMLURL(), nil
 }
 
-func GenerateBranchName(prefix string) string {
-	return fmt.Sprintf("ovad/%s-%d", prefix, time.Now().Unix())
+func GenerateBranchName(agentName string) string {
+	return fmt.Sprintf("%s/patch-%d", agentName, time.Now().Unix())
 }
 
 func (c *Client) SearchFiles(ctx context.Context, owner, repo, branch, pattern string) ([]string, error) {

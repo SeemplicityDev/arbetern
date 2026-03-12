@@ -11,6 +11,7 @@ import (
 	"github.com/justmike1/arbetern/atlassian"
 	"github.com/justmike1/arbetern/chorus"
 	"github.com/justmike1/arbetern/config"
+	"github.com/justmike1/arbetern/datadog"
 	"github.com/justmike1/arbetern/github"
 	"github.com/justmike1/arbetern/llm"
 	"github.com/justmike1/arbetern/nvd"
@@ -47,6 +48,7 @@ type GeneralHandler struct {
 	nvdClient        *nvd.Client
 	sfClient         *salesforce.Client
 	chorusClient     *chorus.Client
+	datadogClients   *datadog.MultiClient
 	contextProvider  *ContextProvider
 	memory           *ConversationMemory
 	prompts          PromptProvider
@@ -841,6 +843,98 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 				Name:        "list_confluence_spaces",
 				Description: "List all Confluence spaces visible to the bot. Useful for discovering available spaces before searching for pages. Returns space keys, names, and types.",
 				Parameters:  json.RawMessage(`{"type":"object","properties":{}}`),
+			},
+		})
+	}
+
+	// Datadog tools — available when Datadog is configured. Agent-level gating is handled via prompts.
+	if h.datadogClients != nil {
+		tools = append(tools, llm.Tool{
+			Type: "function",
+			Function: llm.ToolFunction{
+				Name:        "datadog_search_logs",
+				Description: "Search Datadog logs using the Log Search API. Use this to find error logs, investigate incidents, debug service issues, or check what happened in a specific time window. Supports full Datadog log query syntax (e.g. 'service:task-exec status:error', 'pod_name:precalc* @error', 'env:prod source:kubernetes'). ALWAYS use this when the user asks about logs, errors, or recent failures in production. Time range defaults to the last 1 hour if not specified.",
+				Parameters: json.RawMessage(`{
+					"type":"object",
+					"properties":{
+						"query":{"type":"string","description":"Datadog log search query (e.g. 'service:task-exec status:error', 'pod_name:my-pod', 'env:prod @http.status_code:>499')"},
+						"from":{"type":"string","description":"Start of time range in ISO-8601 (e.g. '2026-03-12T10:00:00Z'). Defaults to 1 hour ago."},
+						"to":{"type":"string","description":"End of time range in ISO-8601. Defaults to now."},
+						"limit":{"type":"integer","description":"Max log entries to return (default: 20, max: 50)"},
+						"site":{"type":"string","enum":["us","eu"],"description":"Datadog site to query: 'us' (datadoghq.com), 'eu' (datadoghq.eu). Infer from URLs in the user's message. Omit to query all configured sites."}
+					},
+					"required":["query"]
+				}`),
+			},
+		}, llm.Tool{
+			Type: "function",
+			Function: llm.ToolFunction{
+				Name:        "datadog_list_monitors",
+				Description: "List Datadog monitors, optionally filtered by query. Use this to find monitors related to a service, environment, or alert type. Supports Datadog monitor search syntax (e.g. 'tag:service:task-exec', 'tag:env:prod', monitor name substrings). Returns monitor name, status (OK/Alert/Warn/No Data), type, tags, and direct links.",
+				Parameters: json.RawMessage(`{
+					"type":"object",
+					"properties":{
+						"query":{"type":"string","description":"Monitor search query (e.g. 'tag:env:prod', 'task-exec', 'tag:team:devops'). Empty returns all monitors."},
+						"limit":{"type":"integer","description":"Max monitors to return (default: 20, max: 50)"},
+						"site":{"type":"string","enum":["us","eu"],"description":"Datadog site to query: 'us' (datadoghq.com), 'eu' (datadoghq.eu). Infer from URLs in the user's message. Omit to query all configured sites."}
+					}
+				}`),
+			},
+		}, llm.Tool{
+			Type: "function",
+			Function: llm.ToolFunction{
+				Name:        "datadog_get_monitor",
+				Description: "Get full details of a specific Datadog monitor by its numeric ID. Returns the monitor's name, query, message (notification template with reasoning/escalation steps), status, tags, creator, and timestamps. Use this to understand WHY a monitor triggered — the query shows the threshold condition and the message contains the team's documented reasoning and next steps. Extract the monitor ID from Datadog URLs (e.g. https://app.datadoghq.com/monitors/12345 → ID is 12345, https://app.datadoghq.eu/monitors/12345 → ID is 12345, site=eu).",
+				Parameters: json.RawMessage(`{
+					"type":"object",
+					"properties":{
+						"monitor_id":{"type":"string","description":"Numeric monitor ID (e.g. '12345'). Extract from Datadog monitor URLs."},
+						"site":{"type":"string","enum":["us","eu"],"description":"Datadog site to query: 'us' (datadoghq.com), 'eu' (datadoghq.eu). Infer from URLs in the user's message. Omit to try all configured sites."}
+					},
+					"required":["monitor_id"]
+				}`),
+			},
+		}, llm.Tool{
+			Type: "function",
+			Function: llm.ToolFunction{
+				Name:        "datadog_list_hosts",
+				Description: "List infrastructure hosts from Datadog, optionally filtered. Use this to check host health, find hosts running a specific service, or investigate infrastructure issues. Returns host names, up/down status, apps, tags, and cloud metadata.",
+				Parameters: json.RawMessage(`{
+					"type":"object",
+					"properties":{
+						"filter":{"type":"string","description":"Filter hosts by name, tag, or other attributes (e.g. 'precalc', 'env:prod')"},
+						"count":{"type":"integer","description":"Max hosts to return (default: 20, max: 100)"},
+						"site":{"type":"string","enum":["us","eu"],"description":"Datadog site to query: 'us' (datadoghq.com), 'eu' (datadoghq.eu). Infer from URLs in the user's message. Omit to query all configured sites."}
+					}
+				}`),
+			},
+		}, llm.Tool{
+			Type: "function",
+			Function: llm.ToolFunction{
+				Name:        "datadog_get_dashboard",
+				Description: "Fetch a Datadog dashboard by its ID. Returns the dashboard title, description, layout, author, and all widget definitions (titles, types). Use this when a user shares a Datadog dashboard URL (e.g. https://app.datadoghq.com/dashboard/abc-def-ghi or https://app.datadoghq.eu/dashboard/abc-def-ghi) — extract the dashboard ID from the URL path. Useful for understanding what metrics/monitors a team tracks.",
+				Parameters: json.RawMessage(`{
+					"type":"object",
+					"properties":{
+						"dashboard_id":{"type":"string","description":"Dashboard ID (e.g. 'abc-def-ghi'). Extract from Datadog dashboard URLs: /dashboard/<id>/title"},
+						"site":{"type":"string","enum":["us","eu"],"description":"Datadog site to query: 'us' (datadoghq.com), 'eu' (datadoghq.eu). Infer from URLs in the user's message. Omit to try all configured sites."}
+					},
+					"required":["dashboard_id"]
+				}`),
+			},
+		}, llm.Tool{
+			Type: "function",
+			Function: llm.ToolFunction{
+				Name:        "datadog_list_dashboards",
+				Description: "List Datadog dashboards, optionally filtered by title keyword. Use this to discover available dashboards for a team, service, or topic.",
+				Parameters: json.RawMessage(`{
+					"type":"object",
+					"properties":{
+						"query":{"type":"string","description":"Filter dashboards by title keyword (e.g. 'task-exec', 'production', 'SLO'). Empty returns all."},
+						"count":{"type":"integer","description":"Max dashboards to return (default: 20, max: 50)"},
+						"site":{"type":"string","enum":["us","eu"],"description":"Datadog site to query: 'us' (datadoghq.com), 'eu' (datadoghq.eu). Infer from URLs in the user's message. Omit to query all configured sites."}
+					}
+				}`),
 			},
 		})
 	}
@@ -2240,6 +2334,131 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		}
 		log.Printf("[user=%s channel=%s] wrote back %d CRM changes for meeting %s", userID, channelID, len(changes), args.MeetingID)
 		return fmt.Sprintf("Successfully wrote %d CRM field update(s) for opportunity %s from meeting %s.", len(changes), args.OpportunityID, args.MeetingID)
+
+	// ---- Datadog tools ----
+
+	case "datadog_search_logs":
+		if h.datadogClients == nil {
+			return "Error: Datadog integration is not configured. Set DD_API_KEY_US/DD_APP_KEY_US and/or DD_API_KEY_EU/DD_APP_KEY_EU to enable it."
+		}
+		var args struct {
+			Query string `json:"query"`
+			From  string `json:"from"`
+			To    string `json:"to"`
+			Limit int    `json:"limit"`
+			Site  string `json:"site"`
+		}
+		if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+			return fmt.Sprintf("Error parsing arguments: %v", err)
+		}
+		if args.Query == "" {
+			return "Error: query is required."
+		}
+		result, err := h.datadogClients.SearchLogs(ctx, args.Site, args.Query, args.From, args.To, args.Limit)
+		if err != nil {
+			return fmt.Sprintf("Error searching Datadog logs: %v", err)
+		}
+		log.Printf("[user=%s channel=%s] searched Datadog logs for %q (site=%s)", userID, channelID, args.Query, args.Site)
+		return result
+
+	case "datadog_list_monitors":
+		if h.datadogClients == nil {
+			return "Error: Datadog integration is not configured. Set DD_API_KEY_US/DD_APP_KEY_US and/or DD_API_KEY_EU/DD_APP_KEY_EU to enable it."
+		}
+		var args struct {
+			Query string `json:"query"`
+			Limit int    `json:"limit"`
+			Site  string `json:"site"`
+		}
+		if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+			return fmt.Sprintf("Error parsing arguments: %v", err)
+		}
+		result, err := h.datadogClients.ListMonitors(ctx, args.Site, args.Query, args.Limit)
+		if err != nil {
+			return fmt.Sprintf("Error listing Datadog monitors: %v", err)
+		}
+		log.Printf("[user=%s channel=%s] listed Datadog monitors (query=%q, site=%s)", userID, channelID, args.Query, args.Site)
+		return result
+
+	case "datadog_get_monitor":
+		if h.datadogClients == nil {
+			return "Error: Datadog integration is not configured. Set DD_API_KEY_US/DD_APP_KEY_US and/or DD_API_KEY_EU/DD_APP_KEY_EU to enable it."
+		}
+		var args struct {
+			MonitorID string `json:"monitor_id"`
+			Site      string `json:"site"`
+		}
+		if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+			return fmt.Sprintf("Error parsing arguments: %v", err)
+		}
+		if args.MonitorID == "" {
+			return "Error: monitor_id is required."
+		}
+		result, err := h.datadogClients.GetMonitor(ctx, args.Site, args.MonitorID)
+		if err != nil {
+			return fmt.Sprintf("Error fetching Datadog monitor: %v", err)
+		}
+		log.Printf("[user=%s channel=%s] fetched Datadog monitor %s (site=%s)", userID, channelID, args.MonitorID, args.Site)
+		return result
+
+	case "datadog_list_hosts":
+		if h.datadogClients == nil {
+			return "Error: Datadog integration is not configured. Set DD_API_KEY_US/DD_APP_KEY_US and/or DD_API_KEY_EU/DD_APP_KEY_EU to enable it."
+		}
+		var args struct {
+			Filter string `json:"filter"`
+			Count  int    `json:"count"`
+			Site   string `json:"site"`
+		}
+		if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+			return fmt.Sprintf("Error parsing arguments: %v", err)
+		}
+		result, err := h.datadogClients.ListHosts(ctx, args.Site, args.Filter, args.Count)
+		if err != nil {
+			return fmt.Sprintf("Error listing Datadog hosts: %v", err)
+		}
+		log.Printf("[user=%s channel=%s] listed Datadog hosts (filter=%q, site=%s)", userID, channelID, args.Filter, args.Site)
+		return result
+
+	case "datadog_get_dashboard":
+		if h.datadogClients == nil {
+			return "Error: Datadog integration is not configured. Set DD_API_KEY_US/DD_APP_KEY_US and/or DD_API_KEY_EU/DD_APP_KEY_EU to enable it."
+		}
+		var args struct {
+			DashboardID string `json:"dashboard_id"`
+			Site        string `json:"site"`
+		}
+		if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+			return fmt.Sprintf("Error parsing arguments: %v", err)
+		}
+		if args.DashboardID == "" {
+			return "Error: dashboard_id is required."
+		}
+		result, err := h.datadogClients.GetDashboard(ctx, args.Site, args.DashboardID)
+		if err != nil {
+			return fmt.Sprintf("Error fetching Datadog dashboard: %v", err)
+		}
+		log.Printf("[user=%s channel=%s] fetched Datadog dashboard %s (site=%s)", userID, channelID, args.DashboardID, args.Site)
+		return result
+
+	case "datadog_list_dashboards":
+		if h.datadogClients == nil {
+			return "Error: Datadog integration is not configured. Set DD_API_KEY_US/DD_APP_KEY_US and/or DD_API_KEY_EU/DD_APP_KEY_EU to enable it."
+		}
+		var args struct {
+			Query string `json:"query"`
+			Count int    `json:"count"`
+			Site  string `json:"site"`
+		}
+		if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+			return fmt.Sprintf("Error parsing arguments: %v", err)
+		}
+		result, err := h.datadogClients.ListDashboards(ctx, args.Site, args.Query, args.Count)
+		if err != nil {
+			return fmt.Sprintf("Error listing Datadog dashboards: %v", err)
+		}
+		log.Printf("[user=%s channel=%s] listed Datadog dashboards (query=%q, site=%s)", userID, channelID, args.Query, args.Site)
+		return result
 
 	default:
 		return fmt.Sprintf("Unknown tool: %s", name)

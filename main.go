@@ -19,6 +19,7 @@ import (
 	"github.com/justmike1/arbetern/chorus"
 	"github.com/justmike1/arbetern/commands"
 	"github.com/justmike1/arbetern/config"
+	"github.com/justmike1/arbetern/datadog"
 	"github.com/justmike1/arbetern/github"
 	"github.com/justmike1/arbetern/llm"
 	"github.com/justmike1/arbetern/nvd"
@@ -249,6 +250,7 @@ func refreshIntegrations(
 	jiraClient *atlassian.Client,
 	sfClient *salesforce.Client,
 	chorusClient *chorus.Client,
+	datadogClients *datadog.MultiClient,
 	modelsClient *llm.Client,
 	codeModelsClient *llm.Client,
 ) {
@@ -593,6 +595,41 @@ func refreshIntegrations(
 		})
 	}
 
+	// --- Datadog ---
+	if cfg.DatadogConfigured() {
+		ddConnected := datadogClients != nil
+		ddPerms := []permission{
+			{Scope: "logs_read_data", Description: "Search and read log entries via Log Search API", Required: true, Granted: boolPtr(ddConnected)},
+			{Scope: "monitors_read", Description: "List and get monitor details, status, and configuration", Required: true, Granted: boolPtr(ddConnected)},
+			{Scope: "hosts_read", Description: "List infrastructure hosts and their metadata", Required: true, Granted: boolPtr(ddConnected)},
+			{Scope: "dashboards_read", Description: "List and read dashboard definitions and widgets", Required: true, Granted: boolPtr(ddConnected)},
+		}
+		activeSites := make(map[string]string)
+		if datadogClients != nil {
+			activeSites["Sites"] = datadogClients.Sites()
+		}
+		result = append(result, integration{
+			ID:           "datadog",
+			Name:         "Datadog",
+			Configured:   ddConnected,
+			AuthMode:     "API Key + App Key (per-site)",
+			Permissions:  ddPerms,
+			ActiveModels: activeSites,
+		})
+	} else {
+		result = append(result, integration{
+			ID:         "datadog",
+			Name:       "Datadog",
+			Configured: false,
+			Permissions: []permission{
+				{Scope: "logs_read_data", Description: "Search and read log entries via Log Search API", Required: true},
+				{Scope: "monitors_read", Description: "List and get monitor details, status, and configuration", Required: true},
+				{Scope: "hosts_read", Description: "List infrastructure hosts and their metadata", Required: true},
+				{Scope: "dashboards_read", Description: "List and read dashboard definitions and widgets", Required: true},
+			},
+		})
+	}
+
 	integrationsMu.Lock()
 	integrationsCache = result
 	integrationsMu.Unlock()
@@ -608,16 +645,17 @@ func startIntegrationsRefresher(
 	jiraClient *atlassian.Client,
 	sfClient *salesforce.Client,
 	chorusClient *chorus.Client,
+	datadogClients *datadog.MultiClient,
 	modelsClient *llm.Client,
 	codeModelsClient *llm.Client,
 ) {
-	refreshIntegrations(cfg, slackClient, ghClient, jiraClient, sfClient, chorusClient, modelsClient, codeModelsClient)
+	refreshIntegrations(cfg, slackClient, ghClient, jiraClient, sfClient, chorusClient, datadogClients, modelsClient, codeModelsClient)
 
 	go func() {
 		ticker := time.NewTicker(1 * time.Hour)
 		defer ticker.Stop()
 		for range ticker.C {
-			refreshIntegrations(cfg, slackClient, ghClient, jiraClient, sfClient, chorusClient, modelsClient, codeModelsClient)
+			refreshIntegrations(cfg, slackClient, ghClient, jiraClient, sfClient, chorusClient, datadogClients, modelsClient, codeModelsClient)
 		}
 	}()
 }
@@ -711,6 +749,13 @@ func main() {
 		log.Printf("Chorus integration enabled")
 	}
 
+	// Datadog multi-client — supports both US (datadoghq.com) and EU (datadoghq.eu) sites.
+	var datadogClients *datadog.MultiClient
+	if cfg.DatadogConfigured() {
+		datadogClients = datadog.NewMultiClient(cfg.DDAPIKeyUS, cfg.DDAppKeyUS, cfg.DDAPIKeyEU, cfg.DDAppKeyEU)
+		log.Printf("Datadog integration enabled (sites: %s)", datadogClients.Sites())
+	}
+
 	// Discover agents and register per-agent webhook routes (/<agent>/webhook).
 	agents, err := prompts.DiscoverAgents("")
 	if err != nil {
@@ -721,7 +766,7 @@ func main() {
 	}
 
 	// Start background integration permission refresher (runs once now, then every hour).
-	startIntegrationsRefresher(cfg, slackClient, ghClient, jiraClient, sfClient, chorusClient, modelsClient, codeModelsClient)
+	startIntegrationsRefresher(cfg, slackClient, ghClient, jiraClient, sfClient, chorusClient, datadogClients, modelsClient, codeModelsClient)
 
 	// Thread session store — enables follow-up replies in threads without /commands.
 	sessions := commands.NewSessionStore(cfg.ThreadSessionTTL)
@@ -747,7 +792,7 @@ func main() {
 		}
 
 		agentID := agent.ID // capture for closure
-		router := commands.NewRouter(slackClient, ghClient, modelsClient, codeModelsClient, jiraClient, nvdClient, sfClient, chorusClient, ap, agent.ID, cfg.AppURL, sessions, cfg.MaxToolRounds)
+		router := commands.NewRouter(slackClient, ghClient, modelsClient, codeModelsClient, jiraClient, nvdClient, sfClient, chorusClient, datadogClients, ap, agent.ID, cfg.AppURL, sessions, cfg.MaxToolRounds)
 		routers[agent.ID] = router
 
 		// Wrap router.Handle with RBAC check.

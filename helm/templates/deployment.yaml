@@ -159,6 +159,30 @@ spec:
                   name: {{ .Values.secretName }}
                   key: chorus-base-url
             {{- end }}
+            {{- if index .Values.secretValues "dd-api-key-us" }}
+            - name: DD_API_KEY_US
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: dd-api-key-us
+            - name: DD_APP_KEY_US
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: dd-app-key-us
+            {{- end }}
+            {{- if index .Values.secretValues "dd-api-key-eu" }}
+            - name: DD_API_KEY_EU
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: dd-api-key-eu
+            - name: DD_APP_KEY_EU
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: dd-app-key-eu
+            {{- end }}
             - name: GOMEMLIMIT
               value: {{ .Values.goRuntime.goMemLimit | quote }}
             - name: GOGC

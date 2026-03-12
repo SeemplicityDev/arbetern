@@ -39,6 +39,12 @@ secretValues:
   # Chorus / ZoomInfo (optional — enables call intelligence and deal momentum for Pulse)
   # chorus-api-token: "your-chorus-api-token"  # Chorus → Personal Settings → API Token
   # chorus-base-url: "https://chorus.ai"        # override for on-prem / custom endpoint
+  # Datadog (optional — enables log search, monitors, infrastructure, and dashboards)
+  # Configure US, EU, or both. The site is inferred from user prompts and URLs.
+  # dd-api-key-us: "your-dd-api-key-us"   # Datadog US (datadoghq.com) → Organization Settings → API Keys
+  # dd-app-key-us: "your-dd-app-key-us"   # Datadog US → Organization Settings → Application Keys
+  # dd-api-key-eu: "your-dd-api-key-eu"   # Datadog EU (datadoghq.eu) → Organization Settings → API Keys
+  # dd-app-key-eu: "your-dd-app-key-eu"   # Datadog EU → Organization Settings → Application Keys
 
 # ingress:
 #   enabled: true
