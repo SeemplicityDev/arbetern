@@ -112,8 +112,8 @@ general: |
   - Extract monitor IDs from Datadog URLs (e.g. https://app.datadoghq.com/monitors/12345 → monitor_id "12345").
   - Extract dashboard IDs from Datadog URLs (e.g. https://app.datadoghq.com/dashboard/abc-def-ghi/my-dashboard → dashboard_id "abc-def-ghi").
   - When investigating a triggered monitor, use datadog_get_monitor to read the monitor's query (threshold/condition) and message (contains documented reasoning and escalation steps written by the team).
-  - For log searches, use Datadog query syntax: 'service:name status:error', 'pod_name:prefix*', 'env:prod source:kubernetes @http.status_code:>499', etc.
-  - When an alert references a service or pod, search logs for that service/pod around the alert time window to find the actual error messages.
+  - **Log search priority**: when an alert or user message references a specific pod or container, search by `pod_name` FIRST (e.g. `pod_name:aggregation-worker-consumer-lb2fk-7dpkm`). Only fall back to `service:name` if the pod name is not available or the pod-level search returns no results. Pod-level queries are more precise and avoid noise from other pods in the same service.
+  - For log searches, use Datadog query syntax: 'pod_name:prefix*', 'service:name status:error', 'env:prod source:kubernetes @http.status_code:>499', etc.
   - Use datadog_list_hosts to check infrastructure health and find hosts running specific services.
   - Use datadog_get_dashboard / datadog_list_dashboards to understand what metrics and monitors a team tracks.
   - Combine Datadog data with GitHub tools: after finding errors in logs, search the codebase to understand the root cause and suggest fixes.

@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -23,6 +24,28 @@ const azureResponsesAPIVersion = "2025-04-01-preview"
 // maxResponseBody is the upper bound on response body reads to prevent OOM from
 // unexpectedly large upstream responses (10 MB).
 const maxResponseBody = 10 << 20
+
+// maxRetries is the number of additional attempts for retryable HTTP errors.
+const maxRetries = 3
+
+// baseRetryDelay is the initial backoff delay between retries.
+const baseRetryDelay = 2 * time.Second
+
+// isRetryable returns true for HTTP status codes that warrant a retry.
+func isRetryable(statusCode int) bool {
+	return statusCode == http.StatusTooManyRequests || statusCode >= 500
+}
+
+// retryDelay calculates how long to wait before the next retry, respecting
+// a Retry-After header (seconds) if present.
+func retryDelay(resp *http.Response, attempt int) time.Duration {
+	if ra := resp.Header.Get("Retry-After"); ra != "" {
+		if secs, err := strconv.Atoi(ra); err == nil && secs > 0 {
+			return time.Duration(secs) * time.Second
+		}
+	}
+	return baseRetryDelay * (1 << attempt)
+}
 
 // Client provides LLM inference through either GitHub Models or Azure OpenAI.
 // The backend is selected at construction time; the rest of the codebase uses
@@ -155,6 +178,40 @@ func (c *Client) doChat(ctx context.Context, messages []ChatMessage, tools []Too
 		return nil, fmt.Errorf("failed to read response body: %w", err)
 	}
 
+	if isRetryable(resp.StatusCode) {
+		for attempt := 0; attempt < maxRetries; attempt++ {
+			wait := retryDelay(resp, attempt)
+			log.Printf("[llm] chat retryable %d, backing off %s (attempt %d/%d)", resp.StatusCode, wait, attempt+1, maxRetries)
+			select {
+			case <-time.After(wait):
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+			retryReq, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, bytes.NewReader(payload))
+			if err != nil {
+				return nil, fmt.Errorf("failed to create retry request: %w", err)
+			}
+			retryReq.Header.Set("Content-Type", "application/json")
+			if c.useAzure() {
+				retryReq.Header.Set("api-key", c.azureAPIKey)
+			} else {
+				retryReq.Header.Set("Authorization", "Bearer "+c.token)
+			}
+			resp, err = c.httpClient.Do(retryReq)
+			if err != nil {
+				return nil, fmt.Errorf("LLM API retry request failed: %w", err)
+			}
+			body, err = io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
+			_ = resp.Body.Close()
+			if err != nil {
+				return nil, fmt.Errorf("failed to read retry response body: %w", err)
+			}
+			if !isRetryable(resp.StatusCode) {
+				break
+			}
+		}
+	}
+
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("LLM API returned %d: %s", resp.StatusCode, extractAPIErrorMessage(body))
 	}
@@ -279,6 +336,36 @@ func (c *Client) doResponses(ctx context.Context, messages []ChatMessage, tools 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
 	if err != nil {
 		return nil, fmt.Errorf("failed to read responses body: %w", err)
+	}
+
+	if isRetryable(resp.StatusCode) {
+		for attempt := 0; attempt < maxRetries; attempt++ {
+			wait := retryDelay(resp, attempt)
+			log.Printf("[llm] responses retryable %d, backing off %s (attempt %d/%d)", resp.StatusCode, wait, attempt+1, maxRetries)
+			select {
+			case <-time.After(wait):
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+			retryReq, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, bytes.NewReader(payload))
+			if err != nil {
+				return nil, fmt.Errorf("failed to create responses retry request: %w", err)
+			}
+			retryReq.Header.Set("Content-Type", "application/json")
+			retryReq.Header.Set("api-key", c.azureAPIKey)
+			resp, err = c.httpClient.Do(retryReq)
+			if err != nil {
+				return nil, fmt.Errorf("responses API retry request failed: %w", err)
+			}
+			body, err = io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
+			_ = resp.Body.Close()
+			if err != nil {
+				return nil, fmt.Errorf("failed to read responses retry body: %w", err)
+			}
+			if !isRetryable(resp.StatusCode) {
+				break
+			}
+		}
 	}
 
 	if resp.StatusCode != http.StatusOK {
