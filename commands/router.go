@@ -56,6 +56,31 @@ func NewRouter(slackClient SlackClient, ghClient *github.Client, modelsClient *l
 	}
 }
 
+// NewDirectRouter creates a Router for non-Slack callers (the HTTP query API).
+// It reuses all integration clients from the source router but swaps in a
+// DirectClient so that responses are captured instead of posted to Slack.
+// Sessions are disabled since there is no thread to follow up in.
+func NewDirectRouter(src *Router, dc *DirectClient) *Router {
+	return &Router{
+		slackClient:      dc,
+		ghClient:         src.ghClient,
+		modelsClient:     src.modelsClient,
+		codeModelsClient: src.codeModelsClient,
+		jiraClient:       src.jiraClient,
+		nvdClient:        src.nvdClient,
+		sfClient:         src.sfClient,
+		chorusClient:     src.chorusClient,
+		datadogClients:   src.datadogClients,
+		contextProvider:  NewContextProvider(dc),
+		memory:           NewConversationMemory(),
+		prompts:          src.prompts,
+		agentID:          src.agentID,
+		appURL:           src.appURL,
+		sessions:         nil,
+		maxToolRounds:    src.maxToolRounds,
+	}
+}
+
 func (r *Router) Handle(channelID, userID, text, responseURL string) {
 	text = strings.TrimSpace(text)
 	if text == "" {
