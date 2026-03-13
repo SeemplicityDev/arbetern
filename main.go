@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"embed"
 	"encoding/json"
 	"fmt"
@@ -660,6 +661,171 @@ func startIntegrationsRefresher(
 	}()
 }
 
+// ── Direct query API types ───────────────────────────────────────────────────
+
+type queryRequest struct {
+	AgentID string `json:"agent_id"`
+	Text    string `json:"text"`
+	Context string `json:"context,omitempty"`
+}
+
+type queryResponse struct {
+	AgentID  string `json:"agent_id"`
+	Response string `json:"response"`
+}
+
+type asyncJob struct {
+	mu       sync.Mutex
+	ID       string `json:"job_id"`
+	AgentID  string `json:"agent_id"`
+	Status   string `json:"status"` // pending, running, completed, failed
+	Response string `json:"response,omitempty"`
+	Error    string `json:"error,omitempty"`
+}
+
+var (
+	jobsMu sync.RWMutex
+	jobs   = make(map[string]*asyncJob)
+)
+
+func generateJobID() string {
+	b := make([]byte, 16)
+	_, _ = rand.Read(b)
+	return fmt.Sprintf("%x", b)
+}
+
+func runDirectQuery(routers map[string]*commands.Router, req queryRequest) (string, error) {
+	router, ok := routers[req.AgentID]
+	if !ok {
+		return "", fmt.Errorf("unknown agent: %s", req.AgentID)
+	}
+	dc := commands.NewDirectClient(req.Context)
+	directRouter := commands.NewDirectRouter(router, dc)
+	directRouter.Handle("direct", "api-user", req.Text, "")
+	responses := dc.Responses()
+	// Filter out audit messages and session footers — keep only substantive content.
+	var filtered []string
+	for _, r := range responses {
+		if strings.HasPrefix(r, ":mag:") || strings.HasPrefix(r, "_:thread:") {
+			continue
+		}
+		filtered = append(filtered, r)
+	}
+	return strings.Join(filtered, "\n\n"), nil
+}
+
+func handleSyncQuery(routers map[string]*commands.Router) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var req queryRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, fmt.Sprintf("invalid JSON: %v", err), http.StatusBadRequest)
+			return
+		}
+		if req.AgentID == "" || req.Text == "" {
+			http.Error(w, "agent_id and text are required", http.StatusBadRequest)
+			return
+		}
+		log.Printf("[api/query] sync request: agent=%s text=%q", req.AgentID, req.Text)
+		result, err := runDirectQuery(routers, req)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(queryResponse{AgentID: req.AgentID, Response: result})
+	}
+}
+
+func handleAsyncQuery(routers map[string]*commands.Router) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var req queryRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, fmt.Sprintf("invalid JSON: %v", err), http.StatusBadRequest)
+			return
+		}
+		if req.AgentID == "" || req.Text == "" {
+			http.Error(w, "agent_id and text are required", http.StatusBadRequest)
+			return
+		}
+		if _, ok := routers[req.AgentID]; !ok {
+			http.Error(w, fmt.Sprintf("unknown agent: %s", req.AgentID), http.StatusBadRequest)
+			return
+		}
+
+		job := &asyncJob{ID: generateJobID(), AgentID: req.AgentID, Status: "pending"}
+		jobsMu.Lock()
+		jobs[job.ID] = job
+		jobsMu.Unlock()
+
+		log.Printf("[api/query/async] job %s created: agent=%s text=%q", job.ID, req.AgentID, req.Text)
+
+		go func() {
+			job.mu.Lock()
+			job.Status = "running"
+			job.mu.Unlock()
+
+			result, err := runDirectQuery(routers, req)
+
+			job.mu.Lock()
+			if err != nil {
+				job.Status = "failed"
+				job.Error = err.Error()
+			} else {
+				job.Status = "completed"
+				job.Response = result
+			}
+			job.mu.Unlock()
+		}()
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]string{"job_id": job.ID})
+	}
+}
+
+func handleQueryStatus() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		jobID := strings.TrimPrefix(r.URL.Path, "/api/query/status/")
+		if jobID == "" {
+			http.Error(w, "job_id is required", http.StatusBadRequest)
+			return
+		}
+		jobsMu.RLock()
+		job, ok := jobs[jobID]
+		jobsMu.RUnlock()
+		if !ok {
+			http.Error(w, "job not found", http.StatusNotFound)
+			return
+		}
+		job.mu.Lock()
+		resp := map[string]string{
+			"job_id":  job.ID,
+			"status":  job.Status,
+			"agent_id": job.AgentID,
+		}
+		if job.Response != "" {
+			resp["response"] = job.Response
+		}
+		if job.Error != "" {
+			resp["error"] = job.Error
+		}
+		job.mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+	}
+}
+
 func main() {
 	cfg, err := config.Load()
 	if err != nil {
@@ -969,6 +1135,15 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(commits)
 	})
+
+	// API: direct agent query (synchronous — blocks until complete).
+	apiMux.HandleFunc("/api/query", handleSyncQuery(routers))
+
+	// API: direct agent query (async — returns job ID, poll for result).
+	apiMux.HandleFunc("/api/query/async", handleAsyncQuery(routers))
+
+	// API: poll async query job status.
+	apiMux.HandleFunc("/api/query/status/", handleQueryStatus())
 
 	http.Handle("/api/", ipWhitelist(uiCIDRs, apiMux))
 
