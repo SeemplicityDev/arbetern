@@ -53,6 +53,8 @@ type Config struct {
 	DDAppKeyUS            string
 	DDAPIKeyEU            string // Datadog EU (datadoghq.eu)
 	DDAppKeyEU            string
+	SlackClientID         string // Slack app OAuth client ID (for user identity verification on direct API)
+	SlackClientSecret     string // Slack app OAuth client secret
 }
 
 // UseAzure returns true when Azure OpenAI credentials are configured.
@@ -99,6 +101,11 @@ func (c *Config) DatadogEUConfigured() bool {
 	return c.DDAPIKeyEU != "" && c.DDAppKeyEU != ""
 }
 
+// SlackOAuthConfigured returns true when Slack OAuth client credentials are present.
+func (c *Config) SlackOAuthConfigured() bool {
+	return c.SlackClientID != "" && c.SlackClientSecret != ""
+}
+
 func Load() (*Config, error) {
 	cfg := &Config{
 		SlackBotToken:         os.Getenv("SLACK_BOT_TOKEN"),
@@ -128,6 +135,8 @@ func Load() (*Config, error) {
 		DDAppKeyUS:            os.Getenv("DD_APP_KEY_US"),
 		DDAPIKeyEU:            os.Getenv("DD_API_KEY_EU"),
 		DDAppKeyEU:            os.Getenv("DD_APP_KEY_EU"),
+		SlackClientID:         os.Getenv("SLACK_CLIENT_ID"),
+		SlackClientSecret:     os.Getenv("SLACK_CLIENT_SECRET"),
 	}
 
 	if cfg.SlackBotToken == "" {
