@@ -16,6 +16,8 @@ const (
 	maxResponseBody   = 10 << 20 // 10 MB
 	defaultMaxResults = 20
 	maxAllowedResults = 50
+	maxRetries        = 3
+	retryBaseDelay    = 1 * time.Second
 )
 
 // Client provides access to the Linear GraphQL API.
@@ -27,6 +29,8 @@ type Client struct {
 
 // NewClient creates a Linear API client using a personal API token.
 func NewClient(apiToken, teamID string) *Client {
+	// Linear expects a bare token, not "Bearer <token>".
+	apiToken = strings.TrimPrefix(apiToken, "Bearer ")
 	return &Client{
 		apiToken:   apiToken,
 		teamID:     teamID,
@@ -35,6 +39,7 @@ func NewClient(apiToken, teamID string) *Client {
 }
 
 // graphQLRequest sends a GraphQL request and decodes the response into v.
+// Retries on 429 (rate limit) and 5xx responses with exponential backoff.
 func (c *Client) graphQLRequest(query string, variables map[string]interface{}, v interface{}) error {
 	payload := map[string]interface{}{
 		"query": query,
@@ -48,25 +53,38 @@ func (c *Client) graphQLRequest(query string, variables map[string]interface{}, 
 		return fmt.Errorf("marshal request: %w", err)
 	}
 
-	req, err := http.NewRequest(http.MethodPost, linearAPIURL, bytes.NewReader(body))
-	if err != nil {
-		return fmt.Errorf("create request: %w", err)
-	}
-	req.Header.Set("Authorization", c.apiToken)
-	req.Header.Set("Content-Type", "application/json")
+	var respBody []byte
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		req, err := http.NewRequest(http.MethodPost, linearAPIURL, bytes.NewReader(body))
+		if err != nil {
+			return fmt.Errorf("create request: %w", err)
+		}
+		req.Header.Set("Authorization", c.apiToken)
+		req.Header.Set("Content-Type", "application/json")
 
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("send request: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			return fmt.Errorf("send request: %w", err)
+		}
 
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
-	if err != nil {
-		return fmt.Errorf("read response: %w", err)
-	}
+		respBody, err = io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
+		_ = resp.Body.Close()
+		if err != nil {
+			return fmt.Errorf("read response: %w", err)
+		}
 
-	if resp.StatusCode != http.StatusOK {
+		if resp.StatusCode == http.StatusOK {
+			break
+		}
+
+		// Retry on 429 (rate limit) and 5xx (server errors).
+		if (resp.StatusCode == 429 || resp.StatusCode >= 500) && attempt < maxRetries {
+			delay := retryBaseDelay * time.Duration(1<<uint(attempt))
+			log.Printf("[linear] HTTP %d, retrying in %s (attempt %d/%d)", resp.StatusCode, delay, attempt+1, maxRetries)
+			time.Sleep(delay)
+			continue
+		}
+
 		return fmt.Errorf("linear API returned HTTP %d: %s", resp.StatusCode, string(respBody))
 	}
 

@@ -791,10 +791,16 @@ func main() {
 	var linearClient *linear.Client
 	if cfg.LinearConfigured() {
 		linearClient = linear.NewClient(cfg.LinearAPIToken, cfg.LinearTeamID)
-		if cfg.LinearTeamID != "" {
-			log.Printf("Linear integration enabled (default team ID: %s)", cfg.LinearTeamID)
+		// Validate the token by listing teams.
+		if teams, err := linearClient.ListTeams(); err != nil {
+			log.Printf("Warning: Linear token validation failed (integration may not work): %v", err)
 		} else {
-			log.Printf("Linear integration enabled (no default team — team_id required per request)")
+			log.Printf("Linear integration enabled (%d teams accessible)", len(teams))
+		}
+		if cfg.LinearTeamID != "" {
+			log.Printf("Linear default team ID: %s", cfg.LinearTeamID)
+		} else {
+			log.Printf("Linear: no default team — team_id required per request")
 		}
 	}
 

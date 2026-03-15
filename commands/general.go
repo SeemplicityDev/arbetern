@@ -2547,9 +2547,6 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		return result
 
 	case "create_linear_issue":
-		if h.linearClient == nil {
-			return "Error: Linear integration is not configured. Set LINEAR_API_TOKEN to enable it."
-		}
 		var args struct {
 			Title       string `json:"title"`
 			Description string `json:"description"`
@@ -2574,15 +2571,18 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 
 		// Resolve assignee name to Linear user ID.
 		var assigneeID string
+		var assigneeWarning string
 		if args.Assignee != "" {
 			users, err := h.linearClient.SearchMembers(args.Assignee)
 			if err != nil {
 				log.Printf("[user=%s channel=%s] Linear user search failed for %q: %v", userID, channelID, args.Assignee, err)
+				assigneeWarning = fmt.Sprintf("\n(Warning: could not resolve assignee %q: %v)", args.Assignee, err)
 			} else if len(users) > 0 {
 				assigneeID = users[0].ID
 				log.Printf("[user=%s channel=%s] resolved assignee %q to Linear user %s (%s)", userID, channelID, args.Assignee, users[0].Name, assigneeID)
 			} else {
 				log.Printf("[user=%s channel=%s] no Linear user found for %q", userID, channelID, args.Assignee)
+				assigneeWarning = fmt.Sprintf("\n(Warning: no Linear user found matching %q — issue created without assignee)", args.Assignee)
 			}
 		}
 
@@ -2597,12 +2597,9 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 			return fmt.Sprintf("Error creating Linear issue: %v", err)
 		}
 		log.Printf("[user=%s channel=%s] created Linear issue %s: %s", userID, channelID, issue.Identifier, issue.URL)
-		return fmt.Sprintf("Linear issue created: *%s* — %s\nTitle: %s", issue.Identifier, issue.URL, args.Title)
+		return fmt.Sprintf("Linear issue created: *%s* — %s\nTitle: %s%s", issue.Identifier, issue.URL, args.Title, assigneeWarning)
 
 	case "get_linear_issue":
-		if h.linearClient == nil {
-			return "Error: Linear integration is not configured. Set LINEAR_API_TOKEN to enable it."
-		}
 		var args struct {
 			Identifier string `json:"identifier"`
 		}
@@ -2632,9 +2629,6 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		return sb.String()
 
 	case "search_linear_issues":
-		if h.linearClient == nil {
-			return "Error: Linear integration is not configured. Set LINEAR_API_TOKEN to enable it."
-		}
 		var args struct {
 			Query      string `json:"query"`
 			MaxResults int    `json:"max_results"`
@@ -2663,9 +2657,6 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		return sb.String()
 
 	case "update_linear_issue":
-		if h.linearClient == nil {
-			return "Error: Linear integration is not configured. Set LINEAR_API_TOKEN to enable it."
-		}
 		var args struct {
 			Identifier  string `json:"identifier"`
 			Title       string `json:"title"`
@@ -2677,12 +2668,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		if args.Title == "" && args.Description == "" {
 			return "Error: at least one of title or description must be provided."
 		}
-		// Fetch the issue to get its internal ID (required for the mutation).
-		issue, err := h.linearClient.GetIssue(args.Identifier)
-		if err != nil {
-			return fmt.Sprintf("Error fetching Linear issue %q: %v", args.Identifier, err)
-		}
-		if err := h.linearClient.UpdateIssue(issue.ID, args.Title, args.Description); err != nil {
+		if err := h.linearClient.UpdateIssue(args.Identifier, args.Title, args.Description); err != nil {
 			return fmt.Sprintf("Error updating Linear issue: %v", err)
 		}
 		updated := []string{}
@@ -2696,9 +2682,6 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		return fmt.Sprintf("Successfully updated Linear issue %s: %s", args.Identifier, strings.Join(updated, " and "))
 
 	case "list_linear_teams":
-		if h.linearClient == nil {
-			return "Error: Linear integration is not configured. Set LINEAR_API_TOKEN to enable it."
-		}
 		teams, err := h.linearClient.ListTeams()
 		if err != nil {
 			return fmt.Sprintf("Error listing Linear teams: %v", err)
@@ -2715,9 +2698,6 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		return sb.String()
 
 	case "resolve_linear_user":
-		if h.linearClient == nil {
-			return "Error: Linear integration is not configured. Set LINEAR_API_TOKEN to enable it."
-		}
 		var args struct {
 			Query string `json:"query"`
 		}

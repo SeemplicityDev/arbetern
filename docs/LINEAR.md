@@ -37,11 +37,9 @@ Example Slack commands:
 
 If you want a default team for issue creation, find your team's ID:
 
-1. In Linear, navigate to **Settings → Teams**.
-2. Click on the team you want to use as the default.
-3. The team ID appears in the URL: `https://linear.app/your-org/settings/teams/<TEAM_ID>/general`
+After configuring the API token, agents can call `list_linear_teams` to discover all available team IDs at runtime. This is the recommended approach.
 
-Alternatively, after configuring the API token, agents can call `list_linear_teams` to discover all available team IDs at runtime.
+Alternatively, you can find team IDs via the Linear API or GraphQL explorer.
 
 ### 3. Configure Environment Variables
 
