@@ -642,13 +642,9 @@ func refreshIntegrations(
 			{Scope: "teams:read", Description: "List accessible teams and workflow states", Required: true, Granted: boolPtr(linearConfigured)},
 			{Scope: "users:read", Description: "Search and resolve team members for issue assignment", Required: false, Granted: boolPtr(linearConfigured)},
 		}
-		teamInfo := ""
+		var activeModels map[string]string
 		if linearClient != nil && cfg.LinearTeamID != "" {
-			teamInfo = cfg.LinearTeamID
-		}
-		activeModels := map[string]string{}
-		if teamInfo != "" {
-			activeModels["Default Team ID"] = teamInfo
+			activeModels = map[string]string{"Default Team ID": cfg.LinearTeamID}
 		}
 		result = append(result, integration{
 			ID:           "linear",
@@ -792,7 +788,7 @@ func main() {
 	if cfg.LinearConfigured() {
 		linearClient = linear.NewClient(cfg.LinearAPIToken, cfg.LinearTeamID)
 		// Validate the token by listing teams.
-		if teams, err := linearClient.ListTeams(); err != nil {
+		if teams, err := linearClient.ListTeams(context.Background()); err != nil {
 			log.Printf("Warning: Linear token validation failed (integration may not work): %v", err)
 		} else {
 			log.Printf("Linear integration enabled (%d teams accessible)", len(teams))

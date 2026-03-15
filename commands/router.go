@@ -177,6 +177,7 @@ func requiresAction(text string) bool {
 		"modify", "change", "update", "edit", "add", "remove",
 		"create ticket", "create a ticket", "create issue", "create a issue",
 		"create jira", "create a jira",
+		"create linear", "create a linear",
 	}
 	for _, kw := range actionKeywords {
 		if strings.Contains(text, kw) {

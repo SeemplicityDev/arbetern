@@ -72,6 +72,21 @@ type activeBranchInfo struct {
 	prURL      string
 }
 
+// buildCreationStamp returns a markdown footer stamped onto issue descriptions
+// created by agents (used by both Jira and Linear handlers).
+func (h *GeneralHandler) buildCreationStamp() string {
+	stamp := fmt.Sprintf("\n\n---\nCreated by **%s** via Arbetern", h.agentID)
+	if h.appURL != "" {
+		stamp += fmt.Sprintf(" | %s/ui/", strings.TrimRight(h.appURL, "/"))
+	}
+	if h.currentChannelID != "" && h.currentAuditTS != "" {
+		if permalink, err := h.slackClient.GetPermalink(h.currentChannelID, h.currentAuditTS); err == nil && permalink != "" {
+			stamp += fmt.Sprintf(" | [Slack message](%s)", permalink)
+		}
+	}
+	return stamp
+}
+
 func (h *GeneralHandler) Execute(channelID, userID, text, responseURL, auditTS string) {
 	ctx := context.Background()
 	h.currentChannelID = channelID
@@ -1617,17 +1632,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
 			return fmt.Sprintf("Error parsing arguments: %v", err)
 		}
-		// Append agent stamp to the description.
-		stamp := fmt.Sprintf("\n\n---\nCreated by **%s** via Arbetern", h.agentID)
-		if h.appURL != "" {
-			stamp += fmt.Sprintf(" | %s/ui/", strings.TrimRight(h.appURL, "/"))
-		}
-		if h.currentChannelID != "" && h.currentAuditTS != "" {
-			if permalink, err := h.slackClient.GetPermalink(h.currentChannelID, h.currentAuditTS); err == nil && permalink != "" {
-				stamp += fmt.Sprintf(" | [Slack message](%s)", permalink)
-			}
-		}
-		args.Description += stamp
+		args.Description += h.buildCreationStamp()
 
 		// Resolve assignee name to Jira account ID.
 		var assigneeID string
@@ -2547,6 +2552,9 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		return result
 
 	case "create_linear_issue":
+		if h.linearClient == nil {
+			return "Error: Linear integration is not configured. Set LINEAR_API_TOKEN to enable it."
+		}
 		var args struct {
 			Title       string `json:"title"`
 			Description string `json:"description"`
@@ -2557,23 +2565,13 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
 			return fmt.Sprintf("Error parsing arguments: %v", err)
 		}
-		// Append agent stamp to the description.
-		stamp := fmt.Sprintf("\n\n---\nCreated by **%s** via Arbetern", h.agentID)
-		if h.appURL != "" {
-			stamp += fmt.Sprintf(" | %s/ui/", strings.TrimRight(h.appURL, "/"))
-		}
-		if h.currentChannelID != "" && h.currentAuditTS != "" {
-			if permalink, err := h.slackClient.GetPermalink(h.currentChannelID, h.currentAuditTS); err == nil && permalink != "" {
-				stamp += fmt.Sprintf(" | [Slack message](%s)", permalink)
-			}
-		}
-		args.Description += stamp
+		args.Description += h.buildCreationStamp()
 
 		// Resolve assignee name to Linear user ID.
 		var assigneeID string
 		var assigneeWarning string
 		if args.Assignee != "" {
-			users, err := h.linearClient.SearchMembers(args.Assignee)
+			users, err := h.linearClient.SearchMembers(ctx, args.Assignee)
 			if err != nil {
 				log.Printf("[user=%s channel=%s] Linear user search failed for %q: %v", userID, channelID, args.Assignee, err)
 				assigneeWarning = fmt.Sprintf("\n(Warning: could not resolve assignee %q: %v)", args.Assignee, err)
@@ -2586,7 +2584,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 			}
 		}
 
-		issue, err := h.linearClient.CreateIssue(linear.CreateIssueInput{
+		issue, err := h.linearClient.CreateIssue(ctx, linear.CreateIssueInput{
 			Title:       args.Title,
 			Description: args.Description,
 			TeamID:      args.TeamID,
@@ -2600,13 +2598,16 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		return fmt.Sprintf("Linear issue created: *%s* — %s\nTitle: %s%s", issue.Identifier, issue.URL, args.Title, assigneeWarning)
 
 	case "get_linear_issue":
+		if h.linearClient == nil {
+			return "Error: Linear integration is not configured. Set LINEAR_API_TOKEN to enable it."
+		}
 		var args struct {
 			Identifier string `json:"identifier"`
 		}
 		if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
 			return fmt.Sprintf("Error parsing arguments: %v", err)
 		}
-		issue, err := h.linearClient.GetIssue(args.Identifier)
+		issue, err := h.linearClient.GetIssue(ctx, args.Identifier)
 		if err != nil {
 			return fmt.Sprintf("Error getting Linear issue: %v", err)
 		}
@@ -2629,6 +2630,9 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		return sb.String()
 
 	case "search_linear_issues":
+		if h.linearClient == nil {
+			return "Error: Linear integration is not configured. Set LINEAR_API_TOKEN to enable it."
+		}
 		var args struct {
 			Query      string `json:"query"`
 			MaxResults int    `json:"max_results"`
@@ -2636,7 +2640,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
 			return fmt.Sprintf("Error parsing arguments: %v", err)
 		}
-		issues, err := h.linearClient.SearchIssues(args.Query, args.MaxResults)
+		issues, err := h.linearClient.SearchIssues(ctx, args.Query, args.MaxResults)
 		if err != nil {
 			return fmt.Sprintf("Error searching Linear issues: %v", err)
 		}
@@ -2657,6 +2661,9 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		return sb.String()
 
 	case "update_linear_issue":
+		if h.linearClient == nil {
+			return "Error: Linear integration is not configured. Set LINEAR_API_TOKEN to enable it."
+		}
 		var args struct {
 			Identifier  string `json:"identifier"`
 			Title       string `json:"title"`
@@ -2668,10 +2675,10 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		if args.Title == "" && args.Description == "" {
 			return "Error: at least one of title or description must be provided."
 		}
-		if err := h.linearClient.UpdateIssue(args.Identifier, args.Title, args.Description); err != nil {
+		if err := h.linearClient.UpdateIssue(ctx, args.Identifier, args.Title, args.Description); err != nil {
 			return fmt.Sprintf("Error updating Linear issue: %v", err)
 		}
-		updated := []string{}
+		var updated []string
 		if args.Title != "" {
 			updated = append(updated, "title")
 		}
@@ -2682,7 +2689,10 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		return fmt.Sprintf("Successfully updated Linear issue %s: %s", args.Identifier, strings.Join(updated, " and "))
 
 	case "list_linear_teams":
-		teams, err := h.linearClient.ListTeams()
+		if h.linearClient == nil {
+			return "Error: Linear integration is not configured. Set LINEAR_API_TOKEN to enable it."
+		}
+		teams, err := h.linearClient.ListTeams(ctx)
 		if err != nil {
 			return fmt.Sprintf("Error listing Linear teams: %v", err)
 		}
@@ -2698,13 +2708,16 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		return sb.String()
 
 	case "resolve_linear_user":
+		if h.linearClient == nil {
+			return "Error: Linear integration is not configured. Set LINEAR_API_TOKEN to enable it."
+		}
 		var args struct {
 			Query string `json:"query"`
 		}
 		if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
 			return fmt.Sprintf("Error parsing arguments: %v", err)
 		}
-		users, err := h.linearClient.SearchMembers(args.Query)
+		users, err := h.linearClient.SearchMembers(ctx, args.Query)
 		if err != nil {
 			return fmt.Sprintf("Error searching Linear users: %v", err)
 		}

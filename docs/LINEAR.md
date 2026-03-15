@@ -92,7 +92,7 @@ Once configured, agents automatically gain access to Linear tools. No additional
 
 ```
 /seihin find Linear issues related to authentication
-/agent-q what are the open issues about the deploy pipeline in Linear?
+/ovad what are the open issues about the deploy pipeline in Linear?
 ```
 
 ### Updating Issues

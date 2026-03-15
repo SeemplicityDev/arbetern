@@ -2,6 +2,7 @@ package linear
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -29,7 +30,7 @@ type Client struct {
 
 // NewClient creates a Linear API client using a personal API token.
 func NewClient(apiToken, teamID string) *Client {
-	// Linear expects a bare token, not "Bearer <token>".
+	// Normalize: strip "Bearer " prefix if provided — the client adds it back when sending requests.
 	apiToken = strings.TrimPrefix(apiToken, "Bearer ")
 	return &Client{
 		apiToken:   apiToken,
@@ -40,8 +41,8 @@ func NewClient(apiToken, teamID string) *Client {
 
 // graphQLRequest sends a GraphQL request and decodes the response into v.
 // Retries on 429 (rate limit) and 5xx responses with exponential backoff.
-func (c *Client) graphQLRequest(query string, variables map[string]interface{}, v interface{}) error {
-	payload := map[string]interface{}{
+func (c *Client) graphQLRequest(ctx context.Context, query string, variables map[string]any, v any) error {
+	payload := map[string]any{
 		"query": query,
 	}
 	if len(variables) > 0 {
@@ -55,11 +56,11 @@ func (c *Client) graphQLRequest(query string, variables map[string]interface{}, 
 
 	var respBody []byte
 	for attempt := 0; attempt <= maxRetries; attempt++ {
-		req, err := http.NewRequest(http.MethodPost, linearAPIURL, bytes.NewReader(body))
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, linearAPIURL, bytes.NewReader(body))
 		if err != nil {
 			return fmt.Errorf("create request: %w", err)
 		}
-		req.Header.Set("Authorization", c.apiToken)
+		req.Header.Set("Authorization", "Bearer "+c.apiToken)
 		req.Header.Set("Content-Type", "application/json")
 
 		resp, err := c.httpClient.Do(req)
@@ -121,8 +122,8 @@ type Issue struct {
 	State       State  `json:"state"`
 	Assignee    *User  `json:"assignee"`
 	Priority    int    `json:"priority"`
-	CreatedAt   string `json:"createdAt"`
-	UpdatedAt   string `json:"updatedAt"`
+	CreatedAt   string `json:"createdAt"` // ISO 8601
+	UpdatedAt   string `json:"updatedAt"` // ISO 8601
 }
 
 // PriorityLabel returns a human-readable label for the Linear priority integer.
@@ -176,7 +177,7 @@ type CreateIssueInput struct {
 }
 
 // CreateIssue creates a new Linear issue and returns the created issue.
-func (c *Client) CreateIssue(input CreateIssueInput) (*Issue, error) {
+func (c *Client) CreateIssue(ctx context.Context, input CreateIssueInput) (*Issue, error) {
 	teamID := input.TeamID
 	if teamID == "" {
 		teamID = c.teamID
@@ -204,7 +205,7 @@ func (c *Client) CreateIssue(input CreateIssueInput) (*Issue, error) {
 		}
 	}`
 
-	variables := map[string]interface{}{
+	variables := map[string]any{
 		"input": buildCreateInput(teamID, input),
 	}
 
@@ -214,7 +215,7 @@ func (c *Client) CreateIssue(input CreateIssueInput) (*Issue, error) {
 			Issue   Issue `json:"issue"`
 		} `json:"issueCreate"`
 	}
-	if err := c.graphQLRequest(query, variables, &data); err != nil {
+	if err := c.graphQLRequest(ctx, query, variables, &data); err != nil {
 		return nil, err
 	}
 	if !data.IssueCreate.Success {
@@ -224,8 +225,8 @@ func (c *Client) CreateIssue(input CreateIssueInput) (*Issue, error) {
 	return &data.IssueCreate.Issue, nil
 }
 
-func buildCreateInput(teamID string, input CreateIssueInput) map[string]interface{} {
-	m := map[string]interface{}{
+func buildCreateInput(teamID string, input CreateIssueInput) map[string]any {
+	m := map[string]any{
 		"teamId": teamID,
 		"title":  input.Title,
 	}
@@ -248,7 +249,7 @@ func buildCreateInput(teamID string, input CreateIssueInput) map[string]interfac
 }
 
 // GetIssue fetches a Linear issue by its identifier (e.g. "ENG-123") or internal UUID.
-func (c *Client) GetIssue(identifier string) (*Issue, error) {
+func (c *Client) GetIssue(ctx context.Context, identifier string) (*Issue, error) {
 	query := `
 	query GetIssue($id: String!) {
 		issue(id: $id) {
@@ -268,7 +269,7 @@ func (c *Client) GetIssue(identifier string) (*Issue, error) {
 	var data struct {
 		Issue Issue `json:"issue"`
 	}
-	if err := c.graphQLRequest(query, map[string]interface{}{"id": identifier}, &data); err != nil {
+	if err := c.graphQLRequest(ctx, query, map[string]any{"id": identifier}, &data); err != nil {
 		return nil, err
 	}
 	if data.Issue.ID == "" {
@@ -277,8 +278,8 @@ func (c *Client) GetIssue(identifier string) (*Issue, error) {
 	return &data.Issue, nil
 }
 
-// SearchIssues searches for Linear issues matching the given query string.
-func (c *Client) SearchIssues(queryStr string, maxResults int) ([]Issue, error) {
+// SearchIssues searches for Linear issues using full-text search.
+func (c *Client) SearchIssues(ctx context.Context, term string, maxResults int) ([]Issue, error) {
 	if maxResults <= 0 {
 		maxResults = defaultMaxResults
 	}
@@ -287,8 +288,8 @@ func (c *Client) SearchIssues(queryStr string, maxResults int) ([]Issue, error) 
 	}
 
 	query := `
-	query SearchIssues($filter: IssueFilter, $first: Int) {
-		issues(filter: $filter, first: $first, orderBy: updatedAt) {
+	query SearchIssues($term: String!, $first: Int, $filter: IssueFilter) {
+		searchIssues(term: $term, first: $first, filter: $filter) {
 			nodes {
 				id
 				identifier
@@ -304,43 +305,33 @@ func (c *Client) SearchIssues(queryStr string, maxResults int) ([]Issue, error) 
 		}
 	}`
 
-	filter := buildSearchFilter(queryStr, c.teamID)
+	variables := map[string]any{
+		"term":  term,
+		"first": maxResults,
+	}
 
-	variables := map[string]interface{}{
-		"filter": filter,
-		"first":  maxResults,
+	// Scope to team if configured.
+	if c.teamID != "" {
+		variables["filter"] = map[string]any{
+			"team": map[string]any{
+				"id": map[string]any{"eq": c.teamID},
+			},
+		}
 	}
 
 	var data struct {
-		Issues struct {
+		SearchIssues struct {
 			Nodes []Issue `json:"nodes"`
-		} `json:"issues"`
+		} `json:"searchIssues"`
 	}
-	if err := c.graphQLRequest(query, variables, &data); err != nil {
+	if err := c.graphQLRequest(ctx, query, variables, &data); err != nil {
 		return nil, err
 	}
-	return data.Issues.Nodes, nil
-}
-
-func buildSearchFilter(queryStr, teamID string) map[string]interface{} {
-	filter := map[string]interface{}{}
-
-	if teamID != "" {
-		filter["team"] = map[string]interface{}{
-			"id": map[string]interface{}{"eq": teamID},
-		}
-	}
-	if queryStr != "" {
-		filter["or"] = []interface{}{
-			map[string]interface{}{"title": map[string]interface{}{"containsIgnoreCase": queryStr}},
-			map[string]interface{}{"description": map[string]interface{}{"containsIgnoreCase": queryStr}},
-		}
-	}
-	return filter
+	return data.SearchIssues.Nodes, nil
 }
 
 // UpdateIssue updates a Linear issue's title and/or description by issue ID or identifier.
-func (c *Client) UpdateIssue(issueID, title, description string) error {
+func (c *Client) UpdateIssue(ctx context.Context, issueID, title, description string) error {
 	query := `
 	mutation UpdateIssue($id: String!, $input: IssueUpdateInput!) {
 		issueUpdate(id: $id, input: $input) {
@@ -352,7 +343,7 @@ func (c *Client) UpdateIssue(issueID, title, description string) error {
 		}
 	}`
 
-	updateInput := map[string]interface{}{}
+	updateInput := map[string]any{}
 	if title != "" {
 		updateInput["title"] = title
 	}
@@ -363,7 +354,7 @@ func (c *Client) UpdateIssue(issueID, title, description string) error {
 		return fmt.Errorf("at least one of title or description must be provided")
 	}
 
-	variables := map[string]interface{}{
+	variables := map[string]any{
 		"id":    issueID,
 		"input": updateInput,
 	}
@@ -377,7 +368,7 @@ func (c *Client) UpdateIssue(issueID, title, description string) error {
 			} `json:"issue"`
 		} `json:"issueUpdate"`
 	}
-	if err := c.graphQLRequest(query, variables, &data); err != nil {
+	if err := c.graphQLRequest(ctx, query, variables, &data); err != nil {
 		return err
 	}
 	if !data.IssueUpdate.Success {
@@ -387,11 +378,11 @@ func (c *Client) UpdateIssue(issueID, title, description string) error {
 	return nil
 }
 
-// ListTeams lists all teams accessible to the API token.
-func (c *Client) ListTeams() ([]Team, error) {
+// ListTeams lists all teams accessible to the API token (up to 250).
+func (c *Client) ListTeams(ctx context.Context) ([]Team, error) {
 	query := `
-	query ListTeams {
-		teams {
+	query ListTeams($first: Int) {
+		teams(first: $first) {
 			nodes {
 				id
 				name
@@ -406,14 +397,14 @@ func (c *Client) ListTeams() ([]Team, error) {
 			Nodes []Team `json:"nodes"`
 		} `json:"teams"`
 	}
-	if err := c.graphQLRequest(query, nil, &data); err != nil {
+	if err := c.graphQLRequest(ctx, query, map[string]any{"first": 250}, &data); err != nil {
 		return nil, err
 	}
 	return data.Teams.Nodes, nil
 }
 
 // ListTeamStates returns the workflow states for the configured (or given) team.
-func (c *Client) ListTeamStates(teamID string) ([]State, error) {
+func (c *Client) ListTeamStates(ctx context.Context, teamID string) ([]State, error) {
 	if teamID == "" {
 		teamID = c.teamID
 	}
@@ -422,9 +413,9 @@ func (c *Client) ListTeamStates(teamID string) ([]State, error) {
 	}
 
 	query := `
-	query ListTeamStates($teamId: String!) {
+	query ListTeamStates($teamId: String!, $first: Int) {
 		team(id: $teamId) {
-			states {
+			states(first: $first) {
 				nodes {
 					id
 					name
@@ -441,15 +432,15 @@ func (c *Client) ListTeamStates(teamID string) ([]State, error) {
 			} `json:"states"`
 		} `json:"team"`
 	}
-	if err := c.graphQLRequest(query, map[string]interface{}{"teamId": teamID}, &data); err != nil {
+	if err := c.graphQLRequest(ctx, query, map[string]any{"teamId": teamID, "first": 250}, &data); err != nil {
 		return nil, err
 	}
 	return data.Team.States.Nodes, nil
 }
 
 // SearchMembers searches for Linear users by name or email.
-func (c *Client) SearchMembers(query string) ([]User, error) {
-	gql := `
+func (c *Client) SearchMembers(ctx context.Context, searchTerm string) ([]User, error) {
+	query := `
 	query SearchMembers($filter: UserFilter) {
 		users(filter: $filter) {
 			nodes {
@@ -461,11 +452,11 @@ func (c *Client) SearchMembers(query string) ([]User, error) {
 		}
 	}`
 
-	filter := map[string]interface{}{
-		"or": []interface{}{
-			map[string]interface{}{"name": map[string]interface{}{"containsIgnoreCase": query}},
-			map[string]interface{}{"displayName": map[string]interface{}{"containsIgnoreCase": query}},
-			map[string]interface{}{"email": map[string]interface{}{"containsIgnoreCase": query}},
+	filter := map[string]any{
+		"or": []any{
+			map[string]any{"name": map[string]any{"containsIgnoreCase": searchTerm}},
+			map[string]any{"displayName": map[string]any{"containsIgnoreCase": searchTerm}},
+			map[string]any{"email": map[string]any{"containsIgnoreCase": searchTerm}},
 		},
 	}
 
@@ -474,7 +465,7 @@ func (c *Client) SearchMembers(query string) ([]User, error) {
 			Nodes []User `json:"nodes"`
 		} `json:"users"`
 	}
-	if err := c.graphQLRequest(gql, map[string]interface{}{"filter": filter}, &data); err != nil {
+	if err := c.graphQLRequest(ctx, query, map[string]any{"filter": filter}, &data); err != nil {
 		return nil, err
 	}
 	return data.Users.Nodes, nil
