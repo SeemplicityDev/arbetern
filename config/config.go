@@ -53,6 +53,8 @@ type Config struct {
 	DDAppKeyUS            string
 	DDAPIKeyEU            string // Datadog EU (datadoghq.eu)
 	DDAppKeyEU            string
+	LinearAPIToken        string // Linear personal API token
+	LinearTeamID          string // Default Linear team ID (optional)
 }
 
 // UseAzure returns true when Azure OpenAI credentials are configured.
@@ -99,6 +101,11 @@ func (c *Config) DatadogEUConfigured() bool {
 	return c.DDAPIKeyEU != "" && c.DDAppKeyEU != ""
 }
 
+// LinearConfigured returns true when a Linear API token is present.
+func (c *Config) LinearConfigured() bool {
+	return c.LinearAPIToken != ""
+}
+
 func Load() (*Config, error) {
 	cfg := &Config{
 		SlackBotToken:         os.Getenv("SLACK_BOT_TOKEN"),
@@ -128,6 +135,8 @@ func Load() (*Config, error) {
 		DDAppKeyUS:            os.Getenv("DD_APP_KEY_US"),
 		DDAPIKeyEU:            os.Getenv("DD_API_KEY_EU"),
 		DDAppKeyEU:            os.Getenv("DD_APP_KEY_EU"),
+		LinearAPIToken:        os.Getenv("LINEAR_API_TOKEN"),
+		LinearTeamID:          os.Getenv("LINEAR_TEAM_ID"),
 	}
 
 	if cfg.SlackBotToken == "" {

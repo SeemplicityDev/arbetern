@@ -13,6 +13,7 @@ import (
 	"github.com/justmike1/arbetern/config"
 	"github.com/justmike1/arbetern/datadog"
 	"github.com/justmike1/arbetern/github"
+	"github.com/justmike1/arbetern/linear"
 	"github.com/justmike1/arbetern/llm"
 	"github.com/justmike1/arbetern/nvd"
 	"github.com/justmike1/arbetern/salesforce"
@@ -49,6 +50,7 @@ type GeneralHandler struct {
 	sfClient         *salesforce.Client
 	chorusClient     *chorus.Client
 	datadogClients   *datadog.MultiClient
+	linearClient     *linear.Client
 	contextProvider  *ContextProvider
 	memory           *ConversationMemory
 	prompts          PromptProvider
@@ -68,6 +70,21 @@ type activeBranchInfo struct {
 	branchName string
 	baseBranch string
 	prURL      string
+}
+
+// buildCreationStamp returns a markdown footer stamped onto issue descriptions
+// created by agents (used by both Jira and Linear handlers).
+func (h *GeneralHandler) buildCreationStamp() string {
+	stamp := fmt.Sprintf("\n\n---\nCreated by **%s** via Arbetern", h.agentID)
+	if h.appURL != "" {
+		stamp += fmt.Sprintf(" | %s/ui/", strings.TrimRight(h.appURL, "/"))
+	}
+	if h.currentChannelID != "" && h.currentAuditTS != "" {
+		if permalink, err := h.slackClient.GetPermalink(h.currentChannelID, h.currentAuditTS); err == nil && permalink != "" {
+			stamp += fmt.Sprintf(" | [Slack message](%s)", permalink)
+		}
+	}
+	return stamp
 }
 
 func (h *GeneralHandler) Execute(channelID, userID, text, responseURL, auditTS string) {
@@ -939,6 +956,90 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 		})
 	}
 
+	// Linear tools — available when Linear is configured.
+	if h.linearClient != nil {
+		tools = append(tools, llm.Tool{
+			Type: "function",
+			Function: llm.ToolFunction{
+				Name:        "create_linear_issue",
+				Description: "Create a Linear issue. Use this when the user asks to create a ticket, task, story, or bug in Linear. Populate the title and description from the relevant content discussed in the conversation. IMPORTANT: Format the description using markdown — use # for headers, - for bullet lists, 1) for numbered lists, **bold** for emphasis, and `code` for inline code. Structure the issue professionally with clear sections (e.g., ## Context, ## Scope, ## Acceptance Criteria). If the user asks to assign the issue to a person, use the assignee field.",
+				Parameters: json.RawMessage(`{
+					"type":"object",
+					"properties":{
+						"title":{"type":"string","description":"Short one-line title for the issue."},
+						"description":{"type":"string","description":"Detailed, well-structured description using markdown formatting. Use ## for section headers, - for bullet points, 1) for numbered steps, **bold** for key terms, and backticks for code references. Organize into clear sections like Context, Scope, Acceptance Criteria, etc."},
+						"team_id":{"type":"string","description":"Linear team ID to create the issue in. If not provided, uses the configured default team. Use list_linear_teams to discover available teams."},
+						"assignee":{"type":"string","description":"Name or email of the person to assign the issue to. The system will search for a matching Linear user."},
+						"priority":{"type":"integer","description":"Issue priority: 1=Urgent, 2=High, 3=Medium, 4=Low, 0=No priority. Default: 0.","enum":[0,1,2,3,4]}
+					},
+					"required":["title","description"]
+				}`),
+			},
+		}, llm.Tool{
+			Type: "function",
+			Function: llm.ToolFunction{
+				Name:        "get_linear_issue",
+				Description: "Get full details of a specific Linear issue by its identifier (e.g. 'ENG-123') or internal UUID. Returns title, description, status, assignee, priority, and URL.",
+				Parameters: json.RawMessage(`{
+					"type":"object",
+					"properties":{
+						"identifier":{"type":"string","description":"Linear issue identifier (e.g. 'ENG-123') or internal UUID."}
+					},
+					"required":["identifier"]
+				}`),
+			},
+		}, llm.Tool{
+			Type: "function",
+			Function: llm.ToolFunction{
+				Name:        "search_linear_issues",
+				Description: "Search for Linear issues by keyword. Searches both the title and description. Use this to find existing issues before creating duplicates, or to look up issues related to a topic.",
+				Parameters: json.RawMessage(`{
+					"type":"object",
+					"properties":{
+						"query":{"type":"string","description":"Keyword or phrase to search for in issue titles and descriptions."},
+						"max_results":{"type":"integer","description":"Maximum number of results to return (default: 20, max: 50)"}
+					},
+					"required":["query"]
+				}`),
+			},
+		}, llm.Tool{
+			Type: "function",
+			Function: llm.ToolFunction{
+				Name:        "update_linear_issue",
+				Description: "Update a Linear issue's title and/or description. Use this to rewrite, refine, or improve issue content. IMPORTANT: Format the description using markdown with clear sections.",
+				Parameters: json.RawMessage(`{
+					"type":"object",
+					"properties":{
+						"identifier":{"type":"string","description":"Linear issue identifier (e.g. 'ENG-123') or internal UUID."},
+						"title":{"type":"string","description":"New title for the issue (optional — only set if you want to change it)."},
+						"description":{"type":"string","description":"New description for the issue in markdown format. Structure with clear sections like ## Context, ## Requirements, ## Acceptance Criteria, etc."}
+					},
+					"required":["identifier"]
+				}`),
+			},
+		}, llm.Tool{
+			Type: "function",
+			Function: llm.ToolFunction{
+				Name:        "list_linear_teams",
+				Description: "List all Linear teams accessible to the bot. Use this to discover available team IDs before creating an issue in a specific team.",
+				Parameters:  json.RawMessage(`{"type":"object","properties":{}}`),
+			},
+		}, llm.Tool{
+			Type: "function",
+			Function: llm.ToolFunction{
+				Name:        "resolve_linear_user",
+				Description: "Search for a Linear user by name or email and return their ID. Use this before creating an issue with an assignee to get the correct user ID.",
+				Parameters: json.RawMessage(`{
+					"type":"object",
+					"properties":{
+						"query":{"type":"string","description":"The person's name or email address to search for."}
+					},
+					"required":["query"]
+				}`),
+			},
+		})
+	}
+
 	return tools
 }
 
@@ -1531,17 +1632,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
 			return fmt.Sprintf("Error parsing arguments: %v", err)
 		}
-		// Append agent stamp to the description.
-		stamp := fmt.Sprintf("\n\n---\nCreated by **%s** via Arbetern", h.agentID)
-		if h.appURL != "" {
-			stamp += fmt.Sprintf(" | %s/ui/", strings.TrimRight(h.appURL, "/"))
-		}
-		if h.currentChannelID != "" && h.currentAuditTS != "" {
-			if permalink, err := h.slackClient.GetPermalink(h.currentChannelID, h.currentAuditTS); err == nil && permalink != "" {
-				stamp += fmt.Sprintf(" | [Slack message](%s)", permalink)
-			}
-		}
-		args.Description += stamp
+		args.Description += h.buildCreationStamp()
 
 		// Resolve assignee name to Jira account ID.
 		var assigneeID string
@@ -2459,6 +2550,198 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		}
 		log.Printf("[user=%s channel=%s] listed Datadog dashboards (query=%q, site=%s)", userID, channelID, args.Query, args.Site)
 		return result
+
+	case "create_linear_issue":
+		if h.linearClient == nil {
+			return "Error: Linear integration is not configured. Set LINEAR_API_TOKEN to enable it."
+		}
+		var args struct {
+			Title       string `json:"title"`
+			Description string `json:"description"`
+			TeamID      string `json:"team_id"`
+			Assignee    string `json:"assignee"`
+			Priority    int    `json:"priority"`
+		}
+		if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+			return fmt.Sprintf("Error parsing arguments: %v", err)
+		}
+		args.Description += h.buildCreationStamp()
+
+		// Resolve assignee name to Linear user ID.
+		var assigneeID string
+		var assigneeWarning string
+		if args.Assignee != "" {
+			users, err := h.linearClient.SearchMembers(ctx, args.Assignee)
+			if err != nil {
+				log.Printf("[user=%s channel=%s] Linear user search failed for %q: %v", userID, channelID, args.Assignee, err)
+				assigneeWarning = fmt.Sprintf("\n(Warning: could not resolve assignee %q: %v)", args.Assignee, err)
+			} else if len(users) > 0 {
+				assigneeID = users[0].ID
+				log.Printf("[user=%s channel=%s] resolved assignee %q to Linear user %s (%s)", userID, channelID, args.Assignee, users[0].Name, assigneeID)
+				if len(users) > 1 {
+					names := make([]string, 0, len(users))
+					for _, u := range users {
+						names = append(names, u.Name)
+					}
+					assigneeWarning = fmt.Sprintf("\n(Note: multiple matches for %q: %s — assigned to %s)", args.Assignee, strings.Join(names, ", "), users[0].Name)
+				}
+			} else {
+				log.Printf("[user=%s channel=%s] no Linear user found for %q", userID, channelID, args.Assignee)
+				assigneeWarning = fmt.Sprintf("\n(Warning: no Linear user found matching %q — issue created without assignee)", args.Assignee)
+			}
+		}
+
+		issue, err := h.linearClient.CreateIssue(ctx, linear.CreateIssueInput{
+			Title:       args.Title,
+			Description: args.Description,
+			TeamID:      args.TeamID,
+			AssigneeID:  assigneeID,
+			Priority:    args.Priority,
+		})
+		if err != nil {
+			return fmt.Sprintf("Error creating Linear issue: %v", err)
+		}
+		log.Printf("[user=%s channel=%s] created Linear issue %s: %s", userID, channelID, issue.Identifier, issue.URL)
+		return fmt.Sprintf("Linear issue created: *%s* — %s\nTitle: %s%s", issue.Identifier, issue.URL, args.Title, assigneeWarning)
+
+	case "get_linear_issue":
+		if h.linearClient == nil {
+			return "Error: Linear integration is not configured. Set LINEAR_API_TOKEN to enable it."
+		}
+		var args struct {
+			Identifier string `json:"identifier"`
+		}
+		if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+			return fmt.Sprintf("Error parsing arguments: %v", err)
+		}
+		issue, err := h.linearClient.GetIssue(ctx, args.Identifier)
+		if err != nil {
+			return fmt.Sprintf("Error getting Linear issue: %v", err)
+		}
+		var sb strings.Builder
+		fmt.Fprintf(&sb, "*%s* — %s\n", issue.Identifier, issue.Title)
+		fmt.Fprintf(&sb, "Status: %s | Priority: %s\n", issue.State.Name, issue.PriorityLabel())
+		if issue.Assignee != nil {
+			fmt.Fprintf(&sb, "Assignee: %s\n", issue.Assignee.Name)
+		}
+		fmt.Fprintf(&sb, "Updated: %s\n", issue.UpdatedAt)
+		fmt.Fprintf(&sb, "URL: %s\n", issue.URL)
+		if issue.Description != "" {
+			desc := issue.Description
+			if len(desc) > 1000 {
+				desc = desc[:1000] + "... (truncated)"
+			}
+			fmt.Fprintf(&sb, "\nDescription:\n%s\n", desc)
+		}
+		log.Printf("[user=%s channel=%s] fetched Linear issue %s", userID, channelID, args.Identifier)
+		return sb.String()
+
+	case "search_linear_issues":
+		if h.linearClient == nil {
+			return "Error: Linear integration is not configured. Set LINEAR_API_TOKEN to enable it."
+		}
+		var args struct {
+			Query      string `json:"query"`
+			MaxResults int    `json:"max_results"`
+		}
+		if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+			return fmt.Sprintf("Error parsing arguments: %v", err)
+		}
+		issues, err := h.linearClient.SearchIssues(ctx, args.Query, args.MaxResults)
+		if err != nil {
+			return fmt.Sprintf("Error searching Linear issues: %v", err)
+		}
+		if len(issues) == 0 {
+			return fmt.Sprintf("No Linear issues found matching %q.", args.Query)
+		}
+		var sb strings.Builder
+		fmt.Fprintf(&sb, "Found %d Linear issues:\n\n", len(issues))
+		for _, i := range issues {
+			assignee := "Unassigned"
+			if i.Assignee != nil {
+				assignee = i.Assignee.Name
+			}
+			fmt.Fprintf(&sb, "• *%s* — %s\n  Status: %s | Priority: %s | Assignee: %s\n  URL: %s\n",
+				i.Identifier, i.Title, i.State.Name, i.PriorityLabel(), assignee, i.URL)
+		}
+		log.Printf("[user=%s channel=%s] searched Linear issues for %q, found %d", userID, channelID, args.Query, len(issues))
+		return sb.String()
+
+	case "update_linear_issue":
+		if h.linearClient == nil {
+			return "Error: Linear integration is not configured. Set LINEAR_API_TOKEN to enable it."
+		}
+		var args struct {
+			Identifier  string `json:"identifier"`
+			Title       string `json:"title"`
+			Description string `json:"description"`
+		}
+		if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+			return fmt.Sprintf("Error parsing arguments: %v", err)
+		}
+		if args.Title == "" && args.Description == "" {
+			return "Error: at least one of title or description must be provided."
+		}
+		if err := h.linearClient.UpdateIssue(ctx, args.Identifier, args.Title, args.Description); err != nil {
+			return fmt.Sprintf("Error updating Linear issue: %v", err)
+		}
+		var updated []string
+		if args.Title != "" {
+			updated = append(updated, "title")
+		}
+		if args.Description != "" {
+			updated = append(updated, "description")
+		}
+		log.Printf("[user=%s channel=%s] updated Linear issue %s (%s)", userID, channelID, args.Identifier, strings.Join(updated, ", "))
+		return fmt.Sprintf("Successfully updated Linear issue %s: %s", args.Identifier, strings.Join(updated, " and "))
+
+	case "list_linear_teams":
+		if h.linearClient == nil {
+			return "Error: Linear integration is not configured. Set LINEAR_API_TOKEN to enable it."
+		}
+		teams, err := h.linearClient.ListTeams(ctx)
+		if err != nil {
+			return fmt.Sprintf("Error listing Linear teams: %v", err)
+		}
+		if len(teams) == 0 {
+			return "No Linear teams found."
+		}
+		var sb strings.Builder
+		fmt.Fprintf(&sb, "Linear teams (%d):\n", len(teams))
+		for _, t := range teams {
+			fmt.Fprintf(&sb, "  • %s (key: %s, id: %s, issues: %d)\n", t.Name, t.Key, t.ID, t.IssueCount)
+		}
+		log.Printf("[user=%s channel=%s] listed %d Linear teams", userID, channelID, len(teams))
+		return sb.String()
+
+	case "resolve_linear_user":
+		if h.linearClient == nil {
+			return "Error: Linear integration is not configured. Set LINEAR_API_TOKEN to enable it."
+		}
+		var args struct {
+			Query string `json:"query"`
+		}
+		if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+			return fmt.Sprintf("Error parsing arguments: %v", err)
+		}
+		users, err := h.linearClient.SearchMembers(ctx, args.Query)
+		if err != nil {
+			return fmt.Sprintf("Error searching Linear users: %v", err)
+		}
+		if len(users) == 0 {
+			return fmt.Sprintf("No Linear users found matching %q.", args.Query)
+		}
+		var sb strings.Builder
+		fmt.Fprintf(&sb, "Found %d Linear user(s):\n", len(users))
+		for i, u := range users {
+			if i >= 5 {
+				fmt.Fprintf(&sb, "  ... and %d more\n", len(users)-5)
+				break
+			}
+			fmt.Fprintf(&sb, "  • %s (%s, id: %s)\n", u.Name, u.Email, u.ID)
+		}
+		log.Printf("[user=%s channel=%s] resolved Linear user %q -> %d result(s)", userID, channelID, args.Query, len(users))
+		return sb.String()
 
 	default:
 		return fmt.Sprintf("Unknown tool: %s", name)
