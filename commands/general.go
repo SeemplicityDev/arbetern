@@ -2578,6 +2578,13 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 			} else if len(users) > 0 {
 				assigneeID = users[0].ID
 				log.Printf("[user=%s channel=%s] resolved assignee %q to Linear user %s (%s)", userID, channelID, args.Assignee, users[0].Name, assigneeID)
+				if len(users) > 1 {
+					names := make([]string, 0, len(users))
+					for _, u := range users {
+						names = append(names, u.Name)
+					}
+					assigneeWarning = fmt.Sprintf("\n(Note: multiple matches for %q: %s — assigned to %s)", args.Assignee, strings.Join(names, ", "), users[0].Name)
+				}
 			} else {
 				log.Printf("[user=%s channel=%s] no Linear user found for %q", userID, channelID, args.Assignee)
 				assigneeWarning = fmt.Sprintf("\n(Warning: no Linear user found matching %q — issue created without assignee)", args.Assignee)

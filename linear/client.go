@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -19,6 +20,8 @@ const (
 	maxAllowedResults = 50
 	maxRetries        = 3
 	retryBaseDelay    = 1 * time.Second
+	maxPageSize       = 250 // Linear's maximum page size for connection queries
+	maxMemberResults  = 20
 )
 
 // Client provides access to the Linear GraphQL API.
@@ -39,8 +42,20 @@ func NewClient(apiToken, teamID string) *Client {
 	}
 }
 
+// retryDelay returns the delay to wait before retrying. If the response includes
+// a Retry-After header, that value is used; otherwise exponential backoff applies.
+func retryDelay(resp *http.Response, attempt int) time.Duration {
+	if ra := resp.Header.Get("Retry-After"); ra != "" {
+		if secs, err := strconv.Atoi(ra); err == nil && secs > 0 {
+			return time.Duration(secs) * time.Second
+		}
+	}
+	return retryBaseDelay * time.Duration(1<<uint(attempt))
+}
+
 // graphQLRequest sends a GraphQL request and decodes the response into v.
-// Retries on 429 (rate limit) and 5xx responses with exponential backoff.
+// Retries on transient network errors, 429 (rate limit), and 5xx responses
+// with exponential backoff that respects Retry-After headers and context cancellation.
 func (c *Client) graphQLRequest(ctx context.Context, query string, variables map[string]any, v any) error {
 	payload := map[string]any{
 		"query": query,
@@ -65,6 +80,16 @@ func (c *Client) graphQLRequest(ctx context.Context, query string, variables map
 
 		resp, err := c.httpClient.Do(req)
 		if err != nil {
+			if attempt < maxRetries {
+				delay := retryBaseDelay * time.Duration(1<<uint(attempt))
+				log.Printf("[linear] network error, retrying in %s (attempt %d/%d): %v", delay, attempt+1, maxRetries, err)
+				select {
+				case <-time.After(delay):
+					continue
+				case <-ctx.Done():
+					return ctx.Err()
+				}
+			}
 			return fmt.Errorf("send request: %w", err)
 		}
 
@@ -80,10 +105,14 @@ func (c *Client) graphQLRequest(ctx context.Context, query string, variables map
 
 		// Retry on 429 (rate limit) and 5xx (server errors).
 		if (resp.StatusCode == 429 || resp.StatusCode >= 500) && attempt < maxRetries {
-			delay := retryBaseDelay * time.Duration(1<<uint(attempt))
+			delay := retryDelay(resp, attempt)
 			log.Printf("[linear] HTTP %d, retrying in %s (attempt %d/%d)", resp.StatusCode, delay, attempt+1, maxRetries)
-			time.Sleep(delay)
-			continue
+			select {
+			case <-time.After(delay):
+				continue
+			case <-ctx.Done():
+				return ctx.Err()
+			}
 		}
 
 		return fmt.Errorf("linear API returned HTTP %d: %s", resp.StatusCode, string(respBody))
@@ -278,7 +307,9 @@ func (c *Client) GetIssue(ctx context.Context, identifier string) (*Issue, error
 	return &data.Issue, nil
 }
 
-// SearchIssues searches for Linear issues using full-text search.
+// SearchIssues searches for Linear issues using the issues query with filters.
+// Searches title and description using case-insensitive substring matching,
+// scoped to the configured team if set.
 func (c *Client) SearchIssues(ctx context.Context, term string, maxResults int) ([]Issue, error) {
 	if maxResults <= 0 {
 		maxResults = defaultMaxResults
@@ -288,8 +319,8 @@ func (c *Client) SearchIssues(ctx context.Context, term string, maxResults int) 
 	}
 
 	query := `
-	query SearchIssues($term: String!, $first: Int, $filter: IssueFilter) {
-		searchIssues(term: $term, first: $first, filter: $filter) {
+	query SearchIssues($filter: IssueFilter, $first: Int) {
+		issues(filter: $filter, first: $first, orderBy: updatedAt) {
 			nodes {
 				id
 				identifier
@@ -305,29 +336,33 @@ func (c *Client) SearchIssues(ctx context.Context, term string, maxResults int) 
 		}
 	}`
 
-	variables := map[string]any{
-		"term":  term,
-		"first": maxResults,
-	}
-
-	// Scope to team if configured.
+	filter := map[string]any{}
 	if c.teamID != "" {
-		variables["filter"] = map[string]any{
-			"team": map[string]any{
-				"id": map[string]any{"eq": c.teamID},
-			},
+		filter["team"] = map[string]any{
+			"id": map[string]any{"eq": c.teamID},
+		}
+	}
+	if term != "" {
+		filter["or"] = []any{
+			map[string]any{"title": map[string]any{"containsIgnoreCase": term}},
+			map[string]any{"description": map[string]any{"containsIgnoreCase": term}},
 		}
 	}
 
+	variables := map[string]any{
+		"filter": filter,
+		"first":  maxResults,
+	}
+
 	var data struct {
-		SearchIssues struct {
+		Issues struct {
 			Nodes []Issue `json:"nodes"`
-		} `json:"searchIssues"`
+		} `json:"issues"`
 	}
 	if err := c.graphQLRequest(ctx, query, variables, &data); err != nil {
 		return nil, err
 	}
-	return data.SearchIssues.Nodes, nil
+	return data.Issues.Nodes, nil
 }
 
 // UpdateIssue updates a Linear issue's title and/or description by issue ID or identifier.
@@ -378,7 +413,7 @@ func (c *Client) UpdateIssue(ctx context.Context, issueID, title, description st
 	return nil
 }
 
-// ListTeams lists all teams accessible to the API token (up to 250).
+// ListTeams lists all teams accessible to the API token.
 func (c *Client) ListTeams(ctx context.Context) ([]Team, error) {
 	query := `
 	query ListTeams($first: Int) {
@@ -397,7 +432,7 @@ func (c *Client) ListTeams(ctx context.Context) ([]Team, error) {
 			Nodes []Team `json:"nodes"`
 		} `json:"teams"`
 	}
-	if err := c.graphQLRequest(ctx, query, map[string]any{"first": 250}, &data); err != nil {
+	if err := c.graphQLRequest(ctx, query, map[string]any{"first": maxPageSize}, &data); err != nil {
 		return nil, err
 	}
 	return data.Teams.Nodes, nil
@@ -432,17 +467,17 @@ func (c *Client) ListTeamStates(ctx context.Context, teamID string) ([]State, er
 			} `json:"states"`
 		} `json:"team"`
 	}
-	if err := c.graphQLRequest(ctx, query, map[string]any{"teamId": teamID, "first": 250}, &data); err != nil {
+	if err := c.graphQLRequest(ctx, query, map[string]any{"teamId": teamID, "first": maxPageSize}, &data); err != nil {
 		return nil, err
 	}
 	return data.Team.States.Nodes, nil
 }
 
-// SearchMembers searches for Linear users by name or email.
+// SearchMembers searches for Linear users by name or email (up to maxMemberResults).
 func (c *Client) SearchMembers(ctx context.Context, searchTerm string) ([]User, error) {
 	query := `
-	query SearchMembers($filter: UserFilter) {
-		users(filter: $filter) {
+	query SearchMembers($filter: UserFilter, $first: Int) {
+		users(filter: $filter, first: $first) {
 			nodes {
 				id
 				name
@@ -465,7 +500,7 @@ func (c *Client) SearchMembers(ctx context.Context, searchTerm string) ([]User, 
 			Nodes []User `json:"nodes"`
 		} `json:"users"`
 	}
-	if err := c.graphQLRequest(ctx, query, map[string]any{"filter": filter}, &data); err != nil {
+	if err := c.graphQLRequest(ctx, query, map[string]any{"filter": filter, "first": maxMemberResults}, &data); err != nil {
 		return nil, err
 	}
 	return data.Users.Nodes, nil
