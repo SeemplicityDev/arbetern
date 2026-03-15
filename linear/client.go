@@ -385,9 +385,6 @@ func (c *Client) UpdateIssue(ctx context.Context, issueID, title, description st
 	if description != "" {
 		updateInput["description"] = description
 	}
-	if len(updateInput) == 0 {
-		return fmt.Errorf("at least one of title or description must be provided")
-	}
 
 	variables := map[string]any{
 		"id":    issueID,
@@ -475,6 +472,9 @@ func (c *Client) ListTeamStates(ctx context.Context, teamID string) ([]State, er
 
 // SearchMembers searches for Linear users by name or email (up to maxMemberResults).
 func (c *Client) SearchMembers(ctx context.Context, searchTerm string) ([]User, error) {
+	if searchTerm == "" {
+		return nil, fmt.Errorf("search term is required")
+	}
 	query := `
 	query SearchMembers($filter: UserFilter, $first: Int) {
 		users(filter: $filter, first: $first) {
@@ -506,7 +506,3 @@ func (c *Client) SearchMembers(ctx context.Context, searchTerm string) ([]User, 
 	return data.Users.Nodes, nil
 }
 
-// DefaultTeamID returns the configured default team ID.
-func (c *Client) DefaultTeamID() string {
-	return c.teamID
-}

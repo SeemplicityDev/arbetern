@@ -175,7 +175,7 @@ func requiresAction(text string) bool {
 		"rerun", "re-run", "re run", "retry", "restart",
 		"create pr", "create a pr", "open pr", "open a pr",
 		"modify", "change", "update", "edit", "add", "remove",
-		"create ticket", "create a ticket", "create issue", "create a issue",
+		"create ticket", "create a ticket", "create issue", "create an issue",
 		"create jira", "create a jira",
 		"create linear", "create a linear",
 	}
