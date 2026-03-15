@@ -922,6 +922,7 @@
         { id: 'github', name: 'GitHub' },
         { id: 'jira', name: 'Jira' },
         { id: 'confluence', name: 'Confluence' },
+        { id: 'linear', name: 'Linear' },
         { id: 'slack', name: 'Slack' },
         { id: 'azure-openai', name: 'Azure OpenAI' },
         { id: 'datadog', name: 'Datadog' },
@@ -935,6 +936,7 @@
       seihin:    [
         { id: 'jira', name: 'Jira' },
         { id: 'confluence', name: 'Confluence' },
+        { id: 'linear', name: 'Linear' },
         { id: 'slack', name: 'Slack' },
         { id: 'azure-openai', name: 'Azure OpenAI' },
       ],
@@ -942,6 +944,7 @@
         { id: 'github', name: 'GitHub' },
         { id: 'jira', name: 'Jira' },
         { id: 'confluence', name: 'Confluence' },
+        { id: 'linear', name: 'Linear' },
         { id: 'slack', name: 'Slack' },
         { id: 'azure-openai', name: 'Azure OpenAI' },
       ],
@@ -1156,6 +1159,7 @@
       chorus: `<svg viewBox="0 0 128 128"><circle cx="64" cy="64" r="56" fill="#4B0082"/><path d="M40 48c0-4.4 3.6-8 8-8s8 3.6 8 8v32c0 4.4-3.6 8-8 8s-8-3.6-8-8V48zm32 0c0-4.4 3.6-8 8-8s8 3.6 8 8v32c0 4.4-3.6 8-8 8s-8-3.6-8-8V48zM56 38c0-4.4 3.6-8 8-8s8 3.6 8 8v52c0 4.4-3.6 8-8 8s-8-3.6-8-8V38z" fill="#fff"/></svg>`,
       confluence: `<svg viewBox="0 0 128 128"><path d="M9.26 101.37c-1.65 2.7-3.63 5.86-4.87 7.75a3.28 3.28 0 0 0 1.07 4.5l22.56 13.74a3.28 3.28 0 0 0 4.5-1.07c1.07-1.81 2.95-4.88 5-8.33 9.19-15.07 18.47-13.25 35.43-5.42l22.23 10.23a3.28 3.28 0 0 0 4.33-1.65l11.16-24.64a3.28 3.28 0 0 0-1.65-4.33C99.4 88.04 57.06 68.63 9.26 101.37z" fill="#2684FF"/><path d="M118.74 26.63c1.65-2.7 3.63-5.86 4.87-7.75a3.28 3.28 0 0 0-1.07-4.5L100.04.64a3.28 3.28 0 0 0-4.5 1.07c-1.07 1.81-2.95 4.88-5 8.33-9.19 15.07-18.47 13.25-35.43 5.42L33.13 5.31a3.28 3.28 0 0 0-4.33 1.65L17.64 31.6a3.28 3.28 0 0 0 1.65 4.33c9.11 4.17 51.45 23.49 99.45-9.3z" fill="#2684FF"/></svg>`,
       datadog: `<svg viewBox="0 0 24 24"><path d="M12.2596 1.3882L14.7979 3.3402l.4651-2.4531 3.1608.826-1.0881 2.5895 2.604.857L16.952 19.023l-3.3896-2.1778L11.382 19.572l-1.3761-1.5752L4.77 21.067l2.762-11.097-2.5697-1.808 2.4424-2.0697-.9497-3.03L10.098.4427l.9768 2.7024z" fill="#632CA6"/><path d="M8.6766 10.7313l-1.6695 7.86 3.5949-2.1073.9927 1.1365 1.808-2.2622 3.0498 1.958 2.0621-9.5839-2.2553-.7424-.4018.3977-1.9753-1.5198-1.4071 1.775-2.03-.625-.5758 1.3574-.1723 1.5047.589.5225-.7474.965z" fill="#fff"/></svg>`,
+      linear: `<svg viewBox="0 0 128 128"><defs><linearGradient id="lin-g" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#5E6AD2"/><stop offset="100%" stop-color="#7B88E8"/></linearGradient></defs><rect width="128" height="128" rx="24" fill="url(#lin-g)"/><path d="M22 86.6L41.4 106c-10.8-5-19.3-13.4-19.4-19.4zm0-10.2l29.6 29.6c-3-.7-5.9-1.8-8.6-3.2L25.2 94.6 22 91.4v-15zm3.6-10.2l35.2 35.2c-2.2-.3-4.3-.8-6.4-1.5L27 73.8c-.7-2.1-1.2-4.2-1.4-6.4v-1zm9.2-8.6L71.6 105c-1.9-.2-3.8-.6-5.6-1.1L35.4 73.4c-.5-1.8-.9-3.7-1.1-5.6l.5.8zM47 57l24 24L86 66 62 42 47 57zM57 47l24 24 4-4L61 43l-4 4zm11.6-10.6L91.2 59l4-4L72.6 32.4l-4 4zm10.2-9.6l13 13c-1.9-4.5-4.9-8.6-8.6-11.8l-4.4-1.2zm10.8 3.8l6.6 6.6c-1.4-2.6-3.1-5-5.1-7.2l-1.5.6z" fill="#fff" fill-rule="evenodd"/>`,
     };
 
     const INTEGRATION_COLORS = {
@@ -1168,6 +1172,7 @@
       salesforce: '#00A1E0',
       chorus: '#4B0082',
       datadog: '#632CA6',
+      linear: '#5E6AD2',
     };
 
     let integrationsData = [];

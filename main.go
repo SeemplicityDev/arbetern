@@ -21,6 +21,7 @@ import (
 	"github.com/justmike1/arbetern/config"
 	"github.com/justmike1/arbetern/datadog"
 	"github.com/justmike1/arbetern/github"
+	"github.com/justmike1/arbetern/linear"
 	"github.com/justmike1/arbetern/llm"
 	"github.com/justmike1/arbetern/nvd"
 	"github.com/justmike1/arbetern/prompts"
@@ -251,6 +252,7 @@ func refreshIntegrations(
 	sfClient *salesforce.Client,
 	chorusClient *chorus.Client,
 	datadogClients *datadog.MultiClient,
+	linearClient *linear.Client,
 	modelsClient *llm.Client,
 	codeModelsClient *llm.Client,
 ) {
@@ -630,6 +632,34 @@ func refreshIntegrations(
 		})
 	}
 
+	// --- Linear ---
+	{
+		linearConfigured := cfg.LinearConfigured()
+		linearPerms := []permission{
+			{Scope: "issues:read", Description: "Read issues, search, and fetch issue details", Required: true, Granted: boolPtr(linearConfigured)},
+			{Scope: "issues:create", Description: "Create new issues in Linear teams", Required: true, Granted: boolPtr(linearConfigured)},
+			{Scope: "issues:update", Description: "Update issue title and description", Required: true, Granted: boolPtr(linearConfigured)},
+			{Scope: "teams:read", Description: "List accessible teams and workflow states", Required: true, Granted: boolPtr(linearConfigured)},
+			{Scope: "users:read", Description: "Search and resolve team members for issue assignment", Required: false, Granted: boolPtr(linearConfigured)},
+		}
+		teamInfo := ""
+		if linearClient != nil && cfg.LinearTeamID != "" {
+			teamInfo = cfg.LinearTeamID
+		}
+		activeModels := map[string]string{}
+		if teamInfo != "" {
+			activeModels["Default Team ID"] = teamInfo
+		}
+		result = append(result, integration{
+			ID:           "linear",
+			Name:         "Linear",
+			Configured:   linearConfigured,
+			AuthMode:     "Personal API Token",
+			ActiveModels: activeModels,
+			Permissions:  linearPerms,
+		})
+	}
+
 	integrationsMu.Lock()
 	integrationsCache = result
 	integrationsMu.Unlock()
@@ -646,16 +676,17 @@ func startIntegrationsRefresher(
 	sfClient *salesforce.Client,
 	chorusClient *chorus.Client,
 	datadogClients *datadog.MultiClient,
+	linearClient *linear.Client,
 	modelsClient *llm.Client,
 	codeModelsClient *llm.Client,
 ) {
-	refreshIntegrations(cfg, slackClient, ghClient, jiraClient, sfClient, chorusClient, datadogClients, modelsClient, codeModelsClient)
+	refreshIntegrations(cfg, slackClient, ghClient, jiraClient, sfClient, chorusClient, datadogClients, linearClient, modelsClient, codeModelsClient)
 
 	go func() {
 		ticker := time.NewTicker(1 * time.Hour)
 		defer ticker.Stop()
 		for range ticker.C {
-			refreshIntegrations(cfg, slackClient, ghClient, jiraClient, sfClient, chorusClient, datadogClients, modelsClient, codeModelsClient)
+			refreshIntegrations(cfg, slackClient, ghClient, jiraClient, sfClient, chorusClient, datadogClients, linearClient, modelsClient, codeModelsClient)
 		}
 	}()
 }
@@ -756,6 +787,17 @@ func main() {
 		log.Printf("Datadog integration enabled (sites: %s)", datadogClients.Sites())
 	}
 
+	// Linear client — enables issue management for configured agents.
+	var linearClient *linear.Client
+	if cfg.LinearConfigured() {
+		linearClient = linear.NewClient(cfg.LinearAPIToken, cfg.LinearTeamID)
+		if cfg.LinearTeamID != "" {
+			log.Printf("Linear integration enabled (default team ID: %s)", cfg.LinearTeamID)
+		} else {
+			log.Printf("Linear integration enabled (no default team — team_id required per request)")
+		}
+	}
+
 	// Discover agents and register per-agent webhook routes (/<agent>/webhook).
 	agents, err := prompts.DiscoverAgents("")
 	if err != nil {
@@ -766,7 +808,7 @@ func main() {
 	}
 
 	// Start background integration permission refresher (runs once now, then every hour).
-	startIntegrationsRefresher(cfg, slackClient, ghClient, jiraClient, sfClient, chorusClient, datadogClients, modelsClient, codeModelsClient)
+	startIntegrationsRefresher(cfg, slackClient, ghClient, jiraClient, sfClient, chorusClient, datadogClients, linearClient, modelsClient, codeModelsClient)
 
 	// Thread session store — enables follow-up replies in threads without /commands.
 	sessions := commands.NewSessionStore(cfg.ThreadSessionTTL)
@@ -792,7 +834,7 @@ func main() {
 		}
 
 		agentID := agent.ID // capture for closure
-		router := commands.NewRouter(slackClient, ghClient, modelsClient, codeModelsClient, jiraClient, nvdClient, sfClient, chorusClient, datadogClients, ap, agent.ID, cfg.AppURL, sessions, cfg.MaxToolRounds)
+		router := commands.NewRouter(slackClient, ghClient, modelsClient, codeModelsClient, jiraClient, nvdClient, sfClient, chorusClient, datadogClients, linearClient, ap, agent.ID, cfg.AppURL, sessions, cfg.MaxToolRounds)
 		routers[agent.ID] = router
 
 		// Wrap router.Handle with RBAC check.
