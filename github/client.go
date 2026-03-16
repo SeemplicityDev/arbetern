@@ -124,6 +124,22 @@ func (c *Client) UpdateFile(ctx context.Context, owner, repo, path, branch, mess
 	return nil
 }
 
+// CreateFile creates a new file in a GitHub repository. Unlike UpdateFile, no
+// SHA is required because the file does not exist yet.
+func (c *Client) CreateFile(ctx context.Context, owner, repo, path, branch, message string, content []byte) error {
+	opts := &gh.RepositoryContentFileOptions{
+		Message: gh.String(message),
+		Content: content,
+		Branch:  gh.String(branch),
+	}
+
+	_, _, err := c.api.Repositories.CreateFile(ctx, owner, repo, path, opts)
+	if err != nil {
+		return fmt.Errorf("failed to create file %s: %w", path, err)
+	}
+	return nil
+}
+
 func (c *Client) CreatePullRequest(ctx context.Context, owner, repo, baseBranch, headBranch, title, body string) (string, error) {
 	pr := &gh.NewPullRequest{
 		Title: gh.String(title),

@@ -198,7 +198,7 @@ func (h *GeneralHandler) Execute(channelID, userID, text, responseURL, auditTS s
 			// tools are invoked (covers cases where initial intent detection
 			// didn't trigger the code model).
 			codeTools := map[string]bool{
-				"modify_file": true, "regex_replace_file": true,
+				"modify_file": true, "create_file": true, "regex_replace_file": true,
 				"get_file_content": true,
 				"search_code":      true, "search_code_org": true, "search_files": true,
 				"list_directory": true, "get_pull_request": true,
@@ -339,6 +339,24 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 						"branch":{"type":"string","description":"Base branch name (optional, uses default branch if empty)"}
 					},
 					"required":["repo","path","old_content","new_content","description"]
+				}`),
+			},
+		},
+		{
+			Type: "function",
+			Function: llm.ToolFunction{
+				Name:        "create_file",
+				Description: "Create a NEW file in a GitHub repository. Use this when you need to add a file that does not yet exist (e.g. a new YAML config, a new workflow, a new script). The tool creates a branch, commits the new file, and opens a PR. Multiple create_file and modify_file calls for the SAME repository are automatically grouped into a SINGLE pull request. Do NOT use this for files that already exist — use modify_file instead.",
+				Parameters: json.RawMessage(`{
+					"type":"object",
+					"properties":{
+						"repo":{"type":"string","description":"Repository name (without owner)"},
+						"path":{"type":"string","description":"File path to create within the repository (e.g. 'maintenance/db-maintenance.yaml', '.github/workflows/db-maintenance.yml')"},
+						"content":{"type":"string","description":"The full content of the new file."},
+						"description":{"type":"string","description":"Short description of what was added (used as commit message and PR title)"},
+						"branch":{"type":"string","description":"Base branch name (optional, uses default branch if empty)"}
+					},
+					"required":["repo","path","content","description"]
 				}`),
 			},
 		},
@@ -1184,6 +1202,63 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		}
 		log.Printf("[user=%s channel=%s] additional commit to branch %s for PR: %s", userID, channelID, active.branchName, active.prURL)
 		return fmt.Sprintf("Changes committed to existing PR: %s", active.prURL)
+
+	case "create_file":
+		var args struct {
+			Repo        string `json:"repo"`
+			Path        string `json:"path"`
+			Content     string `json:"content"`
+			Description string `json:"description"`
+			Branch      string `json:"branch"`
+		}
+		if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+			return fmt.Sprintf("Error parsing arguments: %v", err)
+		}
+		owner, err := h.ghClient.ResolveOwner(ctx)
+		if err != nil {
+			return fmt.Sprintf("Error resolving owner: %v", err)
+		}
+		baseBranch := args.Branch
+		if baseBranch == "" {
+			baseBranch, err = h.ghClient.GetDefaultBranch(ctx, owner, args.Repo)
+			if err != nil {
+				return fmt.Sprintf("Error getting default branch: %v", err)
+			}
+		}
+
+		repoKey := owner + "/" + args.Repo
+		active := h.activeBranches[repoKey]
+
+		if active == nil {
+			branchName := github.GenerateBranchName(h.agentID)
+			if err := h.ghClient.CreateBranch(ctx, owner, args.Repo, baseBranch, branchName); err != nil {
+				return fmt.Sprintf("Error creating branch: %v", err)
+			}
+			commitMsg := fmt.Sprintf("%s: %s", h.agentID, args.Description)
+			if err := h.ghClient.CreateFile(ctx, owner, args.Repo, args.Path, branchName, commitMsg, []byte(args.Content)); err != nil {
+				return fmt.Sprintf("Error creating file: %v", err)
+			}
+			prTitle := fmt.Sprintf("%s: %s", h.agentID, args.Description)
+			prBody := fmt.Sprintf("Automated file creation requested via Slack by <@%s>.\n\nChange: %s\nNew file: `%s`", userID, args.Description, args.Path)
+			prURL, err := h.ghClient.CreatePullRequest(ctx, owner, args.Repo, baseBranch, branchName, prTitle, prBody)
+			if err != nil {
+				return fmt.Sprintf("File created on branch %s but PR creation failed: %v", branchName, err)
+			}
+			h.activeBranches[repoKey] = &activeBranchInfo{
+				branchName: branchName,
+				baseBranch: baseBranch,
+				prURL:      prURL,
+			}
+			log.Printf("[user=%s channel=%s] PR created via create_file: %s", userID, channelID, prURL)
+			return fmt.Sprintf("File created and pull request opened: %s", prURL)
+		}
+
+		commitMsg := fmt.Sprintf("%s: %s", h.agentID, args.Description)
+		if err := h.ghClient.CreateFile(ctx, owner, args.Repo, args.Path, active.branchName, commitMsg, []byte(args.Content)); err != nil {
+			return fmt.Sprintf("Error creating file on existing branch: %v", err)
+		}
+		log.Printf("[user=%s channel=%s] additional file created on branch %s for PR: %s", userID, channelID, active.branchName, active.prURL)
+		return fmt.Sprintf("File created and committed to existing PR: %s", active.prURL)
 
 	case "regex_replace_file":
 		var args struct {
