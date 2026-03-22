@@ -269,6 +269,116 @@ func (c *Client) GetConfluencePageByTitle(spaceKey, title string) (*ConfluencePa
 	return c.GetConfluencePage(results[0].ID)
 }
 
+// CreateConfluencePageInput holds the parameters for creating a new Confluence page.
+type CreateConfluencePageInput struct {
+	SpaceKey string // Confluence space key (e.g. "DO", "ENG")
+	Title    string // Page title
+	Body     string // Page body in Confluence storage format (XHTML)
+	ParentID string // Optional parent page ID for nesting under a specific page
+}
+
+// CreateConfluencePageResult holds the output of a successful page creation.
+type CreateConfluencePageResult struct {
+	ID     string
+	Title  string
+	WebURL string
+}
+
+// CreateConfluencePage creates a new Confluence page via the v2 REST API.
+func (c *Client) CreateConfluencePage(input CreateConfluencePageInput) (*CreateConfluencePageResult, error) {
+	// Resolve space key → space ID (Confluence v2 API requires spaceId).
+	spaceID, err := c.resolveConfluenceSpaceID(input.SpaceKey)
+	if err != nil {
+		return nil, fmt.Errorf("resolve space %q: %w", input.SpaceKey, err)
+	}
+
+	base := c.confluenceBaseURL()
+
+	payload := map[string]interface{}{
+		"spaceId": spaceID,
+		"status":  "current",
+		"title":   input.Title,
+		"body": map[string]interface{}{
+			"representation": "storage",
+			"value":          input.Body,
+		},
+	}
+	if input.ParentID != "" {
+		payload["parentId"] = input.ParentID
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("marshal payload: %w", err)
+	}
+
+	endpoint := fmt.Sprintf("%s/api/v2/pages", base)
+	req, err := http.NewRequest("POST", endpoint, strings.NewReader(string(body)))
+	if err != nil {
+		return nil, fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	if err := c.authRequest(req); err != nil {
+		return nil, err
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("create page request failed: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
+	if err != nil {
+		return nil, fmt.Errorf("read response: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		return nil, fmt.Errorf("create page returned HTTP %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var raw struct {
+		ID    string `json:"id"`
+		Title string `json:"title"`
+		Links struct {
+			WebUI string `json:"webui"`
+			Base  string `json:"base"`
+		} `json:"_links"`
+	}
+	if err := json.Unmarshal(respBody, &raw); err != nil {
+		return nil, fmt.Errorf("parse create page response: %w", err)
+	}
+
+	webURL := raw.Links.WebUI
+	linkBase := raw.Links.Base
+	if linkBase == "" {
+		linkBase = strings.TrimRight(c.siteURL, "/")
+	}
+	if webURL != "" {
+		webURL = linkBase + webURL
+	}
+
+	return &CreateConfluencePageResult{
+		ID:     raw.ID,
+		Title:  raw.Title,
+		WebURL: webURL,
+	}, nil
+}
+
+// resolveConfluenceSpaceID maps a space key (e.g. "DO") to its numeric space ID.
+func (c *Client) resolveConfluenceSpaceID(spaceKey string) (string, error) {
+	spaces, err := c.ListConfluenceSpaces()
+	if err != nil {
+		return "", err
+	}
+	for _, s := range spaces {
+		if strings.EqualFold(s.Key, spaceKey) {
+			return s.ID, nil
+		}
+	}
+	return "", fmt.Errorf("confluence space with key %q not found", spaceKey)
+}
+
 // ---------------------------------------------------------------------------
 // Confluence URL / Tiny-Link Resolver
 // ---------------------------------------------------------------------------

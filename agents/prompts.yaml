@@ -34,6 +34,7 @@ slack_formatting: |
   - search_confluence_pages: Search for Confluence pages by keyword (CQL query). Use this when the user asks about documentation, wiki pages, or knowledge base articles.
   - get_confluence_page: Fetch the full content of a Confluence page by its ID. Use this after searching when you need the page body.
   - list_confluence_spaces: List available Confluence spaces. Use when the user wants to know which spaces exist.
+  - create_confluence_page: Create a new Confluence page in a specified space. Use when the user asks to create documentation, write a guide, or generate a wiki page. The body must be in Confluence storage format (XHTML).
   Confluence content is returned in Atlassian Document Format (ADF) or HTML — summarize it in Slack mrkdwn format for the user.
 
   You are given recent channel messages as context. Use them to understand the conversation and what the user might be referring to.

@@ -862,6 +862,22 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 				Description: "List all Confluence spaces visible to the bot. Useful for discovering available spaces before searching for pages. Returns space keys, names, and types.",
 				Parameters:  json.RawMessage(`{"type":"object","properties":{}}`),
 			},
+		}, llm.Tool{
+			Type: "function",
+			Function: llm.ToolFunction{
+				Name:        "create_confluence_page",
+				Description: "Create a new Confluence page in a specified space. Use this when the user asks to create documentation, write a guide, or generate a wiki page. The body should be in Confluence storage format (XHTML). You can use basic HTML tags: <h1>-<h6> for headings, <p> for paragraphs, <ul>/<ol>/<li> for lists, <table>/<tr>/<th>/<td> for tables, <code> for inline code, <ac:structured-macro ac:name=\"code\"><ac:plain-text-body><![CDATA[...]]></ac:plain-text-body></ac:structured-macro> for code blocks, <strong> for bold, <em> for italic, and <a href=\"url\">text</a> for links.",
+				Parameters: json.RawMessage(`{
+					"type":"object",
+					"properties":{
+						"space_key":{"type":"string","description":"Confluence space key (e.g. 'DO', 'ENG'). Use list_confluence_spaces to discover available spaces."},
+						"title":{"type":"string","description":"Page title."},
+						"body":{"type":"string","description":"Page body in Confluence storage format (XHTML). Use HTML tags for formatting."},
+						"parent_id":{"type":"string","description":"Optional parent page ID to nest under. Use search_confluence_pages or get_confluence_page to find the parent page ID."}
+					},
+					"required":["space_key","title","body"]
+				}`),
+			},
 		})
 	}
 
@@ -2134,6 +2150,34 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 			fmt.Fprintf(&sb3, "  • %s (key: %s, type: %s)\n", s.Name, s.Key, s.Type)
 		}
 		return sb3.String()
+
+	case "create_confluence_page":
+		if h.jiraClient == nil || !h.jiraClient.Ready() {
+			return "Error: Atlassian integration is not connected. It may still be initializing — please try again shortly."
+		}
+		var args struct {
+			SpaceKey string `json:"space_key"`
+			Title    string `json:"title"`
+			Body     string `json:"body"`
+			ParentID string `json:"parent_id"`
+		}
+		if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+			return fmt.Sprintf("Error parsing arguments: %v", err)
+		}
+		if args.SpaceKey == "" || args.Title == "" {
+			return "Error: space_key and title are required."
+		}
+		result, err := h.jiraClient.CreateConfluencePage(atlassian.CreateConfluencePageInput{
+			SpaceKey: args.SpaceKey,
+			Title:    args.Title,
+			Body:     args.Body,
+			ParentID: args.ParentID,
+		})
+		if err != nil {
+			return fmt.Sprintf("Error creating Confluence page: %v", err)
+		}
+		log.Printf("[user=%s channel=%s] created Confluence page %s (%q) in space %s", userID, channelID, result.ID, result.Title, args.SpaceKey)
+		return fmt.Sprintf("Confluence page created: *%s* (id: %s)\n%s", result.Title, result.ID, result.WebURL)
 
 	case "lookup_cve":
 		if h.nvdClient == nil {
