@@ -118,6 +118,7 @@ func (h *GeneralHandler) Execute(channelID, userID, text, responseURL, auditTS s
 	repliedInThread := false
 	toolCallsMade := false
 	blockedPreActionAcks := 0
+	emptyResponseRetries := 0
 
 	// Track cumulative token usage across all LLM rounds.
 	var totalUsage llm.Usage
@@ -162,6 +163,19 @@ func (h *GeneralHandler) Execute(channelID, userID, text, responseURL, auditTS s
 				messages = append(messages,
 					llm.NewChatMessage("assistant", choice.Message.Content),
 					llm.NewChatMessage("user", "Do not send pre-action acknowledgements. Start tool execution now. Return only completed results from tool outputs (or a concrete tool error after attempted execution)."),
+				)
+				continue
+			}
+
+			// Guardrail: if the model returned an empty response, retry once
+			// asking it to produce actual content. This can happen when the
+			// Responses API returns no output_text items.
+			if strings.TrimSpace(choice.Message.Content) == "" && emptyResponseRetries < 2 {
+				emptyResponseRetries++
+				log.Printf("[user=%s channel=%s] model returned empty content (retry %d); nudging for a real response", userID, channelID, emptyResponseRetries)
+				messages = append(messages,
+					llm.NewChatMessage("assistant", ""),
+					llm.NewChatMessage("user", "Your previous response was empty. Please provide a complete answer to my original request. Use the available tools if needed."),
 				)
 				continue
 			}
