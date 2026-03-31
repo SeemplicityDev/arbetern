@@ -57,22 +57,61 @@ func chatToolsToResponsesTools(tools []Tool) []responsesTool {
 
 // responsesInputItem can represent a user/assistant message, a function_call,
 // or a function_call_output.
+//
+// responsesInputItem can represent a user/assistant message, a function_call,
+// or a function_call_output. Each type has a different set of required fields,
+// so we use a custom MarshalJSON to emit only the fields relevant to each type.
+// This avoids two failure modes:
+//   - omitempty on Output/CallID/Arguments drops required fields → 400
+//     "Missing required parameter: 'input[N].output'"
+//   - no omitempty sends call_id/arguments/output on message items → 400
+//     "Unknown parameter: 'input[N].call_id'"
 type responsesInputItem struct {
 	// Common fields
-	Type string `json:"type,omitempty"` // "message", "function_call", "function_call_output"
-	Role string `json:"role,omitempty"` // for type "message"
+	Type string // "message", "function_call", "function_call_output"
+	Role string // for type "message"
 
 	// For type "message" — content can be a string or structured.
-	Content string `json:"content,omitempty"`
+	Content string
 
 	// For type "function_call"
-	ID        string `json:"id,omitempty"` // function call ID
-	CallID    string `json:"call_id,omitempty"`
-	Name      string `json:"name,omitempty"`
-	Arguments string `json:"arguments,omitempty"`
+	ID        string // function call ID
+	CallID    string
+	Name      string
+	Arguments string
 
 	// For type "function_call_output"
-	Output string `json:"output,omitempty"`
+	Output string
+}
+
+// MarshalJSON serialises only the fields the Responses API expects for each
+// item type, ensuring required fields are always present and unknown fields
+// are never sent.
+func (r responsesInputItem) MarshalJSON() ([]byte, error) {
+	switch r.Type {
+	case "function_call":
+		return json.Marshal(struct {
+			Type      string `json:"type"`
+			ID        string `json:"id,omitempty"`
+			CallID    string `json:"call_id"`
+			Name      string `json:"name"`
+			Arguments string `json:"arguments"`
+		}{r.Type, r.ID, r.CallID, r.Name, r.Arguments})
+
+	case "function_call_output":
+		return json.Marshal(struct {
+			Type   string `json:"type"`
+			CallID string `json:"call_id"`
+			Output string `json:"output"`
+		}{r.Type, r.CallID, r.Output})
+
+	default: // "message"
+		return json.Marshal(struct {
+			Type    string `json:"type"`
+			Role    string `json:"role,omitempty"`
+			Content string `json:"content,omitempty"`
+		}{r.Type, r.Role, r.Content})
+	}
 }
 
 // responsesResponse is the response body from the Azure Responses API.
