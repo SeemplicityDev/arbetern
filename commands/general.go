@@ -22,6 +22,10 @@ import (
 // sourced from github-linguist/linguist. Built once at init time.
 var knownExtensions map[string]bool
 
+// maxFileContentLen is the character limit for file content returned by the
+// get_file_content tool. Files longer than this are truncated with a warning.
+const maxFileContentLen = 32000
+
 // extensionRe matches tokens that look like file extensions (e.g. ".yaml", ".go")
 // or filenames with extensions (e.g. "main.go", "deploy.yaml") in user text.
 var extensionRe = regexp.MustCompile(`(?i)\.[a-z0-9_][a-z0-9_.]*`)
@@ -1030,8 +1034,13 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 			}
 			return fmt.Sprintf("Error reading file: %v.%s", err, hint)
 		}
-		if len(content) > 8000 {
-			content = content[:8000] + "\n... (truncated — file is longer than shown, important content may follow)"
+		if len(content) > maxFileContentLen {
+			totalLen := len(content)
+			content = content[:maxFileContentLen] + fmt.Sprintf(
+				"\n... (TRUNCATED — showing %d of %d chars, %.0f%% of file hidden. "+
+					"If you need to modify content beyond this point, use modify_file with a smaller, "+
+					"known anchor from the visible portion, or ask the user for the exact text to change.)",
+				maxFileContentLen, totalLen, float64(totalLen-maxFileContentLen)/float64(totalLen)*100)
 		}
 		return content
 
@@ -1151,6 +1160,9 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 			return fmt.Sprintf("Error: old_content matches %d locations in the file. Include more surrounding context lines to make it unique.", occurrences)
 		}
 		updatedContent := strings.Replace(fullContent, args.OldContent, args.NewContent, 1)
+		if updatedContent == fullContent {
+			return "Error: old_content and new_content produce identical file content. The replacement is a no-op — double-check that new_content differs from old_content."
+		}
 
 		prBody := fmt.Sprintf("Automated change requested via Slack by <@%s>.\n\nChange: %s", userID, args.Description)
 		result, err := h.branchMgr.CommitAndPR(ctx, owner, args.Repo, baseBranch, userID, args.Description, prBody,
