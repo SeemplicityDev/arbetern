@@ -155,65 +155,20 @@ func (c *Client) doChat(ctx context.Context, messages []ChatMessage, tools []Too
 		apiURL = modelsAPIURL
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, bytes.NewReader(payload))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
-
-	req.Header.Set("Content-Type", "application/json")
+	headers := map[string]string{"Content-Type": "application/json"}
 	if c.useAzure() {
-		req.Header.Set("api-key", c.azureAPIKey)
+		headers["api-key"] = c.azureAPIKey
 	} else {
-		req.Header.Set("Authorization", "Bearer "+c.token)
+		headers["Authorization"] = "Bearer " + c.token
 	}
 
-	resp, err := c.httpClient.Do(req)
+	body, statusCode, err := c.doPostWithRetry(ctx, apiURL, payload, headers, "chat")
 	if err != nil {
-		return nil, fmt.Errorf("LLM API request failed: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response body: %w", err)
+		return nil, err
 	}
 
-	if isRetryable(resp.StatusCode) {
-		for attempt := 0; attempt < maxRetries; attempt++ {
-			wait := retryDelay(resp, attempt)
-			log.Printf("[llm] chat retryable %d, backing off %s (attempt %d/%d)", resp.StatusCode, wait, attempt+1, maxRetries)
-			select {
-			case <-time.After(wait):
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			}
-			retryReq, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, bytes.NewReader(payload))
-			if err != nil {
-				return nil, fmt.Errorf("failed to create retry request: %w", err)
-			}
-			retryReq.Header.Set("Content-Type", "application/json")
-			if c.useAzure() {
-				retryReq.Header.Set("api-key", c.azureAPIKey)
-			} else {
-				retryReq.Header.Set("Authorization", "Bearer "+c.token)
-			}
-			resp, err = c.httpClient.Do(retryReq)
-			if err != nil {
-				return nil, fmt.Errorf("LLM API retry request failed: %w", err)
-			}
-			body, err = io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
-			_ = resp.Body.Close()
-			if err != nil {
-				return nil, fmt.Errorf("failed to read retry response body: %w", err)
-			}
-			if !isRetryable(resp.StatusCode) {
-				break
-			}
-		}
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("LLM API returned %d: %s", resp.StatusCode, extractAPIErrorMessage(body))
+	if statusCode != http.StatusOK {
+		return nil, fmt.Errorf("LLM API returned %d: %s", statusCode, extractAPIErrorMessage(body))
 	}
 
 	var chatResp ChatResponse
@@ -226,6 +181,63 @@ func (c *Client) doChat(ctx context.Context, messages []ChatMessage, tools []Too
 	}
 
 	return &chatResp, nil
+}
+
+// doPostWithRetry performs an HTTP POST with automatic retry on transient errors
+// (429, 5xx). It returns the response body, the final HTTP status code, and any
+// transport-level error. The label parameter is used in log messages.
+func (c *Client) doPostWithRetry(ctx context.Context, url string, payload []byte, headers map[string]string, label string) ([]byte, int, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to create %s request: %w", label, err)
+	}
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, 0, fmt.Errorf("%s API request failed: %w", label, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to read %s response body: %w", label, err)
+	}
+
+	if isRetryable(resp.StatusCode) {
+		for attempt := 0; attempt < maxRetries; attempt++ {
+			wait := retryDelay(resp, attempt)
+			log.Printf("[llm] %s retryable %d, backing off %s (attempt %d/%d)", label, resp.StatusCode, wait, attempt+1, maxRetries)
+			select {
+			case <-time.After(wait):
+			case <-ctx.Done():
+				return nil, 0, ctx.Err()
+			}
+			retryReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
+			if err != nil {
+				return nil, 0, fmt.Errorf("failed to create %s retry request: %w", label, err)
+			}
+			for k, v := range headers {
+				retryReq.Header.Set(k, v)
+			}
+			resp, err = c.httpClient.Do(retryReq)
+			if err != nil {
+				return nil, 0, fmt.Errorf("%s API retry request failed: %w", label, err)
+			}
+			body, err = io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
+			_ = resp.Body.Close()
+			if err != nil {
+				return nil, 0, fmt.Errorf("failed to read %s retry response body: %w", label, err)
+			}
+			if !isRetryable(resp.StatusCode) {
+				break
+			}
+		}
+	}
+
+	return body, resp.StatusCode, nil
 }
 
 // ValidateModel verifies that the configured model/deployment is accessible
@@ -320,56 +332,18 @@ func (c *Client) doResponses(ctx context.Context, messages []ChatMessage, tools 
 	apiURL := fmt.Sprintf("%s/openai/responses?api-version=%s",
 		c.azureEndpoint, azureResponsesAPIVersion)
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, bytes.NewReader(payload))
+	headers := map[string]string{
+		"Content-Type": "application/json",
+		"api-key":      c.azureAPIKey,
+	}
+
+	body, statusCode, err := c.doPostWithRetry(ctx, apiURL, payload, headers, "responses")
 	if err != nil {
-		return nil, fmt.Errorf("failed to create responses request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("api-key", c.azureAPIKey)
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("responses API request failed: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
-	if err != nil {
-		return nil, fmt.Errorf("failed to read responses body: %w", err)
+		return nil, err
 	}
 
-	if isRetryable(resp.StatusCode) {
-		for attempt := 0; attempt < maxRetries; attempt++ {
-			wait := retryDelay(resp, attempt)
-			log.Printf("[llm] responses retryable %d, backing off %s (attempt %d/%d)", resp.StatusCode, wait, attempt+1, maxRetries)
-			select {
-			case <-time.After(wait):
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			}
-			retryReq, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, bytes.NewReader(payload))
-			if err != nil {
-				return nil, fmt.Errorf("failed to create responses retry request: %w", err)
-			}
-			retryReq.Header.Set("Content-Type", "application/json")
-			retryReq.Header.Set("api-key", c.azureAPIKey)
-			resp, err = c.httpClient.Do(retryReq)
-			if err != nil {
-				return nil, fmt.Errorf("responses API retry request failed: %w", err)
-			}
-			body, err = io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
-			_ = resp.Body.Close()
-			if err != nil {
-				return nil, fmt.Errorf("failed to read responses retry body: %w", err)
-			}
-			if !isRetryable(resp.StatusCode) {
-				break
-			}
-		}
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("responses API returned %d: %s", resp.StatusCode, extractAPIErrorMessage(body))
+	if statusCode != http.StatusOK {
+		return nil, fmt.Errorf("responses API returned %d: %s", statusCode, extractAPIErrorMessage(body))
 	}
 
 	var rr responsesResponse

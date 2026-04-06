@@ -16,7 +16,6 @@ import (
 	"github.com/justmike1/arbetern/llm"
 	"github.com/justmike1/arbetern/nvd"
 	"github.com/justmike1/arbetern/salesforce"
-	"github.com/justmike1/arbetern/slack"
 )
 
 // knownExtensions is the set of all known programming-language file extensions
@@ -58,23 +57,15 @@ type GeneralHandler struct {
 	userContext      string
 	currentChannelID string
 	currentAuditTS   string
-	// activeBranches tracks branches created during this Execute() run.
-	// Key: "owner/repo", Value: branch metadata. This ensures multiple
-	// modify_file calls for the same repo produce a single PR.
-	activeBranches map[string]*activeBranchInfo
-}
-
-type activeBranchInfo struct {
-	branchName string
-	baseBranch string
-	prURL      string
+	branchMgr        *BranchManager
+	session          *ThreadSession
 }
 
 func (h *GeneralHandler) Execute(channelID, userID, text, responseURL, auditTS string) {
 	ctx := context.Background()
 	h.currentChannelID = channelID
 	h.currentAuditTS = auditTS
-	h.activeBranches = make(map[string]*activeBranchInfo)
+	h.branchMgr = NewBranchManager(h.ghClient, h.agentID, h.session)
 
 	tools := h.buildTools()
 
@@ -1019,24 +1010,17 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		return fmt.Sprintf("Repositories (%d):\n%s", len(repos), strings.Join(repos, "\n"))
 
 	case "get_file_content":
-		var args struct {
+		args, errMsg := parseToolArgs[struct {
 			Repo   string `json:"repo"`
 			Path   string `json:"path"`
 			Branch string `json:"branch"`
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
 		}
-		if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
-			return fmt.Sprintf("Error parsing arguments: %v", err)
-		}
-		owner, err := h.ghClient.ResolveOwner(ctx)
-		if err != nil {
-			return fmt.Sprintf("Error resolving owner: %v", err)
-		}
-		branch := args.Branch
-		if branch == "" {
-			branch, err = h.ghClient.GetDefaultBranch(ctx, owner, args.Repo)
-			if err != nil {
-				return fmt.Sprintf("Error getting default branch: %v", err)
-			}
+		owner, branch, errMsg := resolveRepoBranch(ctx, h.ghClient, args.Repo, args.Branch)
+		if errMsg != "" {
+			return errMsg
 		}
 		content, _, err := h.ghClient.GetFileContent(ctx, owner, args.Repo, args.Path, branch)
 		if err != nil {
@@ -1052,11 +1036,11 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		return content
 
 	case "get_repo_default_branch":
-		var args struct {
+		args, errMsg := parseToolArgs[struct {
 			Repo string `json:"repo"`
-		}
-		if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
-			return fmt.Sprintf("Error parsing arguments: %v", err)
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
 		}
 		owner, err := h.ghClient.ResolveOwner(ctx)
 		if err != nil {
@@ -1083,24 +1067,17 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		return fmt.Sprintf("Resolved owner: %s", owner)
 
 	case "search_files":
-		var args struct {
+		args, errMsg := parseToolArgs[struct {
 			Repo    string `json:"repo"`
 			Pattern string `json:"pattern"`
 			Branch  string `json:"branch"`
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
 		}
-		if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
-			return fmt.Sprintf("Error parsing arguments: %v", err)
-		}
-		owner, err := h.ghClient.ResolveOwner(ctx)
-		if err != nil {
-			return fmt.Sprintf("Error resolving owner: %v", err)
-		}
-		branch := args.Branch
-		if branch == "" {
-			branch, err = h.ghClient.GetDefaultBranch(ctx, owner, args.Repo)
-			if err != nil {
-				return fmt.Sprintf("Error getting default branch: %v", err)
-			}
+		owner, branch, errMsg := resolveRepoBranch(ctx, h.ghClient, args.Repo, args.Branch)
+		if errMsg != "" {
+			return errMsg
 		}
 		matches, err := h.ghClient.SearchFiles(ctx, owner, args.Repo, branch, args.Pattern)
 		if err != nil {
@@ -1117,24 +1094,17 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		return fmt.Sprintf("Found %d matches:\n%s", len(matches), strings.Join(matches, "\n"))
 
 	case "list_directory":
-		var args struct {
+		args, errMsg := parseToolArgs[struct {
 			Repo   string `json:"repo"`
 			Path   string `json:"path"`
 			Branch string `json:"branch"`
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
 		}
-		if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
-			return fmt.Sprintf("Error parsing arguments: %v", err)
-		}
-		owner, err := h.ghClient.ResolveOwner(ctx)
-		if err != nil {
-			return fmt.Sprintf("Error resolving owner: %v", err)
-		}
-		branch := args.Branch
-		if branch == "" {
-			branch, err = h.ghClient.GetDefaultBranch(ctx, owner, args.Repo)
-			if err != nil {
-				return fmt.Sprintf("Error getting default branch: %v", err)
-			}
+		owner, branch, errMsg := resolveRepoBranch(ctx, h.ghClient, args.Repo, args.Branch)
+		if errMsg != "" {
+			return errMsg
 		}
 		entries, err := h.ghClient.GetDirectoryContents(ctx, owner, args.Repo, args.Path, branch)
 		if err != nil {
@@ -1152,45 +1122,27 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		return context
 
 	case "modify_file":
-		var args struct {
+		args, errMsg := parseToolArgs[struct {
 			Repo        string `json:"repo"`
 			Path        string `json:"path"`
 			OldContent  string `json:"old_content"`
 			NewContent  string `json:"new_content"`
 			Description string `json:"description"`
 			Branch      string `json:"branch"`
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
 		}
-		if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
-			return fmt.Sprintf("Error parsing arguments: %v", err)
-		}
-		owner, err := h.ghClient.ResolveOwner(ctx)
-		if err != nil {
-			return fmt.Sprintf("Error resolving owner: %v", err)
-		}
-		baseBranch := args.Branch
-		if baseBranch == "" {
-			baseBranch, err = h.ghClient.GetDefaultBranch(ctx, owner, args.Repo)
-			if err != nil {
-				return fmt.Sprintf("Error getting default branch: %v", err)
-			}
+		owner, baseBranch, errMsg := resolveRepoBranch(ctx, h.ghClient, args.Repo, args.Branch)
+		if errMsg != "" {
+			return errMsg
 		}
 
-		// Reuse an existing branch for this repo if one was created earlier in this session.
-		repoKey := owner + "/" + args.Repo
-		active := h.activeBranches[repoKey]
-
-		// Determine which branch to read the file from.
-		// If we already have an active branch, read from it (it may contain prior commits).
-		readBranch := baseBranch
-		if active != nil {
-			readBranch = active.branchName
-		}
-
+		readBranch := h.branchMgr.ReadBranch(owner, args.Repo, baseBranch)
 		fullContent, fileSHA, err := h.ghClient.GetFileContent(ctx, owner, args.Repo, args.Path, readBranch)
 		if err != nil {
 			return fmt.Sprintf("Error reading current file: %v", err)
 		}
-		// Perform find-and-replace on the full file content.
 		if !strings.Contains(fullContent, args.OldContent) {
 			return "Error: old_content not found in the file. Make sure old_content is an exact substring of the current file (including whitespace and indentation). Re-read the file with get_file_content and try again."
 		}
@@ -1200,132 +1152,74 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		}
 		updatedContent := strings.Replace(fullContent, args.OldContent, args.NewContent, 1)
 
-		if active == nil {
-			// First modification for this repo — create a new branch and PR.
-			branchName := github.GenerateBranchName(h.agentID)
-			if err := h.ghClient.CreateBranch(ctx, owner, args.Repo, baseBranch, branchName); err != nil {
-				return fmt.Sprintf("Error creating branch: %v", err)
-			}
-			commitMsg := fmt.Sprintf("%s: %s", h.agentID, args.Description)
-			if err := h.ghClient.UpdateFile(ctx, owner, args.Repo, args.Path, branchName, commitMsg, []byte(updatedContent), fileSHA); err != nil {
-				return fmt.Sprintf("Error committing file: %v", err)
-			}
-			prTitle := fmt.Sprintf("%s: %s", h.agentID, args.Description)
-			prBody := fmt.Sprintf("Automated change requested via Slack by <@%s>.\n\nChange: %s", userID, args.Description)
-			prURL, err := h.ghClient.CreatePullRequest(ctx, owner, args.Repo, baseBranch, branchName, prTitle, prBody)
-			if err != nil {
-				return fmt.Sprintf("Changes committed to branch %s but PR creation failed: %v", branchName, err)
-			}
-			h.activeBranches[repoKey] = &activeBranchInfo{
-				branchName: branchName,
-				baseBranch: baseBranch,
-				prURL:      prURL,
-			}
-			log.Printf("[user=%s channel=%s] PR created via modify_file: %s", userID, channelID, prURL)
-			return fmt.Sprintf("Pull request created: %s", prURL)
+		prBody := fmt.Sprintf("Automated change requested via Slack by <@%s>.\n\nChange: %s", userID, args.Description)
+		result, err := h.branchMgr.CommitAndPR(ctx, owner, args.Repo, baseBranch, userID, args.Description, prBody,
+			func(branch string) error {
+				commitMsg := fmt.Sprintf("%s: %s", h.agentID, args.Description)
+				return h.ghClient.UpdateFile(ctx, owner, args.Repo, args.Path, branch, commitMsg, []byte(updatedContent), fileSHA)
+			})
+		if err != nil {
+			return fmt.Sprintf("Error: %v", err)
 		}
-
-		// Subsequent modification — commit to the existing branch.
-		commitMsg := fmt.Sprintf("%s: %s", h.agentID, args.Description)
-		if err := h.ghClient.UpdateFile(ctx, owner, args.Repo, args.Path, active.branchName, commitMsg, []byte(updatedContent), fileSHA); err != nil {
-			return fmt.Sprintf("Error committing file to existing branch: %v", err)
+		log.Printf("[user=%s channel=%s] modify_file: PR %s (new=%t)", userID, channelID, result.PrURL, result.IsNew)
+		if result.IsNew {
+			return fmt.Sprintf("Pull request created: %s", result.PrURL)
 		}
-		log.Printf("[user=%s channel=%s] additional commit to branch %s for PR: %s", userID, channelID, active.branchName, active.prURL)
-		return fmt.Sprintf("Changes committed to existing PR: %s", active.prURL)
+		return fmt.Sprintf("Changes committed to existing PR: %s", result.PrURL)
 
 	case "create_file":
-		var args struct {
+		args, errMsg := parseToolArgs[struct {
 			Repo        string `json:"repo"`
 			Path        string `json:"path"`
 			Content     string `json:"content"`
 			Description string `json:"description"`
 			Branch      string `json:"branch"`
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
 		}
-		if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
-			return fmt.Sprintf("Error parsing arguments: %v", err)
+		owner, baseBranch, errMsg := resolveRepoBranch(ctx, h.ghClient, args.Repo, args.Branch)
+		if errMsg != "" {
+			return errMsg
 		}
-		owner, err := h.ghClient.ResolveOwner(ctx)
+
+		prBody := fmt.Sprintf("Automated file creation requested via Slack by <@%s>.\n\nChange: %s\nNew file: `%s`", userID, args.Description, args.Path)
+		result, err := h.branchMgr.CommitAndPR(ctx, owner, args.Repo, baseBranch, userID, args.Description, prBody,
+			func(branch string) error {
+				commitMsg := fmt.Sprintf("%s: %s", h.agentID, args.Description)
+				return h.ghClient.CreateFile(ctx, owner, args.Repo, args.Path, branch, commitMsg, []byte(args.Content))
+			})
 		if err != nil {
-			return fmt.Sprintf("Error resolving owner: %v", err)
+			return fmt.Sprintf("Error: %v", err)
 		}
-		baseBranch := args.Branch
-		if baseBranch == "" {
-			baseBranch, err = h.ghClient.GetDefaultBranch(ctx, owner, args.Repo)
-			if err != nil {
-				return fmt.Sprintf("Error getting default branch: %v", err)
-			}
+		log.Printf("[user=%s channel=%s] create_file: PR %s (new=%t)", userID, channelID, result.PrURL, result.IsNew)
+		if result.IsNew {
+			return fmt.Sprintf("File created and pull request opened: %s", result.PrURL)
 		}
-
-		repoKey := owner + "/" + args.Repo
-		active := h.activeBranches[repoKey]
-
-		if active == nil {
-			branchName := github.GenerateBranchName(h.agentID)
-			if err := h.ghClient.CreateBranch(ctx, owner, args.Repo, baseBranch, branchName); err != nil {
-				return fmt.Sprintf("Error creating branch: %v", err)
-			}
-			commitMsg := fmt.Sprintf("%s: %s", h.agentID, args.Description)
-			if err := h.ghClient.CreateFile(ctx, owner, args.Repo, args.Path, branchName, commitMsg, []byte(args.Content)); err != nil {
-				return fmt.Sprintf("Error creating file: %v", err)
-			}
-			prTitle := fmt.Sprintf("%s: %s", h.agentID, args.Description)
-			prBody := fmt.Sprintf("Automated file creation requested via Slack by <@%s>.\n\nChange: %s\nNew file: `%s`", userID, args.Description, args.Path)
-			prURL, err := h.ghClient.CreatePullRequest(ctx, owner, args.Repo, baseBranch, branchName, prTitle, prBody)
-			if err != nil {
-				return fmt.Sprintf("File created on branch %s but PR creation failed: %v", branchName, err)
-			}
-			h.activeBranches[repoKey] = &activeBranchInfo{
-				branchName: branchName,
-				baseBranch: baseBranch,
-				prURL:      prURL,
-			}
-			log.Printf("[user=%s channel=%s] PR created via create_file: %s", userID, channelID, prURL)
-			return fmt.Sprintf("File created and pull request opened: %s", prURL)
-		}
-
-		commitMsg := fmt.Sprintf("%s: %s", h.agentID, args.Description)
-		if err := h.ghClient.CreateFile(ctx, owner, args.Repo, args.Path, active.branchName, commitMsg, []byte(args.Content)); err != nil {
-			return fmt.Sprintf("Error creating file on existing branch: %v", err)
-		}
-		log.Printf("[user=%s channel=%s] additional file created on branch %s for PR: %s", userID, channelID, active.branchName, active.prURL)
-		return fmt.Sprintf("File created and committed to existing PR: %s", active.prURL)
+		return fmt.Sprintf("File created and committed to existing PR: %s", result.PrURL)
 
 	case "regex_replace_file":
-		var args struct {
+		args, errMsg := parseToolArgs[struct {
 			Repo        string `json:"repo"`
 			Path        string `json:"path"`
 			Pattern     string `json:"pattern"`
 			Replacement string `json:"replacement"`
 			Description string `json:"description"`
 			Branch      string `json:"branch"`
-		}
-		if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
-			return fmt.Sprintf("Error parsing arguments: %v", err)
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
 		}
 		re, err := regexp.Compile(args.Pattern)
 		if err != nil {
 			return fmt.Sprintf("Error compiling regex pattern: %v", err)
 		}
-		owner, err := h.ghClient.ResolveOwner(ctx)
-		if err != nil {
-			return fmt.Sprintf("Error resolving owner: %v", err)
-		}
-		baseBranch := args.Branch
-		if baseBranch == "" {
-			baseBranch, err = h.ghClient.GetDefaultBranch(ctx, owner, args.Repo)
-			if err != nil {
-				return fmt.Sprintf("Error getting default branch: %v", err)
-			}
+		owner, baseBranch, errMsg := resolveRepoBranch(ctx, h.ghClient, args.Repo, args.Branch)
+		if errMsg != "" {
+			return errMsg
 		}
 
-		repoKey := owner + "/" + args.Repo
-		active := h.activeBranches[repoKey]
-
-		readBranch := baseBranch
-		if active != nil {
-			readBranch = active.branchName
-		}
-
+		readBranch := h.branchMgr.ReadBranch(owner, args.Repo, baseBranch)
 		fullContent, fileSHA, err := h.ghClient.GetFileContent(ctx, owner, args.Repo, args.Path, readBranch)
 		if err != nil {
 			return fmt.Sprintf("Error reading current file: %v", err)
@@ -1339,45 +1233,29 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		log.Printf("[user=%s channel=%s] regex_replace_file: %d matches of %q in %s/%s",
 			userID, channelID, matches, args.Pattern, args.Repo, args.Path)
 
-		if active == nil {
-			branchName := github.GenerateBranchName(h.agentID)
-			if err := h.ghClient.CreateBranch(ctx, owner, args.Repo, baseBranch, branchName); err != nil {
-				return fmt.Sprintf("Error creating branch: %v", err)
-			}
-			commitMsg := fmt.Sprintf("%s: %s", h.agentID, args.Description)
-			if err := h.ghClient.UpdateFile(ctx, owner, args.Repo, args.Path, branchName, commitMsg, []byte(updatedContent), fileSHA); err != nil {
-				return fmt.Sprintf("Error committing file: %v", err)
-			}
-			prTitle := fmt.Sprintf("%s: %s", h.agentID, args.Description)
-			prBody := fmt.Sprintf("Automated regex replacement requested via Slack by <@%s>.\n\nChange: %s\nPattern: `%s` → `%s`\nMatches replaced: %d", userID, args.Description, args.Pattern, args.Replacement, matches)
-			prURL, err := h.ghClient.CreatePullRequest(ctx, owner, args.Repo, baseBranch, branchName, prTitle, prBody)
-			if err != nil {
-				return fmt.Sprintf("Changes committed to branch %s but PR creation failed: %v", branchName, err)
-			}
-			h.activeBranches[repoKey] = &activeBranchInfo{
-				branchName: branchName,
-				baseBranch: baseBranch,
-				prURL:      prURL,
-			}
-			log.Printf("[user=%s channel=%s] PR created via regex_replace_file (%d matches): %s", userID, channelID, matches, prURL)
-			return fmt.Sprintf("Replaced %d matches. Pull request created: %s", matches, prURL)
+		prBody := fmt.Sprintf("Automated regex replacement requested via Slack by <@%s>.\n\nChange: %s\nPattern: `%s` → `%s`\nMatches replaced: %d", userID, args.Description, args.Pattern, args.Replacement, matches)
+		result, err := h.branchMgr.CommitAndPR(ctx, owner, args.Repo, baseBranch, userID, args.Description, prBody,
+			func(branch string) error {
+				commitMsg := fmt.Sprintf("%s: %s", h.agentID, args.Description)
+				return h.ghClient.UpdateFile(ctx, owner, args.Repo, args.Path, branch, commitMsg, []byte(updatedContent), fileSHA)
+			})
+		if err != nil {
+			return fmt.Sprintf("Error: %v", err)
 		}
-
-		commitMsg := fmt.Sprintf("%s: %s", h.agentID, args.Description)
-		if err := h.ghClient.UpdateFile(ctx, owner, args.Repo, args.Path, active.branchName, commitMsg, []byte(updatedContent), fileSHA); err != nil {
-			return fmt.Sprintf("Error committing file to existing branch: %v", err)
+		log.Printf("[user=%s channel=%s] regex_replace_file: PR %s (new=%t, matches=%d)", userID, channelID, result.PrURL, result.IsNew, matches)
+		if result.IsNew {
+			return fmt.Sprintf("Replaced %d matches. Pull request created: %s", matches, result.PrURL)
 		}
-		log.Printf("[user=%s channel=%s] regex_replace_file: additional commit to branch %s (%d matches) for PR: %s", userID, channelID, active.branchName, matches, active.prURL)
-		return fmt.Sprintf("Replaced %d matches. Changes committed to existing PR: %s", matches, active.prURL)
+		return fmt.Sprintf("Replaced %d matches. Changes committed to existing PR: %s", matches, result.PrURL)
 
 	case "get_pull_request":
-		var args struct {
+		args, errMsg := parseToolArgs[struct {
 			Repo   string `json:"repo"`
 			Number int    `json:"number"`
 			URL    string `json:"url"`
-		}
-		if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
-			return fmt.Sprintf("Error parsing arguments: %v", err)
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
 		}
 		owner, err := h.ghClient.ResolveOwner(ctx)
 		if err != nil {
@@ -1404,13 +1282,13 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		return github.FormatPRSummary(pr)
 
 	case "list_pull_requests":
-		var args struct {
+		args, errMsg := parseToolArgs[struct {
 			Repo  string `json:"repo"`
 			State string `json:"state"`
 			Limit int    `json:"limit"`
-		}
-		if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
-			return fmt.Sprintf("Error parsing arguments: %v", err)
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
 		}
 		owner, err := h.ghClient.ResolveOwner(ctx)
 		if err != nil {
@@ -1432,12 +1310,12 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		return sb.String()
 
 	case "search_code":
-		var args struct {
+		args, errMsg := parseToolArgs[struct {
 			Repo  string `json:"repo"`
 			Query string `json:"query"`
-		}
-		if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
-			return fmt.Sprintf("Error parsing arguments: %v", err)
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
 		}
 		owner, err := h.ghClient.ResolveOwner(ctx)
 		if err != nil {
@@ -1462,11 +1340,11 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		return sb.String()
 
 	case "search_code_org":
-		var args struct {
+		args, errMsg := parseToolArgs[struct {
 			Query string `json:"query"`
-		}
-		if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
-			return fmt.Sprintf("Error parsing arguments: %v", err)
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
 		}
 		owner, err := h.ghClient.ResolveOwner(ctx)
 		if err != nil {
@@ -1504,11 +1382,11 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		return sb.String()
 
 	case "get_workflow_run":
-		var args struct {
+		args, errMsg := parseToolArgs[struct {
 			URL string `json:"url"`
-		}
-		if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
-			return fmt.Sprintf("Error parsing arguments: %v", err)
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
 		}
 		owner, repo, runID, err := github.ParseWorkflowRunURL(args.URL)
 		if err != nil {
@@ -1524,11 +1402,11 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		return result
 
 	case "rerun_failed_jobs":
-		var args struct {
+		args, errMsg := parseToolArgs[struct {
 			URL string `json:"url"`
-		}
-		if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
-			return fmt.Sprintf("Error parsing arguments: %v", err)
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
 		}
 		owner, repo, runID, err := github.ParseWorkflowRunURL(args.URL)
 		if err != nil {
@@ -1542,11 +1420,11 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		return fmt.Sprintf("Successfully triggered re-run of failed jobs for workflow run %d in %s/%s. The run is now in progress: %s", runID, owner, repo, args.URL)
 
 	case "rerun_workflow":
-		var args struct {
+		args, errMsg := parseToolArgs[struct {
 			URL string `json:"url"`
-		}
-		if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
-			return fmt.Sprintf("Error parsing arguments: %v", err)
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
 		}
 		owner, repo, runID, err := github.ParseWorkflowRunURL(args.URL)
 		if err != nil {
@@ -1560,12 +1438,12 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		return fmt.Sprintf("Successfully triggered full re-run of workflow run %d in %s/%s. All jobs will run again: %s", runID, owner, repo, args.URL)
 
 	case "reply_in_thread":
-		var args struct {
+		args, errMsg := parseToolArgs[struct {
 			ThreadTS string `json:"thread_ts"`
 			Text     string `json:"text"`
-		}
-		if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
-			return fmt.Sprintf("Error parsing arguments: %v", err)
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
 		}
 		if err := h.slackClient.PostThreadReply(channelID, args.ThreadTS, args.Text); err != nil {
 			return fmt.Sprintf("Error posting thread reply: %v", err)
@@ -1574,14 +1452,14 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		return "Successfully posted reply in thread."
 
 	case "upload_snippet":
-		var args struct {
+		args, errMsg := parseToolArgs[struct {
 			Content  string `json:"content"`
 			Filename string `json:"filename"`
 			Title    string `json:"title"`
 			Filetype string `json:"filetype"`
-		}
-		if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
-			return fmt.Sprintf("Error parsing arguments: %v", err)
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
 		}
 		if args.Filetype == "" {
 			args.Filetype = "text"
@@ -1599,11 +1477,11 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		return fmt.Sprintf("Successfully uploaded snippet '%s' as %s.", args.Title, args.Filename)
 
 	case "fetch_thread_context":
-		var args struct {
+		args, errMsg := parseToolArgs[struct {
 			URL string `json:"url"`
-		}
-		if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
-			return fmt.Sprintf("Error parsing arguments: %v", err)
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
 		}
 		threadChannelID, threadTS, err := ParseSlackThreadURL(args.URL)
 		if err != nil {
@@ -1621,10 +1499,10 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		return fmt.Sprintf("Thread context (channel_id=%s, thread_ts=%s):\n\n%s", threadChannelID, threadTS, formatted)
 
 	case "create_jira_ticket":
-		if h.jiraClient == nil || !h.jiraClient.Ready() {
-			return "Error: Jira integration is not connected. It may still be initializing — please try again shortly."
+		if errMsg := requireReady("Jira", h.jiraClient); errMsg != "" {
+			return errMsg
 		}
-		var args struct {
+		args, errMsg := parseToolArgs[struct {
 			Project     string   `json:"project"`
 			Summary     string   `json:"summary"`
 			Description string   `json:"description"`
@@ -1632,9 +1510,9 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 			Labels      []string `json:"labels"`
 			Assignee    string   `json:"assignee"`
 			Team        string   `json:"team"`
-		}
-		if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
-			return fmt.Sprintf("Error parsing arguments: %v", err)
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
 		}
 		// Append agent stamp to the description.
 		stamp := fmt.Sprintf("\n\n---\nCreated by **%s** via Arbetern", h.agentID)
@@ -1709,8 +1587,8 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		return fmt.Sprintf("Jira ticket created: *%s* — %s\nSummary: %s", issue.Key, issue.Browse, args.Summary)
 
 	case "list_jira_projects":
-		if h.jiraClient == nil || !h.jiraClient.Ready() {
-			return "Error: Jira integration is not connected. It may still be initializing — please try again shortly."
+		if errMsg := requireReady("Jira", h.jiraClient); errMsg != "" {
+			return errMsg
 		}
 		projects, err := h.jiraClient.ListProjects()
 		if err != nil {
@@ -1723,15 +1601,15 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		return fmt.Sprintf("Jira projects (%d):\n%s", len(projects), strings.Join(projects, "\n"))
 
 	case "search_jira_issues":
-		if h.jiraClient == nil || !h.jiraClient.Ready() {
-			return "Error: Jira integration is not connected. It may still be initializing — please try again shortly."
+		if errMsg := requireReady("Jira", h.jiraClient); errMsg != "" {
+			return errMsg
 		}
-		var args struct {
+		args, errMsg := parseToolArgs[struct {
 			JQL        string `json:"jql"`
 			MaxResults int    `json:"max_results"`
-		}
-		if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
-			return fmt.Sprintf("Error parsing arguments: %v", err)
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
 		}
 		issues, err := h.jiraClient.SearchIssuesJQL(args.JQL, args.MaxResults)
 		if err != nil {
@@ -1764,14 +1642,14 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		return sb.String()
 
 	case "get_jira_issue":
-		if h.jiraClient == nil || !h.jiraClient.Ready() {
-			return "Error: Jira integration is not connected. It may still be initializing — please try again shortly."
+		if errMsg := requireReady("Jira", h.jiraClient); errMsg != "" {
+			return errMsg
 		}
-		var args struct {
+		args, errMsg := parseToolArgs[struct {
 			IssueKey string `json:"issue_key"`
-		}
-		if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
-			return fmt.Sprintf("Error parsing arguments: %v", err)
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
 		}
 		issue, err := h.jiraClient.GetIssue(args.IssueKey)
 		if err != nil {
@@ -1801,16 +1679,16 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		return sb.String()
 
 	case "update_jira_issue":
-		if h.jiraClient == nil || !h.jiraClient.Ready() {
-			return "Error: Jira integration is not connected. It may still be initializing — please try again shortly."
+		if errMsg := requireReady("Jira", h.jiraClient); errMsg != "" {
+			return errMsg
 		}
-		var args struct {
+		args, errMsg := parseToolArgs[struct {
 			IssueKey    string `json:"issue_key"`
 			Summary     string `json:"summary"`
 			Description string `json:"description"`
-		}
-		if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
-			return fmt.Sprintf("Error parsing arguments: %v", err)
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
 		}
 		if args.Summary == "" && args.Description == "" {
 			return "Error: at least one of summary or description must be provided."
@@ -1838,11 +1716,11 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		return fmt.Sprintf("Successfully updated %s: %s", args.IssueKey, strings.Join(updated, " and "))
 
 	case "get_slack_user_info":
-		var args struct {
+		args, errMsg := parseToolArgs[struct {
 			UserID string `json:"user_id"`
-		}
-		if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
-			return fmt.Sprintf("Error parsing arguments: %v", err)
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
 		}
 		user, err := h.slackClient.GetUserInfo(args.UserID)
 		if err != nil {
@@ -1852,14 +1730,14 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 			user.ID, user.RealName, user.Profile.DisplayName, user.Profile.Email, user.Profile.Title)
 
 	case "resolve_jira_team":
-		if h.jiraClient == nil || !h.jiraClient.Ready() {
-			return "Error: Jira integration is not connected. It may still be initializing — please try again shortly."
+		if errMsg := requireReady("Jira", h.jiraClient); errMsg != "" {
+			return errMsg
 		}
-		var args struct {
+		args, errMsg := parseToolArgs[struct {
 			TeamName string `json:"team_name"`
-		}
-		if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
-			return fmt.Sprintf("Error parsing arguments: %v", err)
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
 		}
 		// First discover the JQL clause name for the Team field.
 		fields, err := h.jiraClient.FindTeamFields()
@@ -1876,15 +1754,15 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		return fmt.Sprintf("Team resolved:\n  Display Name: %s\n  Team UUID: %s\n  JQL Clause: %s\n\nUse in JQL: \"%s\" = \"%s\"\nExample: \"%s\" = \"%s\" AND status = \"In Progress\" ORDER BY priority DESC", displayName, teamID, jqlClause, jqlClause, teamID, jqlClause, teamID)
 
 	case "resolve_jira_user":
-		if h.jiraClient == nil || !h.jiraClient.Ready() {
-			return "Error: Jira integration is not connected. It may still be initializing — please try again shortly."
+		if errMsg := requireReady("Jira", h.jiraClient); errMsg != "" {
+			return errMsg
 		}
-		var args struct {
+		args, errMsg := parseToolArgs[struct {
 			Name  string `json:"name"`
 			Email string `json:"email"`
-		}
-		if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
-			return fmt.Sprintf("Error parsing arguments: %v", err)
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
 		}
 
 		// Multi-strategy search: email first (most reliable), then full name, then individual name parts.
@@ -1960,14 +1838,14 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 	// ---- Dashboard & Filter tools ----
 
 	case "get_jira_dashboard":
-		if h.jiraClient == nil || !h.jiraClient.Ready() {
-			return "Error: Jira integration is not connected. It may still be initializing — please try again shortly."
+		if errMsg := requireReady("Jira", h.jiraClient); errMsg != "" {
+			return errMsg
 		}
-		var args struct {
+		args, errMsg := parseToolArgs[struct {
 			DashboardID string `json:"dashboard_id"`
-		}
-		if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
-			return fmt.Sprintf("Error parsing arguments: %v", err)
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
 		}
 		if args.DashboardID == "" {
 			return "Error: dashboard_id is required."
@@ -2013,16 +1891,16 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		return sb2.String()
 
 	case "get_jira_filter":
-		if h.jiraClient == nil || !h.jiraClient.Ready() {
-			return "Error: Jira integration is not connected. It may still be initializing — please try again shortly."
+		if errMsg := requireReady("Jira", h.jiraClient); errMsg != "" {
+			return errMsg
 		}
-		var args struct {
+		args, errMsg := parseToolArgs[struct {
 			FilterID   string `json:"filter_id"`
 			RunJQL     *bool  `json:"run_jql"`
 			MaxResults int    `json:"max_results"`
-		}
-		if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
-			return fmt.Sprintf("Error parsing arguments: %v", err)
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
 		}
 		if args.FilterID == "" {
 			return "Error: filter_id is required."
@@ -2078,15 +1956,15 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 	// ---- Confluence tools ----
 
 	case "search_confluence_pages":
-		if h.jiraClient == nil || !h.jiraClient.Ready() {
-			return "Error: Atlassian integration is not connected. It may still be initializing — please try again shortly."
+		if errMsg := requireReady("Atlassian", h.jiraClient); errMsg != "" {
+			return errMsg
 		}
-		var args struct {
+		args, errMsg := parseToolArgs[struct {
 			CQL   string `json:"cql"`
 			Limit int    `json:"limit"`
-		}
-		if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
-			return fmt.Sprintf("Error parsing arguments: %v", err)
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
 		}
 		if args.CQL == "" {
 			return "Error: cql is required."
@@ -2114,14 +1992,14 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		return sb2.String()
 
 	case "get_confluence_page":
-		if h.jiraClient == nil || !h.jiraClient.Ready() {
-			return "Error: Atlassian integration is not connected. It may still be initializing — please try again shortly."
+		if errMsg := requireReady("Atlassian", h.jiraClient); errMsg != "" {
+			return errMsg
 		}
-		var args struct {
+		args, errMsg := parseToolArgs[struct {
 			PageID string `json:"page_id"`
-		}
-		if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
-			return fmt.Sprintf("Error parsing arguments: %v", err)
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
 		}
 		if args.PageID == "" {
 			return "Error: page_id is required."
@@ -2147,8 +2025,8 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		return fmt.Sprintf("Page: %s (id: %s, v%d)\nLink: %s\n\n%s", page.Title, page.ID, page.Version, link, body)
 
 	case "list_confluence_spaces":
-		if h.jiraClient == nil || !h.jiraClient.Ready() {
-			return "Error: Atlassian integration is not connected. It may still be initializing — please try again shortly."
+		if errMsg := requireReady("Atlassian", h.jiraClient); errMsg != "" {
+			return errMsg
 		}
 		spaces, err := h.jiraClient.ListConfluenceSpaces()
 		if err != nil {
@@ -2166,17 +2044,17 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		return sb3.String()
 
 	case "create_confluence_page":
-		if h.jiraClient == nil || !h.jiraClient.Ready() {
-			return "Error: Atlassian integration is not connected. It may still be initializing — please try again shortly."
+		if errMsg := requireReady("Atlassian", h.jiraClient); errMsg != "" {
+			return errMsg
 		}
-		var args struct {
+		args, errMsg := parseToolArgs[struct {
 			SpaceKey string `json:"space_key"`
 			Title    string `json:"title"`
 			Body     string `json:"body"`
 			ParentID string `json:"parent_id"`
-		}
-		if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
-			return fmt.Sprintf("Error parsing arguments: %v", err)
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
 		}
 		if args.SpaceKey == "" || args.Title == "" {
 			return "Error: space_key and title are required."
@@ -2197,11 +2075,11 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		if h.nvdClient == nil {
 			return "Error: NVD integration is not configured."
 		}
-		var args struct {
+		args, errMsg := parseToolArgs[struct {
 			CVEID string `json:"cve_id"`
-		}
-		if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
-			return fmt.Sprintf("Error parsing arguments: %v", err)
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
 		}
 		args.CVEID = strings.TrimSpace(strings.ToUpper(args.CVEID))
 		if args.CVEID == "" {
@@ -2218,12 +2096,12 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		if h.nvdClient == nil {
 			return "Error: NVD integration is not configured."
 		}
-		var args struct {
+		args, errMsg := parseToolArgs[struct {
 			Keyword        string `json:"keyword"`
 			ResultsPerPage int    `json:"results_per_page"`
-		}
-		if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
-			return fmt.Sprintf("Error parsing arguments: %v", err)
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
 		}
 		if args.Keyword == "" {
 			return "Error: keyword is required."
@@ -2245,14 +2123,14 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		return sb.String()
 
 	case "salesforce_query":
-		if h.sfClient == nil || !h.sfClient.Ready() {
-			return "Error: Salesforce integration is not connected. It may still be initializing — please try again shortly."
+		if errMsg := requireReady("Salesforce", h.sfClient); errMsg != "" {
+			return errMsg
 		}
-		var args struct {
+		args, errMsg := parseToolArgs[struct {
 			SOQL string `json:"soql"`
-		}
-		if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
-			return fmt.Sprintf("Error parsing arguments: %v", err)
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
 		}
 		if args.SOQL == "" {
 			return "Error: soql is required."
@@ -2292,14 +2170,14 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		}
 
 	case "salesforce_describe":
-		if h.sfClient == nil || !h.sfClient.Ready() {
-			return "Error: Salesforce integration is not connected. It may still be initializing — please try again shortly."
+		if errMsg := requireReady("Salesforce", h.sfClient); errMsg != "" {
+			return errMsg
 		}
-		var args struct {
+		args, errMsg := parseToolArgs[struct {
 			ObjectName string `json:"object_name"`
-		}
-		if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
-			return fmt.Sprintf("Error parsing arguments: %v", err)
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
 		}
 		if args.ObjectName == "" {
 			return "Error: object_name is required."
@@ -2326,10 +2204,10 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 	// ---- Chorus tools ----
 
 	case "chorus_list_conversations":
-		if h.chorusClient == nil || !h.chorusClient.Ready() {
-			return "Error: Chorus integration is not connected. Set CHORUS_API_TOKEN to enable it."
+		if errMsg := requireReady("Chorus", h.chorusClient); errMsg != "" {
+			return errMsg
 		}
-		var args struct {
+		args, errMsg := parseToolArgs[struct {
 			MinDate              string  `json:"min_date"`
 			MaxDate              string  `json:"max_date"`
 			MinDuration          float64 `json:"min_duration"`
@@ -2343,9 +2221,9 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 			WithTrackers         bool    `json:"with_trackers"`
 			DispositionConnected bool    `json:"disposition_connected"`
 			DispositionVoicemail bool    `json:"disposition_voicemail"`
-		}
-		if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
-			return fmt.Sprintf("Error parsing arguments: %v", err)
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
 		}
 		engagements, err := h.chorusClient.ListEngagements(chorus.EngagementFilter{
 			MinDate:              args.MinDate,
@@ -2372,14 +2250,14 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		return chorus.FormatEngagements(engagements)
 
 	case "chorus_get_conversation":
-		if h.chorusClient == nil || !h.chorusClient.Ready() {
-			return "Error: Chorus integration is not connected. Set CHORUS_API_TOKEN to enable it."
+		if errMsg := requireReady("Chorus", h.chorusClient); errMsg != "" {
+			return errMsg
 		}
-		var args struct {
+		args, errMsg := parseToolArgs[struct {
 			ConversationID string `json:"conversation_id"`
-		}
-		if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
-			return fmt.Sprintf("Error parsing arguments: %v", err)
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
 		}
 		if args.ConversationID == "" {
 			return "Error: conversation_id is required."
@@ -2392,14 +2270,14 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		return chorus.FormatConversation(conv)
 
 	case "chorus_create_sales_qualification":
-		if h.chorusClient == nil || !h.chorusClient.Ready() {
-			return "Error: Chorus integration is not connected. Set CHORUS_API_TOKEN to enable it."
+		if errMsg := requireReady("Chorus", h.chorusClient); errMsg != "" {
+			return errMsg
 		}
-		var args struct {
+		args, errMsg := parseToolArgs[struct {
 			RecordingID string `json:"recording_id"`
-		}
-		if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
-			return fmt.Sprintf("Error parsing arguments: %v", err)
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
 		}
 		if args.RecordingID == "" {
 			return "Error: recording_id is required."
@@ -2412,14 +2290,14 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		return chorus.FormatSalesQualification(sq)
 
 	case "chorus_get_sales_qualification":
-		if h.chorusClient == nil || !h.chorusClient.Ready() {
-			return "Error: Chorus integration is not connected. Set CHORUS_API_TOKEN to enable it."
+		if errMsg := requireReady("Chorus", h.chorusClient); errMsg != "" {
+			return errMsg
 		}
-		var args struct {
+		args, errMsg := parseToolArgs[struct {
 			RecordingID string `json:"recording_id"`
-		}
-		if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
-			return fmt.Sprintf("Error parsing arguments: %v", err)
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
 		}
 		if args.RecordingID == "" {
 			return "Error: recording_id is required."
@@ -2432,10 +2310,10 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		return chorus.FormatSalesQualification(sq)
 
 	case "chorus_writeback_crm":
-		if h.chorusClient == nil || !h.chorusClient.Ready() {
-			return "Error: Chorus integration is not connected. Set CHORUS_API_TOKEN to enable it."
+		if errMsg := requireReady("Chorus", h.chorusClient); errMsg != "" {
+			return errMsg
 		}
-		var args struct {
+		args, errMsg := parseToolArgs[struct {
 			MeetingID     string `json:"meeting_id"`
 			OpportunityID string `json:"opportunity_id"`
 			ObjectType    string `json:"object_type"`
@@ -2444,9 +2322,9 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 				NewValue      string `json:"new_value"`
 				PreviousValue string `json:"previous_value"`
 			} `json:"crm_changes"`
-		}
-		if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
-			return fmt.Sprintf("Error parsing arguments: %v", err)
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
 		}
 		if args.MeetingID == "" || args.OpportunityID == "" || len(args.CRMChanges) == 0 {
 			return "Error: meeting_id, opportunity_id, and at least one crm_changes entry are required."
@@ -2474,15 +2352,15 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		if h.datadogClients == nil {
 			return "Error: Datadog integration is not configured. Set DD_API_KEY_US/DD_APP_KEY_US and/or DD_API_KEY_EU/DD_APP_KEY_EU to enable it."
 		}
-		var args struct {
+		args, errMsg := parseToolArgs[struct {
 			Query string `json:"query"`
 			From  string `json:"from"`
 			To    string `json:"to"`
 			Limit int    `json:"limit"`
 			Site  string `json:"site"`
-		}
-		if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
-			return fmt.Sprintf("Error parsing arguments: %v", err)
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
 		}
 		if args.Query == "" {
 			return "Error: query is required."
@@ -2498,13 +2376,13 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		if h.datadogClients == nil {
 			return "Error: Datadog integration is not configured. Set DD_API_KEY_US/DD_APP_KEY_US and/or DD_API_KEY_EU/DD_APP_KEY_EU to enable it."
 		}
-		var args struct {
+		args, errMsg := parseToolArgs[struct {
 			Query string `json:"query"`
 			Limit int    `json:"limit"`
 			Site  string `json:"site"`
-		}
-		if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
-			return fmt.Sprintf("Error parsing arguments: %v", err)
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
 		}
 		result, err := h.datadogClients.ListMonitors(ctx, args.Site, args.Query, args.Limit)
 		if err != nil {
@@ -2517,12 +2395,12 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		if h.datadogClients == nil {
 			return "Error: Datadog integration is not configured. Set DD_API_KEY_US/DD_APP_KEY_US and/or DD_API_KEY_EU/DD_APP_KEY_EU to enable it."
 		}
-		var args struct {
+		args, errMsg := parseToolArgs[struct {
 			MonitorID string `json:"monitor_id"`
 			Site      string `json:"site"`
-		}
-		if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
-			return fmt.Sprintf("Error parsing arguments: %v", err)
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
 		}
 		if args.MonitorID == "" {
 			return "Error: monitor_id is required."
@@ -2538,13 +2416,13 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		if h.datadogClients == nil {
 			return "Error: Datadog integration is not configured. Set DD_API_KEY_US/DD_APP_KEY_US and/or DD_API_KEY_EU/DD_APP_KEY_EU to enable it."
 		}
-		var args struct {
+		args, errMsg := parseToolArgs[struct {
 			Filter string `json:"filter"`
 			Count  int    `json:"count"`
 			Site   string `json:"site"`
-		}
-		if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
-			return fmt.Sprintf("Error parsing arguments: %v", err)
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
 		}
 		result, err := h.datadogClients.ListHosts(ctx, args.Site, args.Filter, args.Count)
 		if err != nil {
@@ -2557,12 +2435,12 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		if h.datadogClients == nil {
 			return "Error: Datadog integration is not configured. Set DD_API_KEY_US/DD_APP_KEY_US and/or DD_API_KEY_EU/DD_APP_KEY_EU to enable it."
 		}
-		var args struct {
+		args, errMsg := parseToolArgs[struct {
 			DashboardID string `json:"dashboard_id"`
 			Site        string `json:"site"`
-		}
-		if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
-			return fmt.Sprintf("Error parsing arguments: %v", err)
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
 		}
 		if args.DashboardID == "" {
 			return "Error: dashboard_id is required."
@@ -2578,13 +2456,13 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		if h.datadogClients == nil {
 			return "Error: Datadog integration is not configured. Set DD_API_KEY_US/DD_APP_KEY_US and/or DD_API_KEY_EU/DD_APP_KEY_EU to enable it."
 		}
-		var args struct {
+		args, errMsg := parseToolArgs[struct {
 			Query string `json:"query"`
 			Count int    `json:"count"`
 			Site  string `json:"site"`
-		}
-		if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
-			return fmt.Sprintf("Error parsing arguments: %v", err)
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
 		}
 		result, err := h.datadogClients.ListDashboards(ctx, args.Site, args.Query, args.Count)
 		if err != nil {
@@ -2599,46 +2477,11 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 }
 
 func (h *GeneralHandler) fetchWorkflowLogs(ctx context.Context, text, userID, channelID string) string {
-	urls := github.ExtractWorkflowRunURLs(text)
-	if len(urls) == 0 {
-		return ""
-	}
-
-	seen := make(map[string]bool)
-	var result string
-	for _, u := range urls {
-		if seen[u] {
-			continue
-		}
-		seen[u] = true
-
-		owner, repo, runID, err := github.ParseWorkflowRunURL(u)
-		if err != nil {
-			continue
-		}
-
-		log.Printf("[user=%s channel=%s] auto-fetching workflow run %s/%s/%d", userID, channelID, owner, repo, runID)
-		summary, err := h.ghClient.GetWorkflowRunSummary(ctx, owner, repo, runID)
-		if err != nil {
-			log.Printf("[user=%s channel=%s] failed to fetch workflow run summary: %v", userID, channelID, err)
-			continue
-		}
-
-		result += github.FormatWorkflowRunSummary(summary)
-	}
-	return result
+	return fetchWorkflowLogsBulk(ctx, h.ghClient, text, userID, channelID)
 }
 
 func (h *GeneralHandler) replyDefault(channelID, responseURL, auditTS, text string) {
-	if auditTS != "" {
-		if err := h.slackClient.PostThreadReply(channelID, auditTS, text); err != nil {
-			log.Printf("[channel=%s] failed to post thread reply: %v", channelID, err)
-		}
-		return
-	}
-	if err := slack.RespondToURL(responseURL, text, false); err != nil {
-		log.Printf("[channel=%s] failed to respond: %v", channelID, err)
-	}
+	replyOrThread(h.slackClient, channelID, responseURL, auditTS, text)
 }
 
 // isCodeIntent returns true when the user's message suggests code modification,

@@ -29,16 +29,16 @@ func (h *DebugHandler) Execute(channelID, userID, text, responseURL, auditTS str
 	channelContext, err := h.contextProvider.GetFreshChannelContext(channelID)
 	if err != nil {
 		log.Printf("[user=%s channel=%s] failed to fetch channel context: %v", userID, channelID, err)
-		h.reply(channelID, responseURL, auditTS, fmt.Sprintf("Failed to read channel history: %v", err))
+		replyOrThread(h.slackClient, channelID, responseURL, auditTS, fmt.Sprintf("Failed to read channel history: %v", err))
 		return
 	}
 
 	if channelContext == "(no recent messages)" || channelContext == "(no recent messages with content)" {
-		h.reply(channelID, responseURL, auditTS, "No messages found in this channel to analyze.")
+		replyOrThread(h.slackClient, channelID, responseURL, auditTS, "No messages found in this channel to analyze.")
 		return
 	}
 
-	workflowLogs := h.fetchWorkflowLogs(ctx, channelContext+"\n"+text, userID, channelID)
+	workflowLogs := fetchWorkflowLogsBulk(ctx, h.ghClient, channelContext+"\n"+text, userID, channelID)
 
 	systemPrompt := h.prompts.SystemPrompt("debug")
 	systemPrompt = strings.Replace(systemPrompt, "{{USER_CONTEXT}}", h.userContext, 1)
@@ -58,48 +58,5 @@ func (h *DebugHandler) Execute(channelID, userID, text, responseURL, auditTS str
 	log.Printf("[user=%s channel=%s] debug analysis completed successfully", userID, channelID)
 	h.memory.SetAssistantResponse(channelID, userID, response)
 	stamp := llm.FormatUsageStamp(usage, h.modelsClient.Model())
-	h.reply(channelID, responseURL, auditTS, response+stamp)
-}
-
-func (h *DebugHandler) reply(channelID, responseURL, auditTS, text string) {
-	if auditTS != "" {
-		if err := h.slackClient.PostThreadReply(channelID, auditTS, text); err != nil {
-			log.Printf("[channel=%s] failed to post thread reply: %v", channelID, err)
-		}
-		return
-	}
-	if err := slack.RespondToURL(responseURL, text, false); err != nil {
-		log.Printf("[channel=%s] failed to respond: %v", channelID, err)
-	}
-}
-
-func (h *DebugHandler) fetchWorkflowLogs(ctx context.Context, channelContext, userID, channelID string) string {
-	urls := github.ExtractWorkflowRunURLs(channelContext)
-	if len(urls) == 0 {
-		return ""
-	}
-
-	seen := make(map[string]bool)
-	var result string
-	for _, u := range urls {
-		if seen[u] {
-			continue
-		}
-		seen[u] = true
-
-		owner, repo, runID, err := github.ParseWorkflowRunURL(u)
-		if err != nil {
-			continue
-		}
-
-		log.Printf("[user=%s channel=%s] fetching workflow run %s/%s/%d", userID, channelID, owner, repo, runID)
-		summary, err := h.ghClient.GetWorkflowRunSummary(ctx, owner, repo, runID)
-		if err != nil {
-			log.Printf("[user=%s channel=%s] failed to fetch workflow run summary: %v", userID, channelID, err)
-			continue
-		}
-
-		result += github.FormatWorkflowRunSummary(summary)
-	}
-	return result
+	replyOrThread(h.slackClient, channelID, responseURL, auditTS, response+stamp)
 }

@@ -90,6 +90,13 @@ func (r *Router) Handle(channelID, userID, text, responseURL string) {
 
 	userContext := r.resolveUserContext(userID)
 
+	// Look up the session so the initial handler can persist branches/PRs
+	// for follow-up thread messages.
+	var sess *ThreadSession
+	if auditTS != "" && r.sessions != nil {
+		sess = r.sessions.Lookup(channelID, auditTS)
+	}
+
 	lower := strings.ToLower(text)
 
 	switch {
@@ -101,21 +108,11 @@ func (r *Router) Handle(channelID, userID, text, responseURL string) {
 
 	case isDebugIntent(lower):
 		log.Printf("[user=%s channel=%s] routed to: debug", userID, channelID)
-		handler := &DebugHandler{
-			slackClient:     r.slackClient,
-			ghClient:        r.ghClient,
-			modelsClient:    r.modelsClient,
-			contextProvider: r.contextProvider,
-			memory:          r.memory,
-			prompts:         r.prompts,
-			userContext:     userContext,
-		}
-		handler.Execute(channelID, userID, text, responseURL, auditTS)
+		r.newDebugHandler(userContext).Execute(channelID, userID, text, responseURL, auditTS)
 
 	default:
 		log.Printf("[user=%s channel=%s] routed to: general handler", userID, channelID)
-		handler := &GeneralHandler{slackClient: r.slackClient, ghClient: r.ghClient, modelsClient: r.modelsClient, codeModelsClient: r.codeModelsClient, jiraClient: r.jiraClient, nvdClient: r.nvdClient, sfClient: r.sfClient, chorusClient: r.chorusClient, datadogClients: r.datadogClients, contextProvider: r.contextProvider, memory: r.memory, prompts: r.prompts, agentID: r.agentID, appURL: r.appURL, maxToolRounds: r.maxToolRounds, userContext: userContext}
-		handler.Execute(channelID, userID, text, responseURL, auditTS)
+		r.newGeneralHandler(userContext, sess).Execute(channelID, userID, text, responseURL, auditTS)
 	}
 
 	// Post a session footer so the user knows they can reply in the thread.
@@ -183,6 +180,40 @@ func requiresAction(text string) bool {
 	return false
 }
 
+func (r *Router) newDebugHandler(userContext string) *DebugHandler {
+	return &DebugHandler{
+		slackClient:     r.slackClient,
+		ghClient:        r.ghClient,
+		modelsClient:    r.modelsClient,
+		contextProvider: r.contextProvider,
+		memory:          r.memory,
+		prompts:         r.prompts,
+		userContext:     userContext,
+	}
+}
+
+func (r *Router) newGeneralHandler(userContext string, session *ThreadSession) *GeneralHandler {
+	return &GeneralHandler{
+		slackClient:      r.slackClient,
+		ghClient:         r.ghClient,
+		modelsClient:     r.modelsClient,
+		codeModelsClient: r.codeModelsClient,
+		jiraClient:       r.jiraClient,
+		nvdClient:        r.nvdClient,
+		sfClient:         r.sfClient,
+		chorusClient:     r.chorusClient,
+		datadogClients:   r.datadogClients,
+		contextProvider:  r.contextProvider,
+		memory:           r.memory,
+		prompts:          r.prompts,
+		agentID:          r.agentID,
+		appURL:           r.appURL,
+		maxToolRounds:    r.maxToolRounds,
+		userContext:      userContext,
+		session:          session,
+	}
+}
+
 func (r *Router) replyError(responseURL, msg string) {
 	if err := slack.RespondToURL(responseURL, msg, true); err != nil {
 		log.Printf("failed to send error to user: %v", err)
@@ -229,25 +260,22 @@ func (r *Router) HandleThreadReply(channelID, threadTS, userID, text string) {
 
 	userContext := r.resolveUserContext(userID)
 
+	// Look up the session so we can pass it to the handler — this lets the
+	// handler reuse branches/PRs created in earlier messages of this thread.
+	var sess *ThreadSession
+	if r.sessions != nil {
+		sess = r.sessions.Lookup(channelID, threadTS)
+	}
+
 	lower := strings.ToLower(text)
 
 	switch {
 	case isDebugIntent(lower):
 		log.Printf("[user=%s channel=%s thread=%s] thread routed to: debug", userID, channelID, threadTS)
-		handler := &DebugHandler{
-			slackClient:     r.slackClient,
-			ghClient:        r.ghClient,
-			modelsClient:    r.modelsClient,
-			contextProvider: r.contextProvider,
-			memory:          r.memory,
-			prompts:         r.prompts,
-			userContext:     userContext,
-		}
-		handler.Execute(channelID, userID, text, "", threadTS)
+		r.newDebugHandler(userContext).Execute(channelID, userID, text, "", threadTS)
 
 	default:
 		log.Printf("[user=%s channel=%s thread=%s] thread routed to: general handler", userID, channelID, threadTS)
-		handler := &GeneralHandler{slackClient: r.slackClient, ghClient: r.ghClient, modelsClient: r.modelsClient, codeModelsClient: r.codeModelsClient, jiraClient: r.jiraClient, nvdClient: r.nvdClient, sfClient: r.sfClient, chorusClient: r.chorusClient, datadogClients: r.datadogClients, contextProvider: r.contextProvider, memory: r.memory, prompts: r.prompts, agentID: r.agentID, appURL: r.appURL, maxToolRounds: r.maxToolRounds, userContext: userContext}
-		handler.Execute(channelID, userID, text, "", threadTS)
+		r.newGeneralHandler(userContext, sess).Execute(channelID, userID, text, "", threadTS)
 	}
 }

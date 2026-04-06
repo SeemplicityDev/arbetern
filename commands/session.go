@@ -10,6 +10,14 @@ import (
 // DefaultSessionTTL is used when no custom TTL is provided.
 const DefaultSessionTTL = 3 * time.Minute
 
+// ActiveBranchInfo holds metadata about a branch+PR created during a session.
+// Exported so it can be shared between session and handler.
+type ActiveBranchInfo struct {
+	BranchName string
+	BaseBranch string
+	PrURL      string
+}
+
 // ThreadSession represents an active conversational bridge for a specific
 // Slack thread. It is created when a /command posts an audit message and
 // remains alive for TTL, refreshed on every interaction.
@@ -22,9 +30,10 @@ type ThreadSession struct {
 	CreatedAt time.Time
 	LastSeen  time.Time
 
-	mu         sync.Mutex
-	timer      *time.Timer
-	processing bool
+	mu             sync.Mutex
+	timer          *time.Timer
+	processing     bool
+	ActiveBranches map[string]*ActiveBranchInfo // key: "owner/repo"
 }
 
 // TryStartProcessing attempts to mark the session as actively processing.
