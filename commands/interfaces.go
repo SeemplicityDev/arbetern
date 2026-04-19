@@ -7,6 +7,8 @@ type SlackClient interface {
 	FetchThreadReplies(channelID, threadTS string, limit int) ([]slacklib.Message, error)
 	PostMessage(channelID, text string) (string, error)
 	PostThreadReply(channelID, threadTS, text string) error
+	PostBlocks(channelID, fallback string, blocks []slacklib.Block) (string, error)
+	PostThreadBlocks(channelID, threadTS, fallback string, blocks []slacklib.Block) error
 	GetPermalink(channelID, messageTS string) (string, error)
 	GetUserInfo(userID string) (*slacklib.User, error)
 	UploadFileSnippet(channelID, threadTS, filename, title, content, filetype string) (string, error)

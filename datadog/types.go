@@ -124,3 +124,37 @@ type DashboardSummary struct {
 	Created      string `json:"created_at"`
 	Modified     string `json:"modified_at"`
 }
+
+// --------------------------------------------------------------------------
+// Metrics query types (v1 /api/v1/query — timeseries)
+// --------------------------------------------------------------------------
+
+// MetricsQueryResponse is the response from GET /api/v1/query.
+type MetricsQueryResponse struct {
+	Status   string         `json:"status"`
+	ResType  string         `json:"res_type"`
+	Series   []MetricSeries `json:"series"`
+	FromDate int64          `json:"from_date"`
+	ToDate   int64          `json:"to_date"`
+	Query    string         `json:"query"`
+	Message  string         `json:"message"`
+	Error    string         `json:"error,omitempty"`
+}
+
+// MetricSeries is one series in a metrics query response. Each series
+// corresponds to a single tag combination (a "scope" in Datadog terminology).
+type MetricSeries struct {
+	Metric      string   `json:"metric"`
+	DisplayName string   `json:"display_name"`
+	Expression  string   `json:"expression"`
+	Scope       string   `json:"scope"`
+	TagSet      []string `json:"tag_set"`
+	Unit        []any    `json:"unit"`
+	Aggr        string   `json:"aggr"`
+	// PointList is an array of [timestamp_ms, value] pairs. Values can be nil
+	// when Datadog has no data for that bucket.
+	PointList [][]*float64 `json:"pointlist"`
+	Start     int64        `json:"start"`
+	End       int64        `json:"end"`
+	Length    int          `json:"length"`
+}

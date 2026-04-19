@@ -100,6 +100,16 @@ func (r *Router) Handle(channelID, userID, text, responseURL string) {
 		sess = r.sessions.Lookup(channelID, auditTS)
 	}
 
+	// First-class account dashboard subcommand: `dashboard <account> [--refresh]`.
+	// Skips the LLM, runs a deterministic pipeline, and posts a Block Kit reply.
+	// Gated on having the registry + Salesforce configured — resolving the
+	// account by name requires Salesforce.
+	if account, refresh, ok := parseDashboardSubcommand(text); ok && r.dashboards != nil && r.sfClient != nil && r.sfClient.Ready() {
+		log.Printf("[agent=%s user=%s channel=%s] routed to: account dashboard", r.agentID, userID, channelID)
+		r.handleAccountDashboard(channelID, userID, responseURL, auditTS, account, refresh)
+		return
+	}
+
 	lower := strings.ToLower(text)
 
 	switch {

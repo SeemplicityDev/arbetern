@@ -720,3 +720,357 @@ func (mc *MultiClient) ListDashboards(ctx context.Context, site, query string, c
 	}
 	return strings.Join(parts, "\n"), nil
 }
+
+// --------------------------------------------------------------------------
+// Metrics query (v1 /api/v1/query)
+// --------------------------------------------------------------------------
+
+// QueryMetrics runs a Datadog timeseries metrics query. `query` must be a full
+// Datadog metric query expression (e.g.
+// "avg:kubernetes.cpu.usage.total{*} by {kube_service}"). `from`/`to` accept
+// either ISO-8601 (e.g. "2026-04-19T10:00:00Z"), unix seconds, or a relative
+// shorthand ("-1h", "-15m", "-7d"). Empty `from` defaults to -1h, empty `to`
+// defaults to now.
+func (c *Client) QueryMetrics(ctx context.Context, query, from, to string) (*MetricsQueryResponse, error) {
+	if strings.TrimSpace(query) == "" {
+		return nil, fmt.Errorf("query is required")
+	}
+	fromUnix, err := parseTimeArg(from, time.Now().Add(-1*time.Hour))
+	if err != nil {
+		return nil, fmt.Errorf("invalid from: %w", err)
+	}
+	toUnix, err := parseTimeArg(to, time.Now())
+	if err != nil {
+		return nil, fmt.Errorf("invalid to: %w", err)
+	}
+	if fromUnix >= toUnix {
+		return nil, fmt.Errorf("from (%d) must be earlier than to (%d)", fromUnix, toUnix)
+	}
+	params := url.Values{
+		"from":  {fmt.Sprintf("%d", fromUnix)},
+		"to":    {fmt.Sprintf("%d", toUnix)},
+		"query": {query},
+	}
+	var resp MetricsQueryResponse
+	if err := c.get(ctx, "/api/v1/query", params, &resp); err != nil {
+		return nil, err
+	}
+	if resp.Status != "" && resp.Status != "ok" {
+		msg := resp.Error
+		if msg == "" {
+			msg = resp.Message
+		}
+		return &resp, fmt.Errorf("datadog query status=%s: %s", resp.Status, msg)
+	}
+	return &resp, nil
+}
+
+// QueryMetrics runs a metrics query across one or both sites and returns a
+// formatted result. `site` is "us", "eu", or "" for all configured sites.
+func (mc *MultiClient) QueryMetrics(ctx context.Context, site, query, from, to string) (string, error) {
+	cs := mc.clients(site)
+	if len(cs) == 0 {
+		return "", fmt.Errorf("no Datadog client configured for site %q", site)
+	}
+	multi := len(cs) > 1
+	var parts []string
+	var lastErr error
+	for _, c := range cs {
+		resp, err := c.QueryMetrics(ctx, query, from, to)
+		if err != nil {
+			lastErr = err
+			if multi {
+				parts = append(parts, fmt.Sprintf("*[%s]* Error: %v", c.SiteLabel(), err))
+			}
+			continue
+		}
+		formatted := FormatMetricsQuery(resp, c.Site())
+		if multi {
+			formatted = fmt.Sprintf("*[%s]*\n%s", c.SiteLabel(), formatted)
+		}
+		parts = append(parts, formatted)
+	}
+	if len(parts) == 0 {
+		return "", lastErr
+	}
+	return strings.Join(parts, "\n\n"), nil
+}
+
+// MetricsChartSeries is one pre-aggregated series rendered as a line in a chart.
+// Points is [[timestamp_ms, value], ...] with null-valued points dropped.
+type MetricsChartSeries struct {
+	Scope  string       `json:"scope"`
+	Unit   string       `json:"unit,omitempty"`
+	Avg    float64      `json:"avg"`
+	Min    float64      `json:"min"`
+	Max    float64      `json:"max"`
+	Last   float64      `json:"last"`
+	Count  int          `json:"count"`
+	Points [][2]float64 `json:"points"`
+}
+
+// MetricsChartSite is the per-site payload the dashboard viewer renders as a chart.
+type MetricsChartSite struct {
+	Site      string               `json:"site"`
+	Label     string               `json:"label"`
+	Query     string               `json:"query"`
+	FromDate  int64                `json:"from_date"`
+	ToDate    int64                `json:"to_date"`
+	Unit      string               `json:"unit,omitempty"`
+	Message   string               `json:"message,omitempty"`
+	Error     string               `json:"error,omitempty"`
+	Series    []MetricsChartSeries `json:"series"`
+	Truncated int                  `json:"truncated,omitempty"`
+}
+
+// MetricsChartPayload is the full structured result the dashboard viewer expects.
+// The "kind": "datadog_metrics" marker lets the frontend detect and draw charts.
+type MetricsChartPayload struct {
+	Kind  string             `json:"kind"`
+	Sites []MetricsChartSite `json:"sites"`
+}
+
+// QueryMetricsRaw runs a metrics query across one or both sites and returns a
+// structured, chart-friendly result. Each site's series are sorted by avg desc
+// and capped at topN (default 20). Points are filtered to drop Datadog's null
+// buckets so the frontend can plot them directly.
+func (mc *MultiClient) QueryMetricsRaw(ctx context.Context, site, query, from, to string, topN int) (*MetricsChartPayload, error) {
+	cs := mc.clients(site)
+	if len(cs) == 0 {
+		return nil, fmt.Errorf("no Datadog client configured for site %q", site)
+	}
+	if topN <= 0 {
+		topN = 20
+	}
+	if topN > 100 {
+		topN = 100
+	}
+	payload := &MetricsChartPayload{Kind: "datadog_metrics"}
+	var lastErr error
+	for _, c := range cs {
+		siteEntry := MetricsChartSite{
+			Site:  c.Site(),
+			Label: c.SiteLabel(),
+			Query: query,
+		}
+		resp, err := c.QueryMetrics(ctx, query, from, to)
+		if err != nil {
+			siteEntry.Error = err.Error()
+			lastErr = err
+			payload.Sites = append(payload.Sites, siteEntry)
+			continue
+		}
+		siteEntry.FromDate = resp.FromDate
+		siteEntry.ToDate = resp.ToDate
+		siteEntry.Message = resp.Message
+		for _, s := range resp.Series {
+			cs := MetricsChartSeries{Scope: s.Scope, Unit: seriesUnit(s)}
+			if cs.Scope == "" {
+				cs.Scope = "*"
+			}
+			var sum float64
+			first := true
+			pts := make([][2]float64, 0, len(s.PointList))
+			for _, pt := range s.PointList {
+				if len(pt) < 2 || pt[0] == nil || pt[1] == nil {
+					continue
+				}
+				ts, v := *pt[0], *pt[1]
+				if first {
+					cs.Min, cs.Max = v, v
+					first = false
+				} else {
+					if v < cs.Min {
+						cs.Min = v
+					}
+					if v > cs.Max {
+						cs.Max = v
+					}
+				}
+				sum += v
+				cs.Last = v
+				cs.Count++
+				pts = append(pts, [2]float64{ts, v})
+			}
+			if cs.Count > 0 {
+				cs.Avg = sum / float64(cs.Count)
+			}
+			cs.Points = pts
+			if siteEntry.Unit == "" && cs.Unit != "" {
+				siteEntry.Unit = cs.Unit
+			}
+			siteEntry.Series = append(siteEntry.Series, cs)
+		}
+		// Sort by avg desc (insertion sort, same style as FormatMetricsQuery).
+		for i := 1; i < len(siteEntry.Series); i++ {
+			for j := i; j > 0 && siteEntry.Series[j].Avg > siteEntry.Series[j-1].Avg; j-- {
+				siteEntry.Series[j], siteEntry.Series[j-1] = siteEntry.Series[j-1], siteEntry.Series[j]
+			}
+		}
+		if len(siteEntry.Series) > topN {
+			siteEntry.Truncated = len(siteEntry.Series) - topN
+			siteEntry.Series = siteEntry.Series[:topN]
+		}
+		payload.Sites = append(payload.Sites, siteEntry)
+	}
+	if len(payload.Sites) == 0 {
+		return nil, lastErr
+	}
+	return payload, nil
+}
+
+// parseTimeArg accepts ISO-8601, unix seconds, or relative shorthand like
+// "-1h", "-30m", "-7d". Empty falls back to the provided default.
+func parseTimeArg(v string, def time.Time) (int64, error) {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return def.Unix(), nil
+	}
+	if strings.HasPrefix(v, "-") || strings.HasPrefix(v, "+") {
+		if d, err := time.ParseDuration(v); err == nil {
+			return time.Now().Add(d).Unix(), nil
+		}
+	}
+	if len(v) >= 8 && strings.IndexFunc(v, func(r rune) bool { return r < '0' || r > '9' }) == -1 {
+		var n int64
+		if _, err := fmt.Sscanf(v, "%d", &n); err == nil && n > 0 {
+			return n, nil
+		}
+	}
+	if t, err := time.Parse(time.RFC3339, v); err == nil {
+		return t.Unix(), nil
+	}
+	return 0, fmt.Errorf("unrecognized time format %q (use ISO-8601, unix seconds, or a duration like -1h)", v)
+}
+
+// FormatMetricsQuery renders a metrics query response into a Slack-friendly
+// summary: per-series aggregates (avg/min/max/last) sorted by avg desc.
+func FormatMetricsQuery(resp *MetricsQueryResponse, site string) string {
+	if resp == nil {
+		return "No response."
+	}
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "Query: `%s`\n", resp.Query)
+	if resp.FromDate > 0 && resp.ToDate > 0 {
+		fromT := time.Unix(resp.FromDate/1000, 0).UTC().Format(time.RFC3339)
+		toT := time.Unix(resp.ToDate/1000, 0).UTC().Format(time.RFC3339)
+		fmt.Fprintf(&sb, "Window: %s → %s\n", fromT, toT)
+	}
+	if resp.Message != "" {
+		fmt.Fprintf(&sb, "Message: %s\n", resp.Message)
+	}
+	if len(resp.Series) == 0 {
+		sb.WriteString("\nNo series returned. The query matched zero metric data in this window.")
+		return sb.String()
+	}
+
+	type row struct {
+		scope               string
+		unit                string
+		min, avg, max, last float64
+		count               int
+	}
+	rows := make([]row, 0, len(resp.Series))
+	for _, s := range resp.Series {
+		r := row{scope: s.Scope, unit: seriesUnit(s)}
+		if r.scope == "" {
+			r.scope = "*"
+		}
+		var sum float64
+		first := true
+		for _, pt := range s.PointList {
+			if len(pt) < 2 || pt[1] == nil {
+				continue
+			}
+			v := *pt[1]
+			if first {
+				r.min, r.max = v, v
+				first = false
+			} else {
+				if v < r.min {
+					r.min = v
+				}
+				if v > r.max {
+					r.max = v
+				}
+			}
+			sum += v
+			r.last = v
+			r.count++
+		}
+		if r.count > 0 {
+			r.avg = sum / float64(r.count)
+		}
+		rows = append(rows, r)
+	}
+	for i := 1; i < len(rows); i++ {
+		for j := i; j > 0 && rows[j].avg > rows[j-1].avg; j-- {
+			rows[j], rows[j-1] = rows[j-1], rows[j]
+		}
+	}
+
+	fmt.Fprintf(&sb, "\nSeries (%d):\n", len(rows))
+	limit := 50
+	if len(rows) < limit {
+		limit = len(rows)
+	}
+	for _, r := range rows[:limit] {
+		unit := ""
+		if r.unit != "" {
+			unit = " " + r.unit
+		}
+		if r.count == 0 {
+			fmt.Fprintf(&sb, "• %s — no data\n", r.scope)
+			continue
+		}
+		fmt.Fprintf(&sb, "• %s — avg=%s%s, min=%s%s, max=%s%s, last=%s%s (n=%d)\n",
+			r.scope,
+			formatNumber(r.avg), unit,
+			formatNumber(r.min), unit,
+			formatNumber(r.max), unit,
+			formatNumber(r.last), unit,
+			r.count,
+		)
+	}
+	if len(rows) > limit {
+		fmt.Fprintf(&sb, "… and %d more series\n", len(rows)-limit)
+	}
+	fmt.Fprintf(&sb, "\nExplore: <https://app.%s/metric/explorer|Metrics Explorer>\n", site)
+	return sb.String()
+}
+
+// seriesUnit extracts a printable unit name from the series' unit array.
+func seriesUnit(s MetricSeries) string {
+	if len(s.Unit) == 0 {
+		return ""
+	}
+	if u, ok := s.Unit[0].(map[string]any); ok {
+		if name, _ := u["short_name"].(string); name != "" {
+			return name
+		}
+		if name, _ := u["name"].(string); name != "" {
+			return name
+		}
+	}
+	return ""
+}
+
+// formatNumber prints a float with a sensible number of significant digits.
+func formatNumber(v float64) string {
+	abs := v
+	if abs < 0 {
+		abs = -abs
+	}
+	switch {
+	case abs == 0:
+		return "0"
+	case abs >= 1000:
+		return fmt.Sprintf("%.1f", v)
+	case abs >= 10:
+		return fmt.Sprintf("%.2f", v)
+	case abs >= 1:
+		return fmt.Sprintf("%.3f", v)
+	default:
+		return fmt.Sprintf("%.4g", v)
+	}
+}

@@ -981,6 +981,22 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 					}
 				}`),
 			},
+		}, llm.Tool{
+			Type: "function",
+			Function: llm.ToolFunction{
+				Name:        "datadog_query_metrics",
+				Description: "Run a Datadog timeseries metrics query and get per-series aggregates (avg/min/max/last). Use this whenever the user asks about CPU, memory, network, disk, latency, throughput, error rate, or any numeric metric broken down by tags (service, pod, cluster, host, etc.) — this is the ONLY tool that can answer those questions. Returns series sorted by avg descending so low/high utilizers are easy to spot. Do client-side filtering (e.g. \"under 20% CPU\") by reading the series list in the result. Query MUST be a valid Datadog metric expression with an aggregator and scope. Examples: `avg:kubernetes.cpu.usage.total{cluster_name:prod-us} by {kube_service}` (raw CPU usage), `avg:kubernetes.cpu.usage.total{*} by {kube_service} / avg:kubernetes.cpu.limits{*} by {kube_service} * 100` (CPU utilization vs limit, %), `avg:kubernetes.memory.usage{*} by {kube_deployment}`, `sum:kubernetes.pods.running{*} by {cluster_name}`, `avg:system.load.1{*} by {host}`. Prefer `by {kube_service}` or `by {kube_deployment}` when the user asks \"which services/deployments\". Default time window is the last 1 hour. If the initial query returns too many series, re-run with a tighter scope filter.",
+				Parameters: json.RawMessage(`{
+					"type":"object",
+					"properties":{
+						"query":{"type":"string","description":"Full Datadog metric query expression, e.g. 'avg:kubernetes.cpu.usage.total{cluster_name:prod} by {kube_service}' or 'avg:kubernetes.cpu.usage.total{*} by {kube_service} / avg:kubernetes.cpu.limits{*} by {kube_service} * 100'. Must include an aggregator (avg/sum/min/max), a metric name, a scope filter {...}, and optionally a grouping 'by {tag}'."},
+						"from":{"type":"string","description":"Start of the time window. Accepts ISO-8601 ('2026-04-19T10:00:00Z'), unix seconds, or a relative duration ('-1h', '-15m', '-7d'). Defaults to -1h."},
+						"to":{"type":"string","description":"End of the time window (ISO-8601, unix seconds, or a duration). Defaults to now."},
+						"site":{"type":"string","enum":["us","eu"],"description":"Datadog site to query: 'us' (datadoghq.com), 'eu' (datadoghq.eu). Infer from URLs in the user's message. Omit to query all configured sites."}
+					},
+					"required":["query"]
+				}`),
+			},
 		})
 	}
 
@@ -2488,6 +2504,29 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 			return fmt.Sprintf("Error listing Datadog dashboards: %v", err)
 		}
 		log.Printf("[user=%s channel=%s] listed Datadog dashboards (query=%q, site=%s)", userID, channelID, args.Query, args.Site)
+		return result
+
+	case "datadog_query_metrics":
+		if h.datadogClients == nil {
+			return "Error: Datadog integration is not configured. Set DD_API_KEY_US/DD_APP_KEY_US and/or DD_API_KEY_EU/DD_APP_KEY_EU to enable it."
+		}
+		args, errMsg := parseToolArgs[struct {
+			Query string `json:"query"`
+			From  string `json:"from"`
+			To    string `json:"to"`
+			Site  string `json:"site"`
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
+		}
+		if strings.TrimSpace(args.Query) == "" {
+			return "Error: query is required (e.g. 'avg:kubernetes.cpu.usage.total{*} by {kube_service}')."
+		}
+		result, err := h.datadogClients.QueryMetrics(ctx, args.Site, args.Query, args.From, args.To)
+		if err != nil {
+			return fmt.Sprintf("Error querying Datadog metrics: %v", err)
+		}
+		log.Printf("[user=%s channel=%s] queried Datadog metrics (site=%s, query=%q, from=%q, to=%q)", userID, channelID, args.Site, args.Query, args.From, args.To)
 		return result
 
 	default:

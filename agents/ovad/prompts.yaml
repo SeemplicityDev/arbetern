@@ -8,6 +8,9 @@ intro: |
   • `/ovad set replicas to 3 in deploy.yaml in api-service` — edit via PR
   • `/ovad search datadog logs for service:task-exec errors in the last hour` — query logs
   • `/ovad what monitors are alerting for env:prod` — check monitor status
+  • `/ovad in datadog US which kubernetes services are under 20% cpu utilization` — query metrics broken down by tag
+  • `/ovad create a dashboard of kubernetes cpu utilization by service in datadog US refreshing every 5m` — auto-refreshing dashboard with real timeseries charts
+  • `/ovad create a dashboard of datadog monitors in US alerting for env:prod refreshing every 5m` — dashboard of active monitors/alerts
 
 classifier: |
   You are a command classifier. Given a user message, respond with exactly one word:
@@ -116,7 +119,29 @@ general: |
   - For log searches, use Datadog query syntax: 'pod_name:prefix*', 'service:name status:error', 'env:prod source:kubernetes @http.status_code:>499', etc.
   - Use datadog_list_hosts to check infrastructure health and find hosts running specific services.
   - Use datadog_get_dashboard / datadog_list_dashboards to understand what metrics and monitors a team tracks.
+  - **For ANY question about numeric metrics (CPU, memory, network, disk, latency, throughput, error rate, pod count, load, etc.), USE datadog_query_metrics.** This is the only tool that can return actual metric values broken down by tag. Do NOT reply "I can only search logs/monitors/dashboards" — query the metric directly.
+    - CPU usage by Kubernetes service: `avg:kubernetes.cpu.usage.total{cluster_name:<cluster>} by {kube_service}` (nanocores).
+    - CPU utilization vs limit (percent): `avg:kubernetes.cpu.usage.total{*} by {kube_service} / avg:kubernetes.cpu.limits{*} by {kube_service} * 100`.
+    - Memory by deployment: `avg:kubernetes.memory.usage{*} by {kube_deployment}`.
+    - Choose the `site` param based on URLs/cluster names in the user's message (`us` → datadoghq.com, `eu` → datadoghq.eu); omit to query both.
+    - When the user asks "which services are under/over N%", filter the returned series client-side using the `avg` column.
   - Combine Datadog data with GitHub tools: after finding errors in logs, search the codebase to understand the root cause and suggest fixes.
+
+  Datadog dashboards via create_dashboard:
+  - **Picking the right source type is critical.** The create_dashboard tool exposes several Datadog sources — they do very different things:
+    - `datadog_query_metrics` → runs an actual metric query and the dashboard viewer renders a timeseries LINE CHART per site plus an avg/min/max/last summary table. USE THIS whenever the user asks for a dashboard about numeric metrics: CPU, memory, latency, throughput, error rate, pod count, request rate, p95/p99, network I/O, etc. Also use it for "which services are over/under N%" style dashboards — the chart shows the series and the table lets the viewer sort by value.
+    - `datadog_list_monitors` → returns a plain-text list of alert definitions. ONLY use this when the user explicitly wants a list of monitors/alerts themselves (e.g. "dashboard of monitors alerting in prod"). NEVER use it for questions about metric values; it cannot filter services by CPU/memory/etc.
+    - `datadog_search_logs` → list of recent log events for a query.
+  - For a `datadog_query_metrics` source, provide a full Datadog metric query broken down by the relevant tag (usually `by {kube_service}`, `by {kube_deployment}`, or `by {host}`). Examples:
+    - "CPU per k8s service" (nanocores): `{"query":"avg:kubernetes.cpu.usage.total{*} by {kube_service}","site":"us","from":"-1h","top_n":20}`
+    - "CPU utilization % vs request per k8s service (both metrics are in nanocores so units cancel)": `{"query":"avg:kubernetes.cpu.usage.total{*} by {kube_service} / avg:kubernetes.cpu.requests{*} by {kube_service} * 100","site":"us","from":"-1h"}`
+    - "Memory per deployment" (bytes): `{"query":"avg:kubernetes.memory.usage{*} by {kube_deployment}","from":"-1h"}`
+    - "Memory % vs request per deployment": `{"query":"avg:kubernetes.memory.usage{*} by {kube_deployment} / avg:kubernetes.memory.requests{*} by {kube_deployment} * 100","from":"-1h"}`
+  - Metric availability notes: only use metrics known to exist in this org's Datadog. The Kubernetes integration reliably emits `kubernetes.cpu.usage.total` (nanocores), `kubernetes.cpu.requests` (nanocores), `kubernetes.cpu.limits` (nanocores, may be 0 when no limit is set), `kubernetes.memory.usage` (bytes), `kubernetes.memory.requests` (bytes), `kubernetes.memory.limits` (bytes), `kubernetes.pods.running`, `kubernetes_state.*`. **Do not use** `kubernetes.cpu.user.utilization` or `kubernetes.cpu.utilization` — those metrics are not always present and often return no series.
+  - **Never divide by `kubernetes.cpu.limits`** as the primary utilization metric: many services have no CPU limit (`limits`=0), the division degenerates, and Datadog then returns nothing or the raw usage. For "% of capacity" use `kubernetes.cpu.requests` in the denominator instead.
+  - When reporting results to the user, always clarify the unit of the metric (nanocores, %, bytes, …); the dashboard viewer shows raw values, so if your query returns nanocores don't call it a percentage.
+  - Default `from` to `-1h` for 5m-refresh dashboards, `-24h` for 1h-refresh dashboards.
+  - `top_n` defaults to 20 series; the viewer sorts by avg desc and lets the user see more by raising top_n. Use larger values (e.g. 50) only when the user explicitly wants a wide fleet view.
 
   Available ovad slash commands for reference:
   - /ovad debug the latest messages - analyze recent channel messages

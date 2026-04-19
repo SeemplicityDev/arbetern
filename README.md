@@ -268,6 +268,99 @@ get a single list of every active dashboard across every agent, with clickable v
 links. No agent slash-command or LLM round-trip is involved — it reads straight from
 the registry.
 
+## Account Health Dashboards (`/<agent> dashboard <name>`)
+
+In addition to LLM-composed source dashboards, any agent with Salesforce configured
+gets a **first-class `dashboard` subcommand** that runs a fixed, deterministic
+pipeline and replies with a Block Kit summary + a link to the full HTML view:
+
+```
+/pulse dashboard Sprout Social
+/pulse dashboard Sprout Social --refresh
+```
+
+Pipeline on each invocation:
+
+1. **Resolve** the account via fuzzy Salesforce `LIKE` search (exact match > prefix > contains).
+2. **Fan out in parallel** to every configured integration — Salesforce opps, Jira
+   open tickets mentioning the account, Chorus engagements (last 45d, filtered by
+   account email domain when derivable from `Account.Website`), Datadog monitors
+   tagged for the account or currently alerting.
+3. **Compute a weighted health score** (0–100) from the signals below.
+4. **Persist** a Kind=`account` dashboard under a slug-stable URL
+   (`/<agent>/dashboard/acct-<slug>`) and cache the snapshot at
+   `<DASHBOARDS_DIR>/_cache/account/<slug>.json`.
+5. **Reply** with a Slack Block Kit summary: score badge, top 3 risks, top 3 action
+   items, signal breakdown, and an **Open full dashboard →** button.
+
+**Caching:** the first request of the day fetches fresh data and caches it for 24h.
+Subsequent requests serve from cache unless `--refresh` (or `-r`) is passed.
+
+**Score bands:** `80+` green · `60–79` yellow · `40–59` orange · `<40` red.
+
+**Signal weights** (sum to 100):
+
+| Signal | Weight | Key penalties |
+|---|---|---|
+| Ticket Health | 25 | Open P0/P1 (-15 ea), stale >14d (-10 ea), unassigned (-5 ea) |
+| Infra Stability | 20 | Monitor in ALERT (-20 ea), WARN (-10 ea) |
+| Engagement (Chorus) | 20 | No calls 30d (-20), competitor mentions (-10 ea), overdue items (-5 ea) |
+| Comms (Slack/Email) | 15 | *Not yet instrumented — full credit in v1.* |
+| License & Commercial | 20 | Renewal <60d with no open opp (-30) |
+
+The HTML view renders a bar chart of signal score-vs-weight via Chart.js (loaded
+from CDN), a coloured score badge, and the full source-panel tables underneath.
+
+## Example `create_dashboard` Prompts per Agent
+
+Every agent with `create_dashboard` available can also build **custom, sync-on-a-
+timer dashboards** from its integration sources. Copy a prompt below verbatim as
+the body of a slash command:
+
+### `/pulse` — Customer Success
+```
+create dashboard "Paypal 360" short-name paypal-360 that syncs every 10m with:
+- jira_search of JQL `project = WAK AND labels = paypal AND resolution = Unresolved ORDER BY priority DESC`
+- salesforce_query SOQL `SELECT Id, Name, StageName, CloseDate, Amount FROM Opportunity WHERE Account.Name = 'Paypal' AND IsClosed = false`
+- chorus_list_conversations with participants_email = @paypal.com over the last 30 days, with_trackers: true
+```
+
+### `/ovad` — DevOps & SRE
+```
+create dashboard "Prod incidents today" short-name prod-today, every 5m, with:
+- datadog_search_logs query `env:prod status:error` over the last 24h, limit 25
+- datadog_list_monitors query `status:alert` limit 25
+- github_list_prs for repo infra-live, state open, limit 15
+```
+
+### `/agent-q` — QA & Test
+```
+create dashboard "Flaky tests board" short-name flaky-tests that refreshes every 15m:
+- jira_search JQL `labels in (flaky, test-failure) AND statusCategory != Done ORDER BY updated DESC`
+- github_list_prs for repo api-service state open limit 20 (to cross-reference open test fixes)
+```
+
+### `/goldsai` — Security Research
+```
+create dashboard "Open vulns this quarter" short-name secops-q, every 30m, with:
+- jira_search JQL `project = SEC AND labels = cve AND resolution = Unresolved ORDER BY priority DESC`
+- confluence_search cql `label = "security-advisory" AND lastModified > now("-90d")`
+```
+
+### `/seihin` — Sr. Technical PM
+```
+create dashboard "PM intake queue" short-name pm-intake that syncs every 15m:
+- jira_search JQL `project = PROD AND status = "Intake" ORDER BY created ASC` max_results 30
+- confluence_search cql `label = "pm-rfc" AND lastModified > now("-14d")`
+```
+
+Tips for good results:
+- Always provide a `short_name` so the chip on the agent card stays compact.
+- Quote JQL / SOQL / CQL values exactly as you'd type them in the native UI.
+- Start with a 5–15m `sync_interval`; the system clamps below 30s and above 24h.
+- Each integration must be **configured** — ask the agent `what integrations do you
+  have` if you aren't sure which sources will resolve.
+
 ## Project Structure
 
 ```

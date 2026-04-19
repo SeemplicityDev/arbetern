@@ -45,7 +45,44 @@
     .footer{margin-top:40px;padding-top:20px;border-top:1px solid var(--border);color:var(--text-muted);font-size:11px;text-align:center}
     a{color:var(--accent);text-decoration:none}
     a:hover{text-decoration:underline}
+
+    /* Account-health summary panel (Kind="account") */
+    .account{display:grid;grid-template-columns:260px 1fr;gap:20px;background:var(--card);border:1px solid var(--border);border-radius:12px;padding:20px;margin-bottom:24px}
+    .score-box{display:flex;flex-direction:column;align-items:center;justify-content:center;padding:18px;border-radius:10px;background:#050505;border:1px solid var(--border)}
+    .score-box .num{font-size:54px;font-weight:800;line-height:1;letter-spacing:-1px}
+    .score-box .band{margin-top:10px;padding:4px 12px;border-radius:20px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.5px}
+    .band-green{background:rgba(46,148,68,.15);color:#57c97a}
+    .band-yellow{background:rgba(222,184,60,.15);color:#e7cb5e}
+    .band-orange{background:rgba(222,128,40,.15);color:#eda760}
+    .band-red{background:rgba(196,64,64,.15);color:#e07c7c}
+    .score-box.band-green .num{color:#57c97a}
+    .score-box.band-yellow .num{color:#e7cb5e}
+    .score-box.band-orange .num{color:#eda760}
+    .score-box.band-red .num{color:#e07c7c}
+    .lists{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+    .list-block h3{font-size:12px;text-transform:uppercase;letter-spacing:.5px;color:var(--text-muted);margin-bottom:8px;font-weight:600}
+    .list-block ul{list-style:none;padding:0;margin:0}
+    .list-block li{padding:6px 0;border-bottom:1px solid var(--border);font-size:13px;line-height:1.45}
+    .list-block li:last-child{border-bottom:none}
+    .signal-chart{margin-top:18px;background:#050505;border:1px solid var(--border);border-radius:10px;padding:14px;grid-column:1 / -1}
+    canvas#signal-chart{max-height:220px}
+    /* Datadog metrics (datadog_query_metrics source) chart widgets. */
+    .metrics-site{margin-bottom:18px}
+    .metrics-site:last-child{margin-bottom:0}
+    .metrics-site h4{font-size:12px;text-transform:uppercase;letter-spacing:.5px;color:var(--text-muted);margin:0 0 8px;font-weight:600;display:flex;gap:10px;align-items:center}
+    .metrics-site h4 .q{font-family:'SF Mono','Fira Code',monospace;font-size:11px;color:var(--accent);background:rgba(74,138,212,.08);padding:2px 8px;border-radius:4px;text-transform:none;letter-spacing:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:70%}
+    .metrics-site h4 .dd-link{margin-left:auto;font-size:11px;color:var(--accent);text-transform:none;letter-spacing:0;font-weight:500;padding:2px 8px;border:1px solid var(--border);border-radius:4px;background:var(--card);cursor:pointer;font-family:inherit}
+    .metrics-site h4 .dd-link + .dd-link{margin-left:6px}
+    .metrics-site h4 .dd-link:hover{text-decoration:none;background:var(--card-hover)}
+    .metrics-chart{background:#050505;border:1px solid var(--border);border-radius:8px;padding:10px;height:320px}
+    .metrics-chart canvas{max-height:300px}
+    .metrics-summary{margin-top:10px;font-size:12px;color:var(--text-muted)}
+    .metrics-summary table{font-size:12px}
+    .metrics-summary th,.metrics-summary td{padding:4px 10px}
+    @media (max-width: 800px){ .account{grid-template-columns:1fr} .lists{grid-template-columns:1fr} }
   </style>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
 </head>
 <body>
 <header>
@@ -60,6 +97,7 @@
 </header>
 <main>
   <div class="description" id="description"></div>
+  <div id="account-panel" style="display:none"></div>
   <div id="sources"></div>
   <div class="footer">
     Auto-refreshes from the server every sync interval. Raw JSON: <a id="raw-link" href="">data.json</a>
@@ -123,6 +161,10 @@
 
   function renderContent(content){
     if (content === null || content === undefined) return '<div class="empty">No data.</div>';
+    // Structured Datadog metrics payload → Chart.js line chart per site.
+    if (content && typeof content === 'object' && !Array.isArray(content) && content.kind === 'datadog_metrics') {
+      return renderMetricsPayload(content);
+    }
     if (typeof content === 'string') {
       // Heuristic: if the text contains Slack markup, render rich; otherwise plain pre.
       if (/[*<`:]/.test(content)) {
@@ -147,6 +189,234 @@
     return '<pre class="content">' + escapeHtml(String(content)) + '</pre>';
   }
 
+  let signalChart = null;
+  // Chart.js instances keyed by canvas DOM id so we can destroy them on re-render.
+  const metricsCharts = {};
+  let metricsChartSeq = 0;
+
+  // Deterministic-ish color from string hash, for series lines.
+  function colorForScope(scope, i){
+    const palette = [
+      '#4a8ad4', '#57c97a', '#e7cb5e', '#eda760', '#e07c7c', '#b288d9',
+      '#55b8c5', '#c58dbf', '#8bc56d', '#d68888', '#6d9fd6', '#c5a86d',
+    ];
+    if (!scope) return palette[i % palette.length];
+    let h = 0;
+    for (let k = 0; k < scope.length; k++) h = (h * 31 + scope.charCodeAt(k)) | 0;
+    return palette[Math.abs(h) % palette.length];
+  }
+
+  function fmtMetricNum(v){
+    if (v === null || v === undefined || Number.isNaN(v)) return '—';
+    const a = Math.abs(v);
+    if (a === 0) return '0';
+    if (a >= 1000) return v.toFixed(1);
+    if (a >= 10) return v.toFixed(2);
+    if (a >= 1) return v.toFixed(3);
+    return v.toFixed(4);
+  }
+
+  // Build a URL that opens the Datadog Metrics Explorer on the right site with
+  // the query's time window pre-set. Datadog's explorer encodes the actual
+  // query expression in an opaque hash fragment, so the query cannot be
+  // pre-filled via URL params — we pair this link with a "Copy query" button.
+  function datadogExploreURL(site, fromMs, toMs){
+    const host = site && site.indexOf('.') !== -1 ? site : 'datadoghq.com';
+    const params = new URLSearchParams({ paused: 'true' });
+    if (fromMs) params.set('start', String(fromMs));
+    if (toMs) params.set('end', String(toMs));
+    return 'https://app.' + host + '/metric/explorer?' + params.toString();
+  }
+
+  function copyToClipboard(text, btn){
+    const done = () => {
+      if (!btn) return;
+      const prev = btn.textContent;
+      btn.textContent = 'Copied';
+      setTimeout(() => { btn.textContent = prev; }, 1200);
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(done, done);
+    } else {
+      const ta = document.createElement('textarea');
+      ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+      document.body.appendChild(ta); ta.select();
+      try { document.execCommand('copy'); } catch (_) {}
+      document.body.removeChild(ta); done();
+    }
+  }
+  window.__copyMetricsQuery = function(btn){
+    const q = btn && btn.getAttribute('data-query');
+    if (q) copyToClipboard(q, btn);
+  };
+
+  // Render a datadog_query_metrics source payload: per-site chart + summary table.
+  function renderMetricsPayload(payload){
+    const sites = payload.sites || [];
+    if (sites.length === 0) return '<div class="empty">No metric series returned.</div>';
+    const blocks = sites.map(site => {
+      const canvasId = 'metrics-chart-' + (++metricsChartSeq);
+      const series = site.series || [];
+      const unitLabel = site.unit ? escapeHtml(site.unit) : 'metric\u2019s native unit';
+      const unitBadge = site.unit ? ' (' + escapeHtml(site.unit) + ')' : '';
+      const errorBlock = site.error ? '<div class="source-error">' + escapeHtml(site.error) + '</div>' : '';
+      const ddURL = datadogExploreURL(site.site, site.from_date, site.to_date);
+      const qAttr = escapeHtml(site.query || '');
+      const header =
+        '<h4>[' + escapeHtml(site.label || site.site || '') + ']' + unitBadge +
+        ' <span class="q" title="' + qAttr + '">' + qAttr + '</span>' +
+        ' <button type="button" class="dd-link" data-query="' + qAttr + '" onclick="__copyMetricsQuery(this)">Copy query</button>' +
+        ' <a href="' + ddURL + '" target="_blank" rel="noopener" class="dd-link">Open in Datadog \u2197</a>' +
+        '</h4>';
+      if (errorBlock && series.length === 0) {
+        return '<div class="metrics-site">' + header + errorBlock + '</div>';
+      }
+      if (series.length === 0) {
+        return '<div class="metrics-site">' + header +
+          '<div class="empty" style="margin-top:8px">No data returned. The metric name may not exist in this Datadog site, the tag filter may match zero series, or the time window may be empty. Try the <strong>Open in Datadog</strong> link above to verify the query, then adjust the metric or tags.</div>' +
+          '</div>';
+      }
+      let summaryRows = '';
+      if (series.length > 0) {
+        const legend =
+          '<div class="empty" style="margin:4px 0 8px">' +
+          'Each row is one tag group. Values are in ' + unitLabel + '. ' +
+          '<strong>avg / min / max / last</strong> are computed across the ' +
+          'query window (<strong>n</strong> = sample count). Rows are sorted by <strong>avg</strong> desc. ' +
+          'The chart above plots the same series over time.' +
+          '</div>';
+        summaryRows = '<div class="metrics-summary">' + legend +
+          '<div class="table-wrap"><table><thead><tr>' +
+          '<th title="Tag combination for this series">scope</th>' +
+          '<th title="Mean value across the window">avg</th>' +
+          '<th title="Minimum value in the window">min</th>' +
+          '<th title="Maximum value in the window">max</th>' +
+          '<th title="Most recent data point">last</th>' +
+          '<th title="Number of non-null samples">n</th>' +
+          '</tr></thead><tbody>' +
+          series.map(s => '<tr>' +
+            '<td>' + escapeHtml(s.scope || '*') + '</td>' +
+            '<td>' + fmtMetricNum(s.avg) + '</td>' +
+            '<td>' + fmtMetricNum(s.min) + '</td>' +
+            '<td>' + fmtMetricNum(s.max) + '</td>' +
+            '<td>' + fmtMetricNum(s.last) + '</td>' +
+            '<td>' + (s.count ?? 0) + '</td>' +
+          '</tr>').join('') +
+          '</tbody></table></div>' +
+          (site.truncated ? '<div class="empty" style="margin-top:6px">… and ' + site.truncated + ' more series (sorted by avg desc; increase top_n to see more)</div>' : '') +
+          '</div>';
+      }
+      return '<div class="metrics-site">' +
+        header +
+        errorBlock +
+        '<div class="metrics-chart"><canvas id="' + canvasId + '"></canvas></div>' +
+        summaryRows +
+        '</div>';
+    }).join('');
+
+    // Defer Chart.js wiring until the new markup is attached to the DOM.
+    setTimeout(() => {
+      sites.forEach((site, idx) => {
+        const canvasId = 'metrics-chart-' + (metricsChartSeq - (sites.length - 1 - idx));
+        const canvas = document.getElementById(canvasId);
+        if (!canvas || typeof Chart === 'undefined') return;
+        if (metricsCharts[canvasId]) { metricsCharts[canvasId].destroy(); }
+        const datasets = (site.series || []).map((s, i) => ({
+          label: s.scope || '*',
+          data: (s.points || []).map(p => ({ x: p[0], y: p[1] })),
+          borderColor: colorForScope(s.scope || String(i), i),
+          backgroundColor: colorForScope(s.scope || String(i), i) + '33',
+          borderWidth: 1.5,
+          pointRadius: 0,
+          pointHoverRadius: 3,
+          tension: 0.25,
+          spanGaps: true,
+        }));
+        metricsCharts[canvasId] = new Chart(canvas.getContext('2d'), {
+          type: 'line',
+          data: { datasets },
+          options: {
+            responsive: true, maintainAspectRatio: false,
+            interaction: { mode: 'nearest', intersect: false },
+            plugins: {
+              legend: {
+                display: datasets.length <= 12,
+                labels: { color: '#b0b8c1', boxWidth: 10, font: { size: 10 } },
+                position: 'bottom',
+              },
+              tooltip: {
+                callbacks: {
+                  title: items => items.length ? new Date(items[0].parsed.x).toLocaleString() : '',
+                  label: item => (item.dataset.label || '') + ': ' + fmtMetricNum(item.parsed.y),
+                },
+              },
+            },
+            scales: {
+              x: {
+                type: 'time',
+                time: { tooltipFormat: 'MMM d, HH:mm' },
+                ticks: { color: '#b0b8c1', maxRotation: 0, autoSkipPadding: 20 },
+                grid: { color: 'rgba(255,255,255,0.04)' },
+              },
+              y: {
+                ticks: { color: '#b0b8c1' },
+                grid: { color: 'rgba(255,255,255,0.04)' },
+                beginAtZero: true,
+              },
+            },
+          },
+        });
+      });
+    }, 0);
+    return blocks;
+  }
+
+  function renderAccount(panel, acct){
+    const band = (acct.band || 'yellow').toLowerCase();
+    const risks = (acct.risks || []).map(r => '<li>' + escapeHtml(r) + '</li>').join('') || '<li class="empty">No top risks.</li>';
+    const actions = (acct.actions || []).map(r => '<li>' + escapeHtml(r) + '</li>').join('') || '<li class="empty">No immediate actions.</li>';
+    panel.innerHTML =
+      '<div class="account">' +
+        '<div class="score-box band-' + escapeHtml(band) + '">' +
+          '<div class="num">' + (acct.score ?? 0) + '</div>' +
+          '<div class="band band-' + escapeHtml(band) + '">' + escapeHtml(band) + '</div>' +
+          '<div class="source-meta" style="margin-top:10px">' + escapeHtml(acct.account_name || '') + '</div>' +
+        '</div>' +
+        '<div class="lists">' +
+          '<div class="list-block"><h3>Top risks</h3><ul>' + risks + '</ul></div>' +
+          '<div class="list-block"><h3>Action items</h3><ul>' + actions + '</ul></div>' +
+        '</div>' +
+        '<div class="signal-chart"><canvas id="signal-chart"></canvas></div>' +
+      '</div>';
+    // Signal breakdown bar chart.
+    const signals = acct.signals || [];
+    const labels = signals.map(s => s.name);
+    const scored = signals.map(s => s.score);
+    const weights = signals.map(s => s.weight);
+    const ctx = panel.querySelector('#signal-chart').getContext('2d');
+    if (signalChart) signalChart.destroy();
+    // Chart.js global loaded via CDN; bail gracefully if the CDN is blocked.
+    if (typeof Chart === 'undefined') return;
+    signalChart = new Chart(ctx, {
+      type: 'bar',
+      data: {
+        labels,
+        datasets: [
+          { label: 'Score', data: scored, backgroundColor: '#4a8ad4' },
+          { label: 'Weight (max)', data: weights, backgroundColor: 'rgba(74,138,212,0.18)' },
+        ],
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { labels: { color: '#b0b8c1' } } },
+        scales: {
+          x: { ticks: { color: '#b0b8c1' }, grid: { color: 'rgba(255,255,255,0.04)' } },
+          y: { ticks: { color: '#b0b8c1' }, grid: { color: 'rgba(255,255,255,0.04)' }, beginAtZero: true },
+        },
+      },
+    });
+  }
+
   async function load(){
     const path = window.location.pathname.replace(/\/$/, '');
     const dataURL = path + '/data.json';
@@ -164,6 +434,16 @@
       const badge = document.getElementById('sync-badge');
       if (d.last_error) { badge.textContent = 'error'; badge.className = 'badge err'; }
       else if (d.last_sync) { badge.textContent = 'live'; badge.className = 'badge ok'; }
+
+      // Account-health summary panel (only for Kind="account").
+      const acctPanel = document.getElementById('account-panel');
+      if (d.kind === 'account' && d.account) {
+        acctPanel.style.display = 'block';
+        renderAccount(acctPanel, d.account);
+      } else {
+        acctPanel.style.display = 'none';
+      }
+
       const sources = document.getElementById('sources');
       sources.innerHTML = '';
       (d.sources || []).forEach((s, i) => {

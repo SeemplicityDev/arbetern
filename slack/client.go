@@ -54,6 +54,34 @@ func (c *Client) PostThreadReply(channelID, threadTS, text string) error {
 	return nil
 }
 
+// PostBlocks posts a Block Kit message with a fallback text string (shown by
+// clients that can't render blocks, e.g. mobile notifications). Returns the
+// message ts on success. Blocks must be built by the caller using
+// github.com/slack-go/slack.Block implementations.
+func (c *Client) PostBlocks(channelID, fallback string, blocks []slack.Block) (string, error) {
+	_, ts, err := c.api.PostMessage(channelID,
+		slack.MsgOptionText(fallback, false),
+		slack.MsgOptionBlocks(blocks...),
+	)
+	if err != nil {
+		return "", fmt.Errorf("failed to post blocks: %w", err)
+	}
+	return ts, nil
+}
+
+// PostThreadBlocks posts a Block Kit message as a reply in an existing thread.
+func (c *Client) PostThreadBlocks(channelID, threadTS, fallback string, blocks []slack.Block) error {
+	_, _, err := c.api.PostMessage(channelID,
+		slack.MsgOptionText(fallback, false),
+		slack.MsgOptionBlocks(blocks...),
+		slack.MsgOptionTS(threadTS),
+	)
+	if err != nil {
+		return fmt.Errorf("failed to post thread blocks: %w", err)
+	}
+	return nil
+}
+
 func (c *Client) FetchThreadReplies(channelID, threadTS string, limit int) ([]slack.Message, error) {
 	msgs, _, _, err := c.api.GetConversationReplies(&slack.GetConversationRepliesParameters{
 		ChannelID: channelID,

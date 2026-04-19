@@ -31,6 +31,7 @@ var SupportedSourceTypes = []string{
 	"chorus_list_conversations",
 	"datadog_search_logs",
 	"datadog_list_monitors",
+	"datadog_query_metrics",
 	"confluence_search",
 	"github_list_prs",
 }
@@ -54,11 +55,12 @@ func ValidateSource(src DataSource) error {
 		return fmt.Errorf("unsupported source type %q", src.Type)
 	}
 	required := map[string]string{
-		"jira_search":         "jql",
-		"salesforce_query":    "soql",
-		"datadog_search_logs": "query",
-		"confluence_search":   "cql",
-		"github_list_prs":     "repo",
+		"jira_search":           "jql",
+		"salesforce_query":      "soql",
+		"datadog_search_logs":   "query",
+		"datadog_query_metrics": "query",
+		"confluence_search":     "cql",
+		"github_list_prs":       "repo",
 	}
 	if key, ok := required[src.Type]; ok {
 		if v, _ := src.Args[key].(string); strings.TrimSpace(v) == "" {
@@ -165,6 +167,26 @@ func (e *clientExecutor) Execute(ctx context.Context, src DataSource) (any, erro
 			return nil, err
 		}
 		return text, nil
+
+	case "datadog_query_metrics":
+		if e.Datadog == nil {
+			return nil, fmt.Errorf("datadog client not configured")
+		}
+		query := stringArg(src.Args, "query")
+		if query == "" {
+			return nil, fmt.Errorf("datadog_query_metrics requires args.query")
+		}
+		payload, err := e.Datadog.QueryMetricsRaw(ctx,
+			stringArg(src.Args, "site"),
+			query,
+			stringArg(src.Args, "from"),
+			stringArg(src.Args, "to"),
+			intArg(src.Args, "top_n", 20),
+		)
+		if err != nil {
+			return nil, err
+		}
+		return payload, nil
 
 	case "confluence_search":
 		if e.Jira == nil || !e.Jira.Ready() {

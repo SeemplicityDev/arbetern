@@ -62,11 +62,15 @@ type SourceResult struct {
 
 // Dashboard is the on-disk descriptor.
 type Dashboard struct {
-	ID           string                  `json:"id"`
-	Agent        string                  `json:"agent"`
-	Name         string                  `json:"name"`
-	ShortName    string                  `json:"short_name"`
-	Description  string                  `json:"description,omitempty"`
+	ID          string `json:"id"`
+	Agent       string `json:"agent"`
+	Name        string `json:"name"`
+	ShortName   string `json:"short_name"`
+	Description string `json:"description,omitempty"`
+	// Kind distinguishes a plain sources dashboard (empty / "sources") from an
+	// account-health dashboard ("account"). The HTML viewer switches layout based
+	// on this field.
+	Kind         string                  `json:"kind,omitempty"`
 	SyncInterval string                  `json:"sync_interval"`
 	Sources      []DataSource            `json:"sources"`
 	CreatedBy    string                  `json:"created_by,omitempty"`
@@ -74,6 +78,29 @@ type Dashboard struct {
 	LastSync     string                  `json:"last_sync,omitempty"`
 	LastError    string                  `json:"last_error,omitempty"`
 	Data         map[string]SourceResult `json:"data,omitempty"`
+	// Account is populated for Kind=="account" dashboards and drives the health
+	// summary panel (score badge, risks, actions, signal bars).
+	Account *AccountSummary `json:"account,omitempty"`
+}
+
+// AccountSummary captures the health-score output for an account dashboard.
+type AccountSummary struct {
+	AccountName string   `json:"account_name"`
+	AccountID   string   `json:"account_id,omitempty"`
+	Score       int      `json:"score"`
+	Band        string   `json:"band"` // green | yellow | orange | red
+	Risks       []string `json:"risks,omitempty"`
+	Actions     []string `json:"actions,omitempty"`
+	Signals     []Signal `json:"signals,omitempty"`
+	GeneratedAt string   `json:"generated_at"`
+}
+
+// Signal is one row of the health breakdown.
+type Signal struct {
+	Name    string   `json:"name"`
+	Weight  int      `json:"weight"`
+	Score   int      `json:"score"`
+	Reasons []string `json:"reasons,omitempty"`
 }
 
 // ViewURL returns the path to the HTML view for this dashboard.
@@ -224,6 +251,44 @@ func (r *Registry) Create(ctx context.Context, agent, createdBy string, name, sh
 	r.startRunner(ctx, d)
 	log.Printf("[dashboards] created %s/%s (%q, every %s)", agent, id, name, d.interval())
 	return d, nil
+}
+
+// Upsert stores a fully-formed Dashboard under its own ID without starting a
+// background sync goroutine. Intended for on-demand dashboards (e.g. account
+// health snapshots) where the caller, not a cron ticker, drives refreshes.
+//
+// Any existing runner for the same (agent, id) is stopped so the new snapshot
+// becomes the sole source of truth. The dashboard is written to disk atomically.
+func (r *Registry) Upsert(d *Dashboard) error {
+	if d == nil {
+		return fmt.Errorf("dashboard is nil")
+	}
+	if !agentValidRe.MatchString(d.Agent) {
+		return fmt.Errorf("invalid agent id %q", d.Agent)
+	}
+	if !idValidRe.MatchString(d.ID) {
+		return fmt.Errorf("invalid dashboard id %q", d.ID)
+	}
+	if d.CreatedAt == "" {
+		d.CreatedAt = time.Now().UTC().Format(time.RFC3339)
+	}
+	if d.SyncInterval == "" {
+		d.SyncInterval = DefaultSyncInterval.String()
+	}
+
+	r.mu.Lock()
+	if run, ok := r.runners[key(d.Agent, d.ID)]; ok {
+		run.cancel()
+		delete(r.runners, key(d.Agent, d.ID))
+	}
+	r.items[key(d.Agent, d.ID)] = d
+	r.mu.Unlock()
+
+	if err := r.persist(d); err != nil {
+		return err
+	}
+	log.Printf("[dashboards] upsert %s/%s (%q)", d.Agent, d.ID, d.Name)
+	return nil
 }
 
 // Get returns a copy of the stored dashboard by agent+id, or (nil,false) if missing.
