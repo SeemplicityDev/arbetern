@@ -27,6 +27,7 @@ import (
 	"github.com/justmike1/arbetern/prompts"
 	"github.com/justmike1/arbetern/salesforce"
 	"github.com/justmike1/arbetern/slack"
+	"github.com/justmike1/arbetern/workflows"
 )
 
 //go:embed ui/*
@@ -179,14 +180,26 @@ const (
 func buildHelpMessage(agents []prompts.AgentConfig) string {
 	var b strings.Builder
 	b.WriteString("*arbetern* — AI Agent Platform\n\n")
-	b.WriteString("Available agents:\n")
+	b.WriteString("*Available agents*\n")
 	for _, agent := range agents {
 		intro := agent.Prompts["intro"]
 		desc := extractIntroLine(intro)
 		fmt.Fprintf(&b, "• `/%s` — %s\n", agent.ID, desc)
 	}
-	b.WriteString("\nUse `/<agent> introduce yourself` for a full introduction from any agent.")
-	b.WriteString("\nUse `/arbetern list dashboards` to see all active dashboards across agents.")
+	b.WriteString("\n*Cross-agent commands*\n")
+	b.WriteString("• `/<agent> introduce yourself` — full introduction from any agent\n")
+	b.WriteString("• `/arbetern list dashboards` — every active dashboard, grouped by agent\n")
+	b.WriteString("• `/arbetern list workflows` — every scheduled/triggered workflow, grouped by agent\n")
+
+	b.WriteString("\n*Create a dashboard* (auto-refreshing read-only view)\n")
+	b.WriteString("• `/pulse create dashboard \"Paypal 360\" short-name paypal-360 that syncs every 10m with jira_search, salesforce_query, chorus_list_conversations`\n")
+	b.WriteString("• `/ovad create a dashboard of datadog monitors in US alerting for env:prod refreshing every 5m`\n")
+
+	b.WriteString("\n*Create a workflow* (scheduled action — can write / PR / post)\n")
+	b.WriteString("• `/ovad create a workflow that every 5m polls jira open bugs in WAK with label arbetern, fixes them in github (PR assigned to claude), and posts to slack channel C02S5BP9LHX`\n")
+	b.WriteString("• `/pulse create a workflow every 30m to check datadog monitors alerting for service:payments and DM me the list`\n")
+	b.WriteString("• Multi-step (subflows): `/seihin create a workflow every 1h with tasks: 1) list my in-progress tickets, 2) rewrite each description, 3) post a summary to #pm-intake`\n")
+	b.WriteString("• Event-triggered: `/agent-q create a workflow that runs on_failure of ovad/<workflow-id> and opens a Jira bug with the error`\n")
 	return b.String()
 }
 
@@ -197,7 +210,10 @@ func buildDashboardsMessage(reg *dashboards.Registry, agents []prompts.AgentConf
 	b.WriteString("*arbetern dashboards*\n\n")
 	all := reg.List("")
 	if len(all) == 0 {
-		b.WriteString("_No dashboards are currently registered. Ask any agent to create one — e.g. `/pulse create dashboard …`._")
+		b.WriteString("_No dashboards are currently registered._\n\n")
+		b.WriteString("Ask any agent to build one — e.g.\n")
+		b.WriteString("• `/pulse create dashboard \"Paypal 360\" short-name paypal-360 that syncs every 10m with jira_search, salesforce_query, chorus_list_conversations`\n")
+		b.WriteString("• `/ovad create a dashboard of datadog monitors alerting for env:prod refreshing every 5m`")
 		return b.String()
 	}
 
@@ -238,6 +254,70 @@ func plural(n int) string {
 		return ""
 	}
 	return "s"
+}
+
+// buildWorkflowsMessage renders every active workflow grouped by agent, with
+// clickable links to the HTML view. Used by /arbetern list workflows.
+func buildWorkflowsMessage(reg *workflows.Registry, agents []prompts.AgentConfig, appURL string) string {
+	var b strings.Builder
+	b.WriteString("*arbetern workflows*\n\n")
+	all := reg.List("")
+	if len(all) == 0 {
+		b.WriteString("_No workflows are currently registered._\n\n")
+		b.WriteString("Ask any agent to create one — e.g.\n")
+		b.WriteString("• `/ovad create a workflow every 5m: poll jira open bugs in WAK with label arbetern, fix them in github (PR assigned to claude), post to slack C02S5BP9LHX`\n")
+		b.WriteString("• Multi-step: `/seihin create a workflow every 1h with tasks: 1) list my in-progress tickets 2) rewrite each description 3) post a summary to #pm-intake`\n")
+		b.WriteString("• Event-triggered: `/agent-q create a workflow that runs on_failure of ovad/<id> and opens a Jira bug with the error`")
+		return b.String()
+	}
+
+	byAgent := make(map[string][]*workflows.Workflow, len(agents))
+	for _, w := range all {
+		byAgent[w.Agent] = append(byAgent[w.Agent], w)
+	}
+
+	total := 0
+	for _, agent := range agents {
+		list := byAgent[agent.ID]
+		if len(list) == 0 {
+			continue
+		}
+		fmt.Fprintf(&b, "*/%s* (%d)\n", agent.ID, len(list))
+		for _, w := range list {
+			label := w.ShortName
+			if label == "" {
+				label = w.Name
+			}
+			url := appURL + w.ViewURL()
+			lastRun := w.LastRun
+			if lastRun == "" {
+				lastRun = "pending"
+			}
+			status := "ok"
+			if w.LastError != "" {
+				status = "error"
+			}
+			fmt.Fprintf(&b, "• <%s|%s> — %s (%s, every %s, last run %s, %s)\n", url, label, w.Name, w.Pattern(), w.Interval, lastRun, status)
+			total++
+		}
+		b.WriteString("\n")
+	}
+	fmt.Fprintf(&b, "_%d workflow%s total._", total, plural(total))
+	return b.String()
+}
+
+// workflowExecutor implements workflows.Executor by dispatching to the
+// owning agent's Router.RunWorkflow (headless LLM tool loop).
+type workflowExecutor struct {
+	routers map[string]*commands.Router
+}
+
+func (e *workflowExecutor) Run(ctx context.Context, w *workflows.Workflow, prompt string) (string, error) {
+	r, ok := e.routers[w.Agent]
+	if !ok {
+		return "", fmt.Errorf("no router for agent %q", w.Agent)
+	}
+	return r.RunWorkflow(ctx, w.CreatedBy, prompt)
 }
 
 // extractIntroLine returns the second non-empty line from an intro prompt,
@@ -858,6 +938,23 @@ func main() {
 	}
 	defer dashRegistry.StopAll()
 
+	// Workflows registry: scheduled LLM tool-loop runs.
+	// The executor is wired below once the routers map is populated, so tick
+	// goroutines are not started at LoadAll time — we call StartAllEnabled
+	// afterwards.
+	wfDir := cfg.WorkflowsDir
+	if wfDir == "" {
+		wfDir = workflows.DefaultDir
+	}
+	wfRegistry, err := workflows.New(wfDir, nil)
+	if err != nil {
+		log.Fatalf("failed to init workflows registry: %v", err)
+	}
+	if err := wfRegistry.LoadAll(context.Background()); err != nil {
+		log.Printf("warn: failed to load existing workflows: %v", err)
+	}
+	defer wfRegistry.StopAll()
+
 	for _, agent := range agents {
 		ap, err := prompts.LoadAgent(agent.ID)
 		if err != nil {
@@ -865,7 +962,7 @@ func main() {
 		}
 
 		agentID := agent.ID // capture for closure
-		router := commands.NewRouter(slackClient, ghClient, modelsClient, codeModelsClient, jiraClient, nvdClient, sfClient, chorusClient, datadogClients, dashRegistry, ap, agent.ID, cfg.AppURL, sessions, cfg.MaxToolRounds)
+		router := commands.NewRouter(slackClient, ghClient, modelsClient, codeModelsClient, jiraClient, nvdClient, sfClient, chorusClient, datadogClients, dashRegistry, wfRegistry, ap, agent.ID, cfg.AppURL, sessions, cfg.MaxToolRounds)
 		routers[agent.ID] = router
 
 		// Wrap router.Handle with RBAC check.
@@ -891,6 +988,9 @@ func main() {
 		case strings.EqualFold(trimmed, "list dashboards"), strings.EqualFold(trimmed, "dashboards"), strings.EqualFold(trimmed, "list-dashboards"):
 			log.Printf("[arbetern] user=%s channel=%s listed dashboards", userID, channelID)
 			_ = slack.RespondToURL(responseURL, buildDashboardsMessage(dashRegistry, agents, cfg.AppURL), false)
+		case strings.EqualFold(trimmed, "list workflows"), strings.EqualFold(trimmed, "workflows"), strings.EqualFold(trimmed, "list-workflows"):
+			log.Printf("[arbetern] user=%s channel=%s listed workflows", userID, channelID)
+			_ = slack.RespondToURL(responseURL, buildWorkflowsMessage(wfRegistry, agents, cfg.AppURL), false)
 		default:
 			log.Printf("[arbetern] user=%s channel=%s requested help", userID, channelID)
 			_ = slack.RespondToURL(responseURL, helpMessage, false)
@@ -1059,6 +1159,12 @@ func main() {
 		knownAgents[a.ID] = true
 	}
 	dashRegistry.RegisterRoutes(http.DefaultServeMux, apiMux, knownAgents)
+	wfRegistry.RegisterRoutes(http.DefaultServeMux, apiMux, knownAgents)
+
+	// Wire the workflow executor now that routers are built, then kick off
+	// tick goroutines for every workflow that was loaded from disk.
+	wfRegistry.SetExecutor(&workflowExecutor{routers: routers})
+	wfRegistry.StartAllEnabled(context.Background())
 
 	log.Printf("arbetern server starting on :%s", cfg.Port)
 

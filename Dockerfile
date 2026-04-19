@@ -17,10 +17,10 @@ RUN yq '[.[] | select(has("extensions")) | .extensions[]] | unique | sort' /tmp/
 
 RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /arbetern .
 
-# Pre-create the dashboards data directory owned by the distroless `nonroot`
-# user (uid/gid 65532) so the runtime can persist JSON snapshots even when
-# DASHBOARDS_DIR points at an unmounted default path.
-RUN mkdir -p /var/lib/arbetern/dashboards \
+# Pre-create the shared data directory (dashboards + workflows subdirs) owned
+# by the distroless `nonroot` user (uid/gid 65532) so the runtime can persist
+# JSON even when DASHBOARDS_DIR / WORKFLOWS_DIR point at an unmounted default.
+RUN mkdir -p /var/lib/arbetern/dashboards /var/lib/arbetern/workflows \
     && chown -R 65532:65532 /var/lib/arbetern
 
 FROM gcr.io/distroless/static:nonroot

@@ -12,6 +12,7 @@ intro: |
   • `/pulse pull the latest call notes for customer Z` — fetch recent Chorus call summaries
   • `/pulse check datadog monitors alerting for service:payments` — check infrastructure health
   • `/pulse create a dashboard tracking open P0 jira tickets for project ACME refreshing every 10m` — build a custom, auto-refreshing dashboard
+  • `/pulse create a workflow every 30m to check renewals <60d with no open opp in salesforce and DM me the risky accounts` — scheduled CS workflow
 
 classifier: |
   You are a command classifier. Given a user message, respond with exactly one word:

@@ -17,6 +17,7 @@ import (
 	"github.com/justmike1/arbetern/llm"
 	"github.com/justmike1/arbetern/nvd"
 	"github.com/justmike1/arbetern/salesforce"
+	"github.com/justmike1/arbetern/workflows"
 )
 
 // knownExtensions is the set of all known programming-language file extensions
@@ -54,6 +55,7 @@ type GeneralHandler struct {
 	chorusClient     *chorus.Client
 	datadogClients   *datadog.MultiClient
 	dashboards       *dashboards.Registry
+	workflows        *workflows.Registry
 	contextProvider  *ContextProvider
 	memory           *ConversationMemory
 	prompts          PromptProvider
@@ -65,6 +67,10 @@ type GeneralHandler struct {
 	currentAuditTS   string
 	branchMgr        *BranchManager
 	session          *ThreadSession
+	// headless is true when the handler is executing a scheduled workflow
+	// tick rather than a Slack-driven command. Affects tool gating (e.g.
+	// reply_in_thread is suppressed) and suppresses audit messaging.
+	headless bool
 }
 
 func (h *GeneralHandler) Execute(channelID, userID, text, responseURL, auditTS string) {
@@ -213,6 +219,8 @@ func (h *GeneralHandler) Execute(channelID, userID, text, responseURL, auditTS s
 				"get_file_content": true,
 				"search_code":      true, "search_code_org": true, "search_files": true,
 				"list_directory": true, "get_pull_request": true,
+				// Dashboard / workflow composition benefits from the stronger model.
+				"create_dashboard": true, "create_workflow": true, "call_workflow": true,
 			}
 			if codeTools[tc.Function.Name] && h.codeModelsClient != nil && activeClient != h.codeModelsClient {
 				activeClient = h.codeModelsClient
@@ -224,6 +232,82 @@ func (h *GeneralHandler) Execute(channelID, userID, text, responseURL, auditTS s
 
 	log.Printf("[user=%s channel=%s] exceeded max tool rounds", userID, channelID)
 	h.replyDefault(channelID, responseURL, auditTS, "The request required too many steps. Please try a simpler query.")
+}
+
+// ExecuteHeadless runs the agent's LLM tool-loop against a single prompt,
+// with no Slack audit thread, response URL, or channel context. Intended for
+// scheduled workflow ticks: the prompt is expected to be fully self-contained
+// and drive all side effects through tools (post_slack_message, create_pr,
+// Jira, etc.). Returns the final assistant message (or the first tool-loop
+// error) — the caller persists this as the run result.
+func (h *GeneralHandler) ExecuteHeadless(ctx context.Context, userID, prompt string) (string, error) {
+	h.currentChannelID = ""
+	h.currentAuditTS = ""
+	h.branchMgr = NewBranchManager(h.ghClient, h.agentID, nil)
+
+	tools := h.buildTools()
+
+	// Scheduled/triggered workflow ticks and call_workflow chains always use
+	// the CODE_MODEL when available — the execution needs structured,
+	// tool-heavy reasoning (PRs, JSON construction, tool composition) rather
+	// than conversational chit-chat, which is the general model's domain.
+	activeClient := h.modelsClient
+	if h.codeModelsClient != nil {
+		activeClient = h.codeModelsClient
+	}
+
+	systemMsg := h.systemPrompt()
+	systemMsg = strings.Replace(systemMsg, "{{MODEL}}", activeClient.Model(), 1)
+	systemMsg = strings.Replace(systemMsg, "{{USER_ID}}", userID, 1)
+	systemMsg = strings.Replace(systemMsg, "{{USER_CONTEXT}}", h.userContext, 1)
+	systemMsg += "\n\n[SCHEDULED WORKFLOW CONTEXT]\n" +
+		"You are executing a scheduled workflow tick. There is NO interactive Slack thread for this run. " +
+		"Do not emit placeholder acknowledgements — call tools immediately and return only concrete outcomes. " +
+		"To notify a Slack channel, use post_slack_message with an explicit channel_id. " +
+		"Do not call create_workflow / delete_workflow from inside a tick."
+
+	messages := []llm.ChatMessage{
+		llm.NewChatMessage("system", systemMsg),
+		llm.NewChatMessage("user", prompt),
+	}
+
+	rounds := h.maxToolRounds
+	if rounds <= 0 {
+		rounds = 50
+	}
+	for i := 0; i < rounds; i++ {
+		resp, err := activeClient.CompleteWithTools(ctx, messages, tools)
+		if err != nil {
+			return "", fmt.Errorf("LLM completion failed: %w", err)
+		}
+		if len(resp.Choices) == 0 {
+			return "", fmt.Errorf("LLM returned no choices")
+		}
+		choice := resp.Choices[0]
+		if len(choice.Message.ToolCalls) == 0 {
+			return strings.TrimSpace(choice.Message.Content), nil
+		}
+		messages = append(messages, llm.ChatMessage{
+			Role:      "assistant",
+			ToolCalls: choice.Message.ToolCalls,
+		})
+		for _, tc := range choice.Message.ToolCalls {
+			log.Printf("[workflow user=%s agent=%s] tool: %s(%s)", userID, h.agentID, tc.Function.Name, tc.Function.Arguments)
+			result := h.executeTool(ctx, "", userID, "", tc.Function.Name, tc.Function.Arguments)
+			messages = append(messages, llm.NewToolResultMessage(tc.ID, result))
+			codeTools := map[string]bool{
+				"modify_file": true, "create_file": true, "regex_replace_file": true,
+				"get_file_content": true,
+				"search_code":      true, "search_code_org": true, "search_files": true,
+				"list_directory": true, "get_pull_request": true,
+				"create_dashboard": true, "create_workflow": true, "call_workflow": true,
+			}
+			if codeTools[tc.Function.Name] && h.codeModelsClient != nil && activeClient != h.codeModelsClient {
+				activeClient = h.codeModelsClient
+			}
+		}
+	}
+	return "", fmt.Errorf("workflow tick exceeded max tool rounds (%d)", rounds)
 }
 
 func (h *GeneralHandler) systemPrompt() string {
@@ -505,6 +589,21 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 						"text":{"type":"string","description":"The message text to post as a threaded reply. Supports Slack markdown formatting."}
 					},
 					"required":["thread_ts","text"]
+				}`),
+			},
+		},
+		{
+			Type: "function",
+			Function: llm.ToolFunction{
+				Name:        "post_slack_message",
+				Description: "Post a message to a specific Slack channel by channel ID. Use this when the user gives you an explicit channel ID (e.g. 'C02S5BP9LHX') and asks you to send a message there, OR inside a scheduled workflow tick where no interactive thread is available. Supports Slack markdown. Returns the posted message ts on success.",
+				Parameters: json.RawMessage(`{
+					"type":"object",
+					"properties":{
+						"channel_id":{"type":"string","description":"Slack channel ID (e.g. 'C02S5BP9LHX'). NOT a channel name."},
+						"text":{"type":"string","description":"Message body. Supports Slack markdown formatting."}
+					},
+					"required":["channel_id","text"]
 				}`),
 			},
 		},
@@ -1001,12 +1100,16 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 	}
 
 	tools = append(tools, h.dashboardTools()...)
+	tools = append(tools, h.workflowTools()...)
 
 	return tools
 }
 
 func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, auditTS, name, argsJSON string) string {
 	if out, handled := h.executeDashboardTool(ctx, userID, channelID, name, argsJSON); handled {
+		return out
+	}
+	if out, handled := h.executeWorkflowTool(ctx, userID, channelID, name, argsJSON); handled {
 		return out
 	}
 	switch name {
@@ -1485,6 +1588,24 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		}
 		log.Printf("[user=%s channel=%s] posted thread reply to ts=%s", userID, channelID, args.ThreadTS)
 		return "Successfully posted reply in thread."
+
+	case "post_slack_message":
+		args, errMsg := parseToolArgs[struct {
+			ChannelID string `json:"channel_id"`
+			Text      string `json:"text"`
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
+		}
+		if strings.TrimSpace(args.ChannelID) == "" || strings.TrimSpace(args.Text) == "" {
+			return "Error: 'channel_id' and 'text' are required."
+		}
+		ts, err := h.slackClient.PostMessage(args.ChannelID, args.Text)
+		if err != nil {
+			return fmt.Sprintf("Error posting to channel %s: %v", args.ChannelID, err)
+		}
+		log.Printf("[user=%s channel=%s] posted message to %s (ts=%s)", userID, channelID, args.ChannelID, ts)
+		return fmt.Sprintf("Successfully posted to channel %s (ts=%s).", args.ChannelID, ts)
 
 	case "upload_snippet":
 		args, errMsg := parseToolArgs[struct {
@@ -2574,6 +2695,9 @@ func isCodeIntent(text string) bool {
 		"actions", "deploy", "deployment",
 		"file", "directory", "folder", "path",
 		"secret", "config", "configuration",
+		// Dashboards & workflows — structured JSON + tool-composition tasks
+		// benefit from the sharper CODE_MODEL reasoning.
+		"dashboard", "dashboards",
 	}
 	for _, kw := range codeKeywords {
 		if strings.Contains(text, kw) {

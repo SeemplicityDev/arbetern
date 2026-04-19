@@ -7,6 +7,7 @@ intro: |
   • `/seihin review ticket ENG-123 and improve its description` — refine a specific ticket
   • `/seihin list my open tickets` — see all your assigned open tickets
   • `/seihin rewrite the acceptance criteria for PROJ-456` — improve specific sections
+  • `/seihin create a workflow every 1h with tasks: 1) list my in-progress tickets 2) rewrite each description 3) post a summary to #pm-intake` — multi-step subflow
 
 classifier: |
   You are a command classifier. Given a user message, respond with exactly one word:

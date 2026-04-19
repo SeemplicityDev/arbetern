@@ -199,7 +199,11 @@ spec:
             {{- end }}
             {{- if .Values.dashboards.enabled }}
             - name: DASHBOARDS_DIR
-              value: {{ .Values.dashboards.mountPath | quote }}
+              value: "{{ .Values.persistence.mountPath }}/{{ .Values.dashboards.subPath }}"
+            {{- end }}
+            {{- if .Values.workflows.enabled }}
+            - name: WORKFLOWS_DIR
+              value: "{{ .Values.persistence.mountPath }}/{{ .Values.workflows.subPath }}"
             {{- end }}
           {{- with .Values.livenessProbe }}
           livenessProbe:
@@ -233,12 +237,12 @@ spec:
               mountPath: /etc/arbetern/agent-rbac
               readOnly: true
           {{- end }}
-          {{- if .Values.dashboards.enabled }}
+          {{- if .Values.persistence.enabled }}
           {{- if and (not .Values.volumeMounts) (not .Values.customPrompts) (not .Values.agentRBAC) }}
           volumeMounts:
           {{- end }}
-            - name: dashboards
-              mountPath: {{ .Values.dashboards.mountPath | quote }}
+            - name: data
+              mountPath: {{ .Values.persistence.mountPath | quote }}
           {{- end }}
       {{- with .Values.volumes }}
       volumes:
@@ -260,15 +264,15 @@ spec:
           configMap:
             name: {{ include "arbetern.fullname" . }}-agent-rbac
       {{- end }}
-      {{- if and .Values.dashboards.enabled (not .Values.dashboards.persistence.enabled) }}
+      {{- if and .Values.persistence.enabled (not .Values.persistence.persistentVolumeClaim.enabled) }}
       {{- if and (not .Values.volumes) (not .Values.customPrompts) (not .Values.agentRBAC) }}
       volumes:
       {{- end }}
-        - name: dashboards
+        - name: data
           emptyDir: {}
       {{- end }}
-      {{- /* When dashboards.persistence is enabled, the "dashboards" volume
-             is supplied by volumeClaimTemplates below (StatefulSet only). */ -}}
+      {{- /* When persistence.persistentVolumeClaim.enabled is true, the "data"
+             volume is supplied by volumeClaimTemplates below (StatefulSet only). */ -}}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
@@ -281,23 +285,23 @@ spec:
       tolerations:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-  {{- if and .Values.dashboards.enabled .Values.dashboards.persistence.enabled }}
+  {{- if and .Values.persistence.enabled .Values.persistence.persistentVolumeClaim.enabled }}
   volumeClaimTemplates:
     - metadata:
-        name: dashboards
+        name: data
         labels:
           {{- include "arbetern.labels" . | nindent 10 }}
-        {{- with .Values.dashboards.persistence.annotations }}
+        {{- with .Values.persistence.persistentVolumeClaim.annotations }}
         annotations:
           {{- toYaml . | nindent 10 }}
         {{- end }}
       spec:
         accessModes:
-          {{- toYaml .Values.dashboards.persistence.accessModes | nindent 10 }}
+          {{- toYaml .Values.persistence.persistentVolumeClaim.accessModes | nindent 10 }}
         resources:
           requests:
-            storage: {{ .Values.dashboards.persistence.size | quote }}
-        {{- with .Values.dashboards.persistence.storageClass }}
+            storage: {{ .Values.persistence.persistentVolumeClaim.size | quote }}
+        {{- with .Values.persistence.persistentVolumeClaim.storageClass }}
         storageClassName: {{ . | quote }}
         {{- end }}
   {{- end }}

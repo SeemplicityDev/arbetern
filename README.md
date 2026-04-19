@@ -84,6 +84,7 @@ Every layer — agent selection, intent routing, tool availability, model switch
 | `AGENT_RBAC_DIR` | no | Directory containing per-agent RBAC overrides (`<agent-id>.yaml` with `allowed_teams` list). Overrides `config.yaml` allowed_teams at deploy time. Set automatically by the Helm chart when `agentRBAC` is configured |
 | `UI_HEADER` | no | Custom header text for the web UI (default: `arbetern`) |
 | `DASHBOARDS_DIR` | no | Directory where dashboard JSON snapshots are persisted (default: `./data/dashboards`). Set automatically by the Helm chart when `dashboards.enabled` is true |
+| `WORKFLOWS_DIR` | no | Directory where workflow JSON descriptors + run history are persisted (default: `./data/workflows`). Set automatically by the Helm chart when `workflows.enabled` is true |
 
 ### Run Locally
 
@@ -245,18 +246,24 @@ chips — click to open, `×` to delete.
 
 **Helm / persistence:**
 
+Dashboards share a single PVC with workflows (see the [Workflows](#workflows) section
+for the full persistence block). To enable the feature:
+
 ```yaml
 dashboards:
-  enabled: true                     # mounts DASHBOARDS_DIR inside the pod
-  mountPath: /var/lib/arbetern/dashboards
-  persistence:
-    enabled: true                   # create a PVC so dashboards survive restarts
+  enabled: true
+workflows:
+  enabled: true
+
+# One PVC, two subdirectories — /var/lib/arbetern/{dashboards,workflows}.
+persistence:
+  enabled: true
+  mountPath: /var/lib/arbetern
+  persistentVolumeClaim:
+    enabled: true                   # false = emptyDir (rebuilt on each roll)
     size: 2Gi
     storageClass: "gp3"
 ```
-
-When `persistence.enabled=false`, the mount falls back to an `emptyDir` and dashboards
-are rebuilt from scratch on each pod roll.
 
 > **Pod security:** the Helm chart sets `podSecurityContext.fsGroup=65532` (matching the
 > `distroless/static:nonroot` user) so kubelet chowns the mounted dashboards volume on
@@ -361,6 +368,136 @@ Tips for good results:
 - Each integration must be **configured** — ask the agent `what integrations do you
   have` if you aren't sure which sources will resolve.
 
+## Workflows
+
+Agents can also own **recurring or event-triggered workflows** — scheduled
+agent invocations that go beyond read-only dashboards. A workflow can open
+PRs, post Slack messages, transition Jira tickets, etc., because each tick
+re-enters the owning agent's full tool-loop (headless) with a pinned prompt.
+
+Example prompt (the one that kicked off this feature):
+
+```
+/ovad create for me a workflow which polls every 5 minutes from jira open bug
+tickets from the wakanda project with the label "arbetern", reads and executes
+upon the bug in github, and sends a slack message to channel C02S5BP9LHX that
+a PR is created — when you create the PR, set claude as the assignee too so it
+will review.
+```
+
+The owning agent synthesises a complete, credentialless prompt (channel IDs,
+repo names, labels, assignees — everything needed so the tick is reproducible),
+persists a JSON descriptor at `<WORKFLOWS_DIR>/<agent>/<id>.json`, and starts
+a goroutine that ticks on the requested interval. Each run's result + error
+is appended to the descriptor; the viewer at `/<agent>/workflow/<id>` renders
+the run history and auto-refreshes every 30 seconds.
+
+### Design patterns
+
+Workflows are modelled after the four Prefect flow-composition patterns,
+adapted for arbetern's LLM-tool-loop execution model:
+
+| Pattern | Coupling | When to use |
+|---|---|---|
+| **Monoflow** | tight (one LLM call per tick) | Simple recurring tasks: "poll X, do Y". |
+| **Flow of subflows** (`tasks`) | medium (sequential, in-process) | Multi-step runs where each step benefits from a smaller, bounded LLM context. |
+| **Flow of deployments** (`call_workflow`) | loose (workflow ↔ workflow via tool call) | Composing specialist workflows across agents. |
+| **Event-triggered** (`trigger: on_success/on_failure`) | loose (reactive) | Run workflow B whenever workflow A finishes (or fails). |
+
+```
+tight coupling                                          loose coupling
+───────────────                                          ───────────────
+ Monoflow  ──▶  Flow of subflows  ──▶  Flow of deployments  ──▶  Event-triggered
+ one prompt     ordered tasks          call_workflow tool        on_success of X
+```
+
+**Monoflow** is the default. Supply a single `prompt` — the agent re-runs the
+exact same instruction every interval.
+
+**Flow of subflows** splits a workflow into an ordered `tasks` list. Each
+task's output is compacted and fed forward as context for the next task's
+prompt. Keeps individual LLM calls small and recoverable.
+
+**Flow of deployments** is expressed via the `call_workflow` tool: a parent
+workflow's prompt instructs the agent to synchronously invoke one or more
+child workflows (possibly owned by different agents) and chain their results.
+Child workflows remain independently scheduled.
+
+**Event-triggered** workflows do not tick on their own — they listen. When
+any workflow finishes, the registry fires listener workflows whose
+`trigger.type` is `on_success` / `on_failure` and whose `trigger.ref`
+matches `<agent>/<id>` of the just-finished run. Set `trigger.type: manual`
+to disable auto-execution entirely; such workflows only run via the manual
+API endpoint.
+
+### Lifecycle tools (exposed to the LLM)
+
+| Tool | Purpose |
+|------|---------|
+| `create_workflow` | Register a new workflow with name, short_name, interval, and either `prompt` (monoflow) or `tasks` (subflows), and optional `trigger`. |
+| `list_workflows` | List this agent's workflows with their ids, patterns, intervals, and last-run timestamps. |
+| `delete_workflow` | Stop the background execution and remove the stored JSON. |
+| `call_workflow` | Run another workflow once and return its final result. The canonical "flow of deployments" primitive. |
+
+Inside a headless workflow tick only `call_workflow` and `list_workflows`
+stay available — `create_workflow` / `delete_workflow` are suppressed so a
+workflow cannot recursively spawn more workflows.
+
+### Manual triggering
+
+Every workflow has a manual-run endpoint behind the UI IP whitelist:
+
+```bash
+curl -X POST https://<host>/api/workflows/<agent>/<id>/run
+# → { "result": "<final output>" } or { "error": "...", "result": "..." }
+```
+
+This is also how event-triggered and `trigger: manual` workflows are kicked
+off the first time.
+
+### Configuration
+
+- `WORKFLOWS_DIR` — where descriptors are persisted (default `./data/workflows`).
+- Interval is clamped to `[1m, 168h]`; default is `5m`.
+- Only a workflow's own agent can create / delete / list it via the LLM tools;
+  `call_workflow` can target any agent.
+
+### Helm / persistence
+
+Workflows share a single PVC with dashboards — one volume, two sub-directories:
+
+```yaml
+dashboards:
+  enabled: true
+workflows:
+  enabled: true
+
+persistence:
+  enabled: true
+  mountPath: /var/lib/arbetern           # DASHBOARDS_DIR = $mountPath/dashboards
+                                         # WORKFLOWS_DIR  = $mountPath/workflows
+  persistentVolumeClaim:
+    enabled: true                        # false = emptyDir (rebuilt every roll)
+    size: 2Gi
+    storageClass: "gp3"
+```
+
+When `persistentVolumeClaim.enabled=false`, the mount falls back to an
+`emptyDir` and both dashboards and workflows are rebuilt from scratch on each
+pod roll.
+
+> **Pod security:** the Helm chart sets `podSecurityContext.fsGroup=65532`
+> (matching the `distroless/static:nonroot` user) so kubelet chowns the shared
+> volume on pod start, letting the non-root process create the `<agent>/`
+> sub-directories.
+
+### Cross-agent list command
+
+In any Slack channel, run `/arbetern list workflows` to get a single list of
+every active workflow across every agent, with clickable view links and
+per-workflow pattern labels. This reads directly from the registry — no agent
+round-trip, no LLM call.
+
 ## Project Structure
 
 ```
@@ -394,6 +531,7 @@ chorus/              # Chorus (ZoomInfo) REST API client (call intelligence, dea
 slack/               # Slack webhook handler + response helpers
 prompts/             # YAML prompt loader + agent discovery
 dashboards/          # dashboard registry, sync runner, executor, embedded HTML viewer
+workflows/           # workflow engine (monoflow / subflows / event-triggered) + embedded viewer
 ui/                  # embedded web UI (agent manager)
 helm/                # Helm chart
 docs/                # setup guides (Slack, GitHub PAT, Atlassian)

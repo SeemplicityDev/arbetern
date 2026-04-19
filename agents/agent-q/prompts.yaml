@@ -6,6 +6,7 @@ intro: |
   • `/agent-q debug the latest test failure` — analyze a recent test failure or flaky test
   • `/agent-q what tests cover the auth module in my-repo` — explore test coverage
   • `/agent-q review the test plan for the checkout flow` — get QA feedback
+  • `/agent-q create a workflow that runs on_failure of ovad/<workflow-id> and opens a Jira bug with the error` — event-triggered test-failure handler
 
 classifier: |
   You are a command classifier. Given a user message, respond with exactly one word:

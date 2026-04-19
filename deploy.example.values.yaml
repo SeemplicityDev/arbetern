@@ -75,13 +75,17 @@ secretValues:
 #     - S0A6S3KNNLW   # CS team
 #     - S0B7T4LOOLX   # DevOps
 
-# Dashboards — LLM-created recurring data dashboards persisted as JSON.
-# Enable persistence to keep dashboards across pod restarts; leave disabled
-# for ephemeral/dev environments where emptyDir is fine.
+# Dashboards + workflows share a single persistent data directory.
+# Enable the PVC to keep state across pod restarts; leave disabled for
+# ephemeral/dev environments where emptyDir is fine.
 # dashboards:
 #   enabled: true
-#   mountPath: /var/lib/arbetern/dashboards
-#   persistence:
+# workflows:
+#   enabled: true
+# persistence:
+#   enabled: true
+#   mountPath: /var/lib/arbetern
+#   persistentVolumeClaim:
 #     enabled: true
 #     size: 2Gi
 #     storageClass: "gp3"

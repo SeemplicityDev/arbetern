@@ -746,6 +746,58 @@
       color: var(--red);
     }
 
+    /* ── Agent Workflows Section ───────────── */
+    .agent-workflows {
+      margin-top: 10px;
+      padding-top: 10px;
+      border-top: 1px dashed var(--border);
+    }
+    .agent-workflows-label {
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: var(--text-muted);
+      margin-bottom: 6px;
+    }
+    .agent-workflows-list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+    .agent-workflow-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      font-size: 11px;
+      padding: 3px 8px;
+      border-radius: 6px;
+      background: rgba(46, 148, 68, 0.08);
+      border: 1px solid rgba(46, 148, 68, 0.25);
+      color: var(--green);
+      text-decoration: none;
+      transition: all 0.15s ease;
+    }
+    .agent-workflow-chip:hover {
+      background: rgba(46, 148, 68, 0.15);
+    }
+    .agent-workflow-chip.err {
+      background: rgba(196, 64, 64, 0.08);
+      border-color: rgba(196, 64, 64, 0.25);
+      color: #c44040;
+    }
+    .agent-workflow-chip .wf-delete {
+      font-size: 13px;
+      line-height: 1;
+      color: var(--text-muted);
+      padding: 0 2px;
+      cursor: pointer;
+      border: none;
+      background: transparent;
+    }
+    .agent-workflow-chip .wf-delete:hover {
+      color: var(--red);
+    }
+
     .agent-integration-badge .badge-label {
       white-space: nowrap;
     }
@@ -1061,6 +1113,7 @@
             <div class="agent-prompts-count">${promptCount} prompt${promptCount !== 1 ? 's' : ''}</div>
             ${renderAgentBadges(agent.id)}
             ${renderAgentDashboards(agent.id)}
+            ${renderAgentWorkflows(agent.id)}
           </div>`;
       }).join('');
     }
@@ -1103,6 +1156,48 @@
         renderAgents(agentsData);
       } catch (err) {
         alert('Failed to delete dashboard: ' + err);
+      }
+    }
+
+    const AGENT_WORKFLOWS = {};
+
+    function renderAgentWorkflows(agentId) {
+      const list = (AGENT_WORKFLOWS[agentId] || []);
+      if (list.length === 0) return '';
+      const chips = list.map(w => {
+        const label = escapeHtml(w.short_name || w.name || w.id);
+        const url = `/${agentId}/workflow/${encodeURIComponent(w.id)}`;
+        const title = escapeHtml(w.name + (w.description ? ' — ' + w.description : '') + ' · every ' + w.interval);
+        const cls = w.last_error ? ' err' : '';
+        return `<a class="agent-workflow-chip${cls}" href="${url}" target="_blank" rel="noopener" title="${title}" onclick="event.stopPropagation()">${label}<button class="wf-delete" title="Delete workflow" onclick="event.preventDefault();event.stopPropagation();deleteWorkflow('${agentId}','${w.id}');">×</button></a>`;
+      }).join('');
+      return `<div class="agent-workflows"><div class="agent-workflows-label">Scheduled workflows</div><div class="agent-workflows-list">${chips}</div></div>`;
+    }
+
+    async function loadWorkflows() {
+      try {
+        const r = await fetch('/api/workflows');
+        if (!r.ok) return;
+        const list = await r.json();
+        for (const k of Object.keys(AGENT_WORKFLOWS)) delete AGENT_WORKFLOWS[k];
+        (list || []).forEach(w => {
+          if (!AGENT_WORKFLOWS[w.agent]) AGENT_WORKFLOWS[w.agent] = [];
+          AGENT_WORKFLOWS[w.agent].push(w);
+        });
+      } catch (err) {
+        console.warn('Failed to load workflows:', err);
+      }
+    }
+
+    async function deleteWorkflow(agentId, id) {
+      if (!confirm('Delete this workflow? This stops its schedule and removes its stored data.')) return;
+      try {
+        const r = await fetch(`/api/workflows/${encodeURIComponent(agentId)}/${encodeURIComponent(id)}`, { method: 'DELETE' });
+        if (!r.ok && r.status !== 204) throw new Error('HTTP ' + r.status);
+        await loadWorkflows();
+        renderAgents(agentsData);
+      } catch (err) {
+        alert('Failed to delete workflow: ' + err);
       }
     }
 
@@ -1198,6 +1293,7 @@
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         agentsData = await resp.json();
         await loadDashboards();
+        await loadWorkflows();
         renderAgents(agentsData);
       } catch (err) {
         console.error('Failed to load agents:', err);

@@ -1,0 +1,382 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>arbetern — workflow</title>
+  <style>
+    :root {
+      --bg:#000; --surface:#070707; --card:#0c0c0c; --card-2:#101010; --card-hover:#141414;
+      --border:#1a1a1a; --border-accent:#2a2a2a;
+      --text:#d0d7df; --text-muted:#6b7685; --accent:#4a8ad4; --accent-2:#7a5ddb;
+      --green:#2e9444; --red:#c44040; --amber:#d18a3a;
+      --shadow:0 4px 22px -6px rgba(0,0,0,.6), 0 1px 0 0 rgba(255,255,255,.02) inset;
+    }
+    *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+    body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Inter,Roboto,sans-serif;background:radial-gradient(ellipse at top, #0a0a0e 0%, #000 60%);color:var(--text);min-height:100vh}
+    header{display:flex;align-items:center;justify-content:space-between;padding:20px 28px;border-bottom:1px solid var(--border);background:rgba(7,7,7,.85);backdrop-filter:blur(8px);position:sticky;top:0;z-index:10}
+    header h1{font-size:18px;font-weight:700;letter-spacing:-.3px}
+    header .meta{font-size:12px;color:var(--text-muted)}
+    header .badge{font-size:11px;padding:4px 12px;border-radius:20px;background:var(--card);border:1px solid var(--border);color:var(--text-muted);font-weight:500}
+    header .badge.ok{color:var(--green);border-color:rgba(46,148,68,.35);background:rgba(46,148,68,.06)}
+    header .badge.err{color:var(--red);border-color:rgba(196,64,64,.35);background:rgba(196,64,64,.06)}
+    header .badge.paused{color:var(--amber);border-color:rgba(209,138,58,.35);background:rgba(209,138,58,.06)}
+    main{max-width:1200px;margin:0 auto;padding:28px 24px 60px}
+    .description{color:var(--text-muted);font-size:13px;margin-bottom:24px;max-width:820px;line-height:1.6}
+    .card{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:22px;margin-bottom:18px;box-shadow:var(--shadow)}
+    .card-title{font-size:12px;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:.8px;margin-bottom:14px;display:flex;align-items:center;gap:8px}
+    .card-title .count{background:var(--card-2);border:1px solid var(--border);border-radius:10px;padding:2px 8px;font-size:10px;color:var(--text)}
+    .meta-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin-bottom:20px}
+    .meta-item{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:12px 16px;box-shadow:var(--shadow)}
+    .meta-item .label{font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px}
+    .meta-item .value{font-size:14px;color:var(--text);font-weight:500;word-break:break-word}
+
+    /* Flow diagram */
+    .flow{display:flex;flex-direction:column;gap:0;align-items:stretch}
+    .flow-row{display:flex;flex-wrap:wrap;gap:12px;justify-content:center;align-items:stretch;min-height:64px}
+    .flow-connector{display:flex;justify-content:center;margin:6px 0;color:var(--border-accent)}
+    .flow-connector svg{width:18px;height:32px}
+    .flow-lane-label{text-align:center;font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:1px;margin:4px 0 6px}
+    .node{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;padding:14px 18px;background:linear-gradient(180deg,var(--card-hover),var(--card));border:1px solid var(--border-accent);border-radius:14px;min-width:128px;min-height:86px;box-shadow:var(--shadow);transition:transform .15s ease,border-color .15s ease}
+    .node:hover{transform:translateY(-1px);border-color:#333}
+    .node .icon{width:32px;height:32px;display:flex;align-items:center;justify-content:center;border-radius:8px;background:var(--card-2);border:1px solid var(--border);flex-shrink:0}
+    .node .icon svg{width:22px;height:22px}
+    .node .name{font-size:12px;font-weight:600;color:var(--text);letter-spacing:.2px}
+    .node .sub{font-size:10px;color:var(--text-muted);text-align:center;max-width:160px;line-height:1.35;word-break:break-word}
+    .node.trigger{border-color:rgba(122,93,219,.35);background:linear-gradient(180deg,rgba(122,93,219,.08),var(--card))}
+    .node.agent{border-color:rgba(74,138,212,.45);background:linear-gradient(180deg,rgba(74,138,212,.08),var(--card));min-width:160px}
+    .node.agent .icon{background:rgba(74,138,212,.12);border-color:rgba(74,138,212,.35)}
+    .node.output{border-color:rgba(46,148,68,.3)}
+    .node.source{border-color:rgba(209,138,58,.3)}
+    .flow-empty{color:var(--text-muted);font-size:12px;font-style:italic;padding:10px}
+
+    /* Task pipeline */
+    .task-pipeline{display:flex;flex-direction:column;gap:0}
+    .task-row{display:flex;align-items:stretch;gap:14px;padding:16px;background:var(--card-2);border:1px solid var(--border);border-radius:12px;margin-bottom:10px}
+    .task-index{display:flex;flex-direction:column;align-items:center;gap:6px;min-width:44px}
+    .task-index .num{width:32px;height:32px;border-radius:50%;background:linear-gradient(135deg,var(--accent),var(--accent-2));color:#fff;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:13px;box-shadow:0 4px 12px -4px rgba(74,138,212,.4)}
+    .task-index .bar{flex:1;width:2px;background:linear-gradient(180deg,var(--accent) 0%,var(--border) 100%);margin-top:2px;border-radius:2px}
+    .task-body{flex:1;min-width:0}
+    .task-name{font-size:13px;font-weight:600;color:var(--text);margin-bottom:4px}
+    .task-prompt{font-family:'SF Mono','Fira Code',monospace;font-size:11px;line-height:1.55;color:var(--text-muted);white-space:pre-wrap;word-break:break-word;background:#050505;border:1px solid var(--border);border-radius:8px;padding:10px;margin-top:8px;max-height:180px;overflow:auto}
+    .task-chips{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
+    .chip{display:inline-flex;align-items:center;gap:5px;padding:3px 8px 3px 5px;background:var(--card);border:1px solid var(--border);border-radius:20px;font-size:10px;color:var(--text-muted)}
+    .chip svg{width:14px;height:14px}
+
+    /* Trigger / prompt cards */
+    .prompt{background:#050505;border:1px solid var(--border);border-radius:10px;padding:14px;font-family:'SF Mono','Fira Code',monospace;font-size:12px;line-height:1.55;color:var(--text);overflow-x:auto;white-space:pre-wrap;word-break:break-word}
+
+    /* Run history */
+    .run{border:1px solid var(--border);border-radius:12px;padding:14px 16px;margin-bottom:10px;background:var(--card-2)}
+    .run-head{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px}
+    .run-time{font-family:'SF Mono','Fira Code',monospace;font-size:12px;color:var(--text)}
+    .run-duration{font-size:11px;color:var(--text-muted)}
+    .run-status{font-size:11px;padding:2px 10px;border-radius:20px;background:rgba(46,148,68,.1);color:var(--green);border:1px solid rgba(46,148,68,.3);font-weight:500}
+    .run-status.err{background:rgba(196,64,64,.08);color:var(--red);border-color:rgba(196,64,64,.3)}
+    .run-result{font-family:'SF Mono','Fira Code',monospace;font-size:12px;line-height:1.5;color:var(--text-muted);white-space:pre-wrap;word-break:break-word;max-height:320px;overflow:auto;background:#050505;border:1px solid var(--border);border-radius:8px;padding:10px;margin-top:6px}
+    .run-error{font-family:'SF Mono','Fira Code',monospace;font-size:12px;color:var(--red);white-space:pre-wrap;word-break:break-word;background:rgba(196,64,64,.05);border:1px solid rgba(196,64,64,.25);border-radius:8px;padding:10px;margin-top:6px}
+    .run-task-line{display:flex;align-items:center;gap:8px;font-size:11px;color:var(--text-muted);font-family:'SF Mono','Fira Code',monospace;margin:2px 0}
+    .run-task-line .dot{width:6px;height:6px;border-radius:50%;background:var(--green)}
+    .run-task-line.err .dot{background:var(--red)}
+
+    .empty{color:var(--text-muted);font-size:13px;font-style:italic;padding:6px 0}
+    .footer{margin-top:40px;padding-top:20px;border-top:1px solid var(--border);color:var(--text-muted);font-size:11px;text-align:center}
+    a{color:var(--accent);text-decoration:none}
+    a:hover{text-decoration:underline}
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1 id="title">workflow</h1>
+      <div class="meta" id="subtitle"></div>
+    </div>
+    <div id="status-badge" class="badge">loading…</div>
+  </header>
+  <main>
+    <p class="description" id="description"></p>
+    <div class="meta-grid" id="meta-grid"></div>
+
+    <div class="card">
+      <div class="card-title">Flow diagram <span class="count" id="pattern-badge">—</span></div>
+      <div id="flow-diagram"></div>
+    </div>
+
+    <div class="card" id="tasks-card" style="display:none">
+      <div class="card-title">Tasks <span class="count" id="task-count">0</span></div>
+      <div id="tasks" class="task-pipeline"></div>
+    </div>
+
+    <div class="card" id="prompt-card">
+      <div class="card-title">Prompt</div>
+      <pre class="prompt" id="prompt"></pre>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Run history <span class="count" id="run-count">0</span></div>
+      <div id="runs"></div>
+    </div>
+
+    <div class="footer" id="footer"></div>
+  </main>
+
+  <script>
+    // ---------- Integration catalogue (inline SVG logos, monochrome-tinted) ----------
+    // Each entry defines match keywords and a small brand-coloured SVG.
+    const INTEGRATIONS = [
+      { id:'jira',       name:'Jira',       kind:'source', keys:['jira','jql','ticket','issue','wak','proj','project ='],
+        svg: '<svg viewBox="0 0 32 32" xmlns="http://www.w3.org/2000/svg"><path fill="#2684FF" d="M15.3 2.1 2 15.4a.9.9 0 0 0 0 1.3l13.3 13.3a.9.9 0 0 0 1.3 0l5-5a.9.9 0 0 0 0-1.3L11 15.1a.5.5 0 0 1 0-.7l10.6-10.6a.5.5 0 0 1 .7 0l5 5a.9.9 0 0 0 1.3 0l1.1-1.1a.9.9 0 0 0 0-1.3L16.6 2.1a.9.9 0 0 0-1.3 0z"/></svg>' },
+      { id:'confluence', name:'Confluence', kind:'source', keys:['confluence','cql','wiki','space'],
+        svg: '<svg viewBox="0 0 32 32" xmlns="http://www.w3.org/2000/svg"><path fill="#2684FF" d="M3 23.3c-.4.7-.2 1.6.5 2l5 3c.8.4 1.7.2 2.2-.6 2.6-4.2 4.8-3.7 8.9-1.9l5 2.3c.8.4 1.7 0 2-.8l2.4-5.4c.3-.8 0-1.7-.8-2-10.6-5-18-4.8-25.2 3.4zM29 8.7c.4-.7.2-1.6-.5-2l-5-3c-.8-.4-1.7-.2-2.2.6-2.6 4.2-4.8 3.7-8.9 1.9l-5-2.3c-.8-.4-1.7 0-2 .8L3 9.1c-.3.8 0 1.7.8 2 10.6 5 18 4.8 25.2-3.4z"/></svg>' },
+      { id:'github',     name:'GitHub',     kind:'both',   keys:['github','gh','repo','repository','pull request','pr ','pull-request','branch','commit','.github'],
+        svg: '<svg viewBox="0 0 32 32" xmlns="http://www.w3.org/2000/svg"><path fill="#f0f6fc" d="M16 2.3C8.4 2.3 2.3 8.5 2.3 16c0 6 3.9 11.2 9.4 13 .7.1.9-.3.9-.7v-2.4c-3.8.8-4.6-1.8-4.6-1.8-.6-1.6-1.5-2-1.5-2-1.2-.8.1-.8.1-.8 1.4.1 2.1 1.4 2.1 1.4 1.2 2.1 3.2 1.5 4 1.1.1-.9.5-1.5.9-1.8-3-.3-6.2-1.5-6.2-6.7 0-1.5.5-2.7 1.4-3.7-.1-.3-.6-1.7.1-3.5 0 0 1.1-.4 3.7 1.4 1.1-.3 2.2-.4 3.3-.4s2.2.2 3.3.4c2.6-1.8 3.7-1.4 3.7-1.4.7 1.8.3 3.2.1 3.5.9 1 1.4 2.2 1.4 3.7 0 5.3-3.2 6.4-6.2 6.7.5.4 1 1.3 1 2.6v3.9c0 .4.2.8.9.7 5.5-1.8 9.4-7 9.4-13 0-7.5-6.2-13.7-13.7-13.7z"/></svg>' },
+      { id:'slack',      name:'Slack',      kind:'output', keys:['slack','channel','c0','u0','post_slack','dm '],
+        svg: '<svg viewBox="0 0 32 32" xmlns="http://www.w3.org/2000/svg"><g><path fill="#36C5F0" d="M9 19.5a2.5 2.5 0 1 1-2.5-2.5H9zm1.3 0a2.5 2.5 0 0 1 5 0v6.2a2.5 2.5 0 0 1-5 0z"/><path fill="#2EB67D" d="M12.8 9a2.5 2.5 0 1 1 2.5-2.5V9zm0 1.3a2.5 2.5 0 0 1 0 5H6.5a2.5 2.5 0 0 1 0-5z"/><path fill="#ECB22E" d="M23.2 12.8a2.5 2.5 0 1 1 2.5 2.5h-2.5zm-1.3 0a2.5 2.5 0 0 1-5 0V6.5a2.5 2.5 0 0 1 5 0z"/><path fill="#E01E5A" d="M19.5 23.2a2.5 2.5 0 1 1-2.5 2.5v-2.5zm0-1.3a2.5 2.5 0 0 1 0-5h6.2a2.5 2.5 0 0 1 0 5z"/></g></svg>' },
+      { id:'datadog',    name:'Datadog',    kind:'source', keys:['datadog','dd_','env:prod','metric','monitor','logs'],
+        svg: '<svg viewBox="0 0 32 32" xmlns="http://www.w3.org/2000/svg"><path fill="#632CA6" d="M27 8.5 5 16l6.6 2.4-3 6.8 6.7-5.3L17 28l5-20z"/></svg>' },
+      { id:'salesforce', name:'Salesforce', kind:'source', keys:['salesforce','soql','opportunity','account.name','accountid'],
+        svg: '<svg viewBox="0 0 32 32" xmlns="http://www.w3.org/2000/svg"><path fill="#00A1E0" d="M13 7a6 6 0 0 1 10.5-1.5A7 7 0 0 1 30 12a7 7 0 0 1-3 5.7A6 6 0 0 1 22 26a6 6 0 0 1-4-1.5A7 7 0 0 1 6 22a6 6 0 0 1-4-11 6 6 0 0 1 11-4z"/></svg>' },
+      { id:'chorus',     name:'Chorus',     kind:'source', keys:['chorus','call intelligence','zoominfo','conversations'],
+        svg: '<svg viewBox="0 0 32 32" xmlns="http://www.w3.org/2000/svg"><path fill="#ff5a1f" d="M16 3C9 3 3 8.4 3 15.2c0 3.6 1.6 6.8 4.3 9L6 28l5.4-2.2c1.4.5 2.9.8 4.5.8 7 0 13-5.4 13-12.2S23.1 3 16 3z"/></svg>' },
+      { id:'nvd',        name:'NVD',        kind:'source', keys:['nvd','cve','vulnerabilit'],
+        svg: '<svg viewBox="0 0 32 32" xmlns="http://www.w3.org/2000/svg"><path fill="#c0392b" d="M16 2 4 6v10c0 7 5.2 12.5 12 14 6.8-1.5 12-7 12-14V6z"/></svg>' },
+      { id:'workflow',   name:'Workflow',   kind:'both',   keys:['call_workflow','sub-workflow','child workflow'],
+        svg: '<svg viewBox="0 0 32 32" xmlns="http://www.w3.org/2000/svg"><circle cx="8" cy="8" r="4" fill="#7a5ddb"/><circle cx="24" cy="24" r="4" fill="#4a8ad4"/><path stroke="#6b7685" stroke-width="2" fill="none" d="M8 12v8c0 2 2 4 4 4h8"/></svg>' },
+    ];
+
+    const CLOCK_SVG = '<svg viewBox="0 0 32 32" xmlns="http://www.w3.org/2000/svg"><circle cx="16" cy="16" r="12" fill="none" stroke="#7a5ddb" stroke-width="2"/><path d="M16 8v8l5 3" stroke="#7a5ddb" stroke-width="2" fill="none" stroke-linecap="round"/></svg>';
+    const BOLT_SVG = '<svg viewBox="0 0 32 32" xmlns="http://www.w3.org/2000/svg"><path fill="#d18a3a" d="M18 3 6 19h8l-2 10 12-16h-8z"/></svg>';
+    const HAND_SVG = '<svg viewBox="0 0 32 32" xmlns="http://www.w3.org/2000/svg"><path fill="#6b7685" d="M10 14V6a2 2 0 1 1 4 0v7h1V4a2 2 0 1 1 4 0v9h1V6a2 2 0 1 1 4 0v10l-1 8c-.5 3.2-3 4-6 4h-4c-3 0-4-1-5-3l-4-8a2 2 0 1 1 3-2z"/></svg>';
+    const ARROW_SVG = '<svg viewBox="0 0 18 32" xmlns="http://www.w3.org/2000/svg"><path d="M9 2v24m0 0-5-5m5 5 5-5" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+
+    function escapeHtml(str) {
+      const d = document.createElement('div');
+      d.textContent = str == null ? '' : String(str);
+      return d.innerHTML;
+    }
+    function formatTime(s) {
+      if (!s) return '—';
+      try { return new Date(s).toLocaleString(); } catch (_) { return s; }
+    }
+
+    // Scan text for integrations. Returns an ordered list of unique integrations.
+    function detectIntegrations(text) {
+      if (!text) return [];
+      const lower = text.toLowerCase();
+      const out = [];
+      const seen = new Set();
+      for (const integ of INTEGRATIONS) {
+        if (seen.has(integ.id)) continue;
+        for (const key of integ.keys) {
+          if (lower.includes(key)) { out.push(integ); seen.add(integ.id); break; }
+        }
+      }
+      return out;
+    }
+
+    function nodeHTML({ kind, iconSvg, name, sub }) {
+      return (
+        '<div class="node ' + (kind || '') + '">' +
+          '<div class="icon">' + iconSvg + '</div>' +
+          '<div class="name">' + escapeHtml(name) + '</div>' +
+          (sub ? '<div class="sub">' + escapeHtml(sub) + '</div>' : '') +
+        '</div>'
+      );
+    }
+
+    function arrowRow() {
+      return '<div class="flow-connector">' + ARROW_SVG + '</div>';
+    }
+
+    function laneHTML(label, nodesHtml) {
+      if (!nodesHtml) return '';
+      return (
+        '<div>' +
+          '<div class="flow-lane-label">' + escapeHtml(label) + '</div>' +
+          '<div class="flow-row">' + nodesHtml + '</div>' +
+        '</div>'
+      );
+    }
+
+    // Build the flow diagram: Trigger → Sources → Agent → Outputs.
+    function renderDiagram(wf, integrations) {
+      const trigType = (wf.trigger && wf.trigger.type) || 'schedule';
+      let triggerNode;
+      if (trigType === 'schedule') {
+        triggerNode = nodeHTML({ kind:'trigger', iconSvg:CLOCK_SVG, name:'Schedule', sub:'every ' + (wf.interval || '—') });
+      } else if (trigType === 'on_success' || trigType === 'on_failure') {
+        triggerNode = nodeHTML({ kind:'trigger', iconSvg:BOLT_SVG, name:trigType.replace('_',' '), sub:wf.trigger.ref });
+      } else {
+        triggerNode = nodeHTML({ kind:'trigger', iconSvg:HAND_SVG, name:'Manual', sub:'run via API' });
+      }
+
+      const sources = integrations.filter(i => i.kind === 'source' || i.kind === 'both');
+      const outputs = integrations.filter(i => i.kind === 'output' || i.kind === 'both');
+
+      const sourceNodes = sources.length
+        ? sources.map(i => nodeHTML({ kind:'source', iconSvg:i.svg, name:i.name })).join('')
+        : '<div class="flow-empty">No integrations detected in the prompt.</div>';
+
+      const agentNode = nodeHTML({
+        kind:'agent',
+        iconSvg:'<svg viewBox="0 0 32 32" xmlns="http://www.w3.org/2000/svg"><circle cx="16" cy="12" r="6" fill="#4a8ad4"/><path d="M6 28c0-5.5 4.5-10 10-10s10 4.5 10 10" fill="#4a8ad4"/></svg>',
+        name:'/' + (wf.agent || 'agent'),
+        sub:'LLM tool-loop'
+      });
+
+      const outputNodes = outputs.length
+        ? outputs.map(i => nodeHTML({ kind:'output', iconSvg:i.svg, name:i.name })).join('')
+        : '';
+
+      let html = '<div class="flow">';
+      html += laneHTML('Trigger', triggerNode);
+      html += arrowRow();
+      html += laneHTML('Read from', sourceNodes);
+      html += arrowRow();
+      html += laneHTML('Agent', agentNode);
+      if (outputNodes) {
+        html += arrowRow();
+        html += laneHTML('Write to', outputNodes);
+      }
+      html += '</div>';
+      return html;
+    }
+
+    function taskChipsHTML(promptText) {
+      const integs = detectIntegrations(promptText);
+      if (!integs.length) return '';
+      return '<div class="task-chips">' +
+        integs.map(i => '<span class="chip">' + i.svg + escapeHtml(i.name) + '</span>').join('') +
+        '</div>';
+    }
+
+    async function load() {
+      const path = window.location.pathname.replace(/\/$/, '');
+      const res = await fetch(path + '/data.json', { cache: 'no-store' });
+      if (!res.ok) {
+        document.getElementById('title').textContent = 'workflow not found';
+        return;
+      }
+      const wf = await res.json();
+      document.title = 'arbetern — ' + (wf.name || wf.id);
+      document.getElementById('title').textContent = wf.name || wf.id;
+      document.getElementById('subtitle').textContent =
+        '/' + wf.agent + ' · id ' + wf.id + ' · every ' + wf.interval + ' · created ' + formatTime(wf.created_at);
+
+      const badge = document.getElementById('status-badge');
+      if (!wf.enabled) {
+        badge.textContent = 'paused'; badge.className = 'badge paused';
+      } else if (wf.last_error) {
+        badge.textContent = 'last run errored'; badge.className = 'badge err';
+      } else if (wf.last_run) {
+        badge.textContent = 'last run ok'; badge.className = 'badge ok';
+      } else {
+        badge.textContent = 'pending first run'; badge.className = 'badge';
+      }
+
+      document.getElementById('description').textContent = wf.description || '';
+
+      const hasTasks = Array.isArray(wf.tasks) && wf.tasks.length > 0;
+      const trig = wf.trigger || {};
+      const trigType = trig.type || 'schedule';
+      const pattern = hasTasks ? 'subflows'
+        : (trigType === 'on_success' || trigType === 'on_failure') ? 'event-triggered'
+        : trigType === 'manual' ? 'manual'
+        : 'monoflow';
+      document.getElementById('pattern-badge').textContent = pattern;
+
+      // Gather integrations across all prompt text for the top-level diagram.
+      const allText = hasTasks
+        ? (wf.tasks || []).map(t => (t.name || '') + ' ' + (t.prompt || '')).join('\n')
+        : (wf.prompt || '');
+      const integrations = detectIntegrations(allText);
+      document.getElementById('flow-diagram').innerHTML = renderDiagram(wf, integrations);
+
+      // Meta grid
+      const items = [
+        { label: 'Agent', value: '/' + wf.agent },
+        { label: 'Pattern', value: pattern },
+        { label: 'Interval', value: trigType === 'schedule' ? wf.interval : '—' },
+        { label: 'Trigger', value: trigType + (trig.ref ? ' (' + trig.ref + ')' : '') },
+        { label: 'Enabled', value: wf.enabled ? 'yes' : 'no' },
+        { label: 'Created by', value: wf.created_by || '—' },
+        { label: 'Last run', value: formatTime(wf.last_run) },
+      ];
+      document.getElementById('meta-grid').innerHTML = items.map(i =>
+        '<div class="meta-item"><div class="label">' + escapeHtml(i.label) + '</div><div class="value">' + escapeHtml(i.value) + '</div></div>'
+      ).join('');
+
+      // Tasks vs prompt
+      const tasksCard = document.getElementById('tasks-card');
+      const promptCard = document.getElementById('prompt-card');
+      if (hasTasks) {
+        promptCard.style.display = 'none';
+        tasksCard.style.display = 'block';
+        document.getElementById('task-count').textContent = wf.tasks.length;
+        document.getElementById('tasks').innerHTML = wf.tasks.map((t, i) => {
+          const isLast = i === wf.tasks.length - 1;
+          return (
+            '<div class="task-row">' +
+              '<div class="task-index">' +
+                '<div class="num">' + (i+1) + '</div>' +
+                (isLast ? '' : '<div class="bar"></div>') +
+              '</div>' +
+              '<div class="task-body">' +
+                '<div class="task-name">' + escapeHtml(t.name) + '</div>' +
+                taskChipsHTML(t.prompt) +
+                '<div class="task-prompt">' + escapeHtml(t.prompt) + '</div>' +
+              '</div>' +
+            '</div>'
+          );
+        }).join('');
+      } else {
+        document.getElementById('prompt').textContent = wf.prompt || '';
+      }
+
+      // Run history
+      const runsEl = document.getElementById('runs');
+      const runs = wf.runs || [];
+      document.getElementById('run-count').textContent = runs.length;
+      if (runs.length === 0) {
+        runsEl.innerHTML = '<div class="empty">No runs yet — the first execution happens immediately after creation.</div>';
+      } else {
+        runsEl.innerHTML = runs.map(r => {
+          const ok = !r.error;
+          const statusCls = ok ? 'run-status' : 'run-status err';
+          const statusText = ok ? 'ok' : 'error';
+          const taskBlock = Array.isArray(r.tasks) && r.tasks.length > 0
+            ? r.tasks.map((t, i) => {
+                const tStatus = t.error ? 'error' : 'ok';
+                return '<div class="run-task-line' + (t.error ? ' err' : '') + '">' +
+                  '<span class="dot"></span>' +
+                  (i+1) + '. ' + escapeHtml(t.name) + ' — ' + tStatus + ' (' + (t.duration_ms || 0) + 'ms)' +
+                  (t.error ? '  err: ' + escapeHtml(t.error) : '') +
+                  '</div>';
+              }).join('')
+            : '';
+          const body = ok
+            ? taskBlock + (r.result ? '<div class="run-result">' + escapeHtml(r.result) + '</div>' : '')
+            : taskBlock + '<div class="run-error">' + escapeHtml(r.error) + '</div>' + (r.result ? '<div class="run-result">' + escapeHtml(r.result) + '</div>' : '');
+          const trigBadge = r.triggered_by ? '<span class="run-duration">· ' + escapeHtml(r.triggered_by) + '</span>' : '';
+          return (
+            '<div class="run">' +
+              '<div class="run-head">' +
+                '<span class="run-time">' + escapeHtml(formatTime(r.started_at)) + '</span>' +
+                '<span class="run-duration">' + escapeHtml((r.duration_ms || 0) + ' ms') + '</span>' +
+                trigBadge +
+                '<span class="' + statusCls + '">' + statusText + '</span>' +
+              '</div>' +
+              body +
+            '</div>'
+          );
+        }).join('');
+      }
+
+      document.getElementById('footer').textContent = 'Last refreshed ' + new Date().toLocaleString();
+    }
+
+    load().catch(e => console.error(e));
+    setInterval(() => load().catch(() => {}), 30000);
+  </script>
+</body>
+</html>

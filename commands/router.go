@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"math"
@@ -15,6 +16,7 @@ import (
 	"github.com/justmike1/arbetern/nvd"
 	"github.com/justmike1/arbetern/salesforce"
 	"github.com/justmike1/arbetern/slack"
+	"github.com/justmike1/arbetern/workflows"
 )
 
 type Router struct {
@@ -28,6 +30,7 @@ type Router struct {
 	chorusClient     *chorus.Client
 	datadogClients   *datadog.MultiClient
 	dashboards       *dashboards.Registry
+	workflows        *workflows.Registry
 	contextProvider  *ContextProvider
 	memory           *ConversationMemory
 	prompts          PromptProvider
@@ -37,7 +40,7 @@ type Router struct {
 	maxToolRounds    int
 }
 
-func NewRouter(slackClient SlackClient, ghClient *github.Client, modelsClient *llm.Client, codeModelsClient *llm.Client, jiraClient *atlassian.Client, nvdClient *nvd.Client, sfClient *salesforce.Client, chorusClient *chorus.Client, datadogClients *datadog.MultiClient, dashboardRegistry *dashboards.Registry, pp PromptProvider, agentID, appURL string, sessions *SessionStore, maxToolRounds int) *Router {
+func NewRouter(slackClient SlackClient, ghClient *github.Client, modelsClient *llm.Client, codeModelsClient *llm.Client, jiraClient *atlassian.Client, nvdClient *nvd.Client, sfClient *salesforce.Client, chorusClient *chorus.Client, datadogClients *datadog.MultiClient, dashboardRegistry *dashboards.Registry, workflowRegistry *workflows.Registry, pp PromptProvider, agentID, appURL string, sessions *SessionStore, maxToolRounds int) *Router {
 	return &Router{
 		slackClient:      slackClient,
 		ghClient:         ghClient,
@@ -49,6 +52,7 @@ func NewRouter(slackClient SlackClient, ghClient *github.Client, modelsClient *l
 		chorusClient:     chorusClient,
 		datadogClients:   datadogClients,
 		dashboards:       dashboardRegistry,
+		workflows:        workflowRegistry,
 		contextProvider:  NewContextProvider(slackClient),
 		memory:           NewConversationMemory(),
 		prompts:          pp,
@@ -217,6 +221,7 @@ func (r *Router) newGeneralHandler(userContext string, session *ThreadSession) *
 		chorusClient:     r.chorusClient,
 		datadogClients:   r.datadogClients,
 		dashboards:       r.dashboards,
+		workflows:        r.workflows,
 		contextProvider:  r.contextProvider,
 		memory:           r.memory,
 		prompts:          r.prompts,
@@ -292,4 +297,21 @@ func (r *Router) HandleThreadReply(channelID, threadTS, userID, text string) {
 		log.Printf("[user=%s channel=%s thread=%s] thread routed to: general handler", userID, channelID, threadTS)
 		r.newGeneralHandler(userContext, sess).Execute(channelID, userID, text, "", threadTS)
 	}
+}
+
+// RunWorkflow runs a workflow's prompt through this agent's headless LLM
+// tool-loop. It is called by the workflow scheduler on every tick. There is
+// no Slack audit thread, response URL, or channel context — so the prompt
+// must be fully self-contained and use tools (post_slack_message, Jira,
+// GitHub, etc.) to produce any user-visible side effects.
+//
+// Returns the final assistant message content or the first tool-loop error.
+func (r *Router) RunWorkflow(ctx context.Context, userID, prompt string) (string, error) {
+	if strings.TrimSpace(prompt) == "" {
+		return "", fmt.Errorf("workflow prompt is empty")
+	}
+	userContext := fmt.Sprintf("Scheduled workflow run (agent=%s, creator=%s). No interactive user is present — execute the instruction autonomously using tools.", r.agentID, userID)
+	h := r.newGeneralHandler(userContext, nil)
+	h.headless = true
+	return h.ExecuteHeadless(ctx, userID, prompt)
 }
