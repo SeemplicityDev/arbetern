@@ -21,6 +21,14 @@ const azureAPIVersion = "2024-10-21"
 // azureResponsesAPIVersion is the API version for the Responses API (codex models).
 const azureResponsesAPIVersion = "2025-04-01-preview"
 
+// anthropicAPIVersion is the Anthropic Messages API version header value sent
+// to Foundry's /anthropic/v1/messages endpoint for Claude deployments.
+const anthropicAPIVersion = "2023-06-01"
+
+// anthropicMaxTokens bounds the completion length for Anthropic Messages API
+// calls (the API requires max_tokens and has no default).
+const anthropicMaxTokens = 4096
+
 // maxResponseBody is the upper bound on response body reads to prevent OOM from
 // unexpectedly large upstream responses (10 MB).
 const maxResponseBody = 10 << 20
@@ -92,6 +100,22 @@ func (c *Client) useAzure() bool {
 	return c.azureEndpoint != "" && c.azureAPIKey != ""
 }
 
+// azureServicesEndpoint returns the Azure AI Services hostname used for
+// partner-model protocol endpoints (e.g. /anthropic/v1/messages). When the
+// user configured the classic "*.openai.azure.com" endpoint, we rewrite it to
+// the sibling "*.services.ai.azure.com" host (same resource, different
+// surface) so Claude and OpenAI deployments work from one config value.
+func (c *Client) azureServicesEndpoint() string {
+	return strings.Replace(c.azureEndpoint, ".openai.azure.com", ".services.ai.azure.com", 1)
+}
+
+// isAnthropicModel reports whether the given Azure deployment name is a
+// Claude model served through Foundry's Anthropic Messages API endpoint
+// (/anthropic/v1/messages).
+func isAnthropicModel(model string) bool {
+	return strings.HasPrefix(strings.ToLower(model), "claude")
+}
+
 // Model returns the model/deployment name this client is using.
 func (c *Client) Model() string {
 	return c.model
@@ -116,6 +140,17 @@ func (c *Client) Complete(ctx context.Context, systemPrompt, userPrompt string) 
 		return resp.Choices[0].Message.Content, resp.Usage, nil
 	}
 
+	if c.useAzure() && isAnthropicModel(c.model) {
+		resp, err := c.doAnthropic(ctx, messages, nil)
+		if err != nil {
+			return "", nil, err
+		}
+		if len(resp.Choices) == 0 {
+			return "", nil, fmt.Errorf("anthropic API returned no output")
+		}
+		return resp.Choices[0].Message.Content, resp.Usage, nil
+	}
+
 	resp, err := c.doChat(ctx, messages, nil)
 	if err != nil {
 		return "", nil, err
@@ -131,6 +166,9 @@ func (c *Client) Complete(ctx context.Context, systemPrompt, userPrompt string) 
 func (c *Client) CompleteWithTools(ctx context.Context, messages []ChatMessage, tools []Tool) (*ChatResponse, error) {
 	if c.isResponsesModel() {
 		return c.doResponses(ctx, messages, tools)
+	}
+	if c.useAzure() && isAnthropicModel(c.model) {
+		return c.doAnthropic(ctx, messages, tools)
 	}
 	return c.doChat(ctx, messages, tools)
 }
@@ -303,9 +341,25 @@ func (c *Client) Endpoint() string {
 
 // isResponsesModel returns true when the deployment uses the Azure Responses API
 // (/openai/responses) rather than the legacy Chat Completions endpoint.
-// All current Azure OpenAI deployments (gpt-5.x, codex, etc.) use this API.
+// Only the gpt-5.x / codex / o-series families support Responses. Other
+// deployments (gpt-4.x, claude-*, etc.) fall back to Chat Completions.
 func (c *Client) isResponsesModel() bool {
-	return c.useAzure()
+	if !c.useAzure() {
+		return false
+	}
+	if isAnthropicModel(c.model) {
+		return false
+	}
+	m := strings.ToLower(c.model)
+	switch {
+	case strings.HasPrefix(m, "gpt-5"),
+		strings.HasPrefix(m, "codex"),
+		strings.HasPrefix(m, "o1"),
+		strings.HasPrefix(m, "o3"),
+		strings.HasPrefix(m, "o4"):
+		return true
+	}
+	return false
 }
 
 // doResponses calls the Azure Responses API (/responses) for codex models.
