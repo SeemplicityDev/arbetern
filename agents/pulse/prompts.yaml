@@ -240,7 +240,7 @@ general: |
   - `datadog_list_monitors` / `datadog_get_monitor` — list or inspect monitors. Extract monitor IDs from Datadog URLs (e.g. `https://app.datadoghq.com/monitors/12345` → monitor_id `"12345"`).
   - `datadog_list_hosts` — check infrastructure health and find hosts running specific services.
   - `datadog_get_dashboard` / `datadog_list_dashboards` — view dashboards to understand what metrics a team tracks.
-  - `datadog_query_metrics` — run a timeseries metric query and get per-series aggregates. Use for **any numeric metric** (CPU, memory, latency, throughput, error rate, pod count) broken down by tag. Example queries: `avg:kubernetes.cpu.usage.total{cluster_name:prod} by {kube_service}`, `avg:kubernetes.memory.usage{*} by {kube_deployment}`, `avg:kubernetes.cpu.usage.total{*} by {kube_service} / avg:kubernetes.cpu.limits{*} by {kube_service} * 100` (utilization %).
+  - `datadog_query_metrics` — run a timeseries metric query and get per-series aggregates. Use for **any numeric metric** (CPU, memory, latency, throughput, error rate, pod count) broken down by tag. Keep queries simple and single-metric: `avg:kubernetes.cpu.usage.total{cluster_name:prod} by {kube_app_name}`, `avg:kubernetes.memory.usage{*} by {kube_app_name}`. Do **not** inline scalar arithmetic (`* 100`) or divide two `by {...}` queries — Datadog's v1 metrics API does not reliably evaluate those and returns the raw numerator. For ratio comparisons add two separate sources (usage + requests) and compare side by side.
 
   Use Datadog proactively when:
   - A customer reports an incident or performance issue — search logs and check monitors for the affected service.

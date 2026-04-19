@@ -210,10 +210,146 @@
     if (v === null || v === undefined || Number.isNaN(v)) return '—';
     const a = Math.abs(v);
     if (a === 0) return '0';
-    if (a >= 1000) return v.toFixed(1);
+    if (a >= 1e12) return (v/1e12).toFixed(2) + 'T';
+    if (a >= 1e9)  return (v/1e9).toFixed(2) + 'G';
+    if (a >= 1e6)  return (v/1e6).toFixed(2) + 'M';
+    if (a >= 1e3)  return (v/1e3).toFixed(2) + 'K';
     if (a >= 10) return v.toFixed(2);
     if (a >= 1) return v.toFixed(3);
     return v.toFixed(4);
+  }
+
+  // Infer a display unit for a datadog_query_metrics site so we can render
+  // meaningful values (cores / millicores / %, MiB / GiB, etc.) instead of
+  // raw nanocores or bytes. Falls back to "raw" SI formatting when the query
+  // shape is unfamiliar.
+  function inferMetricUnit(site){
+    const q = String(site.query || '').toLowerCase();
+    let maxAbs = 0;
+    for (const s of (site.series || [])) {
+      for (const k of ['avg','min','max','last']) {
+        const v = s[k];
+        if (typeof v === 'number' && Number.isFinite(v)) {
+          const a = Math.abs(v);
+          if (a > maxAbs) maxAbs = a;
+        }
+      }
+    }
+    const isCPU = /kubernetes\.cpu\./.test(q);
+    const isMem = /kubernetes\.memory\./.test(q);
+    // CPU usage.total is reported in nanocores (1 core = 1e9), while
+    // requests/limits/capacity/allocatable are reported in cores directly.
+    // Without this split, a 0.25-core request renders as "0.000m".
+    const isCPUCoresNative = isCPU && /\.(requests|limits|capacity|allocatable)\b/.test(q);
+    const endsMul100 = /\*\s*100\s*$/.test(q.trim());
+    let kind = 'raw';
+    let warning = '';
+    if (isCPU && endsMul100 && maxAbs <= 1000) {
+      kind = 'percent';
+    } else if (isCPU && endsMul100 && maxAbs > 1000) {
+      kind = 'cores';
+      warning = "Query ends with '* 100' (intended as % of CPU requests), but the values are nanocore-sized. This usually means kubernetes.cpu.requests is missing or zero for these workloads, so the division degenerated into the raw usage numerator. Showing CPU usage in cores instead of percent.";
+    } else if (isCPUCoresNative) {
+      kind = 'cores_native';
+    } else if (isCPU) {
+      kind = 'cores';
+    } else if (isMem) {
+      kind = 'bytes';
+    } else if (endsMul100 && maxAbs <= 1000) {
+      kind = 'percent';
+    }
+    return { kind, warning, maxAbs };
+  }
+
+  function unitDisplayLabel(u){
+    switch (u.kind) {
+      case 'percent':       return '%';
+      case 'cores':         return 'CPU cores';
+      case 'cores_native':  return 'CPU cores';
+      case 'bytes':         return 'bytes (auto-scaled)';
+      default:              return 'native units';
+    }
+  }
+
+  function formatByUnit(v, u){
+    if (v === null || v === undefined || Number.isNaN(v) || !Number.isFinite(v)) return '—';
+    if (u.kind === 'percent') {
+      return (Math.abs(v) >= 10 ? v.toFixed(1) : v.toFixed(2)) + '%';
+    }
+    if (u.kind === 'cores') {
+      // incoming values are nanocores (1 core = 1e9 nanocores)
+      const cores = v / 1e9;
+      const a = Math.abs(cores);
+      if (a === 0) return '0';
+      if (a >= 1)     return cores.toFixed(2) + ' cores';
+      if (a >= 0.001) return (cores * 1000).toFixed(0) + 'm';
+      return (cores * 1000).toFixed(3) + 'm';
+    }
+    if (u.kind === 'cores_native') {
+      // incoming values are already in cores (requests/limits)
+      const cores = v;
+      const a = Math.abs(cores);
+      if (a === 0) return '0';
+      if (a >= 1)     return cores.toFixed(2) + ' cores';
+      if (a >= 0.001) return (cores * 1000).toFixed(0) + 'm';
+      return (cores * 1000).toFixed(3) + 'm';
+    }
+    if (u.kind === 'bytes') {
+      const a = Math.abs(v);
+      if (a >= 1024 ** 4) return (v / 1024 ** 4).toFixed(2) + ' TiB';
+      if (a >= 1024 ** 3) return (v / 1024 ** 3).toFixed(2) + ' GiB';
+      if (a >= 1024 ** 2) return (v / 1024 ** 2).toFixed(2) + ' MiB';
+      if (a >= 1024)      return (v / 1024).toFixed(2) + ' KiB';
+      return v.toFixed(0) + ' B';
+    }
+    return fmtMetricNum(v);
+  }
+
+  function chartScale(u){
+    if (u.kind === 'cores') return { div: 1e9, label: 'cores' };
+    if (u.kind === 'cores_native') return { div: 1, label: 'cores' };
+    if (u.kind === 'bytes') {
+      const a = u.maxAbs || 0;
+      if (a >= 1024 ** 3) return { div: 1024 ** 3, label: 'GiB' };
+      if (a >= 1024 ** 2) return { div: 1024 ** 2, label: 'MiB' };
+      if (a >= 1024)      return { div: 1024,      label: 'KiB' };
+      return { div: 1, label: 'bytes' };
+    }
+    if (u.kind === 'percent') return { div: 1, label: '%' };
+    return { div: 1, label: '' };
+  }
+
+  function describeWindow(fromMs, toMs){
+    if (!fromMs || !toMs) return '';
+    const ms = Math.max(0, toMs - fromMs);
+    const mins = ms / 60000;
+    if (mins < 90)  return Math.round(mins) + ' min';
+    const hrs = ms / 3600000;
+    if (hrs < 48)   return (hrs % 1 === 0 ? hrs.toFixed(0) : hrs.toFixed(1)) + ' h';
+    return (hrs / 24).toFixed(1) + ' d';
+  }
+
+  // Render a short "what are we looking at" banner above each chart:
+  // series count, window, top/bottom scope by avg, plus any unit warning.
+  function metricsSummaryIntro(site, u){
+    const series = site.series || [];
+    if (series.length === 0) return '';
+    const sorted = [...series]
+      .filter(s => typeof s.avg === 'number' && Number.isFinite(s.avg))
+      .sort((a, b) => b.avg - a.avg);
+    const top = sorted[0];
+    const bot = sorted[sorted.length - 1];
+    const win = describeWindow(site.from_date, site.to_date);
+    const bits = [];
+    bits.push('<strong>' + series.length + '</strong> series' + (win ? ' over the last <strong>' + win + '</strong>' : ''));
+    if (top) bits.push('highest avg: <strong>' + escapeHtml(top.scope || '*') + '</strong> (' + formatByUnit(top.avg, u) + ')');
+    if (bot && bot !== top) bits.push('lowest avg: <strong>' + escapeHtml(bot.scope || '*') + '</strong> (' + formatByUnit(bot.avg, u) + ')');
+    if (site.truncated) bits.push('+' + site.truncated + ' more hidden');
+    const intro = '<div class="metrics-summary-intro empty" style="margin:6px 0 8px">Showing ' + bits.join(' · ') + '. Values formatted as ' + unitDisplayLabel(u) + '.</div>';
+    const warn = u.warning
+      ? '<div class="source-error" style="background:#3a2a10;border-color:#d79a4a;color:#f3d8a8;margin:6px 0 8px">⚠ ' + escapeHtml(u.warning) + '</div>'
+      : '';
+    return warn + intro;
   }
 
   // Build a URL that opens the Datadog Metrics Explorer on the right site with
@@ -249,6 +385,15 @@
     const q = btn && btn.getAttribute('data-query');
     if (q) copyToClipboard(q, btn);
   };
+  // Auto-copy the query when opening Datadog so the user just pastes it into
+  // the explorer's query box. Datadog does not accept arbitrary query
+  // expressions via URL (the state is in an opaque LZString hash fragment),
+  // so copy+paste is the only reliable path.
+  window.__openInDatadog = function(link){
+    const q = link && link.getAttribute('data-query');
+    if (q) copyToClipboard(q, null);
+    return true; // let the anchor navigate
+  };
 
   // Render a datadog_query_metrics source payload: per-site chart + summary table.
   function renderMetricsPayload(payload){
@@ -257,8 +402,9 @@
     const blocks = sites.map(site => {
       const canvasId = 'metrics-chart-' + (++metricsChartSeq);
       const series = site.series || [];
-      const unitLabel = site.unit ? escapeHtml(site.unit) : 'metric\u2019s native unit';
-      const unitBadge = site.unit ? ' (' + escapeHtml(site.unit) + ')' : '';
+      const unit = inferMetricUnit(site);
+      const unitLabel = site.unit ? escapeHtml(site.unit) : escapeHtml(unitDisplayLabel(unit));
+      const unitBadge = ' (' + unitLabel + ')';
       const errorBlock = site.error ? '<div class="source-error">' + escapeHtml(site.error) + '</div>' : '';
       const ddURL = datadogExploreURL(site.site, site.from_date, site.to_date);
       const qAttr = escapeHtml(site.query || '');
@@ -266,7 +412,7 @@
         '<h4>[' + escapeHtml(site.label || site.site || '') + ']' + unitBadge +
         ' <span class="q" title="' + qAttr + '">' + qAttr + '</span>' +
         ' <button type="button" class="dd-link" data-query="' + qAttr + '" onclick="__copyMetricsQuery(this)">Copy query</button>' +
-        ' <a href="' + ddURL + '" target="_blank" rel="noopener" class="dd-link">Open in Datadog \u2197</a>' +
+        ' <a href="' + ddURL + '" target="_blank" rel="noopener" class="dd-link" data-query="' + qAttr + '" onclick="__openInDatadog(this)" title="Copies the query to your clipboard, then opens Datadog Metrics Explorer. Paste into the query box.">Copy &amp; Open in Datadog \u2197</a>' +
         '</h4>';
       if (errorBlock && series.length === 0) {
         return '<div class="metrics-site">' + header + errorBlock + '</div>';
@@ -276,11 +422,12 @@
           '<div class="empty" style="margin-top:8px">No data returned. The metric name may not exist in this Datadog site, the tag filter may match zero series, or the time window may be empty. Try the <strong>Open in Datadog</strong> link above to verify the query, then adjust the metric or tags.</div>' +
           '</div>';
       }
+      const intro = metricsSummaryIntro(site, unit);
       let summaryRows = '';
       if (series.length > 0) {
         const legend =
           '<div class="empty" style="margin:4px 0 8px">' +
-          'Each row is one tag group. Values are in ' + unitLabel + '. ' +
+          'Each row is one tag group. Values are in <strong>' + unitLabel + '</strong>. ' +
           '<strong>avg / min / max / last</strong> are computed across the ' +
           'query window (<strong>n</strong> = sample count). Rows are sorted by <strong>avg</strong> desc. ' +
           'The chart above plots the same series over time.' +
@@ -296,10 +443,10 @@
           '</tr></thead><tbody>' +
           series.map(s => '<tr>' +
             '<td>' + escapeHtml(s.scope || '*') + '</td>' +
-            '<td>' + fmtMetricNum(s.avg) + '</td>' +
-            '<td>' + fmtMetricNum(s.min) + '</td>' +
-            '<td>' + fmtMetricNum(s.max) + '</td>' +
-            '<td>' + fmtMetricNum(s.last) + '</td>' +
+            '<td>' + formatByUnit(s.avg, unit) + '</td>' +
+            '<td>' + formatByUnit(s.min, unit) + '</td>' +
+            '<td>' + formatByUnit(s.max, unit) + '</td>' +
+            '<td>' + formatByUnit(s.last, unit) + '</td>' +
             '<td>' + (s.count ?? 0) + '</td>' +
           '</tr>').join('') +
           '</tbody></table></div>' +
@@ -309,6 +456,7 @@
       return '<div class="metrics-site">' +
         header +
         errorBlock +
+        intro +
         '<div class="metrics-chart"><canvas id="' + canvasId + '"></canvas></div>' +
         summaryRows +
         '</div>';
@@ -321,9 +469,11 @@
         const canvas = document.getElementById(canvasId);
         if (!canvas || typeof Chart === 'undefined') return;
         if (metricsCharts[canvasId]) { metricsCharts[canvasId].destroy(); }
+        const unit = inferMetricUnit(site);
+        const scale = chartScale(unit);
         const datasets = (site.series || []).map((s, i) => ({
           label: s.scope || '*',
-          data: (s.points || []).map(p => ({ x: p[0], y: p[1] })),
+          data: (s.points || []).map(p => ({ x: p[0], y: (scale.div === 1 ? p[1] : p[1] / scale.div) })),
           borderColor: colorForScope(s.scope || String(i), i),
           backgroundColor: colorForScope(s.scope || String(i), i) + '33',
           borderWidth: 1.5,
@@ -347,7 +497,7 @@
               tooltip: {
                 callbacks: {
                   title: items => items.length ? new Date(items[0].parsed.x).toLocaleString() : '',
-                  label: item => (item.dataset.label || '') + ': ' + fmtMetricNum(item.parsed.y),
+                  label: item => (item.dataset.label || '') + ': ' + formatByUnit(item.parsed.y * scale.div, unit),
                 },
               },
             },
@@ -362,6 +512,9 @@
                 ticks: { color: '#b0b8c1' },
                 grid: { color: 'rgba(255,255,255,0.04)' },
                 beginAtZero: true,
+                title: scale.label
+                  ? { display: true, text: scale.label, color: '#b0b8c1' }
+                  : { display: false },
               },
             },
           },

@@ -1,10 +1,12 @@
 apiVersion: apps/v1
-kind: Deployment
+kind: StatefulSet
 metadata:
   name: {{ include "arbetern.fullname" . }}
   labels:
     {{- include "arbetern.labels" . | nindent 4 }}
 spec:
+  serviceName: {{ include "arbetern.fullname" . }}
+  podManagementPolicy: Parallel
   {{- if not .Values.autoscaling.enabled }}
   replicas: {{ .Values.replicaCount }}
   {{- end }}
@@ -258,18 +260,15 @@ spec:
           configMap:
             name: {{ include "arbetern.fullname" . }}-agent-rbac
       {{- end }}
-      {{- if .Values.dashboards.enabled }}
+      {{- if and .Values.dashboards.enabled (not .Values.dashboards.persistence.enabled) }}
       {{- if and (not .Values.volumes) (not .Values.customPrompts) (not .Values.agentRBAC) }}
       volumes:
       {{- end }}
         - name: dashboards
-          {{- if .Values.dashboards.persistence.enabled }}
-          persistentVolumeClaim:
-            claimName: {{ include "arbetern.fullname" . }}-dashboards
-          {{- else }}
           emptyDir: {}
-          {{- end }}
       {{- end }}
+      {{- /* When dashboards.persistence is enabled, the "dashboards" volume
+             is supplied by volumeClaimTemplates below (StatefulSet only). */ -}}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
@@ -282,3 +281,23 @@ spec:
       tolerations:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+  {{- if and .Values.dashboards.enabled .Values.dashboards.persistence.enabled }}
+  volumeClaimTemplates:
+    - metadata:
+        name: dashboards
+        labels:
+          {{- include "arbetern.labels" . | nindent 10 }}
+        {{- with .Values.dashboards.persistence.annotations }}
+        annotations:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+      spec:
+        accessModes:
+          {{- toYaml .Values.dashboards.persistence.accessModes | nindent 10 }}
+        resources:
+          requests:
+            storage: {{ .Values.dashboards.persistence.size | quote }}
+        {{- with .Values.dashboards.persistence.storageClass }}
+        storageClassName: {{ . | quote }}
+        {{- end }}
+  {{- end }}

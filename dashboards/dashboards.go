@@ -126,6 +126,16 @@ type Executor interface {
 	Execute(ctx context.Context, src DataSource) (any, error)
 }
 
+// AccountRebuilder is an optional Executor extension for Kind="account"
+// dashboards. Account dashboards are built via a dedicated fan-out
+// (see BuildAccountDashboard) and their Sources carry no Args — the generic
+// per-source Execute path would fail with "requires args.X" on every sync.
+// When the Executor implements this interface, syncOne routes account
+// dashboards through RebuildAccount instead of iterating Sources.
+type AccountRebuilder interface {
+	RebuildAccount(ctx context.Context, d *Dashboard) (*Dashboard, error)
+}
+
 // runner owns the goroutine driving one dashboard's sync loop.
 type runner struct {
 	cancel context.CancelFunc
@@ -403,6 +413,43 @@ func (r *Registry) syncOne(ctx context.Context, agent, id string) {
 	}
 	// Work on a copy so concurrent readers see a stable snapshot.
 	d := *orig
+
+	// Account dashboards have their own fan-out + health scoring — their
+	// Sources carry no Args, so running them through the generic executor
+	// would just yield "requires args.X" on every sync. Delegate to the
+	// rebuilder which re-resolves the account and recomputes the score.
+	if d.Kind == "account" {
+		if rb, ok := r.executor.(AccountRebuilder); ok {
+			refreshed, err := rb.RebuildAccount(ctx, &d)
+			if err != nil {
+				d.LastError = err.Error()
+				d.LastSync = time.Now().UTC().Format(time.RFC3339)
+				r.mu.Lock()
+				r.items[key(agent, id)] = &d
+				r.mu.Unlock()
+				if perr := r.persist(&d); perr != nil {
+					log.Printf("[dashboards] persist %s/%s failed: %v", agent, id, perr)
+				}
+				return
+			}
+			// Preserve stable identity fields across rebuilds.
+			refreshed.ID = d.ID
+			refreshed.Agent = d.Agent
+			refreshed.ShortName = d.ShortName
+			refreshed.CreatedBy = d.CreatedBy
+			refreshed.CreatedAt = d.CreatedAt
+			refreshed.SyncInterval = d.SyncInterval
+			refreshed.LastError = ""
+			r.mu.Lock()
+			r.items[key(agent, id)] = refreshed
+			r.mu.Unlock()
+			if err := r.persist(refreshed); err != nil {
+				log.Printf("[dashboards] persist %s/%s failed: %v", agent, id, err)
+			}
+			return
+		}
+	}
+
 	data := make(map[string]SourceResult, len(d.Sources))
 	for i, src := range d.Sources {
 		start := time.Now()
