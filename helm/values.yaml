@@ -18,7 +18,13 @@ serviceAccount:
 podAnnotations: {}
 podLabels: {}
 
-podSecurityContext: {}
+podSecurityContext:
+  # distroless/static:nonroot runs as uid/gid 65532. fsGroup ensures mounted
+  # volumes (emptyDir / PVC for dashboards) are writable by that user.
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
 
 securityContext: {}
 
@@ -32,6 +38,22 @@ env:
   # UI_ALLOWED_CIDRS: "10.0.0.0/8,203.0.113.10/32"  # Comma-separated CIDRs; empty = no restriction.
   # THREAD_SESSION_TTL: "3m"  # How long a thread session stays active (Go duration: 3m, 5m30s, etc.)
   # MAX_TOOL_ROUNDS: "50"  # Max LLM tool-call rounds per request. Increase for complex multi-file tasks.
+
+# Dashboards: LLM-created recurring data dashboards persisted as JSON.
+# When persistence.enabled is true, a PVC is created and mounted so dashboards
+# survive pod restarts. When false, dashboards live in an emptyDir and are
+# rebuilt from scratch on each roll.
+dashboards:
+  enabled: true
+  # Mount path inside the container. Matches DASHBOARDS_DIR env var below.
+  mountPath: /var/lib/arbetern/dashboards
+  persistence:
+    enabled: false
+    size: 1Gi
+    # storageClass: ""           # Leave empty for cluster default
+    accessModes:
+      - ReadWriteOnce
+    annotations: {}
 
 secretName: arbetern-secrets
 

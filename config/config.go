@@ -53,6 +53,7 @@ type Config struct {
 	DDAppKeyUS            string
 	DDAPIKeyEU            string // Datadog EU (datadoghq.eu)
 	DDAppKeyEU            string
+	DashboardsDir         string // Directory where dashboard JSON snapshots are persisted.
 }
 
 // UseAzure returns true when Azure OpenAI credentials are configured.
@@ -128,6 +129,7 @@ func Load() (*Config, error) {
 		DDAppKeyUS:            os.Getenv("DD_APP_KEY_US"),
 		DDAPIKeyEU:            os.Getenv("DD_API_KEY_EU"),
 		DDAppKeyEU:            os.Getenv("DD_APP_KEY_EU"),
+		DashboardsDir:         os.Getenv("DASHBOARDS_DIR"),
 	}
 
 	if cfg.SlackBotToken == "" {

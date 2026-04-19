@@ -17,11 +17,18 @@ RUN yq '[.[] | select(has("extensions")) | .extensions[]] | unique | sort' /tmp/
 
 RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /arbetern .
 
+# Pre-create the dashboards data directory owned by the distroless `nonroot`
+# user (uid/gid 65532) so the runtime can persist JSON snapshots even when
+# DASHBOARDS_DIR points at an unmounted default path.
+RUN mkdir -p /var/lib/arbetern/dashboards \
+    && chown -R 65532:65532 /var/lib/arbetern
+
 FROM gcr.io/distroless/static:nonroot
 
 WORKDIR /app
 
 COPY --from=builder /arbetern /app/arbetern
 COPY agents/ /app/agents/
+COPY --from=builder --chown=65532:65532 /var/lib/arbetern /var/lib/arbetern
 
 ENTRYPOINT ["/app/arbetern"]

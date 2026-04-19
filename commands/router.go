@@ -8,6 +8,7 @@ import (
 
 	"github.com/justmike1/arbetern/atlassian"
 	"github.com/justmike1/arbetern/chorus"
+	"github.com/justmike1/arbetern/dashboards"
 	"github.com/justmike1/arbetern/datadog"
 	"github.com/justmike1/arbetern/github"
 	"github.com/justmike1/arbetern/llm"
@@ -26,6 +27,7 @@ type Router struct {
 	sfClient         *salesforce.Client
 	chorusClient     *chorus.Client
 	datadogClients   *datadog.MultiClient
+	dashboards       *dashboards.Registry
 	contextProvider  *ContextProvider
 	memory           *ConversationMemory
 	prompts          PromptProvider
@@ -35,7 +37,7 @@ type Router struct {
 	maxToolRounds    int
 }
 
-func NewRouter(slackClient SlackClient, ghClient *github.Client, modelsClient *llm.Client, codeModelsClient *llm.Client, jiraClient *atlassian.Client, nvdClient *nvd.Client, sfClient *salesforce.Client, chorusClient *chorus.Client, datadogClients *datadog.MultiClient, pp PromptProvider, agentID, appURL string, sessions *SessionStore, maxToolRounds int) *Router {
+func NewRouter(slackClient SlackClient, ghClient *github.Client, modelsClient *llm.Client, codeModelsClient *llm.Client, jiraClient *atlassian.Client, nvdClient *nvd.Client, sfClient *salesforce.Client, chorusClient *chorus.Client, datadogClients *datadog.MultiClient, dashboardRegistry *dashboards.Registry, pp PromptProvider, agentID, appURL string, sessions *SessionStore, maxToolRounds int) *Router {
 	return &Router{
 		slackClient:      slackClient,
 		ghClient:         ghClient,
@@ -46,6 +48,7 @@ func NewRouter(slackClient SlackClient, ghClient *github.Client, modelsClient *l
 		sfClient:         sfClient,
 		chorusClient:     chorusClient,
 		datadogClients:   datadogClients,
+		dashboards:       dashboardRegistry,
 		contextProvider:  NewContextProvider(slackClient),
 		memory:           NewConversationMemory(),
 		prompts:          pp,
@@ -203,6 +206,7 @@ func (r *Router) newGeneralHandler(userContext string, session *ThreadSession) *
 		sfClient:         r.sfClient,
 		chorusClient:     r.chorusClient,
 		datadogClients:   r.datadogClients,
+		dashboards:       r.dashboards,
 		contextProvider:  r.contextProvider,
 		memory:           r.memory,
 		prompts:          r.prompts,

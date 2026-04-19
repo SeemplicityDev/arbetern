@@ -11,6 +11,7 @@ import (
 	"github.com/justmike1/arbetern/atlassian"
 	"github.com/justmike1/arbetern/chorus"
 	"github.com/justmike1/arbetern/config"
+	"github.com/justmike1/arbetern/dashboards"
 	"github.com/justmike1/arbetern/datadog"
 	"github.com/justmike1/arbetern/github"
 	"github.com/justmike1/arbetern/llm"
@@ -52,6 +53,7 @@ type GeneralHandler struct {
 	sfClient         *salesforce.Client
 	chorusClient     *chorus.Client
 	datadogClients   *datadog.MultiClient
+	dashboards       *dashboards.Registry
 	contextProvider  *ContextProvider
 	memory           *ConversationMemory
 	prompts          PromptProvider
@@ -982,10 +984,15 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 		})
 	}
 
+	tools = append(tools, h.dashboardTools()...)
+
 	return tools
 }
 
 func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, auditTS, name, argsJSON string) string {
+	if out, handled := h.executeDashboardTool(ctx, userID, channelID, name, argsJSON); handled {
+		return out
+	}
 	switch name {
 	case "list_org_repos":
 		owner, err := h.ghClient.ResolveOwner(ctx)

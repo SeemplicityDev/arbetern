@@ -83,6 +83,7 @@ Every layer — agent selection, intent routing, tool availability, model switch
 | `CUSTOM_PROMPTS_DIR` | no | Directory containing custom prompt YAML files that are **appended** to built-in agent prompts. Used for org-specific context via Kubernetes ConfigMap. Set automatically by the Helm chart when `customPrompts` is configured |
 | `AGENT_RBAC_DIR` | no | Directory containing per-agent RBAC overrides (`<agent-id>.yaml` with `allowed_teams` list). Overrides `config.yaml` allowed_teams at deploy time. Set automatically by the Helm chart when `agentRBAC` is configured |
 | `UI_HEADER` | no | Custom header text for the web UI (default: `arbetern`) |
+| `DASHBOARDS_DIR` | no | Directory where dashboard JSON snapshots are persisted (default: `./data/dashboards`). Set automatically by the Helm chart when `dashboards.enabled` is true |
 
 ### Run Locally
 
@@ -209,6 +210,64 @@ export AGENT_RBAC_DIR=/path/to/rbac
 
 > **Slack scope required:** `usergroups:read` — add this to your Slack app's OAuth scopes.
 
+## Dashboards
+
+Agents can create **recurring data dashboards** on demand. Ask the agent in Slack:
+
+```
+/pulse create dashboard to show me all the details you have from your integrations regarding paypal customer, make it sync every 5 minutes
+```
+
+The agent composes a dashboard from its allow-listed read-only integration sources
+(`jira_search`, `salesforce_query`, `chorus_list_conversations`, `datadog_search_logs`,
+`datadog_list_monitors`, `confluence_search`, `github_list_prs`), saves it as JSON at
+`<DASHBOARDS_DIR>/<agent>/<dashboard-id>.json`, and spins up a background goroutine
+that re-runs every source on the requested interval.
+
+**Viewing:** each dashboard is served at `/<agent>/dashboard/<id>` as a self-refreshing
+HTML page, with the raw JSON at `/<agent>/dashboard/<id>/data.json`. Every agent card
+in the Web UI also shows an **Available dashboards** section listing its short-name
+chips — click to open, `×` to delete.
+
+**Lifecycle tools** (exposed to the LLM):
+
+| Tool | Purpose |
+|------|---------|
+| `create_dashboard` | Compose a dashboard with name, short_name, sync_interval, and a list of sources. |
+| `list_dashboards` | List the agent's active dashboards (ids, short names, last-sync times). |
+| `delete_dashboard` | Stop the sync goroutine and remove the stored JSON. |
+
+**Configuration:**
+
+- `DASHBOARDS_DIR` — where JSON snapshots are persisted (default `./data/dashboards`).
+- Sync interval is clamped to `[30s, 24h]`; the default is `5m`.
+- Each source type maps 1:1 to an existing integration client and is read-only.
+
+**Helm / persistence:**
+
+```yaml
+dashboards:
+  enabled: true                     # mounts DASHBOARDS_DIR inside the pod
+  mountPath: /var/lib/arbetern/dashboards
+  persistence:
+    enabled: true                   # create a PVC so dashboards survive restarts
+    size: 2Gi
+    storageClass: "gp3"
+```
+
+When `persistence.enabled=false`, the mount falls back to an `emptyDir` and dashboards
+are rebuilt from scratch on each pod roll.
+
+> **Pod security:** the Helm chart sets `podSecurityContext.fsGroup=65532` (matching the
+> `distroless/static:nonroot` user) so kubelet chowns the mounted dashboards volume on
+> pod start. Without this, the non-root process cannot create `<agent>/` subdirectories
+> inside the PVC and every sync fails with `mkdir: permission denied`.
+
+**Global cross-agent command:** in any Slack channel, run `/arbetern list dashboards` to
+get a single list of every active dashboard across every agent, with clickable view
+links. No agent slash-command or LLM round-trip is involved — it reads straight from
+the registry.
+
 ## Project Structure
 
 ```
@@ -241,6 +300,7 @@ salesforce/          # Salesforce REST API client (SOQL queries, OAuth 2.0)
 chorus/              # Chorus (ZoomInfo) REST API client (call intelligence, deal momentum)
 slack/               # Slack webhook handler + response helpers
 prompts/             # YAML prompt loader + agent discovery
+dashboards/          # dashboard registry, sync runner, executor, embedded HTML viewer
 ui/                  # embedded web UI (agent manager)
 helm/                # Helm chart
 docs/                # setup guides (Slack, GitHub PAT, Atlassian)

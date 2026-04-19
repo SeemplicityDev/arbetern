@@ -195,6 +195,10 @@ spec:
             - name: AGENT_RBAC_DIR
               value: /etc/arbetern/agent-rbac
             {{- end }}
+            {{- if .Values.dashboards.enabled }}
+            - name: DASHBOARDS_DIR
+              value: {{ .Values.dashboards.mountPath | quote }}
+            {{- end }}
           {{- with .Values.livenessProbe }}
           livenessProbe:
             {{- toYaml . | nindent 12 }}
@@ -227,6 +231,13 @@ spec:
               mountPath: /etc/arbetern/agent-rbac
               readOnly: true
           {{- end }}
+          {{- if .Values.dashboards.enabled }}
+          {{- if and (not .Values.volumeMounts) (not .Values.customPrompts) (not .Values.agentRBAC) }}
+          volumeMounts:
+          {{- end }}
+            - name: dashboards
+              mountPath: {{ .Values.dashboards.mountPath | quote }}
+          {{- end }}
       {{- with .Values.volumes }}
       volumes:
         {{- toYaml . | nindent 8 }}
@@ -246,6 +257,18 @@ spec:
         - name: agent-rbac
           configMap:
             name: {{ include "arbetern.fullname" . }}-agent-rbac
+      {{- end }}
+      {{- if .Values.dashboards.enabled }}
+      {{- if and (not .Values.volumes) (not .Values.customPrompts) (not .Values.agentRBAC) }}
+      volumes:
+      {{- end }}
+        - name: dashboards
+          {{- if .Values.dashboards.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "arbetern.fullname" . }}-dashboards
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
       {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:

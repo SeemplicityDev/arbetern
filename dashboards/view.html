@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>arbetern — dashboard</title>
+  <style>
+    :root {
+      --bg:#000; --surface:#070707; --card:#0c0c0c; --card-hover:#111;
+      --border:#1a1a1a; --border-accent:#242424;
+      --text:#b0b8c1; --text-muted:#6b7685; --accent:#4a8ad4; --green:#2e9444; --red:#c44040;
+    }
+    *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+    body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Inter,Roboto,sans-serif;background:var(--bg);color:var(--text);min-height:100vh}
+    header{display:flex;align-items:center;justify-content:space-between;padding:20px 28px;border-bottom:1px solid var(--border);background:var(--surface);position:sticky;top:0;z-index:10}
+    header h1{font-size:18px;font-weight:700;letter-spacing:-.3px}
+    header .meta{font-size:12px;color:var(--text-muted)}
+    header .badge{font-size:11px;padding:3px 10px;border-radius:20px;background:var(--card);border:1px solid var(--border);color:var(--text-muted)}
+    header .badge.ok{color:var(--green);border-color:rgba(46,148,68,.25)}
+    header .badge.err{color:var(--red);border-color:rgba(196,64,64,.25)}
+    main{max-width:1400px;margin:0 auto;padding:28px 24px}
+    .description{color:var(--text-muted);font-size:13px;margin-bottom:24px;max-width:820px;line-height:1.6}
+    .source{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:20px;margin-bottom:18px}
+    .source-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;gap:10px;flex-wrap:wrap}
+    .source-title{font-size:15px;font-weight:600;color:var(--text)}
+    .source-type{font-family:'SF Mono','Fira Code',monospace;font-size:11px;color:var(--accent);padding:2px 8px;border-radius:4px;background:rgba(74,138,212,.08)}
+    .source-meta{font-size:11px;color:var(--text-muted)}
+    .source-error{font-size:13px;color:var(--red);background:rgba(196,64,64,.05);border:1px solid rgba(196,64,64,.2);border-radius:8px;padding:10px 14px;font-family:'SF Mono','Fira Code',monospace}
+    pre.content{background:#050505;border:1px solid var(--border);border-radius:8px;padding:14px;font-family:'SF Mono','Fira Code',monospace;font-size:12px;line-height:1.5;color:var(--text);overflow-x:auto;white-space:pre-wrap;word-break:break-word;max-height:520px}
+    .rich{background:#050505;border:1px solid var(--border);border-radius:8px;padding:14px;font-size:13px;line-height:1.55;color:var(--text);overflow-x:auto;white-space:pre-wrap;word-break:break-word;max-height:640px}
+    .rich strong{color:#e3e8ee;font-weight:600}
+    .rich code{font-family:'SF Mono','Fira Code',monospace;font-size:12px;background:#111;padding:1px 5px;border-radius:3px;color:#d6dde3}
+    .rich hr{border:0;border-top:1px solid var(--border);margin:10px 0}
+    details.cell{display:inline-block;max-width:100%}
+    details.cell summary{cursor:pointer;color:var(--accent);font-size:12px;list-style:none}
+    details.cell summary::-webkit-details-marker{display:none}
+    details.cell pre{margin-top:6px;background:#050505;border:1px solid var(--border);border-radius:6px;padding:8px;font-family:'SF Mono','Fira Code',monospace;font-size:11px;white-space:pre-wrap;max-height:260px;overflow:auto}
+    .table-wrap{width:100%;overflow-x:auto;border:1px solid var(--border);border-radius:8px;background:#050505}
+    table{width:100%;border-collapse:collapse;font-size:13px;table-layout:auto}
+    th,td{text-align:left;padding:8px 12px;border-bottom:1px solid var(--border);vertical-align:top;max-width:360px;overflow-wrap:anywhere;word-break:break-word;white-space:normal}
+    th{font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:var(--text-muted);font-weight:600;background:#080808;position:sticky;top:0}
+    td a{word-break:break-all}
+    tr:last-child td{border-bottom:none}
+    .empty{color:var(--text-muted);font-size:13px;font-style:italic;padding:6px 0}
+    .footer{margin-top:40px;padding-top:20px;border-top:1px solid var(--border);color:var(--text-muted);font-size:11px;text-align:center}
+    a{color:var(--accent);text-decoration:none}
+    a:hover{text-decoration:underline}
+  </style>
+</head>
+<body>
+<header>
+  <div>
+    <h1 id="title">Loading...</h1>
+    <div class="meta" id="meta"></div>
+  </div>
+  <div style="display:flex;gap:10px;align-items:center">
+    <span class="badge" id="sync-badge">syncing</span>
+    <a class="badge" href="/ui/">← agents</a>
+  </div>
+</header>
+<main>
+  <div class="description" id="description"></div>
+  <div id="sources"></div>
+  <div class="footer">
+    Auto-refreshes from the server every sync interval. Raw JSON: <a id="raw-link" href="">data.json</a>
+  </div>
+</main>
+<script>
+  function escapeHtml(s){const d=document.createElement('div');d.textContent=String(s??'');return d.innerHTML}
+  function fmtTime(s){if(!s)return '';try{return new Date(s).toLocaleString()}catch(e){return s}}
+
+  // Render text that may contain Slack-style mrkdwn (*bold*, `code`, <url|label>,
+  // :emoji:, <br>) into safe HTML.
+  function renderRich(text){
+    let s = escapeHtml(text);
+    // Slack links: <http://url|label> or <http://url>
+    s = s.replace(/&lt;(https?:\/\/[^|&\s]+)\|([^&]+?)&gt;/g, '<a href="$1" target="_blank" rel="noopener">$2</a>');
+    s = s.replace(/&lt;(https?:\/\/[^&\s]+)&gt;/g, '<a href="$1" target="_blank" rel="noopener">$1</a>');
+    // Literal <br> from upstream (e.g. Chorus summaries)
+    s = s.replace(/&lt;br\s*\/?&gt;/gi, '<br>');
+    // Bold: *text* (Slack) and **text** (markdown)
+    s = s.replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>');
+    s = s.replace(/(^|[\s(])\*([^*\n]+)\*/g, '$1<strong>$2</strong>');
+    // Inline code
+    s = s.replace(/`([^`\n]+)`/g, '<code>$1</code>');
+    // Known emoji shortcodes -> unicode
+    const emoji = {
+      ':white_check_mark:':'\u2705', ':rotating_light:':'\u{1F6A8}',
+      ':grey_question:':'\u2754', ':warning:':'\u26A0\uFE0F',
+      ':x:':'\u274C', ':heavy_check_mark:':'\u2714\uFE0F',
+    };
+    s = s.replace(/:[a-z0-9_+-]+:/gi, m => emoji[m] || m);
+    return s;
+  }
+
+  // Turn bare URLs in a plain-text string into clickable <a> tags. Input must
+  // already be HTML-escaped.
+  function linkify(escaped){
+    return escaped.replace(/(https?:\/\/[^\s<>"')]+)(?=[)\].,;:!?]*(\s|$))/g,
+      '<a href="$1" target="_blank" rel="noopener">$1<\/a>');
+  }
+
+  function renderCell(v){
+    if (v === null || v === undefined) return '';
+    if (typeof v === 'string') {
+      const trimmed = v.length > 400 ? v.slice(0,400)+'…' : v;
+      return linkify(escapeHtml(trimmed));
+    }
+    if (typeof v !== 'object') return escapeHtml(String(v));
+    if (Array.isArray(v)) {
+      if (v.length === 0) return '<span class="empty">[]</span>';
+      // Array of primitives → comma list
+      if (v.every(x => x === null || typeof x !== 'object')) {
+        const joined = v.map(x => String(x ?? '')).join(', ');
+        return escapeHtml(joined.length > 240 ? joined.slice(0,240)+'…' : joined);
+      }
+      return '<details class="cell"><summary>['+v.length+' items]</summary><pre>'+escapeHtml(JSON.stringify(v,null,2))+'</pre></details>';
+    }
+    const keys = Object.keys(v);
+    if (keys.length === 0) return '<span class="empty">{}</span>';
+    return '<details class="cell"><summary>{'+keys.length+' keys}</summary><pre>'+escapeHtml(JSON.stringify(v,null,2))+'</pre></details>';
+  }
+
+  function renderContent(content){
+    if (content === null || content === undefined) return '<div class="empty">No data.</div>';
+    if (typeof content === 'string') {
+      // Heuristic: if the text contains Slack markup, render rich; otherwise plain pre.
+      if (/[*<`:]/.test(content)) {
+        return '<div class="rich">' + renderRich(content) + '</div>';
+      }
+      return '<pre class="content">' + escapeHtml(content) + '</pre>';
+    }
+    if (Array.isArray(content)) {
+      if (content.length === 0) return '<div class="empty">No results.</div>';
+      const first = content[0];
+      if (first && typeof first === 'object' && !Array.isArray(first)) {
+        const keys = Array.from(content.reduce((s,r)=>{Object.keys(r||{}).forEach(k=>s.add(k));return s}, new Set())).slice(0, 10);
+        const rows = content.slice(0, 100).map(r => '<tr>' + keys.map(k => '<td>' + renderCell(r[k]) + '</td>').join('') + '</tr>').join('');
+        return '<div class="table-wrap"><table><thead><tr>' + keys.map(k=>'<th>'+escapeHtml(k)+'</th>').join('') + '</tr></thead><tbody>' + rows + '</tbody></table></div>'
+          + (content.length > 100 ? '<div class="empty">Showing 100 of ' + content.length + ' rows.</div>' : '');
+      }
+      return '<pre class="content">' + escapeHtml(JSON.stringify(content, null, 2)) + '</pre>';
+    }
+    if (typeof content === 'object') {
+      return '<pre class="content">' + escapeHtml(JSON.stringify(content, null, 2)) + '</pre>';
+    }
+    return '<pre class="content">' + escapeHtml(String(content)) + '</pre>';
+  }
+
+  async function load(){
+    const path = window.location.pathname.replace(/\/$/, '');
+    const dataURL = path + '/data.json';
+    document.getElementById('raw-link').href = dataURL;
+    try {
+      const r = await fetch(dataURL, { cache: 'no-store' });
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const d = await r.json();
+      document.title = d.name + ' — arbetern';
+      document.getElementById('title').textContent = d.name;
+      document.getElementById('meta').textContent =
+        'agent: ' + d.agent + '  ·  every ' + d.sync_interval +
+        '  ·  last sync: ' + (d.last_sync ? fmtTime(d.last_sync) : 'pending');
+      document.getElementById('description').textContent = d.description || '';
+      const badge = document.getElementById('sync-badge');
+      if (d.last_error) { badge.textContent = 'error'; badge.className = 'badge err'; }
+      else if (d.last_sync) { badge.textContent = 'live'; badge.className = 'badge ok'; }
+      const sources = document.getElementById('sources');
+      sources.innerHTML = '';
+      (d.sources || []).forEach((s, i) => {
+        const label = s.name || (s.type + '_' + i);
+        const res = (d.data || {})[label] || {};
+        const card = document.createElement('div');
+        card.className = 'source';
+        const header = '<div class="source-header"><div><div class="source-title">' + escapeHtml(label) +
+          ' <span class="source-type">' + escapeHtml(s.type) + '</span></div></div>' +
+          '<div class="source-meta">' + (res.fetched_at ? fmtTime(res.fetched_at) : 'pending') +
+          (res.duration_ms != null ? ' · ' + res.duration_ms + 'ms' : '') + '</div></div>';
+        const body = res.error
+          ? '<div class="source-error">' + escapeHtml(res.error) + '</div>'
+          : renderContent(res.content);
+        card.innerHTML = header + body;
+        sources.appendChild(card);
+      });
+    } catch (err) {
+      document.getElementById('title').textContent = 'Failed to load';
+      document.getElementById('meta').textContent = String(err);
+      document.getElementById('sync-badge').textContent = 'error';
+      document.getElementById('sync-badge').className = 'badge err';
+    }
+  }
+
+  load();
+  // Poll once every 15s so users see refreshed data without reloading.
+  setInterval(load, 15000);
+</script>
+</body>
+</html>

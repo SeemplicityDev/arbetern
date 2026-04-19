@@ -19,6 +19,7 @@ import (
 	"github.com/justmike1/arbetern/chorus"
 	"github.com/justmike1/arbetern/commands"
 	"github.com/justmike1/arbetern/config"
+	"github.com/justmike1/arbetern/dashboards"
 	"github.com/justmike1/arbetern/datadog"
 	"github.com/justmike1/arbetern/github"
 	"github.com/justmike1/arbetern/llm"
@@ -185,7 +186,58 @@ func buildHelpMessage(agents []prompts.AgentConfig) string {
 		fmt.Fprintf(&b, "• `/%s` — %s\n", agent.ID, desc)
 	}
 	b.WriteString("\nUse `/<agent> introduce yourself` for a full introduction from any agent.")
+	b.WriteString("\nUse `/arbetern list dashboards` to see all active dashboards across agents.")
 	return b.String()
+}
+
+// buildDashboardsMessage renders every active dashboard grouped by agent, with
+// clickable links to the HTML view. Used by /arbetern list dashboards.
+func buildDashboardsMessage(reg *dashboards.Registry, agents []prompts.AgentConfig, appURL string) string {
+	var b strings.Builder
+	b.WriteString("*arbetern dashboards*\n\n")
+	all := reg.List("")
+	if len(all) == 0 {
+		b.WriteString("_No dashboards are currently registered. Ask any agent to create one — e.g. `/pulse create dashboard …`._")
+		return b.String()
+	}
+
+	// Group by agent, preserving the agent-list order.
+	byAgent := make(map[string][]*dashboards.Dashboard, len(agents))
+	for _, d := range all {
+		byAgent[d.Agent] = append(byAgent[d.Agent], d)
+	}
+
+	total := 0
+	for _, agent := range agents {
+		list := byAgent[agent.ID]
+		if len(list) == 0 {
+			continue
+		}
+		fmt.Fprintf(&b, "*/%s* (%d)\n", agent.ID, len(list))
+		for _, d := range list {
+			label := d.ShortName
+			if label == "" {
+				label = d.Name
+			}
+			url := appURL + d.ViewURL()
+			lastSync := d.LastSync
+			if lastSync == "" {
+				lastSync = "pending"
+			}
+			fmt.Fprintf(&b, "• <%s|%s> — %s (every %s, last sync %s)\n", url, label, d.Name, d.SyncInterval, lastSync)
+			total++
+		}
+		b.WriteString("\n")
+	}
+	fmt.Fprintf(&b, "_%d dashboard%s total._", total, plural(total))
+	return b.String()
+}
+
+func plural(n int) string {
+	if n == 1 {
+		return ""
+	}
+	return "s"
 }
 
 // extractIntroLine returns the second non-empty line from an intro prompt,
@@ -785,6 +837,27 @@ func main() {
 	// Map of agentID → Router so the events handler can dispatch thread replies.
 	routers := make(map[string]*commands.Router, len(agents))
 
+	// Dashboards registry: background sync of LLM-created data dashboards.
+	dashDir := cfg.DashboardsDir
+	if dashDir == "" {
+		dashDir = dashboards.DefaultDir
+	}
+	dashExec := dashboards.NewExecutor(dashboards.Clients{
+		Jira:    jiraClient,
+		SF:      sfClient,
+		Chorus:  chorusClient,
+		Datadog: datadogClients,
+		GitHub:  ghClient,
+	})
+	dashRegistry, err := dashboards.New(dashDir, dashExec)
+	if err != nil {
+		log.Fatalf("failed to init dashboards registry: %v", err)
+	}
+	if err := dashRegistry.LoadAll(context.Background()); err != nil {
+		log.Printf("warn: failed to load existing dashboards: %v", err)
+	}
+	defer dashRegistry.StopAll()
+
 	for _, agent := range agents {
 		ap, err := prompts.LoadAgent(agent.ID)
 		if err != nil {
@@ -792,7 +865,7 @@ func main() {
 		}
 
 		agentID := agent.ID // capture for closure
-		router := commands.NewRouter(slackClient, ghClient, modelsClient, codeModelsClient, jiraClient, nvdClient, sfClient, chorusClient, datadogClients, ap, agent.ID, cfg.AppURL, sessions, cfg.MaxToolRounds)
+		router := commands.NewRouter(slackClient, ghClient, modelsClient, codeModelsClient, jiraClient, nvdClient, sfClient, chorusClient, datadogClients, dashRegistry, ap, agent.ID, cfg.AppURL, sessions, cfg.MaxToolRounds)
 		routers[agent.ID] = router
 
 		// Wrap router.Handle with RBAC check.
@@ -812,10 +885,18 @@ func main() {
 
 	// /arbetern help command — lists all available agents with a one-line description.
 	helpMessage := buildHelpMessage(agents)
-	http.Handle("/arbetern/webhook", slack.NewHandler(cfg.SlackSigningSecret, func(channelID, userID, text, responseURL string) {
-		log.Printf("[arbetern] user=%s channel=%s requested help", userID, channelID)
-		_ = slack.RespondToURL(responseURL, helpMessage, false)
-	}))
+	arbeternHandler := func(channelID, userID, text, responseURL string) {
+		trimmed := strings.TrimSpace(text)
+		switch {
+		case strings.EqualFold(trimmed, "list dashboards"), strings.EqualFold(trimmed, "dashboards"), strings.EqualFold(trimmed, "list-dashboards"):
+			log.Printf("[arbetern] user=%s channel=%s listed dashboards", userID, channelID)
+			_ = slack.RespondToURL(responseURL, buildDashboardsMessage(dashRegistry, agents, cfg.AppURL), false)
+		default:
+			log.Printf("[arbetern] user=%s channel=%s requested help", userID, channelID)
+			_ = slack.RespondToURL(responseURL, helpMessage, false)
+		}
+	}
+	http.Handle("/arbetern/webhook", slack.NewHandler(cfg.SlackSigningSecret, arbeternHandler))
 	log.Printf("Registered /arbetern help command at /arbetern/webhook")
 
 	// Socket Mode — connects outbound to Slack for thread reply events.
@@ -865,8 +946,7 @@ func main() {
 
 				// /arbetern — project help, not an agent.
 				if agentID == "arbetern" {
-					log.Printf("[socket-mode] user=%s channel=%s requested /arbetern help", userID, channelID)
-					_ = slack.RespondToURL(responseURL, helpMessage, false)
+					arbeternHandler(channelID, userID, text, responseURL)
 					return
 				}
 
@@ -971,6 +1051,14 @@ func main() {
 	})
 
 	http.Handle("/api/", ipWhitelist(uiCIDRs, apiMux))
+
+	// Dashboard viewer routes: /<agent>/dashboard/<id>[/data.json]
+	// and API routes under /api/dashboards{,/...}.
+	knownAgents := make(map[string]bool, len(agents))
+	for _, a := range agents {
+		knownAgents[a.ID] = true
+	}
+	dashRegistry.RegisterRoutes(http.DefaultServeMux, apiMux, knownAgents)
 
 	log.Printf("arbetern server starting on :%s", cfg.Port)
 

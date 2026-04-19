@@ -699,6 +699,53 @@
       flex-shrink: 0;
     }
 
+    /* ── Agent Dashboards Section ───────────── */
+    .agent-dashboards {
+      margin-top: 10px;
+      padding-top: 10px;
+      border-top: 1px dashed var(--border);
+    }
+    .agent-dashboards-label {
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: var(--text-muted);
+      margin-bottom: 6px;
+    }
+    .agent-dashboards-list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+    .agent-dashboard-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      font-size: 11px;
+      padding: 3px 8px;
+      border-radius: 6px;
+      background: rgba(74, 138, 212, 0.08);
+      border: 1px solid rgba(74, 138, 212, 0.25);
+      color: var(--accent);
+      text-decoration: none;
+      transition: all 0.15s ease;
+    }
+    .agent-dashboard-chip:hover {
+      background: rgba(74, 138, 212, 0.15);
+    }
+    .agent-dashboard-chip .dash-delete {
+      font-size: 13px;
+      line-height: 1;
+      color: var(--text-muted);
+      padding: 0 2px;
+      cursor: pointer;
+      border: none;
+      background: transparent;
+    }
+    .agent-dashboard-chip .dash-delete:hover {
+      color: var(--red);
+    }
+
     .agent-integration-badge .badge-label {
       white-space: nowrap;
     }
@@ -1013,8 +1060,50 @@
             <div class="agent-status"><span class="status-dot"></span> Active</div>
             <div class="agent-prompts-count">${promptCount} prompt${promptCount !== 1 ? 's' : ''}</div>
             ${renderAgentBadges(agent.id)}
+            ${renderAgentDashboards(agent.id)}
           </div>`;
       }).join('');
+    }
+
+    const AGENT_DASHBOARDS = {};
+
+    function renderAgentDashboards(agentId) {
+      const list = (AGENT_DASHBOARDS[agentId] || []);
+      if (list.length === 0) return '';
+      const chips = list.map(d => {
+        const label = escapeHtml(d.short_name || d.name || d.id);
+        const url = `/${agentId}/dashboard/${encodeURIComponent(d.id)}`;
+        const title = escapeHtml(d.name + (d.description ? ' — ' + d.description : ''));
+        return `<a class="agent-dashboard-chip" href="${url}" target="_blank" rel="noopener" title="${title}" onclick="event.stopPropagation()">${label}<button class="dash-delete" title="Delete dashboard" onclick="event.preventDefault();event.stopPropagation();deleteDashboard('${agentId}','${d.id}');">×</button></a>`;
+      }).join('');
+      return `<div class="agent-dashboards"><div class="agent-dashboards-label">Available dashboards</div><div class="agent-dashboards-list">${chips}</div></div>`;
+    }
+
+    async function loadDashboards() {
+      try {
+        const r = await fetch('/api/dashboards');
+        if (!r.ok) return;
+        const list = await r.json();
+        for (const k of Object.keys(AGENT_DASHBOARDS)) delete AGENT_DASHBOARDS[k];
+        (list || []).forEach(d => {
+          if (!AGENT_DASHBOARDS[d.agent]) AGENT_DASHBOARDS[d.agent] = [];
+          AGENT_DASHBOARDS[d.agent].push(d);
+        });
+      } catch (err) {
+        console.warn('Failed to load dashboards:', err);
+      }
+    }
+
+    async function deleteDashboard(agentId, id) {
+      if (!confirm('Delete this dashboard? This stops its sync and removes its stored data.')) return;
+      try {
+        const r = await fetch(`/api/dashboards/${encodeURIComponent(agentId)}/${encodeURIComponent(id)}`, { method: 'DELETE' });
+        if (!r.ok && r.status !== 204) throw new Error('HTTP ' + r.status);
+        await loadDashboards();
+        renderAgents(agentsData);
+      } catch (err) {
+        alert('Failed to delete dashboard: ' + err);
+      }
     }
 
     function renderAgentBadges(agentId) {
@@ -1108,6 +1197,7 @@
         const resp = await fetch('/api/agents');
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         agentsData = await resp.json();
+        await loadDashboards();
         renderAgents(agentsData);
       } catch (err) {
         console.error('Failed to load agents:', err);
