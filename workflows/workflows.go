@@ -42,6 +42,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -184,6 +185,13 @@ type Executor interface {
 type runner struct {
 	cancel context.CancelFunc
 	done   chan struct{}
+	// busy is set to 1 while this workflow has a tick in flight. It is used
+	// as a non-blocking try-lock so overlapping triggers (e.g. a manual
+	// /run firing while a scheduled tick is mid-execution, or a very slow
+	// tick whose interval elapses before it finishes) do not spawn a
+	// concurrent second run of the same workflow, which would double-post
+	// to Slack, double-create PRs, and race on persistence.
+	busy atomic.Int32
 }
 
 // Registry is the thread-safe in-memory index of workflows plus their goroutines.
@@ -463,7 +471,10 @@ func (r *Registry) startRunner(parent context.Context, w *Workflow) {
 	go func() {
 		defer close(run.done)
 		// Fire an initial tick so the user sees activity without waiting a
-		// full interval for the first execution.
+		// full interval for the first execution. The initial tick is run in
+		// this goroutine so the ticker only starts after it completes — the
+		// ticker then represents the cadence of scheduled ticks relative to
+		// that baseline.
 		_, _ = r.runOnce(ctx, agent, id, "schedule:initial")
 
 		ticker := time.NewTicker(interval)
@@ -473,7 +484,16 @@ func (r *Registry) startRunner(parent context.Context, w *Workflow) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				_, _ = r.runOnce(ctx, agent, id, "schedule")
+				// Each scheduled tick runs in its own goroutine so a tick
+				// that takes longer than the interval does not block later
+				// ticks of THIS workflow from starting on time, and does
+				// not block any other workflow's ticker (each workflow has
+				// its own startRunner goroutine). runOnce uses the per-
+				// workflow `busy` try-lock so an overlapping tick is
+				// skipped rather than run concurrently.
+				go func() {
+					_, _ = r.runOnce(ctx, agent, id, "schedule")
+				}()
 			}
 		}
 	}()
@@ -494,16 +514,30 @@ func (r *Registry) RunOnce(ctx context.Context, agent, id, trigger string) (stri
 
 // runOnce performs the actual execution. For multi-task workflows each task
 // is executed in order with prior outputs threaded into the prompt.
+//
+// A per-workflow `busy` try-lock prevents the same workflow from running
+// concurrently with itself. Overlapping triggers are skipped with a logged
+// warning — this protects against double-posts, double-PRs, and persistence
+// races that would otherwise happen if a slow tick (or manual /run)
+// overlapped another trigger.
 func (r *Registry) runOnce(ctx context.Context, agent, id, triggeredBy string) (string, error) {
 	r.mu.RLock()
 	orig, ok := r.items[key(agent, id)]
 	exec := r.executor
+	run := r.runners[key(agent, id)]
 	r.mu.RUnlock()
 	if !ok {
 		return "", fmt.Errorf("workflow %s/%s not found", agent, id)
 	}
 	if exec == nil {
 		return "", fmt.Errorf("workflow executor not configured")
+	}
+	if run != nil {
+		if !run.busy.CompareAndSwap(0, 1) {
+			log.Printf("[workflows] skip %s/%s (%s): already running", agent, id, triggeredBy)
+			return "", fmt.Errorf("workflow %s/%s is already running", agent, id)
+		}
+		defer run.busy.Store(0)
 	}
 	w := *orig
 	if triggeredBy == "" {
@@ -564,7 +598,10 @@ func (r *Registry) runOnce(ctx context.Context, agent, id, triggeredBy string) (
 	entry.Result = finalResult
 	if firstError != nil {
 		entry.Error = firstError.Error()
-		log.Printf("[workflows] run %s/%s failed: %v", agent, id, firstError)
+		log.Printf("[workflows] run %s/%s failed after %s: %v", agent, id, duration.Round(time.Millisecond), firstError)
+	} else {
+		log.Printf("[workflows] run %s/%s completed in %s (result: %d chars)",
+			agent, id, duration.Round(time.Millisecond), len(finalResult))
 	}
 
 	w.LastRun = entry.StartedAt

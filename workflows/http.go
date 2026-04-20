@@ -1,10 +1,12 @@
 package workflows
 
 import (
+	"context"
 	_ "embed"
 	"encoding/json"
 	"net/http"
 	"strings"
+	"time"
 )
 
 //go:embed view.html
@@ -92,14 +94,30 @@ func (r *Registry) handleAPIItem(w http.ResponseWriter, req *http.Request) {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		out, err := r.RunOnce(req.Context(), agent, id, "manual:api")
-		resp := map[string]any{"result": out}
-		if err != nil {
-			resp["error"] = err.Error()
-			w.WriteHeader(http.StatusInternalServerError)
-		}
+		// Kick the workflow off in its own goroutine and return 202 Accepted
+		// immediately. A workflow tick can easily take several minutes
+		// (LLM tool loops, GitHub API, rate-limit back-offs); blocking the
+		// HTTP response that long ties up the "Run now" UI button and the
+		// request itself will usually be killed by intermediate proxies
+		// before the tick completes. The caller polls /data.json to see
+		// the result appear in the run-history list.
+		//
+		// The per-workflow `busy` try-lock inside runOnce still prevents
+		// concurrent runs of the same workflow, so double-clicking the
+		// button (or a schedule overlapping a manual trigger) is safe.
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+			defer cancel()
+			_, _ = r.RunOnce(ctx, agent, id, "manual:api")
+		}()
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(resp)
+		w.WriteHeader(http.StatusAccepted)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"accepted": true,
+			"agent":    agent,
+			"id":       id,
+			"message":  "workflow run queued; poll /data.json to see the result appear in run history",
+		})
 		return
 	}
 	if len(parts) != 2 {

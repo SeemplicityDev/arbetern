@@ -34,10 +34,19 @@ const anthropicMaxTokens = 4096
 const maxResponseBody = 10 << 20
 
 // maxRetries is the number of additional attempts for retryable HTTP errors.
-const maxRetries = 3
+// Anthropic 429s are fairly common on long tool-loops (workflow ticks with
+// dozens of search_code_org / modify_file rounds). Three retries was too
+// stingy — a single burst of rate-limiting during a 20-round tick was
+// enough to abort the whole tick.
+const maxRetries = 6
 
 // baseRetryDelay is the initial backoff delay between retries.
 const baseRetryDelay = 2 * time.Second
+
+// maxRetryDelay caps the wait between retries. Anthropic Retry-After headers
+// occasionally request very long waits (e.g. 120s) under sustained load;
+// clamping them prevents a single tick from stalling for minutes.
+const maxRetryDelay = 60 * time.Second
 
 // isRetryable returns true for HTTP status codes that warrant a retry.
 func isRetryable(statusCode int) bool {
@@ -45,14 +54,21 @@ func isRetryable(statusCode int) bool {
 }
 
 // retryDelay calculates how long to wait before the next retry, respecting
-// a Retry-After header (seconds) if present.
+// a Retry-After header (seconds) if present. Capped at maxRetryDelay.
 func retryDelay(resp *http.Response, attempt int) time.Duration {
+	var d time.Duration
 	if ra := resp.Header.Get("Retry-After"); ra != "" {
 		if secs, err := strconv.Atoi(ra); err == nil && secs > 0 {
-			return time.Duration(secs) * time.Second
+			d = time.Duration(secs) * time.Second
 		}
 	}
-	return baseRetryDelay * (1 << attempt)
+	if d == 0 {
+		d = baseRetryDelay * (1 << attempt)
+	}
+	if d > maxRetryDelay {
+		d = maxRetryDelay
+	}
+	return d
 }
 
 // Client provides LLM inference through either GitHub Models or Azure OpenAI.

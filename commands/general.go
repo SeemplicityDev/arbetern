@@ -282,9 +282,12 @@ func (h *GeneralHandler) ExecuteHeadless(ctx context.Context, userID, prompt str
 	if rounds <= 0 {
 		rounds = 50
 	}
+	toolCallsMade := 0
 	for i := 0; i < rounds; i++ {
 		resp, err := activeClient.CompleteWithTools(ctx, messages, tools)
 		if err != nil {
+			log.Printf("[workflow user=%s agent=%s] LLM completion failed after %d rounds / %d tool calls: %v",
+				userID, h.agentID, i, toolCallsMade, err)
 			return "", fmt.Errorf("LLM completion failed: %w", err)
 		}
 		if len(resp.Choices) == 0 {
@@ -292,13 +295,26 @@ func (h *GeneralHandler) ExecuteHeadless(ctx context.Context, userID, prompt str
 		}
 		choice := resp.Choices[0]
 		if len(choice.Message.ToolCalls) == 0 {
-			return strings.TrimSpace(choice.Message.Content), nil
+			final := strings.TrimSpace(choice.Message.Content)
+			// Make headless completion visible in the operator log. Without
+			// this, a tick that silently ends with "I was unable to…" (or
+			// an empty message) is indistinguishable from a tick that
+			// actually shipped a PR or Slack message.
+			preview := final
+			if len(preview) > 200 {
+				preview = preview[:200] + "…"
+			}
+			preview = strings.ReplaceAll(preview, "\n", " ")
+			log.Printf("[workflow user=%s agent=%s] completed after %d rounds / %d tool calls; final (%d chars): %q",
+				userID, h.agentID, i+1, toolCallsMade, len(final), preview)
+			return final, nil
 		}
 		messages = append(messages, llm.ChatMessage{
 			Role:      "assistant",
 			ToolCalls: choice.Message.ToolCalls,
 		})
 		for _, tc := range choice.Message.ToolCalls {
+			toolCallsMade++
 			log.Printf("[workflow user=%s agent=%s] tool: %s(%s)", userID, h.agentID, tc.Function.Name, tc.Function.Arguments)
 			result := h.executeTool(ctx, "", userID, "", tc.Function.Name, tc.Function.Arguments)
 			// Surface tool-level errors in the operator log. Without this, a
@@ -325,6 +341,8 @@ func (h *GeneralHandler) ExecuteHeadless(ctx context.Context, userID, prompt str
 			}
 		}
 	}
+	log.Printf("[workflow user=%s agent=%s] exceeded max tool rounds (%d); %d tool calls made",
+		userID, h.agentID, rounds, toolCallsMade)
 	return "", fmt.Errorf("workflow tick exceeded max tool rounds (%d)", rounds)
 }
 

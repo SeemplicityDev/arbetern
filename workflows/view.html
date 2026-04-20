@@ -93,6 +93,9 @@
     </div>
     <div style="display:flex;gap:10px;align-items:center">
       <div id="status-badge" class="badge">loading…</div>
+      <button id="run-now-btn" class="badge" type="button"
+        style="cursor:pointer;font-family:inherit;color:var(--text);background:var(--card);"
+        title="Trigger this workflow immediately, outside its schedule.">▶ run now</button>
       <a class="badge" href="/ui/">← agents</a>
     </div>
   </header>
@@ -400,6 +403,53 @@
 
     load().catch(e => console.error(e));
     setInterval(() => load().catch(() => {}), 30000);
+
+    // "Run now" button: POSTs to /api/workflows/<agent>/<id>/run. The server
+    // returns 202 Accepted immediately and executes the workflow in its own
+    // goroutine, so the UI is not blocked on long-running ticks. We auto-
+    // refresh the run-history for a short window after the trigger so the
+    // new run shows up on its own without requiring a manual page reload.
+    document.getElementById('run-now-btn').addEventListener('click', async () => {
+      const btn = document.getElementById('run-now-btn');
+      const parts = window.location.pathname.replace(/\/$/, '').split('/').filter(Boolean);
+      if (parts.length < 3) return;
+      const agent = parts[0];
+      const id = parts[2];
+      const original = btn.textContent;
+      btn.disabled = true;
+      btn.textContent = '⏳ triggering…';
+      btn.style.opacity = '0.7';
+      try {
+        const res = await fetch('/api/workflows/' + encodeURIComponent(agent) + '/' + encodeURIComponent(id) + '/run', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: '{}',
+        });
+        if (!res.ok && res.status !== 202) {
+          const text = await res.text().catch(() => '');
+          btn.textContent = '✗ failed';
+          console.error('run-now failed:', res.status, text);
+          setTimeout(() => { btn.textContent = original; btn.disabled = false; btn.style.opacity = ''; }, 3000);
+          return;
+        }
+        btn.textContent = '✓ queued';
+        // Poll every 5s for up to 5 minutes so the new run shows up as soon
+        // as the server finishes it. Polling is cheap and idempotent; it
+        // overlaps the 30s auto-refresh loop but uses cache:no-store so it
+        // always gets fresh data.
+        const stopAt = Date.now() + 5 * 60 * 1000;
+        const poll = async () => {
+          await load().catch(() => {});
+          if (Date.now() < stopAt) setTimeout(poll, 5000);
+        };
+        setTimeout(poll, 2000);
+      } catch (e) {
+        console.error('run-now error:', e);
+        btn.textContent = '✗ error';
+      } finally {
+        setTimeout(() => { btn.textContent = original; btn.disabled = false; btn.style.opacity = ''; }, 2500);
+      }
+    });
   </script>
 </body>
 </html>
