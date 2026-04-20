@@ -91,7 +91,10 @@
       <h1 id="title">workflow</h1>
       <div class="meta" id="subtitle"></div>
     </div>
-    <div id="status-badge" class="badge">loading…</div>
+    <div style="display:flex;gap:10px;align-items:center">
+      <div id="status-badge" class="badge">loading…</div>
+      <a class="badge" href="/ui/">← agents</a>
+    </div>
   </header>
   <main>
     <p class="description" id="description"></p>
@@ -160,6 +163,22 @@
     }
 
     // Scan text for integrations. Returns an ordered list of unique integrations.
+    // Keywords are matched with word boundaries when they are purely alphanumeric
+    // (so `gh` doesn't match "right", `c0` doesn't match "c0lor", etc.); keys
+    // containing punctuation or spaces (e.g. "project =", ".github", "pr ") fall
+    // back to substring matching since \b anchors don't apply around symbols.
+    const KEY_RE_CACHE = new Map();
+    function keyMatcher(key) {
+      let re = KEY_RE_CACHE.get(key);
+      if (re !== undefined) return re;
+      if (/^[a-z0-9]+$/i.test(key)) {
+        re = new RegExp('\\b' + key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\b', 'i');
+      } else {
+        re = null; // use substring
+      }
+      KEY_RE_CACHE.set(key, re);
+      return re;
+    }
     function detectIntegrations(text) {
       if (!text) return [];
       const lower = text.toLowerCase();
@@ -168,7 +187,9 @@
       for (const integ of INTEGRATIONS) {
         if (seen.has(integ.id)) continue;
         for (const key of integ.keys) {
-          if (lower.includes(key)) { out.push(integ); seen.add(integ.id); break; }
+          const re = keyMatcher(key);
+          const hit = re ? re.test(text) : lower.includes(key);
+          if (hit) { out.push(integ); seen.add(integ.id); break; }
         }
       }
       return out;
@@ -372,7 +393,9 @@
         }).join('');
       }
 
-      document.getElementById('footer').textContent = 'Last refreshed ' + new Date().toLocaleString();
+      const footer = document.getElementById('footer');
+      footer.innerHTML = 'Last refreshed ' + escapeHtml(new Date().toLocaleString()) +
+        '. Raw JSON: <a id="raw-link" href="' + escapeHtml(path + '/data.json') + '">data.json</a>';
     }
 
     load().catch(e => console.error(e));
