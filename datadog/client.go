@@ -15,7 +15,9 @@ const (
 	defaultSite = "datadoghq.com"
 
 	// Response body size limit for io.LimitReader.
-	maxResponseBody = 5 << 20 // 5 MB
+	// Metric queries across large kube_app_name fanouts can easily exceed
+	// 5 MiB; use a generous cap to avoid truncating the JSON mid-stream.
+	maxResponseBody = 64 << 20 // 64 MiB
 )
 
 // Client talks to the Datadog REST API (v1/v2).
@@ -421,10 +423,7 @@ func (c *Client) get(ctx context.Context, path string, params url.Values, target
 		return fmt.Errorf("datadog API returned %d: %s", resp.StatusCode, string(body))
 	}
 
-	if err := json.Unmarshal(body, target); err != nil {
-		return fmt.Errorf("decoding response: %w", err)
-	}
-	return nil
+	return decodeJSON(resp, body, target)
 }
 
 func (c *Client) post(ctx context.Context, path string, payload interface{}, target interface{}) error {
@@ -457,16 +456,32 @@ func (c *Client) post(ctx context.Context, path string, payload interface{}, tar
 		return fmt.Errorf("datadog API returned %d: %s", resp.StatusCode, string(body))
 	}
 
-	if err := json.Unmarshal(body, target); err != nil {
-		return fmt.Errorf("decoding response: %w", err)
-	}
-	return nil
+	return decodeJSON(resp, body, target)
 }
 
 func (c *Client) setHeaders(req *http.Request) {
 	req.Header.Set("DD-API-KEY", c.apiKey)
 	req.Header.Set("DD-APPLICATION-KEY", c.appKey)
 	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "arbetern/1.0")
+}
+
+// decodeJSON unmarshals body into target, returning a diagnostic error when
+// the response is empty or not valid JSON. The HTTP status, content-length
+// header, and a short body preview are included to ease debugging of
+// intermittent upstream issues (e.g. empty 2xx responses from Datadog).
+func decodeJSON(resp *http.Response, body []byte, target interface{}) error {
+	if len(body) == 0 {
+		return fmt.Errorf("datadog returned empty body (status=%d, content-length=%s)", resp.StatusCode, resp.Header.Get("Content-Length"))
+	}
+	if err := json.Unmarshal(body, target); err != nil {
+		preview := string(body)
+		if len(preview) > 200 {
+			preview = preview[:200] + "…"
+		}
+		return fmt.Errorf("decoding response (status=%d, %d bytes): %w: %s", resp.StatusCode, len(body), err, preview)
+	}
+	return nil
 }
 
 // Site returns the configured Datadog site (e.g. "datadoghq.com").
@@ -752,7 +767,15 @@ func (c *Client) QueryMetrics(ctx context.Context, query, from, to string) (*Met
 		"query": {query},
 	}
 	var resp MetricsQueryResponse
-	if err := c.get(ctx, "/api/v1/query", params, &resp); err != nil {
+	// Datadog occasionally returns an empty 2xx body (typically a transient
+	// upstream hiccup); retry once before surfacing the error.
+	err = c.get(ctx, "/api/v1/query", params, &resp)
+	if err != nil && strings.Contains(err.Error(), "empty body") {
+		time.Sleep(250 * time.Millisecond)
+		resp = MetricsQueryResponse{}
+		err = c.get(ctx, "/api/v1/query", params, &resp)
+	}
+	if err != nil {
 		return nil, err
 	}
 	if resp.Status != "" && resp.Status != "ok" {

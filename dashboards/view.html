@@ -399,8 +399,12 @@
   function renderMetricsPayload(payload){
     const sites = payload.sites || [];
     if (sites.length === 0) return '<div class="empty">No metric series returned.</div>';
-    const blocks = sites.map(site => {
-      const canvasId = 'metrics-chart-' + (++metricsChartSeq);
+    // Pair each site with the canvas id used in its HTML so the async wiring
+    // below can find exactly the right element (the global seq counter keeps
+    // ticking while other source cards in the same dashboard render).
+    const canvasIds = sites.map(() => 'metrics-chart-' + (++metricsChartSeq));
+    const blocks = sites.map((site, siteIdx) => {
+      const canvasId = canvasIds[siteIdx];
       const series = site.series || [];
       const unit = inferMetricUnit(site);
       const unitLabel = site.unit ? escapeHtml(site.unit) : escapeHtml(unitDisplayLabel(unit));
@@ -463,11 +467,21 @@
     }).join('');
 
     // Defer Chart.js wiring until the new markup is attached to the DOM.
-    setTimeout(() => {
+    // requestAnimationFrame ensures layout has committed so the canvas has a
+    // non-zero size; a bare setTimeout(...,0) could fire before the browser
+    // has realized the newly-inserted `.metrics-chart` container.
+    const wire = () => {
       sites.forEach((site, idx) => {
-        const canvasId = 'metrics-chart-' + (metricsChartSeq - (sites.length - 1 - idx));
+        const canvasId = canvasIds[idx];
         const canvas = document.getElementById(canvasId);
-        if (!canvas || typeof Chart === 'undefined') return;
+        if (!canvas) {
+          console.warn('[metrics] canvas missing for', canvasId);
+          return;
+        }
+        if (typeof Chart === 'undefined') {
+          console.warn('[metrics] Chart.js not loaded; skipping', canvasId);
+          return;
+        }
         if (metricsCharts[canvasId]) { metricsCharts[canvasId].destroy(); }
         const unit = inferMetricUnit(site);
         const scale = chartScale(unit);
@@ -482,7 +496,8 @@
           tension: 0.25,
           spanGaps: true,
         }));
-        metricsCharts[canvasId] = new Chart(canvas.getContext('2d'), {
+        try {
+          metricsCharts[canvasId] = new Chart(canvas.getContext('2d'), {
           type: 'line',
           data: { datasets },
           options: {
@@ -518,9 +533,17 @@
               },
             },
           },
-        });
+          });
+        } catch (err) {
+          console.error('[metrics] Chart.js init failed for ' + canvasId, err);
+        }
       });
-    }, 0);
+    };
+    if (typeof requestAnimationFrame === 'function') {
+      requestAnimationFrame(() => requestAnimationFrame(wire));
+    } else {
+      setTimeout(wire, 0);
+    }
     return blocks;
   }
 
