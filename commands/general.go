@@ -220,7 +220,7 @@ func (h *GeneralHandler) Execute(channelID, userID, text, responseURL, auditTS s
 				"search_code":      true, "search_code_org": true, "search_files": true,
 				"list_directory": true, "get_pull_request": true,
 				// Dashboard / workflow composition benefits from the stronger model.
-				"create_dashboard": true, "create_workflow": true, "call_workflow": true,
+				"create_dashboard": true, "create_workflow": true, "update_workflow": true, "call_workflow": true,
 			}
 			if codeTools[tc.Function.Name] && h.codeModelsClient != nil && activeClient != h.codeModelsClient {
 				activeClient = h.codeModelsClient
@@ -271,7 +271,7 @@ func (h *GeneralHandler) ExecuteHeadless(ctx context.Context, userID, prompt str
 		"You are executing a scheduled workflow tick. There is NO interactive Slack thread for this run. " +
 		"Do not emit placeholder acknowledgements — call tools immediately and return only concrete outcomes. " +
 		"To notify a Slack channel, use post_slack_message with an explicit channel_id. " +
-		"Do not call create_workflow / delete_workflow from inside a tick."
+		"Do not call create_workflow / update_workflow / delete_workflow from inside a tick."
 
 	messages := []llm.ChatMessage{
 		llm.NewChatMessage("system", systemMsg),
@@ -334,7 +334,7 @@ func (h *GeneralHandler) ExecuteHeadless(ctx context.Context, userID, prompt str
 				"get_file_content": true,
 				"search_code":      true, "search_code_org": true, "search_files": true,
 				"list_directory": true, "get_pull_request": true,
-				"create_dashboard": true, "create_workflow": true, "call_workflow": true,
+				"create_dashboard": true, "create_workflow": true, "update_workflow": true, "call_workflow": true,
 			}
 			if codeTools[tc.Function.Name] && h.codeModelsClient != nil && activeClient != h.codeModelsClient {
 				activeClient = h.codeModelsClient

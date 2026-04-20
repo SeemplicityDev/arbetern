@@ -85,6 +85,27 @@ func (h *GeneralHandler) workflowTools() []llm.Tool {
 				}`),
 			},
 		},
+		llm.Tool{
+			Type: "function",
+			Function: llm.ToolFunction{
+				Name:        "update_workflow",
+				Description: "Edit an existing workflow owned by the current agent. Only the fields you pass are changed; all others (including run history, id, created_at, and short_name) are preserved. Use this when the user asks to 'update', 'edit', 'change', 'tweak', 'amend', 'fix', or 'modify' a workflow's behaviour — for example changing the prompt to always post a Slack message, adjusting the interval, pausing/resuming, switching trigger type, or rewriting the task list. The tick goroutine is restarted so the change takes effect on the next run. Requires the workflow id (discover via list_workflows if the user only gave a name). Returns the updated descriptor and its view URL.",
+				Parameters: json.RawMessage(`{
+					"type":"object",
+					"properties":{
+						"id":{"type":"string","description":"Workflow id (16-hex segment from the view URL). Required."},
+						"name":{"type":"string","description":"New human title. Omit to leave unchanged."},
+						"description":{"type":"string","description":"New one-sentence summary. Omit to leave unchanged."},
+						"interval":{"type":"string","description":"New Go duration between ticks (1m-168h). Omit to leave unchanged."},
+						"prompt":{"type":"string","description":"New monoflow prompt. Omit to leave unchanged. Pass an empty string ONLY if you are simultaneously providing a non-empty 'tasks' array."},
+						"tasks":{"type":"array","description":"Replacement ordered task list. Omit to leave unchanged. Pass an empty array to switch the workflow to a prompt-only monoflow.","items":{"type":"object","properties":{"name":{"type":"string"},"prompt":{"type":"string"}},"required":["name","prompt"]}},
+						"trigger":{"type":"object","description":"Replacement trigger. Omit to leave unchanged.","properties":{"type":{"type":"string","enum":["schedule","on_success","on_failure","manual"]},"ref":{"type":"string"}}},
+						"enabled":{"type":"boolean","description":"Pause (false) or resume (true) the workflow. Omit to leave unchanged."}
+					},
+					"required":["id"]
+				}`),
+			},
+		},
 	)
 }
 
@@ -175,6 +196,84 @@ func (h *GeneralHandler) executeWorkflowTool(ctx context.Context, userID, channe
 		}
 		log.Printf("[user=%s channel=%s] deleted workflow agent=%s id=%s", userID, channelID, h.agentID, args.ID)
 		return fmt.Sprintf("Deleted workflow %s.", args.ID), true
+
+	case "update_workflow":
+		if h.headless {
+			return "Error: workflows cannot update workflows from inside a scheduled tick.", true
+		}
+		// Parse into a raw map first so we can tell which fields were
+		// actually supplied by the model (as opposed to JSON zero values,
+		// which we MUST NOT interpret as "clear this field").
+		var raw map[string]json.RawMessage
+		if msg := unmarshalArgs(argsJSON, &raw); msg != "" {
+			return msg, true
+		}
+		idRaw, ok := raw["id"]
+		if !ok {
+			return "Error: 'id' is required.", true
+		}
+		var id string
+		if err := json.Unmarshal(idRaw, &id); err != nil || id == "" {
+			return "Error: 'id' must be a non-empty string.", true
+		}
+		var opts workflows.UpdateOpts
+		if v, ok := raw["name"]; ok {
+			var s string
+			if err := json.Unmarshal(v, &s); err != nil {
+				return fmt.Sprintf("Error: 'name' must be a string: %v", err), true
+			}
+			opts.Name = &s
+		}
+		if v, ok := raw["description"]; ok {
+			var s string
+			if err := json.Unmarshal(v, &s); err != nil {
+				return fmt.Sprintf("Error: 'description' must be a string: %v", err), true
+			}
+			opts.Description = &s
+		}
+		if v, ok := raw["interval"]; ok {
+			var s string
+			if err := json.Unmarshal(v, &s); err != nil {
+				return fmt.Sprintf("Error: 'interval' must be a string: %v", err), true
+			}
+			opts.Interval = &s
+		}
+		if v, ok := raw["prompt"]; ok {
+			var s string
+			if err := json.Unmarshal(v, &s); err != nil {
+				return fmt.Sprintf("Error: 'prompt' must be a string: %v", err), true
+			}
+			opts.Prompt = &s
+		}
+		if v, ok := raw["tasks"]; ok {
+			var tasks []workflows.Task
+			if err := json.Unmarshal(v, &tasks); err != nil {
+				return fmt.Sprintf("Error: 'tasks' must be an array of {name,prompt}: %v", err), true
+			}
+			opts.Tasks = &tasks
+		}
+		if v, ok := raw["trigger"]; ok {
+			var trig workflows.Trigger
+			if err := json.Unmarshal(v, &trig); err != nil {
+				return fmt.Sprintf("Error: 'trigger' must be an object: %v", err), true
+			}
+			opts.Trigger = &trig
+		}
+		if v, ok := raw["enabled"]; ok {
+			var b bool
+			if err := json.Unmarshal(v, &b); err != nil {
+				return fmt.Sprintf("Error: 'enabled' must be a boolean: %v", err), true
+			}
+			opts.Enabled = &b
+		}
+		w, err := h.workflows.Update(ctx, h.agentID, id, opts)
+		if err != nil {
+			return fmt.Sprintf("Error updating workflow: %v", err), true
+		}
+		log.Printf("[user=%s channel=%s] updated workflow agent=%s id=%s pattern=%s", userID, channelID, h.agentID, w.ID, w.Pattern())
+		url := h.appURL + w.ViewURL()
+		return fmt.Sprintf("Updated workflow %q (id=%s, pattern=%s, every %s, enabled=%t). View: %s",
+			w.Name, w.ID, w.Pattern(), w.Interval, w.Enabled, url), true
 
 	case "call_workflow":
 		var args struct {

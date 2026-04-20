@@ -389,6 +389,113 @@ func (r *Registry) List(agent string) []*Workflow {
 	return out
 }
 
+// UpdateOpts carries the editable fields of a workflow. Any field left at
+// its zero value is preserved from the existing workflow, with the exception
+// of Tasks (pass a non-nil slice — possibly empty — to replace tasks), Enabled
+// (always applied), and the explicit Clear* flags for fields whose zero value
+// is ambiguous with "don't change" (e.g. clearing a prompt when switching to
+// tasks-only mode).
+type UpdateOpts struct {
+	Name        *string
+	Description *string
+	Interval    *string
+	Prompt      *string
+	Tasks       *[]Task  // nil = unchanged; non-nil (even empty) = replace
+	Trigger     *Trigger // nil = unchanged
+	Enabled     *bool
+}
+
+// Update applies a partial edit to an existing workflow. The tick goroutine
+// is restarted so the new prompt / interval / trigger take effect on the next
+// scheduled run. Run history, last-run timestamp, and created metadata are
+// preserved. Fields left as nil pointers are untouched.
+func (r *Registry) Update(ctx context.Context, agent, id string, opts UpdateOpts) (*Workflow, error) {
+	r.mu.Lock()
+	orig, ok := r.items[key(agent, id)]
+	if !ok {
+		r.mu.Unlock()
+		return nil, fmt.Errorf("workflow %s/%s not found", agent, id)
+	}
+	updated := *orig // copy, then mutate, then swap in under the lock
+	r.mu.Unlock()
+
+	if opts.Name != nil {
+		if strings.TrimSpace(*opts.Name) == "" {
+			return nil, fmt.Errorf("workflow name cannot be empty")
+		}
+		updated.Name = *opts.Name
+	}
+	if opts.Description != nil {
+		updated.Description = *opts.Description
+	}
+	if opts.Interval != nil {
+		if _, err := time.ParseDuration(*opts.Interval); err != nil {
+			return nil, fmt.Errorf("invalid interval %q: %w", *opts.Interval, err)
+		}
+		updated.Interval = *opts.Interval
+	}
+	if opts.Prompt != nil {
+		updated.Prompt = *opts.Prompt
+	}
+	if opts.Tasks != nil {
+		for i, t := range *opts.Tasks {
+			if strings.TrimSpace(t.Name) == "" || strings.TrimSpace(t.Prompt) == "" {
+				return nil, fmt.Errorf("task %d requires non-empty name and prompt", i+1)
+			}
+		}
+		updated.Tasks = *opts.Tasks
+	}
+	if strings.TrimSpace(updated.Prompt) == "" && len(updated.Tasks) == 0 {
+		return nil, fmt.Errorf("workflow requires either prompt or at least one task after update")
+	}
+	if opts.Trigger != nil {
+		trig := *opts.Trigger
+		switch trig.Type {
+		case "", TriggerSchedule:
+			trig.Type = TriggerSchedule
+			trig.Ref = ""
+		case TriggerOnSuccess, TriggerOnFailure:
+			if !strings.Contains(trig.Ref, "/") {
+				return nil, fmt.Errorf("trigger ref must be '<agent>/<id>' for %s trigger", trig.Type)
+			}
+		case TriggerManual:
+			trig.Ref = ""
+		default:
+			return nil, fmt.Errorf("unknown trigger type %q", trig.Type)
+		}
+		updated.Trigger = trig
+	}
+	if opts.Enabled != nil {
+		updated.Enabled = *opts.Enabled
+	}
+
+	if err := r.persist(&updated); err != nil {
+		return nil, err
+	}
+	r.mu.Lock()
+	r.items[key(agent, id)] = &updated
+	r.mu.Unlock()
+
+	// Restart the tick goroutine so schedule/trigger/prompt changes take
+	// effect immediately. startRunner already cancels any prior runner for
+	// this key before starting a new one.
+	if updated.Enabled {
+		r.startRunner(ctx, &updated)
+	} else {
+		// Disabled: stop any running ticker and leave the entry in place.
+		r.mu.Lock()
+		if run, ok := r.runners[key(agent, id)]; ok {
+			run.cancel()
+			delete(r.runners, key(agent, id))
+		}
+		r.mu.Unlock()
+	}
+	log.Printf("[workflows] updated %s/%s (%q, pattern=%s, every %s, enabled=%t)",
+		agent, id, updated.Name, updated.Pattern(), updated.intervalDur(), updated.Enabled)
+	cp := updated
+	return &cp, nil
+}
+
 // Delete stops the tick goroutine, removes the file, and deletes from memory.
 func (r *Registry) Delete(agent, id string) error {
 	r.mu.Lock()
