@@ -1083,6 +1083,18 @@ func main() {
 	}
 	uiHandler := ipWhitelist(uiCIDRs, http.StripPrefix("/ui/", http.FileServer(http.FS(uiContent))))
 	http.Handle("/ui/", uiHandler)
+	// Favicon — served without IP whitelist so dashboard/workflow viewers can
+	// load it regardless of where they're accessing from.
+	http.HandleFunc("/favicon.svg", func(w http.ResponseWriter, r *http.Request) {
+		b, err := uiFS.ReadFile("ui/favicon.svg")
+		if err != nil {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "image/svg+xml")
+		w.Header().Set("Cache-Control", "public, max-age=86400")
+		_, _ = w.Write(b)
+	})
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/" {
 			http.Redirect(w, r, "/ui/", http.StatusFound)
