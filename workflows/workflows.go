@@ -63,6 +63,14 @@ const (
 	MaxResultChars = 8000
 	// MaxTaskContextChars bounds the prior-task summary fed into the next task.
 	MaxTaskContextChars = 2000
+	// MaxConsecutiveFailures is the number of back-to-back failed ticks (or
+	// ticks that completed with at least one mutating-tool error) before a
+	// scheduled workflow is automatically disabled. A human must then
+	// inspect the last_error / disabled_reason and re-enable the workflow
+	// via update_workflow. This prevents a broken workflow (bad prompt,
+	// misconfigured branch name, revoked credentials, etc.) from spamming
+	// PRs / Slack / 429s indefinitely.
+	MaxConsecutiveFailures = 3
 
 	// TriggerSchedule runs the workflow on its Interval.
 	TriggerSchedule = "schedule"
@@ -112,22 +120,30 @@ type RunLog struct {
 
 // Workflow is the on-disk descriptor.
 type Workflow struct {
-	ID          string   `json:"id"`
-	Agent       string   `json:"agent"`
-	Name        string   `json:"name"`
-	ShortName   string   `json:"short_name"`
-	Description string   `json:"description,omitempty"`
-	Interval    string   `json:"interval"`
-	Prompt      string   `json:"prompt,omitempty"`
-	Tasks       []Task   `json:"tasks,omitempty"`
-	Trigger     Trigger  `json:"trigger,omitempty"`
-	CreatedBy   string   `json:"created_by,omitempty"`
-	CreatedAt   string   `json:"created_at"`
-	Enabled     bool     `json:"enabled"`
-	LastRun     string   `json:"last_run,omitempty"`
-	LastError   string   `json:"last_error,omitempty"`
-	LastResult  string   `json:"last_result,omitempty"`
-	Runs        []RunLog `json:"runs,omitempty"`
+	ID          string  `json:"id"`
+	Agent       string  `json:"agent"`
+	Name        string  `json:"name"`
+	ShortName   string  `json:"short_name"`
+	Description string  `json:"description,omitempty"`
+	Interval    string  `json:"interval"`
+	Prompt      string  `json:"prompt,omitempty"`
+	Tasks       []Task  `json:"tasks,omitempty"`
+	Trigger     Trigger `json:"trigger,omitempty"`
+	CreatedBy   string  `json:"created_by,omitempty"`
+	CreatedAt   string  `json:"created_at"`
+	Enabled     bool    `json:"enabled"`
+	LastRun     string  `json:"last_run,omitempty"`
+	LastError   string  `json:"last_error,omitempty"`
+	LastResult  string  `json:"last_result,omitempty"`
+	// ConsecutiveFailures is incremented on every failed or partially-failed
+	// tick and reset to 0 on a clean run. When it reaches
+	// MaxConsecutiveFailures the workflow is auto-disabled.
+	ConsecutiveFailures int `json:"consecutive_failures,omitempty"`
+	// DisabledReason is set when the registry auto-disables a workflow
+	// (empty when the user manually toggled enabled=false). The UI surfaces
+	// this to explain why a workflow stopped ticking.
+	DisabledReason string   `json:"disabled_reason,omitempty"`
+	Runs           []RunLog `json:"runs,omitempty"`
 }
 
 // ViewURL returns the path to the HTML view for this workflow.
@@ -467,6 +483,12 @@ func (r *Registry) Update(ctx context.Context, agent, id string, opts UpdateOpts
 	}
 	if opts.Enabled != nil {
 		updated.Enabled = *opts.Enabled
+		// Manually re-enabling a workflow clears the auto-disable state so
+		// the runner gets a fresh failure budget and the UI banner goes away.
+		if *opts.Enabled {
+			updated.ConsecutiveFailures = 0
+			updated.DisabledReason = ""
+		}
 	}
 
 	if err := r.persist(&updated); err != nil {
@@ -715,8 +737,29 @@ func (r *Registry) runOnce(ctx context.Context, agent, id, triggeredBy string) (
 	w.LastResult = finalResult
 	if firstError != nil {
 		w.LastError = firstError.Error()
+		w.ConsecutiveFailures++
 	} else {
 		w.LastError = ""
+		w.ConsecutiveFailures = 0
+		// A successful run clears any prior auto-disable reason. (It is
+		// only actually set when Enabled=false, so a clean success after a
+		// user re-enables the workflow will wipe the stale banner.)
+		w.DisabledReason = ""
+	}
+
+	// Auto-disable after too many consecutive failures. Only applies to
+	// workflows that are currently enabled — we don't want to clobber a
+	// user's manual pause with an auto-disable reason.
+	autoDisabled := false
+	if w.Enabled && w.ConsecutiveFailures >= MaxConsecutiveFailures {
+		w.Enabled = false
+		w.DisabledReason = fmt.Sprintf(
+			"auto-disabled after %d consecutive failed ticks. Last error: %s. "+
+				"Re-enable via update_workflow once the underlying issue is fixed.",
+			w.ConsecutiveFailures, w.LastError)
+		autoDisabled = true
+		log.Printf("[workflows] AUTO-DISABLED %s/%s after %d consecutive failures: %s",
+			agent, id, w.ConsecutiveFailures, w.LastError)
 	}
 
 	w.Runs = append([]RunLog{entry}, w.Runs...)
@@ -726,7 +769,21 @@ func (r *Registry) runOnce(ctx context.Context, agent, id, triggeredBy string) (
 
 	r.mu.Lock()
 	r.items[key(agent, id)] = &w
+	var stopRun *runner
+	if autoDisabled {
+		// Detach and cancel the runner AFTER we've released the write lock
+		// so the cancel doesn't contend with this goroutine's own unlock.
+		// The runner goroutine itself will exit on ctx.Done(); our defer on
+		// run.busy.Store(0) above already keeps the try-lock consistent.
+		if old, ok := r.runners[key(agent, id)]; ok {
+			stopRun = old
+			delete(r.runners, key(agent, id))
+		}
+	}
 	r.mu.Unlock()
+	if stopRun != nil {
+		stopRun.cancel()
+	}
 
 	if perr := r.persist(&w); perr != nil {
 		log.Printf("[workflows] persist %s/%s failed: %v", agent, id, perr)

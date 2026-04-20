@@ -283,6 +283,26 @@ func (h *GeneralHandler) ExecuteHeadless(ctx context.Context, userID, prompt str
 		rounds = 50
 	}
 	toolCallsMade := 0
+	// mutatingTools are the side-effect-producing tools whose failure means
+	// this tick did not achieve what the workflow was supposed to do. A
+	// failed modify_file (e.g. 404 because the model passed a non-existent
+	// branch, or old_content didn't match) means no PR was opened; a failed
+	// post_slack_message means no notification went out. We count those
+	// specifically so the workflow layer can treat the tick as failed —
+	// even when the LLM's final assistant message is a nicely-worded
+	// "I tried but…" string — and eventually auto-disable the workflow.
+	mutatingTools := map[string]bool{
+		"modify_file":        true,
+		"create_file":        true,
+		"regex_replace_file": true,
+		"post_slack_message": true,
+		"create_dashboard":   true,
+		"create_workflow":    true,
+		"update_workflow":    true,
+		"delete_workflow":    true,
+		"call_workflow":      true,
+	}
+	var mutatingFailures []string
 	for i := 0; i < rounds; i++ {
 		resp, err := activeClient.CompleteWithTools(ctx, messages, tools)
 		if err != nil {
@@ -307,6 +327,16 @@ func (h *GeneralHandler) ExecuteHeadless(ctx context.Context, userID, prompt str
 			preview = strings.ReplaceAll(preview, "\n", " ")
 			log.Printf("[workflow user=%s agent=%s] completed after %d rounds / %d tool calls; final (%d chars): %q",
 				userID, h.agentID, i+1, toolCallsMade, len(final), preview)
+			if len(mutatingFailures) > 0 {
+				// At least one side-effect tool failed. The tick technically
+				// reached a final assistant message, but the intent of the
+				// workflow (open a PR, post a Slack message, …) wasn't
+				// actually achieved. Surface this as an error so the
+				// workflow registry counts the tick as failed and can
+				// auto-disable after repeated failures.
+				last := mutatingFailures[len(mutatingFailures)-1]
+				return final, fmt.Errorf("workflow tick had %d failed mutating tool call(s); last: %s", len(mutatingFailures), last)
+			}
 			return final, nil
 		}
 		messages = append(messages, llm.ChatMessage{
@@ -327,6 +357,9 @@ func (h *GeneralHandler) ExecuteHeadless(ctx context.Context, userID, prompt str
 					preview = preview[:300] + "…"
 				}
 				log.Printf("[workflow user=%s agent=%s] tool %s returned: %s", userID, h.agentID, tc.Function.Name, preview)
+				if mutatingTools[tc.Function.Name] {
+					mutatingFailures = append(mutatingFailures, fmt.Sprintf("%s: %s", tc.Function.Name, preview))
+				}
 			}
 			messages = append(messages, llm.NewToolResultMessage(tc.ID, result))
 			codeTools := map[string]bool{
@@ -467,7 +500,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 						"old_content":{"type":"string","description":"The exact text in the current file to find and replace. Include 3-5 surrounding context lines to ensure a unique match."},
 						"new_content":{"type":"string","description":"The replacement text that will replace old_content."},
 						"description":{"type":"string","description":"Short description of what was changed (used as commit message and PR title)"},
-						"branch":{"type":"string","description":"Base branch name (optional, uses default branch if empty)"}
+						"branch":{"type":"string","description":"BASE branch the PR should be opened against (typically the repo's default branch — main/master). LEAVE EMPTY in almost all cases; the platform auto-resolves the default branch AND auto-generates a unique head branch per run. Only set this if you specifically need to target a long-lived non-default base like 'develop' or 'release/*'. Never pass a head branch from list_pull_requests or a prior PR — those are auto-generated per-tick and will be ignored."}
 					},
 					"required":["repo","path","old_content","new_content","description"]
 				}`),
@@ -485,7 +518,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 						"path":{"type":"string","description":"File path to create within the repository (e.g. 'maintenance/db-maintenance.yaml', '.github/workflows/db-maintenance.yml')"},
 						"content":{"type":"string","description":"The full content of the new file."},
 						"description":{"type":"string","description":"Short description of what was added (used as commit message and PR title)"},
-						"branch":{"type":"string","description":"Base branch name (optional, uses default branch if empty)"}
+						"branch":{"type":"string","description":"BASE branch the PR should target. LEAVE EMPTY in almost all cases — the platform resolves the repo default branch and auto-generates the head branch. Do not pass an existing PR head branch here."}
 					},
 					"required":["repo","path","content","description"]
 				}`),
@@ -504,7 +537,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 						"pattern":{"type":"string","description":"Go (RE2) regular expression to match. Use capturing groups for partial replacements (e.g. '(tag:\\s*)\\S+' to capture the 'tag: ' prefix)."},
 						"replacement":{"type":"string","description":"Replacement string. Use $1, $2, etc. to reference captured groups (e.g. '${1}latest')."},
 						"description":{"type":"string","description":"Short description of what was changed (used as commit message and PR title)"},
-						"branch":{"type":"string","description":"Base branch name (optional, uses default branch if empty)"}
+						"branch":{"type":"string","description":"BASE branch the PR should target. LEAVE EMPTY in almost all cases — the platform resolves the repo default branch and auto-generates the head branch. Do not pass an existing PR head branch here."}
 					},
 					"required":["repo","path","pattern","replacement","description"]
 				}`),

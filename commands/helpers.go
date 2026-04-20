@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"regexp"
 	"strings"
 
 	"github.com/justmike1/arbetern/github"
@@ -46,12 +47,27 @@ func requireReady(name string, c OAuthClient) string {
 	return ""
 }
 
+// agentPatchBranchRE matches branches produced by github.GenerateBranchName
+// ("<agent>/patch-<unix-timestamp>"). We silently reject these as a PR base
+// because they are transient auto-generated head branches from a prior tick —
+// the LLM sometimes copies one from list_pull_requests into the `branch`
+// argument of modify_file / create_file, which would open the new PR against
+// the old workflow branch instead of the repo's default branch (main/master).
+var agentPatchBranchRE = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*/patch-[0-9]+$`)
+
 // resolveRepoBranch resolves the GitHub owner and fills in the default branch
-// when branch is empty.
+// when branch is empty. It also silently replaces obviously-wrong bases
+// (auto-generated <agent>/patch-<ts> head branches) with the repo default so a
+// confused LLM cannot open a PR that targets a stale workflow branch.
 func resolveRepoBranch(ctx context.Context, ghClient *github.Client, repo, branch string) (owner, resolvedBranch string, errMsg string) {
 	owner, err := ghClient.ResolveOwner(ctx)
 	if err != nil {
 		return "", "", fmt.Sprintf("Error resolving owner: %v", err)
+	}
+	if branch != "" && agentPatchBranchRE.MatchString(branch) {
+		log.Printf("[helpers] ignoring auto-generated agent branch %q as base for %s/%s; falling back to default branch",
+			branch, owner, repo)
+		branch = ""
 	}
 	if branch == "" {
 		branch, err = ghClient.GetDefaultBranch(ctx, owner, repo)

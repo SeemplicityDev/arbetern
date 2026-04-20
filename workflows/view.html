@@ -101,6 +101,7 @@
   </header>
   <main>
     <p class="description" id="description"></p>
+    <div id="disabled-banner" style="display:none;background:rgba(196,64,64,.08);border:1px solid rgba(196,64,64,.35);border-radius:10px;padding:14px 16px;margin-bottom:18px;color:var(--red);font-size:13px;line-height:1.55"></div>
     <div class="meta-grid" id="meta-grid"></div>
 
     <div class="card">
@@ -289,13 +290,23 @@
 
       const badge = document.getElementById('status-badge');
       if (!wf.enabled) {
-        badge.textContent = 'paused'; badge.className = 'badge paused';
+        badge.textContent = wf.disabled_reason ? 'auto-disabled' : 'paused';
+        badge.className = 'badge ' + (wf.disabled_reason ? 'err' : 'paused');
       } else if (wf.last_error) {
         badge.textContent = 'last run errored'; badge.className = 'badge err';
       } else if (wf.last_run) {
         badge.textContent = 'last run ok'; badge.className = 'badge ok';
       } else {
         badge.textContent = 'pending first run'; badge.className = 'badge';
+      }
+
+      const disabledBanner = document.getElementById('disabled-banner');
+      if (!wf.enabled && wf.disabled_reason) {
+        disabledBanner.style.display = 'block';
+        disabledBanner.innerHTML =
+          '<strong>⚠ Auto-disabled</strong> — ' + escapeHtml(wf.disabled_reason);
+      } else {
+        disabledBanner.style.display = 'none';
       }
 
       document.getElementById('description').textContent = wf.description || '';
