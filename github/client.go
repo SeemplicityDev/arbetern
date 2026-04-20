@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -152,7 +153,33 @@ func (c *Client) CreatePullRequest(ctx context.Context, owner, repo, baseBranch,
 	if err != nil {
 		return "", fmt.Errorf("failed to create pull request: %w", err)
 	}
+
+	// Best-effort: request GitHub Copilot as a reviewer. This silently
+	// no-ops if Copilot code review is not enabled for the repo (e.g. the
+	// plan doesn't include it, the org has it disabled, or the PR is from
+	// a fork) — we never fail the PR creation because of it.
+	c.requestCopilotReviewer(ctx, owner, repo, created.GetNumber())
+
 	return created.GetHTMLURL(), nil
+}
+
+// requestCopilotReviewer best-effort-requests the GitHub Copilot bot as a
+// reviewer on an existing pull request. Errors are logged at info level and
+// swallowed: repos without Copilot code review enabled will return 422 and
+// that's fine.
+func (c *Client) requestCopilotReviewer(ctx context.Context, owner, repo string, number int) {
+	if number == 0 {
+		return
+	}
+	// Copilot is requested as a reviewer using its bot login. GitHub accepts
+	// it through the standard request-reviewers endpoint when the repo has
+	// Copilot code review available.
+	req := gh.ReviewersRequest{Reviewers: []string{"copilot-pull-request-reviewer"}}
+	if _, _, err := c.api.PullRequests.RequestReviewers(ctx, owner, repo, number, req); err != nil {
+		log.Printf("[github] copilot reviewer skipped for %s/%s#%d: %v", owner, repo, number, err)
+		return
+	}
+	log.Printf("[github] requested copilot review on %s/%s#%d", owner, repo, number)
 }
 
 func GenerateBranchName(agentName string) string {

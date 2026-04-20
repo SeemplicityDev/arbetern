@@ -5,10 +5,27 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strings"
 
 	"github.com/justmike1/arbetern/github"
 	"github.com/justmike1/arbetern/slack"
 )
+
+// stripWhitespace removes every whitespace character from s so two strings
+// that differ only in whitespace (trailing newline, blank lines, indentation)
+// compare equal. Used to detect no-op / whitespace-only code edits.
+func stripWhitespace(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		switch r {
+		case ' ', '\t', '\n', '\r', '\v', '\f':
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
 
 // parseToolArgs unmarshals a JSON string into the target struct.
 // Returns a user-facing error string if parsing fails.

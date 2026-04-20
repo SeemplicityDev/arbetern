@@ -251,9 +251,16 @@ func (h *GeneralHandler) ExecuteHeadless(ctx context.Context, userID, prompt str
 	// the CODE_MODEL when available — the execution needs structured,
 	// tool-heavy reasoning (PRs, JSON construction, tool composition) rather
 	// than conversational chit-chat, which is the general model's domain.
+	// If no dedicated code model is configured the general model is used as
+	// a fallback and a warning is logged so operators can notice the drift.
 	activeClient := h.modelsClient
 	if h.codeModelsClient != nil {
 		activeClient = h.codeModelsClient
+		log.Printf("[workflow user=%s agent=%s] using code model (%s) for headless execution",
+			userID, h.agentID, activeClient.Model())
+	} else {
+		log.Printf("[workflow user=%s agent=%s] WARNING: no code model configured, falling back to general model (%s)",
+			userID, h.agentID, activeClient.Model())
 	}
 
 	systemMsg := h.systemPrompt()
@@ -294,6 +301,17 @@ func (h *GeneralHandler) ExecuteHeadless(ctx context.Context, userID, prompt str
 		for _, tc := range choice.Message.ToolCalls {
 			log.Printf("[workflow user=%s agent=%s] tool: %s(%s)", userID, h.agentID, tc.Function.Name, tc.Function.Arguments)
 			result := h.executeTool(ctx, "", userID, "", tc.Function.Name, tc.Function.Arguments)
+			// Surface tool-level errors in the operator log. Without this, a
+			// silent "Error: old_content not found" (or similar) from a
+			// modify_file call is only visible to the LLM and can cause it
+			// to ship a weaker fallback (or no-op) PR on its next attempt.
+			if strings.HasPrefix(result, "Error") {
+				preview := strings.ReplaceAll(result, "\n", " ")
+				if len(preview) > 300 {
+					preview = preview[:300] + "…"
+				}
+				log.Printf("[workflow user=%s agent=%s] tool %s returned: %s", userID, h.agentID, tc.Function.Name, preview)
+			}
 			messages = append(messages, llm.NewToolResultMessage(tc.ID, result))
 			codeTools := map[string]bool{
 				"modify_file": true, "create_file": true, "regex_replace_file": true,
@@ -1288,6 +1306,15 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		updatedContent := strings.Replace(fullContent, args.OldContent, args.NewContent, 1)
 		if updatedContent == fullContent {
 			return "Error: old_content and new_content produce identical file content. The replacement is a no-op — double-check that new_content differs from old_content."
+		}
+		// Reject changes whose only effect is whitespace (trailing newline, spaces,
+		// blank lines). A scheduled auto-fix workflow that submits a whitespace-only
+		// PR is almost always the model giving up after its real replacement
+		// failed, and it pollutes the repo with useless PRs.
+		if stripWhitespace(updatedContent) == stripWhitespace(fullContent) {
+			return "Error: the only effective change is whitespace (trailing newline / spaces / blank lines). " +
+				"This is rejected because it is not a real code change. " +
+				"Re-read the file with get_file_content, then submit a modify_file with a substantive content difference."
 		}
 
 		prBody := fmt.Sprintf("Automated change requested via Slack by <@%s>.\n\nChange: %s", userID, args.Description)
