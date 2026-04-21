@@ -904,6 +904,15 @@ func main() {
 	sessions := commands.NewSessionStore(cfg.ThreadSessionTTL)
 	log.Printf("Thread session TTL: %s", cfg.ThreadSessionTTL)
 
+	// Per-user context store (ephemeral, on local disk — NOT in the
+	// persistent mount). Populated after each Slack request and read on
+	// subsequent ones so the agent can recognise recurring user topics.
+	// Files older than the retention window are garbage collected.
+	userContextDir := os.Getenv("USER_CONTEXT_DIR")
+	userContextStore := commands.NewUserContextStore(userContextDir)
+	log.Printf("User-context store: %s (TTL=%s)", userContextStore.BaseDir(), commands.UserContextTTL)
+	userContextStore.StartGC(context.Background(), time.Hour)
+
 	// RBAC: build agentID → allowedTeams map and group membership cache.
 	agentRBAC := make(map[string][]string, len(agents))
 	for _, agent := range agents {
@@ -962,7 +971,7 @@ func main() {
 		}
 
 		agentID := agent.ID // capture for closure
-		router := commands.NewRouter(slackClient, ghClient, modelsClient, codeModelsClient, jiraClient, nvdClient, sfClient, chorusClient, datadogClients, dashRegistry, wfRegistry, ap, agent.ID, cfg.AppURL, sessions, cfg.MaxToolRounds)
+		router := commands.NewRouter(slackClient, ghClient, modelsClient, codeModelsClient, jiraClient, nvdClient, sfClient, chorusClient, datadogClients, dashRegistry, wfRegistry, ap, agent.ID, cfg.AppURL, sessions, cfg.MaxToolRounds, userContextStore)
 		routers[agent.ID] = router
 
 		// Wrap router.Handle with RBAC check.

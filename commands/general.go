@@ -67,6 +67,7 @@ type GeneralHandler struct {
 	currentAuditTS   string
 	branchMgr        *BranchManager
 	session          *ThreadSession
+	userContextStore *UserContextStore
 	// headless is true when the handler is executing a scheduled workflow
 	// tick rather than a Slack-driven command. Affects tool gating (e.g.
 	// reply_in_thread is suppressed) and suppresses audit messaging.
@@ -102,6 +103,9 @@ func (h *GeneralHandler) Execute(channelID, userID, text, responseURL, auditTS s
 	history := h.memory.GetHistory(channelID, userID)
 	if history != "" {
 		systemMsg += fmt.Sprintf("\n\nPrevious conversation with this user:\n%s", history)
+	}
+	if persistent := h.readPersistentUserContext(userID); persistent != "" {
+		systemMsg += fmt.Sprintf("\n\nRecurring topics this user has asked about previously (may hint at current intent):\n%s", persistent)
 	}
 	if channelContext != "" && channelContext != "(no recent messages)" {
 		systemMsg += fmt.Sprintf("\n\nRecent channel messages for context:\n%s", channelContext)
@@ -185,6 +189,7 @@ func (h *GeneralHandler) Execute(channelID, userID, text, responseURL, auditTS s
 
 			log.Printf("[user=%s channel=%s] general query completed successfully", userID, channelID)
 			h.memory.SetAssistantResponse(channelID, userID, choice.Message.Content)
+			h.persistUserContext(userID, text, choice.Message.Content)
 			stamp := llm.FormatUsageStamp(&totalUsage, activeClient.Model())
 			// If we already replied in a specific thread, don't send a redundant follow-up.
 			if repliedInThread {

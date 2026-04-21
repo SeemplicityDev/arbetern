@@ -38,9 +38,10 @@ type Router struct {
 	appURL           string
 	sessions         *SessionStore
 	maxToolRounds    int
+	userContextStore *UserContextStore
 }
 
-func NewRouter(slackClient SlackClient, ghClient *github.Client, modelsClient *llm.Client, codeModelsClient *llm.Client, jiraClient *atlassian.Client, nvdClient *nvd.Client, sfClient *salesforce.Client, chorusClient *chorus.Client, datadogClients *datadog.MultiClient, dashboardRegistry *dashboards.Registry, workflowRegistry *workflows.Registry, pp PromptProvider, agentID, appURL string, sessions *SessionStore, maxToolRounds int) *Router {
+func NewRouter(slackClient SlackClient, ghClient *github.Client, modelsClient *llm.Client, codeModelsClient *llm.Client, jiraClient *atlassian.Client, nvdClient *nvd.Client, sfClient *salesforce.Client, chorusClient *chorus.Client, datadogClients *datadog.MultiClient, dashboardRegistry *dashboards.Registry, workflowRegistry *workflows.Registry, pp PromptProvider, agentID, appURL string, sessions *SessionStore, maxToolRounds int, userContextStore *UserContextStore) *Router {
 	return &Router{
 		slackClient:      slackClient,
 		ghClient:         ghClient,
@@ -60,6 +61,7 @@ func NewRouter(slackClient SlackClient, ghClient *github.Client, modelsClient *l
 		appURL:           appURL,
 		sessions:         sessions,
 		maxToolRounds:    maxToolRounds,
+		userContextStore: userContextStore,
 	}
 }
 
@@ -199,13 +201,15 @@ func requiresAction(text string) bool {
 
 func (r *Router) newDebugHandler(userContext string) *DebugHandler {
 	return &DebugHandler{
-		slackClient:     r.slackClient,
-		ghClient:        r.ghClient,
-		modelsClient:    r.modelsClient,
-		contextProvider: r.contextProvider,
-		memory:          r.memory,
-		prompts:         r.prompts,
-		userContext:     userContext,
+		slackClient:      r.slackClient,
+		ghClient:         r.ghClient,
+		modelsClient:     r.modelsClient,
+		contextProvider:  r.contextProvider,
+		memory:           r.memory,
+		prompts:          r.prompts,
+		userContext:      userContext,
+		agentID:          r.agentID,
+		userContextStore: r.userContextStore,
 	}
 }
 
@@ -230,6 +234,7 @@ func (r *Router) newGeneralHandler(userContext string, session *ThreadSession) *
 		maxToolRounds:    r.maxToolRounds,
 		userContext:      userContext,
 		session:          session,
+		userContextStore: r.userContextStore,
 	}
 }
 
