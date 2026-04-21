@@ -192,6 +192,20 @@ func (s *SessionStore) Stats() (active int, opened, expired, explicit int64) {
 
 // expire is the callback fired when a session's TTL timer triggers.
 func (s *SessionStore) expire(key string, sess *ThreadSession) {
+	// If the original request (or a follow-up) is still running, defer
+	// expiry — otherwise a slow LLM tool loop that outlasts the TTL would
+	// post an "expired" notice while the bot is still working, leaving the
+	// user unable to reply in-thread once the real response finally lands.
+	sess.mu.Lock()
+	processing := sess.processing
+	sess.mu.Unlock()
+	if processing {
+		sess.refresh(s.ttl)
+		log.Printf("[session] deferring expiry — still processing channel=%s thread=%s",
+			sess.ChannelID, sess.ThreadTS)
+		return
+	}
+
 	s.mu.Lock()
 	// Only delete if the map entry still points to the same session object
 	// (guards against a race with Close or re-Open).

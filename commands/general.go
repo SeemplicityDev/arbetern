@@ -2748,36 +2748,39 @@ func (h *GeneralHandler) replyDefault(channelID, responseURL, auditTS, text stri
 
 // isCodeIntent returns true when the user's message suggests code modification,
 // code review, file reading, or any GitHub interaction — tasks that benefit from the specialised CODE_MODEL.
+//
+// Intentionally strict: bare nouns like "secret", "config", "permission",
+// "deploy" are NOT code signals on their own — they appear frequently in ops
+// / troubleshooting questions ("permission denied fetching secret X") where
+// the lighter general model is more appropriate and the user usually just
+// needs a clarifying question, not a multi-round repo expedition. Require
+// an explicit code action verb, a GitHub noun (repo / branch / PR / commit),
+// or a recognised programming-language file extension.
 func isCodeIntent(text string) bool {
 	codeKeywords := []string{
-		// Code modification
+		// Code modification — explicit action verbs.
 		"modify", "change the code", "change code", "edit the file", "edit file",
 		"update the file", "update file", "fix the code", "fix code", "fix the bug",
 		"create pr", "create a pr", "open pr", "open a pr", "pull request",
 		"refactor", "implement", "add feature", "write code", "patch",
-		// File changes (broad — catches "change all X to Y in file")
 		"change all", "update all", "set all", "replace all",
 		"change tag", "change version", "tag version",
 		"send me pr", "send pr",
-		// Code review & reading
-		"review", "look at", "check the code", "check code", "read the code", "read code",
+		// Code review & reading — require an explicit code reference.
+		"check the code", "check code", "read the code", "read code",
 		"show me the code", "show the code", "show code", "code review",
 		"analyze the code", "analyze code", "analyse the code", "analyse code",
-		"inspect", "examine", "audit", "vulnerability", "cve",
-		"affected", "exposed", "security", "dependency", "dependencies",
-		"what does", "how does", "explain the code", "explain code",
-		"search code", "search the code", "find in code", "look for",
-		// Org-wide / cross-repo search
+		"explain the code", "explain code",
+		"search code", "search the code", "find in code",
+		// Security code-audit signals (kept narrow).
+		"vulnerability", "cve",
+		// Org-wide / cross-repo search.
 		"every repo", "all repo", "across repo", "across the org",
 		"which service", "which repo", "which project",
-		"find usages", "find usage", "find all", "give me a list",
-		"who uses", "what uses", "check every",
-		// GitHub interactions — always use code model for any repo/GitHub work
+		"find usages", "find usage",
+		// GitHub interactions — unambiguous code/repo nouns only.
 		"repo", "repository", "branch", "commit", "merge",
-		"github", "workflow", "pipeline", "ci/cd", "cicd",
-		"actions", "deploy", "deployment",
-		"file", "directory", "folder", "path",
-		"secret", "config", "configuration",
+		"github", "workflow", "pipeline",
 		// Dashboards & workflows — structured JSON + tool-composition tasks
 		// benefit from the sharper CODE_MODEL reasoning.
 		"dashboard", "dashboards",
