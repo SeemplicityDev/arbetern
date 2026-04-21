@@ -12,18 +12,19 @@ var viewHTML string
 
 // RegisterRoutes wires the per-agent view and per-API endpoints onto the given mux.
 //
-// Per-agent (public-ish — behind the same gating the agent uses):
+// Per-agent:
 //
 //	GET /<agent>/dashboard/<id>           → embedded HTML viewer
 //	GET /<agent>/dashboard/<id>/data.json → latest stored JSON
 //
-// API (behind the UI IP whitelist, same as other /api/* routes):
+// API:
 //
 //	GET    /api/dashboards               → list all dashboards (optional ?agent=)
 //	DELETE /api/dashboards/<agent>/<id>  → delete a dashboard
 //
 // Agents are validated against the knownAgents set so arbitrary path segments
-// can't be used to access files outside the dashboards tree.
+// can't be used to access files outside the dashboards tree. Access control
+// is handled upstream by the global IP gate in main.
 func (r *Registry) RegisterRoutes(mux *http.ServeMux, apiMux *http.ServeMux, knownAgents map[string]bool) {
 	// Per-agent routes: /<agent>/dashboard/...
 	for agent := range knownAgents {

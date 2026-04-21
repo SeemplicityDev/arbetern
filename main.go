@@ -1090,8 +1090,9 @@ func main() {
 	if len(uiCIDRs) > 0 {
 		log.Printf("UI IP whitelist enabled: %s", cfg.UIAllowedCIDRs)
 	}
-	uiHandler := ipWhitelist(uiCIDRs, http.StripPrefix("/ui/", http.FileServer(http.FS(uiContent))))
-	http.Handle("/ui/", uiHandler)
+	// Per-route IP gating is no longer needed — globalIPGate (installed on
+	// the server Handler below) covers every non-exempt path in one place.
+	http.Handle("/ui/", http.StripPrefix("/ui/", http.FileServer(http.FS(uiContent))))
 	// Favicon — served without IP whitelist so dashboard/workflow viewers can
 	// load it regardless of where they're accessing from.
 	http.HandleFunc("/favicon.svg", func(w http.ResponseWriter, r *http.Request) {
@@ -1171,7 +1172,7 @@ func main() {
 		_ = json.NewEncoder(w).Encode(commits)
 	})
 
-	http.Handle("/api/", ipWhitelist(uiCIDRs, apiMux))
+	http.Handle("/api/", apiMux)
 
 	// Dashboard viewer routes: /<agent>/dashboard/<id>[/data.json]
 	// and API routes under /api/dashboards{,/...}.
@@ -1189,8 +1190,23 @@ func main() {
 
 	log.Printf("arbetern server starting on :%s", cfg.Port)
 
+	// Global IP gate: when UI_ALLOWED_CIDRS is set, block every path except
+	// the two that must stay reachable from outside the allow-list — Slack's
+	// slash-command webhooks (one per agent) and the Kubernetes health
+	// probe. A new endpoint added in the future is locked down
+	// automatically unless explicitly exempted here.
+	exemptPaths := []string{"/healthz"}
+	for _, a := range agents {
+		exemptPaths = append(exemptPaths, "/"+a.ID+"/webhook")
+	}
+	gatedHandler := globalIPGate(uiCIDRs, exemptPaths, http.DefaultServeMux)
+	if len(uiCIDRs) > 0 {
+		log.Printf("Global IP gate enabled — only Slack webhooks and /healthz bypass the allow-list")
+	}
+
 	srv := &http.Server{
 		Addr:         ":" + cfg.Port,
+		Handler:      gatedHandler,
 		ReadTimeout:  30 * time.Second,
 		WriteTimeout: 90 * time.Second,
 		IdleTimeout:  120 * time.Second,

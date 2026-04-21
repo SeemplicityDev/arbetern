@@ -14,15 +14,18 @@ var viewHTML string
 
 // RegisterRoutes wires the per-agent view and API endpoints onto the given mux.
 //
-// Per-agent (public-ish):
+// Per-agent:
 //
 //	GET /<agent>/workflow/<id>           → embedded HTML viewer
 //	GET /<agent>/workflow/<id>/data.json → latest stored JSON
 //
-// API (behind the UI IP whitelist):
+// API:
 //
 //	GET    /api/workflows              → list all workflows (optional ?agent=)
 //	DELETE /api/workflows/<agent>/<id> → delete a workflow
+//
+// Access control is handled upstream by the global IP gate in main; this
+// package deliberately stays transport-agnostic.
 func (r *Registry) RegisterRoutes(mux *http.ServeMux, apiMux *http.ServeMux, knownAgents map[string]bool) {
 	for agent := range knownAgents {
 		a := agent

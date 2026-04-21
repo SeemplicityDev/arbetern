@@ -7,35 +7,6 @@ import (
 	"strings"
 )
 
-// ipWhitelist returns middleware that restricts access to the given parsed CIDR list.
-// If cidrs is empty, the next handler is returned as-is (whitelist disabled).
-// The middleware checks X-Forwarded-For first (for requests behind a load balancer),
-// then falls back to the direct remote address.
-func ipWhitelist(cidrs []*net.IPNet, next http.Handler) http.Handler {
-	if len(cidrs) == 0 {
-		return next // No restriction configured.
-	}
-
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		clientIP := clientIP(r)
-		ip := net.ParseIP(clientIP)
-		if ip == nil {
-			http.Error(w, "Forbidden", http.StatusForbidden)
-			return
-		}
-
-		for _, cidr := range cidrs {
-			if cidr.Contains(ip) {
-				next.ServeHTTP(w, r)
-				return
-			}
-		}
-
-		log.Printf("UI access denied for IP %s", clientIP)
-		http.Error(w, "Forbidden", http.StatusForbidden)
-	})
-}
-
 func parseCIDRs(raw string) []*net.IPNet {
 	if raw == "" {
 		return nil
@@ -78,4 +49,60 @@ func clientIP(r *http.Request) string {
 		return r.RemoteAddr
 	}
 	return host
+}
+
+// globalIPGate returns a middleware that denies every request by default and
+// only lets through:
+//   - exempt URL paths (exact match or prefix match when the exempt entry ends
+//     in "/"), e.g. "/healthz" or Slack slash-command webhooks,
+//   - requests whose client IP falls inside one of the allowed CIDRs.
+//
+// When cidrs is empty the middleware is a no-op — operators who have not
+// configured UI_ALLOWED_CIDRS keep the previous open-by-default behaviour.
+// This is the coarse-grained equivalent of ipWhitelist and is intended to be
+// applied once at the top of the handler chain so dashboards, workflows, UI,
+// and API are all covered with a single rule.
+func globalIPGate(cidrs []*net.IPNet, exempt []string, next http.Handler) http.Handler {
+	if len(cidrs) == 0 {
+		return next
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if isExemptPath(r.URL.Path, exempt) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		ip := net.ParseIP(clientIP(r))
+		if ip != nil {
+			for _, cidr := range cidrs {
+				if cidr.Contains(ip) {
+					next.ServeHTTP(w, r)
+					return
+				}
+			}
+		}
+		log.Printf("access denied for IP %s path=%s", clientIP(r), r.URL.Path)
+		http.Error(w, "Forbidden", http.StatusForbidden)
+	})
+}
+
+// isExemptPath reports whether path matches any exemption rule. An exempt
+// entry ending in "/" matches as a prefix; otherwise an exact match is
+// required. Keeping this strict avoids accidental exposure of endpoints that
+// merely share a common prefix with an exempted route.
+func isExemptPath(path string, exempt []string) bool {
+	for _, e := range exempt {
+		if e == "" {
+			continue
+		}
+		if strings.HasSuffix(e, "/") {
+			if strings.HasPrefix(path, e) {
+				return true
+			}
+			continue
+		}
+		if path == e {
+			return true
+		}
+	}
+	return false
 }
