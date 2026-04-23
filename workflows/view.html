@@ -133,6 +133,9 @@
       <button id="run-now-btn" class="badge" type="button"
         style="cursor:pointer;font-family:inherit;color:var(--text);background:var(--card);"
         title="Trigger this workflow immediately, outside its schedule.">▶ run now</button>
+      <button id="toggle-btn" class="badge" type="button"
+        style="cursor:pointer;font-family:inherit;color:var(--text);background:var(--card);display:none;"
+        title="Pause or resume this workflow. Paused workflows stop ticking and stop responding to on_success / on_failure triggers.">⏸ pause</button>
       <button id="edit-btn" class="badge edit-btn" type="button"
         title="Edit this workflow from the UI (name, prompt, tasks, schedule, trigger, enabled).">
         <svg viewBox="0 0 16 16" width="12" height="12" xmlns="http://www.w3.org/2000/svg" style="fill:currentColor"><path d="M11.013 1.427a1.75 1.75 0 0 1 2.474 0l1.086 1.086a1.75 1.75 0 0 1 0 2.474l-8.61 8.61c-.21.21-.47.364-.756.445l-3.251.93a.75.75 0 0 1-.927-.928l.929-3.25c.081-.286.235-.547.445-.758l8.61-8.61zm1.414 1.06a.25.25 0 0 0-.354 0L10.811 3.75l1.439 1.44 1.263-1.263a.25.25 0 0 0 0-.354l-1.086-1.086zM11.189 6.25 9.75 4.811l-6.286 6.287a.25.25 0 0 0-.064.108l-.558 1.953 1.953-.558a.249.249 0 0 0 .108-.064l6.286-6.287z"/></svg>
@@ -413,6 +416,20 @@
       } else {
         badge.textContent = 'pending first run'; badge.className = 'badge';
       }
+
+      // Toggle button reflects current state: shows "pause" when enabled,
+      // "resume" when disabled. The "run now" button is hidden for disabled
+      // workflows to match the backend behaviour (runners are stopped).
+      const toggleBtn = document.getElementById('toggle-btn');
+      toggleBtn.style.display = '';
+      if (wf.enabled) {
+        toggleBtn.textContent = '⏸ pause';
+        toggleBtn.title = 'Pause this workflow. It will stop ticking and stop responding to on_success / on_failure triggers until resumed.';
+      } else {
+        toggleBtn.textContent = '▶ resume';
+        toggleBtn.title = 'Resume this workflow. Scheduled ticks and event triggers will fire again.';
+      }
+      document.getElementById('run-now-btn').style.display = wf.enabled ? '' : 'none';
 
       const disabledBanner = document.getElementById('disabled-banner');
       if (!wf.enabled && wf.disabled_reason) {
@@ -731,6 +748,42 @@
       } finally {
         saveBtn.disabled = false;
         saveBtn.textContent = original;
+      }
+    });
+
+    // One-click pause / resume. Uses the same PATCH endpoint as the edit
+    // modal but sends only { enabled: bool }, so the backend cancels the
+    // tick goroutine (when pausing) or restarts it (when resuming) without
+    // touching any other field. Auto-disabled workflows also get their
+    // failure counter cleared by the server when we resume them.
+    document.getElementById('toggle-btn').addEventListener('click', async () => {
+      const wf = window.__wf;
+      if (!wf) return;
+      const btn = document.getElementById('toggle-btn');
+      const original = btn.textContent;
+      const wantEnabled = !wf.enabled;
+      btn.disabled = true;
+      btn.textContent = wantEnabled ? '⏳ resuming…' : '⏳ pausing…';
+      try {
+        const res = await fetch('/api/workflows/' + encodeURIComponent(wf.agent) + '/' + encodeURIComponent(wf.id), {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ enabled: wantEnabled }),
+        });
+        if (!res.ok) {
+          const text = await res.text().catch(() => '');
+          btn.textContent = '✗ failed';
+          console.error('toggle failed:', res.status, text);
+          setTimeout(() => { btn.textContent = original; btn.disabled = false; }, 3000);
+          return;
+        }
+        await load().catch(() => {});
+      } catch (e) {
+        console.error('toggle error:', e);
+        btn.textContent = '✗ error';
+        setTimeout(() => { btn.textContent = original; btn.disabled = false; }, 3000);
+      } finally {
+        btn.disabled = false;
       }
     });
   </script>
