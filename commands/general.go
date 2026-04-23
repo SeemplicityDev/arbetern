@@ -7,6 +7,7 @@ import (
 	"log"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/justmike1/arbetern/atlassian"
 	"github.com/justmike1/arbetern/aws"
@@ -577,6 +578,25 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 						"repo":{"type":"string","description":"Repository name (without owner)"},
 						"state":{"type":"string","description":"Filter by state: 'open', 'closed', or 'all' (default: 'all')"},
 						"limit":{"type":"integer","description":"Maximum number of PRs to return (default: 10, max: 30)"}
+					},
+					"required":["repo"]
+				}`),
+			},
+		},
+		{
+			Type: "function",
+			Function: llm.ToolFunction{
+				Name:        "list_commits",
+				Description: "List commits in a repository, optionally filtered by branch, author, and a time window. Use this for daily/weekly activity digests (pass since=YYYY-MM-DDT00:00:00Z and until=YYYY-MM-DDT23:59:59Z for one UTC day), or to find the commit that introduced a specific change. Returns SHA, first line of commit message, author login, author date, and commit URL. If 'branch' is omitted, the repo's default branch is used — so this captures direct-to-default pushes that never went through a PR, in addition to merge/squash commits from merged PRs.",
+				Parameters: json.RawMessage(`{
+					"type":"object",
+					"properties":{
+						"repo":{"type":"string","description":"Repository name (without owner)."},
+						"branch":{"type":"string","description":"Branch, tag, or SHA to list commits from. Defaults to the repo's default branch."},
+						"author":{"type":"string","description":"GitHub login or email to filter by author."},
+						"since":{"type":"string","description":"ISO-8601 timestamp (e.g. '2026-04-21T00:00:00Z'). Only commits on or after this moment are returned."},
+						"until":{"type":"string","description":"ISO-8601 timestamp. Only commits on or before this moment are returned."},
+						"limit":{"type":"integer","description":"Maximum number of commits to return (default 30, max 300)."}
 					},
 					"required":["repo"]
 				}`),
@@ -1601,6 +1621,59 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 			fmt.Fprintf(&sb, "  • #%d %s (%s) by %s — %s\n", pr.Number, pr.Title, pr.State, pr.Author, pr.URL)
 		}
 		log.Printf("[user=%s channel=%s] listed %d PRs in %s", userID, channelID, len(prs), args.Repo)
+		return sb.String()
+
+	case "list_commits":
+		args, errMsg := parseToolArgs[struct {
+			Repo   string `json:"repo"`
+			Branch string `json:"branch"`
+			Author string `json:"author"`
+			Since  string `json:"since"`
+			Until  string `json:"until"`
+			Limit  int    `json:"limit"`
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
+		}
+		if args.Repo == "" {
+			return "Error: repo is required."
+		}
+		var since, until time.Time
+		if args.Since != "" {
+			t, err := time.Parse(time.RFC3339, args.Since)
+			if err != nil {
+				return fmt.Sprintf("Error: invalid since timestamp %q (want RFC3339 like 2026-04-21T00:00:00Z): %v", args.Since, err)
+			}
+			since = t
+		}
+		if args.Until != "" {
+			t, err := time.Parse(time.RFC3339, args.Until)
+			if err != nil {
+				return fmt.Sprintf("Error: invalid until timestamp %q (want RFC3339 like 2026-04-21T23:59:59Z): %v", args.Until, err)
+			}
+			until = t
+		}
+		owner, err := h.ghClient.ResolveOwner(ctx)
+		if err != nil {
+			return fmt.Sprintf("Error resolving owner: %v", err)
+		}
+		commits, err := h.ghClient.ListCommits(ctx, owner, args.Repo, args.Branch, args.Author, since, until, args.Limit)
+		if err != nil {
+			return fmt.Sprintf("Error listing commits: %v", err)
+		}
+		if len(commits) == 0 {
+			return fmt.Sprintf("No commits found in %s (branch=%q, author=%q, since=%q, until=%q).", args.Repo, args.Branch, args.Author, args.Since, args.Until)
+		}
+		var sb strings.Builder
+		fmt.Fprintf(&sb, "Commits in %s (%d):\n", args.Repo, len(commits))
+		for _, cm := range commits {
+			sha := cm.SHA
+			if len(sha) > 7 {
+				sha = sha[:7]
+			}
+			fmt.Fprintf(&sb, "  • %s %s — @%s (%s) %s\n", sha, cm.Message, cm.Author, cm.Date.UTC().Format(time.RFC3339), cm.URL)
+		}
+		log.Printf("[user=%s channel=%s] listed %d commits in %s", userID, channelID, len(commits), args.Repo)
 		return sb.String()
 
 	case "search_code":
