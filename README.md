@@ -392,7 +392,57 @@ repo names, labels, assignees — everything needed so the tick is reproducible)
 persists a JSON descriptor at `<WORKFLOWS_DIR>/<agent>/<id>.json`, and starts
 a goroutine that ticks on the requested interval. Each run's result + error
 is appended to the descriptor; the viewer at `/<agent>/workflow/<id>` renders
-the run history and auto-refreshes every 30 seconds.
+the run history and auto-refreshes adaptively (every 3 seconds while a tick
+is in flight, every 30 seconds otherwise). The header badge shows `running…`
+(blue, pulsing) while a tick is executing, and the **Run now** button is
+disabled until it completes.
+
+### Boot behaviour
+
+On server startup, both the workflow registry and the dashboard registry
+**load all descriptors into memory and start their tickers, but do NOT fire
+an immediate tick / sync**. Scheduled ticks run on their normal cadence;
+user-initiated work (Create, the Run-now button, manual API calls) still
+executes immediately. This keeps deploys quiet — a pod roll won't blast
+every upstream the moment it comes up.
+
+### Time-of-day scheduling (`run_at_utc`)
+
+By default a workflow's first tick fires immediately when its runner starts
+and then repeats every `interval`. Set `run_at_utc` to a `HH:MM` string to
+align the first tick to a wall-clock time in UTC instead — useful for daily
+reports that should always land at, say, 05:00 UTC regardless of when the
+server booted. The field is editable from the workflow edit modal.
+
+Every workflow prompt is also prefixed with the **real current UTC time**
+before being sent to the LLM (`Current UTC time: YYYY-MM-DD HH:MM:SS…`),
+so date arithmetic in scheduled reports doesn't rely on the model's
+training cutoff.
+
+### PR-writing tools
+
+The `modify_file`, `create_file`, and `regex_replace_file` tools all accept
+an optional `pr_body` argument. When supplied, the LLM-authored Markdown is
+used verbatim as the PR description (with a single-line `_Automated via
+Slack by <@user>_` attribution footer appended); when omitted, a generic
+template is used as a fallback. Only the FIRST write call per repo per tick
+establishes the PR body — subsequent calls grouped into the same PR ignore
+their `pr_body` argument.
+
+Every PR opened by these tools also requests **GitHub Copilot as a reviewer**
+best-effort: a REST attempt with the magic `Copilot` login, falling back to
+a GraphQL `requestReviews` mutation that resolves the Copilot bot via
+`pullRequest.suggestedReviewers`. Failures are logged and swallowed — PR
+creation never fails because Copilot couldn't be added (e.g. repos without
+Copilot code review enabled on the plan).
+
+### Threaded Slack replies
+
+The `post_slack_message` tool accepts an optional `thread_ts` argument so
+workflows can post one top-level message and then thread follow-ups under
+it (e.g. an AWS cost report with the day's GitHub digest threaded
+underneath). Capture the `ts` returned by the first `post_slack_message`
+call and pass it as `thread_ts` on subsequent calls.
 
 ### Design patterns
 
@@ -553,7 +603,7 @@ Global prompts (e.g. `security`) are defined in `agents/prompts.yaml` and inheri
 | GitHub | [docs/GITHUB_PAT.md](docs/GITHUB_PAT.md) | ovad, agent-q, goldsai |
 | Atlassian (Jira + Confluence) | [docs/ATLASSIAN.md](docs/ATLASSIAN.md) | seihin, ovad, agent-q, goldsai, pulse |
 | NVD | [NVD API](https://nvd.nist.gov/developers) | goldsai |
-| Salesforce | SOQL Query API (OAuth 2.0 client credentials) | pulse |
+| Salesforce | [docs/SALESFORCE.md](docs/SALESFORCE.md) | pulse |
 | Chorus / ZoomInfo | [docs/CHORUS.md](docs/CHORUS.md) | pulse |
 | AWS Cost Explorer | [docs/AWS.md](docs/AWS.md) | ovad (and any agent running AWS cost workflows) |
 
