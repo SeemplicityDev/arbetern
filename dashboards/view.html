@@ -659,6 +659,12 @@
         } catch (err) {
           console.error('[metrics] Chart.js init failed for ' + canvasId, err);
         }
+        // Initialize the sort/filter state for this site's summary table.
+        const tableEl = document.getElementById(canvasId + '-table');
+        if (tableEl && typeof __metricsApplySort === 'function') {
+          __metricsApplySort(tableEl);
+          __metricsApplyFilter(tableEl);
+        }
       });
     };
     if (typeof requestAnimationFrame === 'function') {
