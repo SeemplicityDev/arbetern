@@ -9,11 +9,9 @@
 
 An orchestration platform for AI agents in the enterprise. Each agent lives in its own directory under `agents/`, with dedicated prompts and a defined professional scope. Arbetern provides the runtime, routing, UI, and integrations — agents bring the expertise.
 
-![Arbetern UI](screenshots/home_1.png)
-
 ### Screenshots
 
-More UI screenshots — dashboards, workflow grid, workflow editor — are in [screenshots/SCREENSHOTS.md](screenshots/SCREENSHOTS.md).
+UI screenshots — home, dashboards, workflow grid, workflow editor — are in [screenshots/SCREENSHOTS.md](screenshots/SCREENSHOTS.md).
 
 ### Architecture — [Bernoulli Naive Bayes](https://en.wikipedia.org/wiki/Naive_Bayes_classifier) by Design
 
