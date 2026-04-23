@@ -407,6 +407,93 @@
     return true; // let the anchor navigate
   };
 
+  // Interactive sort + filter helpers for the per-site metrics summary table.
+  // Each row carries the raw (pre-formatted) numeric values on data-* attrs so
+  // we sort numerically (e.g. 1.2G vs 950M) rather than by display string.
+  function __metricsApplyFilter(table){
+    const input = document.querySelector('input[data-table="' + table.id + '"]');
+    const q = (input ? input.value : '').trim().toLowerCase();
+    let shown = 0, total = 0;
+    table.querySelectorAll('tbody tr').forEach(tr => {
+      total++;
+      const scope = tr.getAttribute('data-scope') || '';
+      const hit = !q || scope.indexOf(q) !== -1;
+      tr.style.display = hit ? '' : 'none';
+      if (hit) shown++;
+    });
+    const countEl = document.getElementById(table.id + '-count');
+    if (countEl) countEl.textContent = q ? (shown + ' / ' + total + ' series') : (total + ' series');
+  }
+  function __metricsApplySort(table){
+    const key = table.getAttribute('data-sort-key') || 'avg';
+    const dir = (table.getAttribute('data-sort-dir') || 'desc') === 'asc' ? 1 : -1;
+    // Determine numeric vs string from the header definition.
+    const th = table.querySelector('thead th[data-key="' + key + '"]');
+    const numeric = th && th.getAttribute('data-num') === '1';
+    const tbody = table.querySelector('tbody');
+    const rows = Array.from(tbody.querySelectorAll('tr'));
+    rows.sort((a, b) => {
+      const av = a.getAttribute('data-' + key) || '';
+      const bv = b.getAttribute('data-' + key) || '';
+      if (numeric) {
+        const an = av === '' ? -Infinity : parseFloat(av);
+        const bn = bv === '' ? -Infinity : parseFloat(bv);
+        if (an === bn) return 0;
+        return an < bn ? -1 * dir : 1 * dir;
+      }
+      return av.localeCompare(bv) * dir;
+    });
+    const frag = document.createDocumentFragment();
+    rows.forEach(r => frag.appendChild(r));
+    tbody.appendChild(frag);
+    // Reflect state in header arrows.
+    table.querySelectorAll('thead th.sortable').forEach(h => {
+      h.classList.remove('sort-asc','sort-desc');
+      const arrow = h.querySelector('.arrow');
+      if (arrow) arrow.textContent = '';
+    });
+    if (th) {
+      th.classList.add(dir === 1 ? 'sort-asc' : 'sort-desc');
+      const arrow = th.querySelector('.arrow');
+      if (arrow) arrow.textContent = dir === 1 ? '▲' : '▼';
+    }
+  }
+  window.__sortMetricsTable = function(th){
+    const table = th.closest('table');
+    if (!table) return;
+    const key = th.getAttribute('data-key');
+    const curKey = table.getAttribute('data-sort-key');
+    const curDir = table.getAttribute('data-sort-dir') || 'desc';
+    let dir;
+    if (curKey === key) {
+      dir = curDir === 'asc' ? 'desc' : 'asc';
+    } else {
+      // New column: numeric columns default to desc (biggest first), scope to asc.
+      dir = th.getAttribute('data-num') === '1' ? 'desc' : 'asc';
+    }
+    table.setAttribute('data-sort-key', key);
+    table.setAttribute('data-sort-dir', dir);
+    __metricsApplySort(table);
+  };
+  window.__filterMetricsTable = function(input){
+    const id = input.getAttribute('data-table');
+    const table = document.getElementById(id);
+    if (table) __metricsApplyFilter(table);
+  };
+  window.__clearMetricsFilter = function(btn){
+    const id = btn.getAttribute('data-table');
+    const input = document.querySelector('input[data-table="' + id + '"]');
+    if (input) { input.value = ''; input.dispatchEvent(new Event('input')); input.focus(); }
+  };
+  // Initialize sort indicators + counts for all metrics tables on the page
+  // after the dashboard finishes rendering each tick.
+  function __initMetricsTables(){
+    document.querySelectorAll('table[id^="metrics-chart-"]').forEach(table => {
+      __metricsApplySort(table);
+      __metricsApplyFilter(table);
+    });
+  }
+
   // Render a datadog_query_metrics source payload: per-site chart + summary table.
   function renderMetricsPayload(payload){
     const sites = payload.sites || [];
