@@ -3,6 +3,7 @@ package github
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -164,22 +165,170 @@ func (c *Client) CreatePullRequest(ctx context.Context, owner, repo, baseBranch,
 }
 
 // requestCopilotReviewer best-effort-requests the GitHub Copilot bot as a
-// reviewer on an existing pull request. Errors are logged at info level and
-// swallowed: repos without Copilot code review enabled will return 422 and
-// that's fine.
+// reviewer on an existing pull request. Errors are logged and swallowed: we
+// never fail PR creation because Copilot couldn't be added.
+//
+// GitHub Copilot code review is a Bot, not a User, so it cannot be requested
+// through the normal `reviewers` list with its bot login
+// (`copilot-pull-request-reviewer[bot]`) — the REST endpoint returns 422
+// "Could not resolve to a User with the username ...". GitHub special-cases
+// the literal string "Copilot" in the REST request-reviewers endpoint for
+// repos where Copilot code review is enabled, so we try that first.
+//
+// If that also fails (older GHES, Copilot not available on the plan, not
+// enabled at the org/repo level, or the PAT lacks `pull_request: write` /
+// `repo` scope), we fall back to the GraphQL `requestReviews` mutation
+// which resolves the Copilot actor by bot login and requests review that
+// way. Any remaining error is logged with the raw response body.
 func (c *Client) requestCopilotReviewer(ctx context.Context, owner, repo string, number int) {
 	if number == 0 {
 		return
 	}
-	// Copilot is requested as a reviewer using its bot login. GitHub accepts
-	// it through the standard request-reviewers endpoint when the repo has
-	// Copilot code review available.
-	req := gh.ReviewersRequest{Reviewers: []string{"copilot-pull-request-reviewer"}}
-	if _, _, err := c.api.PullRequests.RequestReviewers(ctx, owner, repo, number, req); err != nil {
-		log.Printf("[github] copilot reviewer skipped for %s/%s#%d: %v", owner, repo, number, err)
+	// Attempt 1: REST with the magic "Copilot" login.
+	req := gh.ReviewersRequest{Reviewers: []string{"Copilot"}}
+	_, resp, err := c.api.PullRequests.RequestReviewers(ctx, owner, repo, number, req)
+	if err == nil {
+		log.Printf("[github] requested copilot review on %s/%s#%d (REST)", owner, repo, number)
 		return
 	}
-	log.Printf("[github] requested copilot review on %s/%s#%d", owner, repo, number)
+	restStatus, restBody := describeHTTPError(resp, err)
+	log.Printf("[github] copilot REST request failed for %s/%s#%d: %s body=%s", owner, repo, number, restStatus, restBody)
+
+	// Attempt 2: GraphQL fallback.
+	if err := c.requestCopilotReviewerGraphQL(ctx, owner, repo, number); err != nil {
+		log.Printf("[github] copilot GraphQL request failed for %s/%s#%d: %v", owner, repo, number, err)
+		return
+	}
+	log.Printf("[github] requested copilot review on %s/%s#%d (GraphQL)", owner, repo, number)
+}
+
+// describeHTTPError extracts a short status + body from a go-github response,
+// handling nil-resp cases.
+func describeHTTPError(resp *gh.Response, err error) (status, body string) {
+	if resp == nil || resp.Response == nil {
+		return "no response", err.Error()
+	}
+	status = resp.Status
+	if resp.Body != nil {
+		b, _ := io.ReadAll(resp.Body)
+		body = strings.TrimSpace(string(b))
+		if len(body) > 500 {
+			body = body[:500] + "…"
+		}
+	}
+	if body == "" {
+		body = err.Error()
+	}
+	return status, body
+}
+
+// requestCopilotReviewerGraphQL resolves the Copilot bot actor for the repo
+// and requests its review via the GraphQL `requestReviews` mutation. Returns
+// nil on success.
+func (c *Client) requestCopilotReviewerGraphQL(ctx context.Context, owner, repo string, number int) error {
+	// Step 1: resolve PR node ID + the Copilot bot's suggested-reviewer id.
+	// Copilot surfaces in pullRequest.suggestedReviewers when available for
+	// that repo; if it's not present, Copilot is simply not enabled here.
+	query := `query($owner:String!,$repo:String!,$num:Int!){
+	  repository(owner:$owner,name:$repo){
+	    pullRequest(number:$num){
+	      id
+	      suggestedReviewers { reviewer { __typename login ... on Bot { id } ... on User { id } } }
+	    }
+	  }
+	}`
+	queryVars := map[string]any{"owner": owner, "repo": repo, "num": number}
+	queryResp := struct {
+		Data struct {
+			Repository struct {
+				PullRequest struct {
+					ID                 string `json:"id"`
+					SuggestedReviewers []struct {
+						Reviewer struct {
+							TypeName string `json:"__typename"`
+							Login    string `json:"login"`
+							ID       string `json:"id"`
+						} `json:"reviewer"`
+					} `json:"suggestedReviewers"`
+				} `json:"pullRequest"`
+			} `json:"repository"`
+		} `json:"data"`
+		Errors []struct {
+			Message string `json:"message"`
+		} `json:"errors"`
+	}{}
+	if err := c.graphql(ctx, query, queryVars, &queryResp); err != nil {
+		return fmt.Errorf("resolve PR/copilot node ids: %w", err)
+	}
+	if len(queryResp.Errors) > 0 {
+		return fmt.Errorf("graphql errors: %s", queryResp.Errors[0].Message)
+	}
+	prID := queryResp.Data.Repository.PullRequest.ID
+	if prID == "" {
+		return fmt.Errorf("pull request node id not found")
+	}
+	var copilotID string
+	for _, s := range queryResp.Data.Repository.PullRequest.SuggestedReviewers {
+		if strings.EqualFold(s.Reviewer.Login, "copilot-pull-request-reviewer") ||
+			strings.EqualFold(s.Reviewer.Login, "Copilot") {
+			copilotID = s.Reviewer.ID
+			break
+		}
+	}
+	if copilotID == "" {
+		return fmt.Errorf("copilot bot not in suggestedReviewers — code review likely not enabled for this repo")
+	}
+
+	// Step 2: request Copilot as reviewer.
+	mutation := `mutation($prId:ID!,$uids:[ID!]!){
+	  requestReviews(input:{pullRequestId:$prId,userIds:$uids,union:true}){
+	    clientMutationId
+	  }
+	}`
+	mutVars := map[string]any{"prId": prID, "uids": []string{copilotID}}
+	mutResp := struct {
+		Errors []struct {
+			Message string `json:"message"`
+		} `json:"errors"`
+	}{}
+	if err := c.graphql(ctx, mutation, mutVars, &mutResp); err != nil {
+		return fmt.Errorf("requestReviews mutation: %w", err)
+	}
+	if len(mutResp.Errors) > 0 {
+		return fmt.Errorf("graphql errors: %s", mutResp.Errors[0].Message)
+	}
+	return nil
+}
+
+// graphql POSTs a query + variables to GitHub's GraphQL endpoint using the
+// same authenticated HTTP client the REST API uses, and decodes the response
+// into out.
+func (c *Client) graphql(ctx context.Context, query string, vars map[string]any, out any) error {
+	payload := map[string]any{"query": query, "variables": vars}
+	buf, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://api.github.com/graphql", strings.NewReader(string(buf)))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.api.Client().Do(req)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 400 {
+		snippet := string(body)
+		if len(snippet) > 500 {
+			snippet = snippet[:500] + "…"
+		}
+		return fmt.Errorf("graphql HTTP %d: %s", resp.StatusCode, snippet)
+	}
+	return json.Unmarshal(body, out)
 }
 
 func GenerateBranchName(agentName string) string {

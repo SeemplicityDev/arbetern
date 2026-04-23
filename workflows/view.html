@@ -259,6 +259,8 @@
       { id:'confluence', name:'Confluence', kind:'source', keys:['confluence','cql','wiki','space'],
         svg: '<svg viewBox="0 0 32 32" xmlns="http://www.w3.org/2000/svg"><path fill="#2684FF" d="M3 23.3c-.4.7-.2 1.6.5 2l5 3c.8.4 1.7.2 2.2-.6 2.6-4.2 4.8-3.7 8.9-1.9l5 2.3c.8.4 1.7 0 2-.8l2.4-5.4c.3-.8 0-1.7-.8-2-10.6-5-18-4.8-25.2 3.4zM29 8.7c.4-.7.2-1.6-.5-2l-5-3c-.8-.4-1.7-.2-2.2.6-2.6 4.2-4.8 3.7-8.9 1.9l-5-2.3c-.8-.4-1.7 0-2 .8L3 9.1c-.3.8 0 1.7.8 2 10.6 5 18 4.8 25.2-3.4z"/></svg>' },
       { id:'github',     name:'GitHub',     kind:'both',   keys:['github','gh','repo','repository','pull request','pr ','pull-request','branch','commit','.github'],
+        readKeys:['list_commits','list_org_repos','list_pull_requests','get_pull_request','get_file_content','search_code','search_files','resolve_owner','list_branches','list_issues','get_issue'],
+        writeKeys:['create_pull_request','create_issue','merge_pull_request','close_pull_request','close_issue','add_comment','create_branch','push_commit','update_file','delete_file','create_file'],
         svg: '<svg viewBox="0 0 32 32" xmlns="http://www.w3.org/2000/svg"><path fill="#f0f6fc" d="M16 2.3C8.4 2.3 2.3 8.5 2.3 16c0 6 3.9 11.2 9.4 13 .7.1.9-.3.9-.7v-2.4c-3.8.8-4.6-1.8-4.6-1.8-.6-1.6-1.5-2-1.5-2-1.2-.8.1-.8.1-.8 1.4.1 2.1 1.4 2.1 1.4 1.2 2.1 3.2 1.5 4 1.1.1-.9.5-1.5.9-1.8-3-.3-6.2-1.5-6.2-6.7 0-1.5.5-2.7 1.4-3.7-.1-.3-.6-1.7.1-3.5 0 0 1.1-.4 3.7 1.4 1.1-.3 2.2-.4 3.3-.4s2.2.2 3.3.4c2.6-1.8 3.7-1.4 3.7-1.4.7 1.8.3 3.2.1 3.5.9 1 1.4 2.2 1.4 3.7 0 5.3-3.2 6.4-6.2 6.7.5.4 1 1.3 1 2.6v3.9c0 .4.2.8.9.7 5.5-1.8 9.4-7 9.4-13 0-7.5-6.2-13.7-13.7-13.7z"/></svg>' },
       { id:'slack',      name:'Slack',      kind:'output', keys:['slack','channel','c0','u0','post_slack','dm '],
         svg: '<svg viewBox="0 0 32 32" xmlns="http://www.w3.org/2000/svg"><g><path fill="#36C5F0" d="M9 19.5a2.5 2.5 0 1 1-2.5-2.5H9zm1.3 0a2.5 2.5 0 0 1 5 0v6.2a2.5 2.5 0 0 1-5 0z"/><path fill="#2EB67D" d="M12.8 9a2.5 2.5 0 1 1 2.5-2.5V9zm0 1.3a2.5 2.5 0 0 1 0 5H6.5a2.5 2.5 0 0 1 0-5z"/><path fill="#ECB22E" d="M23.2 12.8a2.5 2.5 0 1 1 2.5 2.5h-2.5zm-1.3 0a2.5 2.5 0 0 1-5 0V6.5a2.5 2.5 0 0 1 5 0z"/><path fill="#E01E5A" d="M19.5 23.2a2.5 2.5 0 1 1-2.5 2.5v-2.5zm0-1.3a2.5 2.5 0 0 1 0-5h6.2a2.5 2.5 0 0 1 0 5z"/></g></svg>' },
@@ -311,13 +313,31 @@
       const lower = text.toLowerCase();
       const out = [];
       const seen = new Set();
+      const matches = (keys) => {
+        if (!keys) return false;
+        for (const key of keys) {
+          const re = keyMatcher(key);
+          if (re ? re.test(text) : lower.includes(key.toLowerCase())) return true;
+        }
+        return false;
+      };
       for (const integ of INTEGRATIONS) {
         if (seen.has(integ.id)) continue;
-        for (const key of integ.keys) {
-          const re = keyMatcher(key);
-          const hit = re ? re.test(text) : lower.includes(key);
-          if (hit) { out.push(integ); seen.add(integ.id); break; }
+        if (!matches(integ.keys)) continue;
+        let effectiveKind = integ.kind;
+        // For 'both' integrations, narrow the placement to source or output
+        // when only one intent is actually used in the prompt. This keeps
+        // the diagram honest (e.g. a GitHub-read-only workflow shows GitHub
+        // only under "Read from", not under "Write to").
+        if (integ.kind === 'both' && (integ.readKeys || integ.writeKeys)) {
+          const r = matches(integ.readKeys);
+          const w = matches(integ.writeKeys);
+          if (r && !w) effectiveKind = 'source';
+          else if (w && !r) effectiveKind = 'output';
+          else effectiveKind = 'both'; // both or neither → show on both
         }
+        out.push(Object.assign({}, integ, { kind: effectiveKind }));
+        seen.add(integ.id);
       }
       return out;
     }

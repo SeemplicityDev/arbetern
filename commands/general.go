@@ -508,6 +508,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 						"old_content":{"type":"string","description":"The exact text in the current file to find and replace. Include 3-5 surrounding context lines to ensure a unique match."},
 						"new_content":{"type":"string","description":"The replacement text that will replace old_content."},
 						"description":{"type":"string","description":"Short description of what was changed (used as commit message and PR title)"},
+						"pr_body":{"type":"string","description":"OPTIONAL full Markdown body for the pull request. Use this to give reviewers real context (Jira/ticket link, summary of the change, testing notes, applicable skills). Only the FIRST modify_file/create_file/regex_replace_file call per repo per tick establishes the PR body — subsequent calls that group into the same PR are ignored. When omitted, a short generic attribution line is used."},
 						"branch":{"type":"string","description":"BASE branch the PR should be opened against (typically the repo's default branch — main/master). LEAVE EMPTY in almost all cases; the platform auto-resolves the default branch AND auto-generates a unique head branch per run. Only set this if you specifically need to target a long-lived non-default base like 'develop' or 'release/*'. Never pass a head branch from list_pull_requests or a prior PR — those are auto-generated per-tick and will be ignored."}
 					},
 					"required":["repo","path","old_content","new_content","description"]
@@ -526,6 +527,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 						"path":{"type":"string","description":"File path to create within the repository (e.g. 'maintenance/db-maintenance.yaml', '.github/workflows/db-maintenance.yml')"},
 						"content":{"type":"string","description":"The full content of the new file."},
 						"description":{"type":"string","description":"Short description of what was added (used as commit message and PR title)"},
+						"pr_body":{"type":"string","description":"OPTIONAL full Markdown body for the pull request. Use this to give reviewers real context (Jira/ticket link, summary, testing notes). Only the FIRST write call per repo per tick establishes the PR body; subsequent calls that group into the same PR are ignored."},
 						"branch":{"type":"string","description":"BASE branch the PR should target. LEAVE EMPTY in almost all cases — the platform resolves the repo default branch and auto-generates the head branch. Do not pass an existing PR head branch here."}
 					},
 					"required":["repo","path","content","description"]
@@ -545,6 +547,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 						"pattern":{"type":"string","description":"Go (RE2) regular expression to match. Use capturing groups for partial replacements (e.g. '(tag:\\s*)\\S+' to capture the 'tag: ' prefix)."},
 						"replacement":{"type":"string","description":"Replacement string. Use $1, $2, etc. to reference captured groups (e.g. '${1}latest')."},
 						"description":{"type":"string","description":"Short description of what was changed (used as commit message and PR title)"},
+						"pr_body":{"type":"string","description":"OPTIONAL full Markdown body for the pull request. Use this to give reviewers real context. Only the FIRST write call per repo per tick establishes the PR body; subsequent calls that group into the same PR are ignored."},
 						"branch":{"type":"string","description":"BASE branch the PR should target. LEAVE EMPTY in almost all cases — the platform resolves the repo default branch and auto-generates the head branch. Do not pass an existing PR head branch here."}
 					},
 					"required":["repo","path","pattern","replacement","description"]
@@ -1431,6 +1434,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 			OldContent  string `json:"old_content"`
 			NewContent  string `json:"new_content"`
 			Description string `json:"description"`
+			PRBody      string `json:"pr_body"`
 			Branch      string `json:"branch"`
 		}](argsJSON)
 		if errMsg != "" {
@@ -1467,7 +1471,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 				"Re-read the file with get_file_content, then submit a modify_file with a substantive content difference."
 		}
 
-		prBody := fmt.Sprintf("Automated change requested via Slack by <@%s>.\n\nChange: %s", userID, args.Description)
+		prBody := buildPRBody(userID, args.PRBody, fmt.Sprintf("Automated change requested via Slack by <@%s>.\n\nChange: %s", userID, args.Description))
 		result, err := h.branchMgr.CommitAndPR(ctx, owner, args.Repo, baseBranch, userID, args.Description, prBody,
 			func(branch string) error {
 				commitMsg := fmt.Sprintf("%s: %s", h.agentID, args.Description)
@@ -1488,6 +1492,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 			Path        string `json:"path"`
 			Content     string `json:"content"`
 			Description string `json:"description"`
+			PRBody      string `json:"pr_body"`
 			Branch      string `json:"branch"`
 		}](argsJSON)
 		if errMsg != "" {
@@ -1498,7 +1503,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 			return errMsg
 		}
 
-		prBody := fmt.Sprintf("Automated file creation requested via Slack by <@%s>.\n\nChange: %s\nNew file: `%s`", userID, args.Description, args.Path)
+		prBody := buildPRBody(userID, args.PRBody, fmt.Sprintf("Automated file creation requested via Slack by <@%s>.\n\nChange: %s\nNew file: `%s`", userID, args.Description, args.Path))
 		result, err := h.branchMgr.CommitAndPR(ctx, owner, args.Repo, baseBranch, userID, args.Description, prBody,
 			func(branch string) error {
 				commitMsg := fmt.Sprintf("%s: %s", h.agentID, args.Description)
@@ -1520,6 +1525,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 			Pattern     string `json:"pattern"`
 			Replacement string `json:"replacement"`
 			Description string `json:"description"`
+			PRBody      string `json:"pr_body"`
 			Branch      string `json:"branch"`
 		}](argsJSON)
 		if errMsg != "" {
@@ -1548,7 +1554,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		log.Printf("[user=%s channel=%s] regex_replace_file: %d matches of %q in %s/%s",
 			userID, channelID, matches, args.Pattern, args.Repo, args.Path)
 
-		prBody := fmt.Sprintf("Automated regex replacement requested via Slack by <@%s>.\n\nChange: %s\nPattern: `%s` → `%s`\nMatches replaced: %d", userID, args.Description, args.Pattern, args.Replacement, matches)
+		prBody := buildPRBody(userID, args.PRBody, fmt.Sprintf("Automated regex replacement requested via Slack by <@%s>.\n\nChange: %s\nPattern: `%s` → `%s`\nMatches replaced: %d", userID, args.Description, args.Pattern, args.Replacement, matches))
 		result, err := h.branchMgr.CommitAndPR(ctx, owner, args.Repo, baseBranch, userID, args.Description, prBody,
 			func(branch string) error {
 				commitMsg := fmt.Sprintf("%s: %s", h.agentID, args.Description)

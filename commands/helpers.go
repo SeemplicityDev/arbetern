@@ -28,6 +28,19 @@ func stripWhitespace(s string) string {
 	return b.String()
 }
 
+// buildPRBody returns the PR body for a write-tool call. When the caller
+// supplied pr_body (trimmed non-empty) we use it verbatim and append a
+// one-line Slack attribution footer so reviewers still know which user /
+// workflow originated the change. Otherwise we fall back to the generic
+// template the tool historically used.
+func buildPRBody(userID, supplied, fallback string) string {
+	supplied = strings.TrimSpace(supplied)
+	if supplied == "" {
+		return fallback
+	}
+	return supplied + "\n\n---\n_Automated via Slack by <@" + userID + ">_"
+}
+
 // parseToolArgs unmarshals a JSON string into the target struct.
 // Returns a user-facing error string if parsing fails.
 func parseToolArgs[T any](argsJSON string) (T, string) {
