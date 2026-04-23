@@ -440,33 +440,56 @@
       }
       const intro = metricsSummaryIntro(site, unit);
       let summaryRows = '';
+      const tableId = canvasId + '-table';
       if (series.length > 0) {
         const legend =
           '<div class="empty" style="margin:4px 0 8px">' +
           'Each row is one tag group. Values are in <strong>' + unitLabel + '</strong>. ' +
           '<strong>avg / min / max / last</strong> are computed across the ' +
-          'query window (<strong>n</strong> = sample count). Rows are sorted by <strong>avg</strong> desc. ' +
+          'query window (<strong>n</strong> = sample count). ' +
+          'Click any column header to sort; use the filter box to narrow by scope. ' +
           'The chart above plots the same series over time.' +
           '</div>';
-        summaryRows = '<div class="metrics-summary">' + legend +
-          '<div class="table-wrap"><table><thead><tr>' +
-          '<th title="Tag combination for this series">scope</th>' +
-          '<th title="Mean value across the window">avg</th>' +
-          '<th title="Minimum value in the window">min</th>' +
-          '<th title="Maximum value in the window">max</th>' +
-          '<th title="Most recent data point">last</th>' +
-          '<th title="Number of non-null samples">n</th>' +
-          '</tr></thead><tbody>' +
-          series.map(s => '<tr>' +
+        const filter =
+          '<div class="metrics-filter">' +
+            '<input type="text" placeholder="Filter scope…" data-table="' + tableId + '" oninput="__filterMetricsTable(this)" />' +
+            '<button type="button" class="clear-btn" data-table="' + tableId + '" onclick="__clearMetricsFilter(this)">Clear</button>' +
+            '<span class="count" id="' + tableId + '-count"></span>' +
+          '</div>';
+        const cols = [
+          { key:'scope', label:'scope', num:false, title:'Tag combination for this series' },
+          { key:'avg',   label:'avg',   num:true,  title:'Mean value across the window' },
+          { key:'min',   label:'min',   num:true,  title:'Minimum value in the window' },
+          { key:'max',   label:'max',   num:true,  title:'Maximum value in the window' },
+          { key:'last',  label:'last',  num:true,  title:'Most recent data point' },
+          { key:'count', label:'n',     num:true,  title:'Number of non-null samples' },
+        ];
+        const head = cols.map(c =>
+          '<th class="sortable" data-key="' + c.key + '" data-num="' + (c.num ? '1' : '0') + '"' +
+          ' title="' + c.title + ' (click to sort)" onclick="__sortMetricsTable(this)">' +
+          c.label + '<span class="arrow"></span></th>'
+        ).join('');
+        const body = series.map(s => '<tr' +
+            ' data-scope="' + escapeHtml((s.scope || '*').toLowerCase()) + '"' +
+            ' data-avg="'   + (Number.isFinite(s.avg)   ? s.avg   : '') + '"' +
+            ' data-min="'   + (Number.isFinite(s.min)   ? s.min   : '') + '"' +
+            ' data-max="'   + (Number.isFinite(s.max)   ? s.max   : '') + '"' +
+            ' data-last="'  + (Number.isFinite(s.last)  ? s.last  : '') + '"' +
+            ' data-count="' + (s.count ?? 0) + '"' +
+          '>' +
             '<td>' + escapeHtml(s.scope || '*') + '</td>' +
             '<td>' + formatByUnit(s.avg, unit) + '</td>' +
             '<td>' + formatByUnit(s.min, unit) + '</td>' +
             '<td>' + formatByUnit(s.max, unit) + '</td>' +
             '<td>' + formatByUnit(s.last, unit) + '</td>' +
             '<td>' + (s.count ?? 0) + '</td>' +
-          '</tr>').join('') +
-          '</tbody></table></div>' +
-          (site.truncated ? '<div class="empty" style="margin-top:6px">… and ' + site.truncated + ' more series (sorted by avg desc; increase top_n to see more)</div>' : '') +
+          '</tr>').join('');
+        summaryRows = '<div class="metrics-summary">' + legend + filter +
+          '<div class="table-wrap"><table id="' + tableId + '" data-sort-key="avg" data-sort-dir="desc">' +
+            '<thead><tr>' + head + '</tr></thead>' +
+            '<tbody>' + body + '</tbody>' +
+          '</table></div>' +
+          (site.truncated ? '<div class="empty" style="margin-top:6px">… and ' + site.truncated + ' more series (increase top_n to see more)</div>' : '') +
           '</div>';
       }
       return '<div class="metrics-site">' +
