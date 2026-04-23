@@ -28,10 +28,15 @@ const (
 	// region even for global services; us-east-1 is the canonical choice.
 	DefaultRegion = "us-east-1"
 
-	// DefaultMetric matches what the AWS console shows by default on the
-	// Cost Explorer home page: unblended cost in the payer account's
-	// currency (typically USD). Users can override via the `metric` arg.
-	DefaultMetric = "UnblendedCost"
+	// DefaultMetric is AmortizedCost, which spreads the up-front portion of
+	// Reserved Instances and Savings Plans across the commitment term so a
+	// daily cost report reflects the effective daily spend rather than a
+	// $0 baseline punctuated by lumpy once-a-year charges. This is the
+	// right default for any account that uses RIs or SPs. Callers can
+	// still pick UnblendedCost (what the console shows by default),
+	// BlendedCost, NetAmortizedCost, NetUnblendedCost, or UsageQuantity
+	// via the `metric` argument.
+	DefaultMetric = "AmortizedCost"
 
 	// MaxDays caps single-call time windows to avoid surprising Cost
 	// Explorer charges (each API call costs $0.01). 90 days is plenty
@@ -108,7 +113,7 @@ type CostAndUsageResult struct {
 
 // GetCostAndUsage queries Cost Explorer for per-period cost and returns a
 // flattened result suitable for LLM consumption. Defaults: daily granularity,
-// UnblendedCost metric, last 8 days (so workflows running on morning UTC
+// AmortizedCost metric, last 8 days (so workflows running on morning UTC
 // get 7 full previous days + today-in-progress), no grouping.
 func (c *Client) GetCostAndUsage(ctx context.Context, opts CostAndUsageOpts) (*CostAndUsageResult, error) {
 	start, end, err := resolveDateRange(opts.Start, opts.End, 8)

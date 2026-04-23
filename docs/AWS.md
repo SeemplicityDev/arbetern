@@ -150,7 +150,7 @@ tools disabled; any agent call trying `aws_*` tools returns a clear
 
 | Tool | Description |
 |---|---|
-| **aws_get_cost_and_usage** | Query Cost Explorer for cost and usage over a date range. Supports DAILY / MONTHLY / HOURLY granularity, all standard metrics (`UnblendedCost`, `BlendedCost`, `AmortizedCost`, `NetUnblendedCost`, `NetAmortizedCost`, `UsageQuantity`), optional `group_by` dimension (`SERVICE`, `LINKED_ACCOUNT`, `REGION`, `USAGE_TYPE`, `INSTANCE_TYPE`, `OPERATION`, `PURCHASE_TYPE`, `RECORD_TYPE`, `AVAILABILITY_ZONE`, `PLATFORM`, `TENANCY`, `DATABASE_ENGINE`), and optional exact-match `service_filter`. Default window: last 8 days, DAILY, `UnblendedCost` |
+| **aws_get_cost_and_usage** | Query Cost Explorer for cost and usage over a date range. Supports DAILY / MONTHLY / HOURLY granularity, all standard metrics (`UnblendedCost`, `BlendedCost`, `AmortizedCost`, `NetUnblendedCost`, `NetAmortizedCost`, `UsageQuantity`), optional `group_by` dimension (`SERVICE`, `LINKED_ACCOUNT`, `REGION`, `USAGE_TYPE`, `INSTANCE_TYPE`, `OPERATION`, `PURCHASE_TYPE`, `RECORD_TYPE`, `AVAILABILITY_ZONE`, `PLATFORM`, `TENANCY`, `DATABASE_ENGINE`), and optional exact-match `service_filter`. Default window: last 8 days, DAILY, `AmortizedCost` (spreads Reserved Instance / Savings Plan up-front charges across their commitment term for accurate daily trend analysis) |
 | **aws_get_cost_forecast** | Project future spend using Cost Explorer's forecast model. `start` must be >= today; `end` within 12 months. Default window: tomorrow → +30 days, DAILY |
 | **aws_list_dimension_values** | Enumerate values for a dimension (e.g. list every SERVICE that accrued cost in the last 30 days). Useful for discovering the exact service strings AWS expects as `service_filter` — e.g. `"Amazon Elastic Compute Cloud - Compute"`, not `"EC2"` |
 
@@ -189,7 +189,7 @@ A scheduled monoflow workflow for a morning cost report:
 Daily AWS cost summary — 08:00 UTC
 
 1. Call aws_get_cost_and_usage with the last 8 days at DAILY granularity,
-   UnblendedCost metric, no group_by. Extract the per-day totals.
+   AmortizedCost metric, no group_by. Extract the per-day totals.
 
 2. Call aws_get_cost_and_usage for the most recent completed day (start =
    yesterday, end = today) with group_by=SERVICE. Sort services by spend
