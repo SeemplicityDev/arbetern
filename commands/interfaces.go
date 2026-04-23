@@ -4,6 +4,7 @@ import slacklib "github.com/slack-go/slack"
 
 type SlackClient interface {
 	FetchChannelHistory(channelID string, limit int) ([]slacklib.Message, error)
+	FetchChannelHistoryWindow(channelID, oldest string, limit int) ([]slacklib.Message, error)
 	FetchThreadReplies(channelID, threadTS string, limit int) ([]slacklib.Message, error)
 	PostMessage(channelID, text string) (string, error)
 	PostThreadReply(channelID, threadTS, text string) error

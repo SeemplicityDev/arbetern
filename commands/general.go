@@ -684,6 +684,22 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 		{
 			Type: "function",
 			Function: llm.ToolFunction{
+				Name:        "slack_conversations_history",
+				Description: "Read recent messages from a Slack channel by channel ID. Use this in scheduled workflows that need to react to messages posted in a specific channel (e.g. polling an alerts channel). Returns messages newest-first, each annotated with ts, thread_ts, sender, and whether it was posted by a bot. Pass 'oldest' to fetch only messages posted after a prior watermark ts — leave empty to fetch the most recent 'limit' messages regardless of age. Typical first-run usage: oldest='' and limit=1 to grab only the latest message; subsequent ticks: oldest=<previous-watermark-ts> and limit=20.",
+				Parameters: json.RawMessage(`{
+					"type":"object",
+					"properties":{
+						"channel_id":{"type":"string","description":"Slack channel ID (e.g. 'C09NN1E439D'). NOT a channel name."},
+						"oldest":{"type":"string","description":"Slack ts (e.g. '1776940344.123456') — only return messages strictly newer than this. Leave empty or omit to return the most recent 'limit' messages regardless of age."},
+						"limit":{"type":"integer","description":"Maximum number of messages to return (default 20, max 100)."}
+					},
+					"required":["channel_id"]
+				}`),
+			},
+		},
+		{
+			Type: "function",
+			Function: llm.ToolFunction{
 				Name:        "upload_snippet",
 				Description: "Upload a text file snippet to Slack. Use this instead of posting a long message when the content is large (e.g., full search results with file paths and code lines, log dumps, CSV data, large code blocks). The snippet appears as a collapsible file attachment in the channel/thread, keeping the conversation clean. PREFER this over reply_in_thread or plain messages whenever the output would exceed ~30 lines or ~2000 characters. Ideal for: org-wide search results, full file listings, detailed tables, log output, code dumps.",
 				Parameters: json.RawMessage(`{
@@ -1689,6 +1705,36 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		}
 		log.Printf("[user=%s channel=%s] posted message to %s (ts=%s)", userID, channelID, args.ChannelID, ts)
 		return fmt.Sprintf("Successfully posted to channel %s (ts=%s).", args.ChannelID, ts)
+
+	case "slack_conversations_history":
+		args, errMsg := parseToolArgs[struct {
+			ChannelID string `json:"channel_id"`
+			Oldest    string `json:"oldest"`
+			Limit     int    `json:"limit"`
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
+		}
+		if strings.TrimSpace(args.ChannelID) == "" {
+			return "Error: 'channel_id' is required."
+		}
+		limit := args.Limit
+		if limit <= 0 {
+			limit = 20
+		}
+		if limit > 100 {
+			limit = 100
+		}
+		msgs, err := h.slackClient.FetchChannelHistoryWindow(args.ChannelID, strings.TrimSpace(args.Oldest), limit)
+		if err != nil {
+			return fmt.Sprintf("Error fetching channel history for %s: %v", args.ChannelID, err)
+		}
+		if len(msgs) == 0 {
+			return fmt.Sprintf("No messages found in channel %s after oldest=%q.", args.ChannelID, args.Oldest)
+		}
+		formatted := formatMessages(msgs)
+		log.Printf("[user=%s channel=%s] fetched %d messages from %s (oldest=%q)", userID, channelID, len(msgs), args.ChannelID, args.Oldest)
+		return fmt.Sprintf("Channel history (channel_id=%s, count=%d, oldest_requested=%q):\n\n%s", args.ChannelID, len(msgs), args.Oldest, formatted)
 
 	case "upload_snippet":
 		args, errMsg := parseToolArgs[struct {

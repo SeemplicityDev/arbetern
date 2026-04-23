@@ -38,6 +38,27 @@ func (c *Client) FetchChannelHistory(channelID string, limit int) ([]slack.Messa
 	return resp.Messages, nil
 }
 
+// FetchChannelHistoryWindow returns up to `limit` messages posted after the
+// `oldest` Slack timestamp (exclusive). Pass an empty string or "0" for
+// `oldest` to return the most recent `limit` messages regardless of age.
+// Slack returns messages newest-first.
+func (c *Client) FetchChannelHistoryWindow(channelID, oldest string, limit int) ([]slack.Message, error) {
+	params := &slack.GetConversationHistoryParameters{
+		ChannelID: channelID,
+		Limit:     limit,
+	}
+	if oldest != "" {
+		params.Oldest = oldest
+	}
+
+	resp, err := c.api.GetConversationHistory(params)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch channel history window: %w", err)
+	}
+
+	return resp.Messages, nil
+}
+
 func (c *Client) PostMessage(channelID, text string) (string, error) {
 	_, ts, err := c.api.PostMessage(channelID, slack.MsgOptionText(text, false))
 	if err != nil {
