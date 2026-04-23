@@ -390,6 +390,78 @@ func FormatPRSummary(s *PRSummary) string {
 	return sb.String()
 }
 
+// CommitSummary holds essential information about a single commit.
+type CommitSummary struct {
+	SHA     string    `json:"sha"`
+	Message string    `json:"message"` // first line only
+	Author  string    `json:"author"`  // GitHub login if available, else committer name
+	Date    time.Time `json:"date"`    // author date (commit timestamp)
+	URL     string    `json:"url"`
+}
+
+// ListCommits returns commits for a repo, optionally restricted to a branch
+// (sha) and an author/time window. since and until may be zero to omit.
+// limit caps the number of commits returned (GitHub default PerPage=30;
+// paginates up to 'limit', max 300).
+func (c *Client) ListCommits(ctx context.Context, owner, repo, branch, author string, since, until time.Time, limit int) ([]CommitSummary, error) {
+	if limit <= 0 {
+		limit = 30
+	}
+	if limit > 300 {
+		limit = 300
+	}
+	perPage := limit
+	if perPage > 100 {
+		perPage = 100
+	}
+	opts := &gh.CommitsListOptions{
+		SHA:    branch,
+		Author: author,
+		ListOptions: gh.ListOptions{
+			PerPage: perPage,
+		},
+	}
+	if !since.IsZero() {
+		opts.Since = since
+	}
+	if !until.IsZero() {
+		opts.Until = until
+	}
+
+	var out []CommitSummary
+	for {
+		page, resp, err := c.api.Repositories.ListCommits(ctx, owner, repo, opts)
+		if err != nil {
+			return nil, fmt.Errorf("failed to list commits for %s/%s: %w", owner, repo, err)
+		}
+		for _, rc := range page {
+			msg := rc.GetCommit().GetMessage()
+			if idx := strings.IndexByte(msg, '\n'); idx >= 0 {
+				msg = msg[:idx]
+			}
+			author := rc.GetAuthor().GetLogin()
+			if author == "" {
+				author = rc.GetCommit().GetAuthor().GetName()
+			}
+			out = append(out, CommitSummary{
+				SHA:     rc.GetSHA(),
+				Message: msg,
+				Author:  author,
+				Date:    rc.GetCommit().GetAuthor().GetDate().Time,
+				URL:     rc.GetHTMLURL(),
+			})
+			if len(out) >= limit {
+				return out, nil
+			}
+		}
+		if resp == nil || resp.NextPage == 0 {
+			break
+		}
+		opts.Page = resp.NextPage
+	}
+	return out, nil
+}
+
 // ListPullRequests returns recent PRs for a repo.
 func (c *Client) ListPullRequests(ctx context.Context, owner, repo, state string, limit int) ([]PRSummary, error) {
 	if state == "" {
@@ -731,55 +803,4 @@ func (c *Client) RerunWorkflow(ctx context.Context, owner, repo string, runID in
 		return fmt.Errorf("failed to rerun workflow run %d: %w", runID, err)
 	}
 	return nil
-}
-
-// CommitSummary holds the essential fields of a Git commit.
-type CommitSummary struct {
-	SHA     string `json:"sha"`
-	Message string `json:"message"`
-	Author  string `json:"author"`
-	Date    string `json:"date"`
-	URL     string `json:"url"`
-}
-
-// ListCommits returns the latest commits for a repository (up to limit).
-func (c *Client) ListCommits(ctx context.Context, owner, repo string, limit int) ([]CommitSummary, error) {
-	if limit <= 0 {
-		limit = 20
-	}
-	opts := &gh.CommitsListOptions{
-		ListOptions: gh.ListOptions{PerPage: limit},
-	}
-	commits, _, err := c.api.Repositories.ListCommits(ctx, owner, repo, opts)
-	if err != nil {
-		return nil, fmt.Errorf("failed to list commits for %s/%s: %w", owner, repo, err)
-	}
-
-	result := make([]CommitSummary, 0, len(commits))
-	for _, c := range commits {
-		msg := ""
-		author := ""
-		date := ""
-		if c.Commit != nil {
-			msg = c.Commit.GetMessage()
-			if c.Commit.Author != nil {
-				author = c.Commit.Author.GetName()
-				if c.Commit.Author.Date != nil {
-					date = c.Commit.Author.Date.Format(time.RFC3339)
-				}
-			}
-		}
-		// Use first line of commit message only.
-		if idx := strings.IndexByte(msg, '\n'); idx > 0 {
-			msg = msg[:idx]
-		}
-		result = append(result, CommitSummary{
-			SHA:     c.GetSHA()[:7],
-			Message: msg,
-			Author:  author,
-			Date:    date,
-			URL:     c.GetHTMLURL(),
-		})
-	}
-	return result, nil
 }

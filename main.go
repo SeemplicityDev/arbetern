@@ -1183,10 +1183,16 @@ func main() {
 			http.Error(w, "GitHub integration not configured", http.StatusServiceUnavailable)
 			return
 		}
-		commits, err := ghClient.ListCommits(r.Context(), changelogOwner, changelogRepo, 20)
+		commits, err := ghClient.ListCommits(r.Context(), changelogOwner, changelogRepo, "", "", time.Time{}, time.Time{}, 20)
 		if err != nil {
 			http.Error(w, fmt.Sprintf("failed to fetch commits: %v", err), http.StatusInternalServerError)
 			return
+		}
+		// Shorten SHAs to 7 chars for the UI's changelog view.
+		for i := range commits {
+			if len(commits[i].SHA) > 7 {
+				commits[i].SHA = commits[i].SHA[:7]
+			}
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(commits)
