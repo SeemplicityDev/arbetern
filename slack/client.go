@@ -67,6 +67,21 @@ func (c *Client) PostMessage(channelID, text string) (string, error) {
 	return ts, nil
 }
 
+// PostMessageInThread posts to channelID as a threaded reply under threadTS
+// and returns the new message's ts. When threadTS is empty, behaves like
+// PostMessage (posts as a top-level message).
+func (c *Client) PostMessageInThread(channelID, threadTS, text string) (string, error) {
+	opts := []slack.MsgOption{slack.MsgOptionText(text, false)}
+	if strings.TrimSpace(threadTS) != "" {
+		opts = append(opts, slack.MsgOptionTS(threadTS))
+	}
+	_, ts, err := c.api.PostMessage(channelID, opts...)
+	if err != nil {
+		return "", fmt.Errorf("failed to post message: %w", err)
+	}
+	return ts, nil
+}
+
 func (c *Client) PostThreadReply(channelID, threadTS, text string) error {
 	_, _, err := c.api.PostMessage(channelID, slack.MsgOptionText(text, false), slack.MsgOptionTS(threadTS))
 	if err != nil {

@@ -7,6 +7,7 @@ type SlackClient interface {
 	FetchChannelHistoryWindow(channelID, oldest string, limit int) ([]slacklib.Message, error)
 	FetchThreadReplies(channelID, threadTS string, limit int) ([]slacklib.Message, error)
 	PostMessage(channelID, text string) (string, error)
+	PostMessageInThread(channelID, threadTS, text string) (string, error)
 	PostThreadReply(channelID, threadTS, text string) error
 	PostBlocks(channelID, fallback string, blocks []slacklib.Block) (string, error)
 	PostThreadBlocks(channelID, threadTS, fallback string, blocks []slacklib.Block) error

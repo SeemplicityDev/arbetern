@@ -692,12 +692,13 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 			Type: "function",
 			Function: llm.ToolFunction{
 				Name:        "post_slack_message",
-				Description: "Post a message to a specific Slack channel by channel ID. Use this when the user gives you an explicit channel ID (e.g. 'C02S5BP9LHX') and asks you to send a message there, OR inside a scheduled workflow tick where no interactive thread is available. Supports Slack markdown. Returns the posted message ts on success.",
+				Description: "Post a message to a specific Slack channel by channel ID. Use this when the user gives you an explicit channel ID (e.g. 'C02S5BP9LHX') and asks you to send a message there, OR inside a scheduled workflow tick where no interactive thread is available. If 'thread_ts' is set, the message is posted as a threaded reply under that parent message (use this to keep multi-part reports on the same thread — capture the ts returned by the first call and pass it as thread_ts on subsequent calls). Supports Slack markdown. Returns the posted message ts on success.",
 				Parameters: json.RawMessage(`{
 					"type":"object",
 					"properties":{
 						"channel_id":{"type":"string","description":"Slack channel ID (e.g. 'C02S5BP9LHX'). NOT a channel name."},
-						"text":{"type":"string","description":"Message body. Supports Slack markdown formatting."}
+						"text":{"type":"string","description":"Message body. Supports Slack markdown formatting."},
+						"thread_ts":{"type":"string","description":"OPTIONAL. Parent message ts to reply under. Omit or leave empty to post as a new top-level channel message. Use the ts returned by a prior post_slack_message call to keep a multi-part report threaded together."}
 					},
 					"required":["channel_id","text"]
 				}`),
@@ -1822,6 +1823,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		args, errMsg := parseToolArgs[struct {
 			ChannelID string `json:"channel_id"`
 			Text      string `json:"text"`
+			ThreadTS  string `json:"thread_ts"`
 		}](argsJSON)
 		if errMsg != "" {
 			return errMsg
@@ -1829,9 +1831,13 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		if strings.TrimSpace(args.ChannelID) == "" || strings.TrimSpace(args.Text) == "" {
 			return "Error: 'channel_id' and 'text' are required."
 		}
-		ts, err := h.slackClient.PostMessage(args.ChannelID, args.Text)
+		ts, err := h.slackClient.PostMessageInThread(args.ChannelID, args.ThreadTS, args.Text)
 		if err != nil {
 			return fmt.Sprintf("Error posting to channel %s: %v", args.ChannelID, err)
+		}
+		if strings.TrimSpace(args.ThreadTS) != "" {
+			log.Printf("[user=%s channel=%s] posted threaded reply to %s (thread_ts=%s, ts=%s)", userID, channelID, args.ChannelID, args.ThreadTS, ts)
+			return fmt.Sprintf("Successfully posted threaded reply to channel %s under thread_ts=%s (ts=%s).", args.ChannelID, args.ThreadTS, ts)
 		}
 		log.Printf("[user=%s channel=%s] posted message to %s (ts=%s)", userID, channelID, args.ChannelID, ts)
 		return fmt.Sprintf("Successfully posted to channel %s (ts=%s).", args.ChannelID, ts)
