@@ -965,6 +965,11 @@ func main() {
 	if err := dashRegistry.LoadAll(context.Background()); err != nil {
 		log.Printf("warn: failed to load existing dashboards: %v", err)
 	}
+	// Kick off the scheduled-sync tickers for every dashboard loaded from
+	// disk, but do NOT trigger an immediate sync — server boot should only
+	// load state into memory and start timers, not hammer every upstream on
+	// startup. Ticks will fire on their normal schedule.
+	dashRegistry.StartAll(context.Background())
 	defer dashRegistry.StopAll()
 
 	// Workflows registry: scheduled LLM tool-loop runs.

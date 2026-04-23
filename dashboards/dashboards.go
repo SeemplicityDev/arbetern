@@ -179,8 +179,10 @@ var agentValidRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
 // idValidRe constrains dashboard IDs to a safe URL-friendly alphabet.
 var idValidRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
 
-// LoadAll scans the dashboards directory and kicks off sync goroutines.
-// Invalid files are logged and skipped; they do not prevent startup.
+// LoadAll scans the dashboards directory and loads each dashboard into
+// memory. It does NOT start sync goroutines — call StartAll afterwards to
+// launch them. Invalid files are logged and skipped; they do not prevent
+// startup.
 func (r *Registry) LoadAll(ctx context.Context) error {
 	entries, err := os.ReadDir(r.dir)
 	if err != nil {
@@ -212,11 +214,32 @@ func (r *Registry) LoadAll(ctx context.Context) error {
 			r.mu.Lock()
 			r.items[key(d.Agent, d.ID)] = d
 			r.mu.Unlock()
-			r.startRunner(ctx, d)
 			log.Printf("[dashboards] loaded %s/%s (%q, every %s)", d.Agent, d.ID, d.Name, d.interval())
 		}
 	}
 	return nil
+}
+
+// StartAll launches a sync goroutine for every loaded dashboard WITHOUT
+// firing an immediate sync. Intended as the server-boot entry point: on
+// startup we just want the scheduled ticker to begin, not to blast every
+// upstream (Jira, Datadog, GitHub, Chorus, …) the moment the process comes
+// up. Dashboards that are explicitly refreshed via "Refresh now" or via
+// Create will still sync immediately — only the boot path is lazy.
+//
+// Account-kind dashboards, which have no ticker by design, are started the
+// same way startRunner handles them (no-op runner) so StopAll still works.
+func (r *Registry) StartAll(ctx context.Context) {
+	r.mu.RLock()
+	list := make([]*Dashboard, 0, len(r.items))
+	for _, d := range r.items {
+		cp := *d
+		list = append(list, &cp)
+	}
+	r.mu.RUnlock()
+	for _, d := range list {
+		r.startRunner(ctx, d, false)
+	}
 }
 
 // Create validates, persists, and starts a new dashboard.
@@ -258,7 +281,7 @@ func (r *Registry) Create(ctx context.Context, agent, createdBy string, name, sh
 	r.mu.Lock()
 	r.items[key(agent, id)] = d
 	r.mu.Unlock()
-	r.startRunner(ctx, d)
+	r.startRunner(ctx, d, true)
 	log.Printf("[dashboards] created %s/%s (%q, every %s)", agent, id, name, d.interval())
 	return d, nil
 }
@@ -371,7 +394,7 @@ func (r *Registry) StopAll() {
 }
 
 // startRunner launches the sync goroutine for d. Replaces any existing runner.
-func (r *Registry) startRunner(parent context.Context, d *Dashboard) {
+func (r *Registry) startRunner(parent context.Context, d *Dashboard, runInitial bool) {
 	r.mu.Lock()
 	if old, ok := r.runners[key(d.Agent, d.ID)]; ok {
 		old.cancel()
@@ -387,8 +410,13 @@ func (r *Registry) startRunner(parent context.Context, d *Dashboard) {
 
 	go func() {
 		defer close(run.done)
-		// Kick off an immediate sync so the dashboard has data on first view.
-		r.syncOne(ctx, agent, id)
+		// runInitial=true is the create / explicit-refresh path and should
+		// populate the dashboard so the first view has data. runInitial=false
+		// is the server-boot path — we trust whatever is already on disk and
+		// wait for the next tick.
+		if runInitial {
+			r.syncOne(ctx, agent, id)
+		}
 
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()

@@ -266,8 +266,10 @@ func key(agent, id string) string { return agent + "/" + id }
 var agentValidRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
 var idValidRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
 
-// LoadAll scans the workflows directory and kicks off tick goroutines.
-// Invalid files are logged and skipped; they do not prevent startup.
+// LoadAll scans the workflows directory and loads each workflow into memory.
+// It does NOT start tick goroutines — StartAllEnabled handles that once the
+// executor has been wired up. Invalid files are logged and skipped; they do
+// not prevent startup.
 func (r *Registry) LoadAll(ctx context.Context) error {
 	entries, err := os.ReadDir(r.dir)
 	if err != nil {
@@ -606,7 +608,10 @@ func (r *Registry) StopAll() {
 }
 
 // StartAllEnabled launches runners for every enabled workflow already loaded.
-// Used when the executor is installed after LoadAll.
+// Used when the executor is installed after LoadAll. This is the server-boot
+// entry point, so we pass runInitial=false — loading workflows into memory
+// on startup should NOT fire an immediate tick. Ticks will fire on their
+// normal schedule (or via manual "run now" from the UI).
 func (r *Registry) StartAllEnabled(ctx context.Context) {
 	r.mu.Lock()
 	r.baseCtx = ctx
@@ -619,7 +624,7 @@ func (r *Registry) StartAllEnabled(ctx context.Context) {
 	}
 	r.mu.Unlock()
 	for _, w := range list {
-		r.startRunner(w, true)
+		r.startRunner(w, false)
 	}
 }
 
