@@ -22,6 +22,8 @@
     header .badge.ok{color:var(--green);border-color:rgba(46,148,68,.35);background:rgba(46,148,68,.06)}
     header .badge.err{color:var(--red);border-color:rgba(196,64,64,.35);background:rgba(196,64,64,.06)}
     header .badge.paused{color:var(--amber);border-color:rgba(209,138,58,.35);background:rgba(209,138,58,.06)}
+    header .badge.running{color:var(--blue,#3178c6);border-color:rgba(49,120,198,.45);background:rgba(49,120,198,.08);animation:pulse 1.4s ease-in-out infinite}
+    @keyframes pulse{0%,100%{opacity:1}50%{opacity:.55}}
     main{max-width:1200px;margin:0 auto;padding:28px 24px 60px}
     .description{color:var(--text-muted);font-size:13px;margin-bottom:24px;max-width:820px;line-height:1.6}
     .card{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:22px;margin-bottom:18px;box-shadow:var(--shadow)}
@@ -411,7 +413,10 @@
         '/' + wf.agent + ' · id ' + wf.id + ' · every ' + wf.interval + ' · created ' + formatTime(wf.created_at);
 
       const badge = document.getElementById('status-badge');
-      if (!wf.enabled) {
+      if (wf.running) {
+        badge.textContent = 'running…';
+        badge.className = 'badge running';
+      } else if (!wf.enabled) {
         badge.textContent = wf.disabled_reason ? 'auto-disabled' : 'paused';
         badge.className = 'badge ' + (wf.disabled_reason ? 'err' : 'paused');
       } else if (wf.last_error) {
@@ -435,6 +440,16 @@
         toggleBtn.title = 'Resume this workflow. Scheduled ticks and event triggers will fire again.';
       }
       document.getElementById('run-now-btn').style.display = wf.enabled ? '' : 'none';
+      const runBtn = document.getElementById('run-now-btn');
+      if (wf.running) {
+        runBtn.disabled = true;
+        runBtn.title = 'A tick is currently in progress.';
+        runBtn.textContent = '▶ running…';
+      } else {
+        runBtn.disabled = false;
+        runBtn.title = 'Trigger this workflow immediately.';
+        runBtn.textContent = '▶ run now';
+      }
 
       const disabledBanner = document.getElementById('disabled-banner');
       if (!wf.enabled && wf.disabled_reason) {
@@ -549,7 +564,17 @@
     }
 
     load().catch(e => console.error(e));
-    setInterval(() => load().catch(() => {}), 30000);
+    // Poll every 30s normally; when a tick is in flight, poll every 3s so
+    // the "running…" badge and run history update quickly.
+    let pollTimer = null;
+    function schedulePoll() {
+      if (pollTimer) clearTimeout(pollTimer);
+      const delay = (window.__wf && window.__wf.running) ? 3000 : 30000;
+      pollTimer = setTimeout(() => {
+        load().catch(() => {}).finally(schedulePoll);
+      }, delay);
+    }
+    schedulePoll();
 
     // "Run now" button: POSTs to /api/workflows/<agent>/<id>/run. The server
     // returns 202 Accepted immediately and executes the workflow in its own

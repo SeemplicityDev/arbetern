@@ -149,6 +149,9 @@ type Workflow struct {
 	// this to explain why a workflow stopped ticking.
 	DisabledReason string   `json:"disabled_reason,omitempty"`
 	Runs           []RunLog `json:"runs,omitempty"`
+	// Running is a transient, never-persisted flag populated by Get/List
+	// from the live runner state. True while a tick is in flight.
+	Running bool `json:"running,omitempty"`
 }
 
 // ViewURL returns the path to the HTML view for this workflow.
@@ -222,6 +225,11 @@ type Registry struct {
 	executor Executor
 	items    map[string]*Workflow // key: agent/id
 	runners  map[string]*runner   // key: agent/id
+	// baseCtx is the long-lived registry context, set by StartAllEnabled.
+	// Runner goroutines derive their context from this, NOT from per-request
+	// contexts passed to Create/Update — otherwise the HTTP handler returning
+	// would cancel the runner and any in-flight tick.
+	baseCtx context.Context
 }
 
 // New creates a Registry rooted at dir. It creates the directory if missing.
@@ -379,7 +387,7 @@ func (r *Registry) Create(ctx context.Context, opts CreateOpts) (*Workflow, erro
 	r.mu.Lock()
 	r.items[key(opts.Agent, id)] = w
 	r.mu.Unlock()
-	r.startRunner(ctx, w)
+	r.startRunner(w, true)
 	log.Printf("[workflows] created %s/%s (%q, pattern=%s, every %s)", opts.Agent, id, opts.Name, w.Pattern(), w.intervalDur())
 	return w, nil
 }
@@ -393,6 +401,7 @@ func (r *Registry) Get(agent, id string) (*Workflow, bool) {
 		return nil, false
 	}
 	cp := *w
+	cp.Running = r.isRunning(agent, id)
 	return &cp, true
 }
 
@@ -406,10 +415,18 @@ func (r *Registry) List(agent string) []*Workflow {
 			continue
 		}
 		cp := *w
+		cp.Running = r.isRunning(w.Agent, w.ID)
 		out = append(out, &cp)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt < out[j].CreatedAt })
 	return out
+}
+
+// isRunning reports whether this workflow has a tick in flight. Caller must
+// already hold r.mu (read or write).
+func (r *Registry) isRunning(agent, id string) bool {
+	run := r.runners[key(agent, id)]
+	return run != nil && run.busy.Load() != 0
 }
 
 // UpdateOpts carries the editable fields of a workflow. Any field left at
@@ -515,19 +532,33 @@ func (r *Registry) Update(ctx context.Context, agent, id string, opts UpdateOpts
 	r.items[key(agent, id)] = &updated
 	r.mu.Unlock()
 
-	// Restart the tick goroutine so schedule/trigger/prompt changes take
-	// effect immediately. startRunner already cancels any prior runner for
-	// this key before starting a new one.
-	if updated.Enabled {
-		r.startRunner(ctx, &updated)
-	} else {
+	// Decide whether the tick goroutine actually needs to be restarted.
+	// Non-scheduling edits (name, description, prompt, tasks) are picked up
+	// on the next tick because runOnce re-reads the stored workflow, so
+	// there is no reason to cancel the ticker — cancelling it would also
+	// kill any in-flight manual run (its ctx is derived from the runner's).
+	scheduleChanged := orig.Interval != updated.Interval ||
+		orig.RunAtUTC != updated.RunAtUTC ||
+		orig.Trigger.Type != updated.Trigger.Type ||
+		orig.Trigger.Ref != updated.Trigger.Ref
+	enabledChanged := orig.Enabled != updated.Enabled
+
+	if !updated.Enabled {
 		// Disabled: stop any running ticker and leave the entry in place.
-		r.mu.Lock()
-		if run, ok := r.runners[key(agent, id)]; ok {
-			run.cancel()
-			delete(r.runners, key(agent, id))
+		if enabledChanged {
+			r.mu.Lock()
+			if run, ok := r.runners[key(agent, id)]; ok {
+				run.cancel()
+				delete(r.runners, key(agent, id))
+			}
+			r.mu.Unlock()
 		}
-		r.mu.Unlock()
+	} else if scheduleChanged || enabledChanged {
+		// Restart the runner so the new schedule takes effect. Pass
+		// runInitial=false so the edit does NOT fire an immediate tick
+		// (previous behaviour caused every save to trigger a new run,
+		// which also got killed by the HTTP request context).
+		r.startRunner(&updated, false)
 	}
 	log.Printf("[workflows] updated %s/%s (%q, pattern=%s, every %s, enabled=%t)",
 		agent, id, updated.Name, updated.Pattern(), updated.intervalDur(), updated.Enabled)
@@ -577,7 +608,8 @@ func (r *Registry) StopAll() {
 // StartAllEnabled launches runners for every enabled workflow already loaded.
 // Used when the executor is installed after LoadAll.
 func (r *Registry) StartAllEnabled(ctx context.Context) {
-	r.mu.RLock()
+	r.mu.Lock()
+	r.baseCtx = ctx
 	list := make([]*Workflow, 0, len(r.items))
 	for _, w := range r.items {
 		if w.Enabled {
@@ -585,16 +617,20 @@ func (r *Registry) StartAllEnabled(ctx context.Context) {
 			list = append(list, &cp)
 		}
 	}
-	r.mu.RUnlock()
+	r.mu.Unlock()
 	for _, w := range list {
-		r.startRunner(ctx, w)
+		r.startRunner(w, true)
 	}
 }
 
-func (r *Registry) startRunner(parent context.Context, w *Workflow) {
+func (r *Registry) startRunner(w *Workflow, runInitial bool) {
 	r.mu.Lock()
 	if old, ok := r.runners[key(w.Agent, w.ID)]; ok {
 		old.cancel()
+	}
+	parent := r.baseCtx
+	if parent == nil {
+		parent = context.Background()
 	}
 	ctx, cancel := context.WithCancel(parent)
 	run := &runner{cancel: cancel, done: make(chan struct{})}
@@ -618,7 +654,10 @@ func (r *Registry) startRunner(parent context.Context, w *Workflow) {
 		defer close(run.done)
 		// If RunAtUTC is set, wait until the next HH:MM UTC boundary
 		// before firing the initial tick. Otherwise fire immediately so
-		// the user sees activity without waiting a full interval.
+		// the user sees activity without waiting a full interval — but
+		// only when runInitial is true (i.e. fresh create / server boot).
+		// Updates pass runInitial=false so saving the edit modal does
+		// NOT trigger a new tick (and does not cancel any in-flight run).
 		if delay, ok := parseRunAtDelay(w.RunAtUTC); ok {
 			log.Printf("[workflows] %s/%s aligning first tick to %s UTC (in %s)", agent, id, w.RunAtUTC, delay.Round(time.Second))
 			select {
@@ -627,7 +666,9 @@ func (r *Registry) startRunner(parent context.Context, w *Workflow) {
 			case <-time.After(delay):
 			}
 		}
-		_, _ = r.runOnce(ctx, agent, id, "schedule:initial")
+		if runInitial {
+			_, _ = r.runOnce(ctx, agent, id, "schedule:initial")
+		}
 
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
