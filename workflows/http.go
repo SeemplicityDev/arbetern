@@ -136,6 +136,8 @@ func (r *Registry) handleAPIItem(w http.ResponseWriter, req *http.Request) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(wf)
+	case http.MethodPatch, http.MethodPut:
+		r.handleAPIUpdate(agent, id, w, req)
 	case http.MethodDelete:
 		if err := r.Delete(agent, id); err != nil {
 			http.Error(w, err.Error(), http.StatusNotFound)
@@ -145,4 +147,84 @@ func (r *Registry) handleAPIItem(w http.ResponseWriter, req *http.Request) {
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+// handleAPIUpdate applies a partial edit to a workflow from the UI. Body is a
+// JSON object; only the keys actually present in the payload are treated as
+// intentional edits (mirrors the update_workflow tool semantics so a missing
+// field means "unchanged" rather than "clear").
+func (r *Registry) handleAPIUpdate(agent, id string, w http.ResponseWriter, req *http.Request) {
+	var raw map[string]json.RawMessage
+	dec := json.NewDecoder(req.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&raw); err != nil {
+		http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	var opts UpdateOpts
+	if v, ok := raw["name"]; ok {
+		var s string
+		if err := json.Unmarshal(v, &s); err != nil {
+			http.Error(w, "'name' must be a string", http.StatusBadRequest)
+			return
+		}
+		opts.Name = &s
+	}
+	if v, ok := raw["description"]; ok {
+		var s string
+		if err := json.Unmarshal(v, &s); err != nil {
+			http.Error(w, "'description' must be a string", http.StatusBadRequest)
+			return
+		}
+		opts.Description = &s
+	}
+	if v, ok := raw["interval"]; ok {
+		var s string
+		if err := json.Unmarshal(v, &s); err != nil {
+			http.Error(w, "'interval' must be a string", http.StatusBadRequest)
+			return
+		}
+		opts.Interval = &s
+	}
+	if v, ok := raw["prompt"]; ok {
+		var s string
+		if err := json.Unmarshal(v, &s); err != nil {
+			http.Error(w, "'prompt' must be a string", http.StatusBadRequest)
+			return
+		}
+		opts.Prompt = &s
+	}
+	if v, ok := raw["tasks"]; ok {
+		var tasks []Task
+		if err := json.Unmarshal(v, &tasks); err != nil {
+			http.Error(w, "'tasks' must be an array of {name,prompt}", http.StatusBadRequest)
+			return
+		}
+		opts.Tasks = &tasks
+	}
+	if v, ok := raw["trigger"]; ok {
+		var trig Trigger
+		if err := json.Unmarshal(v, &trig); err != nil {
+			http.Error(w, "'trigger' must be an object", http.StatusBadRequest)
+			return
+		}
+		opts.Trigger = &trig
+	}
+	if v, ok := raw["enabled"]; ok {
+		var b bool
+		if err := json.Unmarshal(v, &b); err != nil {
+			http.Error(w, "'enabled' must be a boolean", http.StatusBadRequest)
+			return
+		}
+		opts.Enabled = &b
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	updated, err := r.Update(ctx, agent, id, opts)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(updated)
 }

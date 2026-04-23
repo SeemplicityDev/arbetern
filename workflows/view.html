@@ -84,6 +84,42 @@
     .footer{margin-top:40px;padding-top:20px;border-top:1px solid var(--border);color:var(--text-muted);font-size:11px;text-align:center}
     a{color:var(--accent);text-decoration:none}
     a:hover{text-decoration:underline}
+
+    /* Edit modal */
+    .modal-backdrop{position:fixed;inset:0;background:rgba(0,0,0,.75);backdrop-filter:blur(4px);z-index:100;display:none;align-items:flex-start;justify-content:center;padding:40px 20px;overflow-y:auto}
+    .modal-backdrop.open{display:flex}
+    .modal{background:var(--card);border:1px solid var(--border-accent);border-radius:14px;box-shadow:0 20px 60px -10px rgba(0,0,0,.8);width:100%;max-width:780px;padding:24px;color:var(--text)}
+    .modal h2{font-size:16px;font-weight:700;margin-bottom:4px}
+    .modal .hint{font-size:12px;color:var(--text-muted);margin-bottom:18px}
+    .form-row{display:flex;flex-direction:column;gap:6px;margin-bottom:14px}
+    .form-row.two{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+    .form-row label{font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:var(--text-muted);font-weight:600}
+    .form-row input[type=text], .form-row textarea, .form-row select{width:100%;background:#050505;border:1px solid var(--border);border-radius:8px;padding:10px 12px;color:var(--text);font-family:inherit;font-size:13px;outline:none}
+    .form-row input[type=text]:focus, .form-row textarea:focus, .form-row select:focus{border-color:var(--accent)}
+    .form-row textarea{font-family:'SF Mono','Fira Code',monospace;font-size:12px;line-height:1.55;resize:vertical;min-height:80px}
+    .form-row .checkbox{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--text)}
+    .form-row .checkbox input{width:auto}
+    .tasks-editor{display:flex;flex-direction:column;gap:10px}
+    .task-edit{background:var(--card-2);border:1px solid var(--border);border-radius:10px;padding:12px;position:relative}
+    .task-edit .task-head{display:flex;align-items:center;gap:8px;margin-bottom:8px}
+    .task-edit .task-head .num{width:24px;height:24px;border-radius:50%;background:linear-gradient(135deg,var(--accent),var(--accent-2));color:#fff;font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+    .task-edit .task-head input{flex:1}
+    .task-edit .remove-task{background:transparent;border:1px solid var(--border);color:var(--text-muted);border-radius:6px;padding:4px 8px;font-size:11px;cursor:pointer;font-family:inherit}
+    .task-edit .remove-task:hover{color:var(--red);border-color:rgba(196,64,64,.35)}
+    .add-task-btn{background:var(--card-2);border:1px dashed var(--border-accent);color:var(--text-muted);border-radius:8px;padding:8px 12px;font-size:12px;cursor:pointer;font-family:inherit}
+    .add-task-btn:hover{color:var(--text);border-color:var(--accent)}
+    .mode-switch{display:flex;gap:4px;background:var(--card-2);border:1px solid var(--border);border-radius:8px;padding:3px;width:fit-content;margin-bottom:8px}
+    .mode-switch button{background:transparent;border:none;color:var(--text-muted);padding:6px 14px;border-radius:6px;font-size:12px;cursor:pointer;font-family:inherit}
+    .mode-switch button.active{background:var(--accent);color:#fff}
+    .modal-actions{display:flex;justify-content:flex-end;gap:10px;margin-top:18px;border-top:1px solid var(--border);padding-top:16px}
+    .btn{background:var(--card-2);border:1px solid var(--border);color:var(--text);padding:8px 18px;border-radius:8px;cursor:pointer;font-family:inherit;font-size:13px;font-weight:500}
+    .btn:hover{border-color:var(--border-accent)}
+    .btn.primary{background:linear-gradient(135deg,var(--accent),var(--accent-2));border-color:transparent;color:#fff}
+    .btn.primary:hover{opacity:.9}
+    .btn:disabled{opacity:.5;cursor:not-allowed}
+    .modal-error{color:var(--red);font-size:12px;background:rgba(196,64,64,.06);border:1px solid rgba(196,64,64,.25);border-radius:8px;padding:8px 10px;margin-top:10px;display:none}
+    .modal-error.show{display:block}
+    .edit-btn{cursor:pointer;font-family:inherit;color:var(--text);background:var(--card);display:inline-flex;align-items:center;gap:4px}
   </style>
 </head>
 <body>
@@ -97,6 +133,11 @@
       <button id="run-now-btn" class="badge" type="button"
         style="cursor:pointer;font-family:inherit;color:var(--text);background:var(--card);"
         title="Trigger this workflow immediately, outside its schedule.">▶ run now</button>
+      <button id="edit-btn" class="badge edit-btn" type="button"
+        title="Edit this workflow from the UI (name, prompt, tasks, schedule, trigger, enabled).">
+        <svg viewBox="0 0 16 16" width="12" height="12" xmlns="http://www.w3.org/2000/svg" style="fill:currentColor"><path d="M11.013 1.427a1.75 1.75 0 0 1 2.474 0l1.086 1.086a1.75 1.75 0 0 1 0 2.474l-8.61 8.61c-.21.21-.47.364-.756.445l-3.251.93a.75.75 0 0 1-.927-.928l.929-3.25c.081-.286.235-.547.445-.758l8.61-8.61zm1.414 1.06a.25.25 0 0 0-.354 0L10.811 3.75l1.439 1.44 1.263-1.263a.25.25 0 0 0 0-.354l-1.086-1.086zM11.189 6.25 9.75 4.811l-6.286 6.287a.25.25 0 0 0-.064.108l-.558 1.953 1.953-.558a.249.249 0 0 0 .108-.064l6.286-6.287z"/></svg>
+        edit
+      </button>
       <a class="badge" href="/ui/">← agents</a>
     </div>
   </header>
@@ -127,6 +168,77 @@
 
     <div class="footer" id="footer"></div>
   </main>
+
+  <!-- Edit modal -->
+  <div id="edit-modal" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="edit-modal-title">
+    <div class="modal">
+      <h2 id="edit-modal-title">Edit workflow</h2>
+      <div class="hint">Changes take effect on the next tick. Run history is preserved.</div>
+
+      <div class="form-row">
+        <label for="edit-name">Name</label>
+        <input type="text" id="edit-name" autocomplete="off" />
+      </div>
+
+      <div class="form-row">
+        <label for="edit-description">Description</label>
+        <textarea id="edit-description" rows="2"></textarea>
+      </div>
+
+      <div class="form-row two">
+        <div class="form-row" style="margin-bottom:0">
+          <label for="edit-interval">Interval (schedule only)</label>
+          <input type="text" id="edit-interval" placeholder="e.g. 5m, 1h" autocomplete="off" />
+        </div>
+        <div class="form-row" style="margin-bottom:0">
+          <label>Enabled</label>
+          <label class="checkbox"><input type="checkbox" id="edit-enabled" /> workflow is active</label>
+        </div>
+      </div>
+
+      <div class="form-row two">
+        <div class="form-row" style="margin-bottom:0">
+          <label for="edit-trigger-type">Trigger type</label>
+          <select id="edit-trigger-type">
+            <option value="schedule">schedule</option>
+            <option value="on_success">on_success</option>
+            <option value="on_failure">on_failure</option>
+            <option value="manual">manual</option>
+          </select>
+        </div>
+        <div class="form-row" id="edit-trigger-ref-row" style="margin-bottom:0">
+          <label for="edit-trigger-ref">Trigger ref (&lt;agent&gt;/&lt;id&gt;)</label>
+          <input type="text" id="edit-trigger-ref" placeholder="agent/workflow-id" autocomplete="off" />
+        </div>
+      </div>
+
+      <div class="form-row">
+        <label>Body</label>
+        <div class="mode-switch">
+          <button type="button" id="mode-prompt" class="active">Monoflow prompt</button>
+          <button type="button" id="mode-tasks">Subflow tasks</button>
+        </div>
+      </div>
+
+      <div class="form-row" id="edit-prompt-row">
+        <label for="edit-prompt">Prompt</label>
+        <textarea id="edit-prompt" rows="8"></textarea>
+      </div>
+
+      <div class="form-row" id="edit-tasks-row" style="display:none">
+        <label>Tasks</label>
+        <div id="edit-tasks" class="tasks-editor"></div>
+        <button type="button" id="add-task-btn" class="add-task-btn">+ add task</button>
+      </div>
+
+      <div id="edit-error" class="modal-error"></div>
+
+      <div class="modal-actions">
+        <button type="button" id="edit-cancel" class="btn">Cancel</button>
+        <button type="button" id="edit-save" class="btn primary">Save changes</button>
+      </div>
+    </div>
+  </div>
 
   <script>
     // ---------- Integration catalogue (inline SVG logos, monochrome-tinted) ----------
@@ -284,6 +396,7 @@
         return;
       }
       const wf = await res.json();
+      window.__wf = wf;
       document.title = 'arbetern — ' + (wf.name || wf.id);
       document.getElementById('title').textContent = wf.name || wf.id;
       document.getElementById('subtitle').textContent =
@@ -460,6 +573,164 @@
         btn.textContent = '✗ error';
       } finally {
         setTimeout(() => { btn.textContent = original; btn.disabled = false; btn.style.opacity = ''; }, 2500);
+      }
+    });
+
+    // -------- Edit workflow modal --------
+    const editModal = document.getElementById('edit-modal');
+    const editErr = document.getElementById('edit-error');
+    let editMode = 'prompt'; // 'prompt' | 'tasks'
+    let editTasks = [];      // [{name, prompt}]
+
+    function setEditMode(mode) {
+      editMode = mode;
+      document.getElementById('mode-prompt').classList.toggle('active', mode === 'prompt');
+      document.getElementById('mode-tasks').classList.toggle('active', mode === 'tasks');
+      document.getElementById('edit-prompt-row').style.display = mode === 'prompt' ? '' : 'none';
+      document.getElementById('edit-tasks-row').style.display  = mode === 'tasks'  ? '' : 'none';
+    }
+
+    function renderEditTasks() {
+      const host = document.getElementById('edit-tasks');
+      if (editTasks.length === 0) {
+        host.innerHTML = '<div class="empty">No tasks yet — click "add task" to create one.</div>';
+        return;
+      }
+      host.innerHTML = editTasks.map((t, i) =>
+        '<div class="task-edit" data-idx="' + i + '">' +
+          '<div class="task-head">' +
+            '<div class="num">' + (i+1) + '</div>' +
+            '<input type="text" class="task-name-input" placeholder="Task name" value="' + escapeHtml(t.name || '') + '" />' +
+            '<button type="button" class="remove-task">remove</button>' +
+          '</div>' +
+          '<textarea class="task-prompt-input" rows="4" placeholder="Task prompt">' + escapeHtml(t.prompt || '') + '</textarea>' +
+        '</div>'
+      ).join('');
+      host.querySelectorAll('.task-edit').forEach(row => {
+        const idx = Number(row.dataset.idx);
+        row.querySelector('.task-name-input').addEventListener('input', (e) => { editTasks[idx].name = e.target.value; });
+        row.querySelector('.task-prompt-input').addEventListener('input', (e) => { editTasks[idx].prompt = e.target.value; });
+        row.querySelector('.remove-task').addEventListener('click', () => {
+          editTasks.splice(idx, 1);
+          renderEditTasks();
+        });
+      });
+    }
+
+    function updateTriggerRefVisibility() {
+      const t = document.getElementById('edit-trigger-type').value;
+      const needsRef = t === 'on_success' || t === 'on_failure';
+      document.getElementById('edit-trigger-ref-row').style.display = needsRef ? '' : 'none';
+    }
+
+    function openEdit() {
+      const wf = window.__wf;
+      if (!wf) return;
+      editErr.classList.remove('show');
+      editErr.textContent = '';
+      document.getElementById('edit-name').value = wf.name || '';
+      document.getElementById('edit-description').value = wf.description || '';
+      document.getElementById('edit-interval').value = wf.interval || '';
+      document.getElementById('edit-enabled').checked = !!wf.enabled;
+      const trig = wf.trigger || {};
+      document.getElementById('edit-trigger-type').value = trig.type || 'schedule';
+      document.getElementById('edit-trigger-ref').value = trig.ref || '';
+      updateTriggerRefVisibility();
+      document.getElementById('edit-prompt').value = wf.prompt || '';
+      editTasks = Array.isArray(wf.tasks) ? wf.tasks.map(t => ({ name: t.name || '', prompt: t.prompt || '' })) : [];
+      renderEditTasks();
+      setEditMode(editTasks.length > 0 ? 'tasks' : 'prompt');
+      editModal.classList.add('open');
+    }
+    function closeEdit() { editModal.classList.remove('open'); }
+
+    document.getElementById('edit-btn').addEventListener('click', openEdit);
+    document.getElementById('edit-cancel').addEventListener('click', closeEdit);
+    editModal.addEventListener('click', (e) => { if (e.target === editModal) closeEdit(); });
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && editModal.classList.contains('open')) closeEdit();
+    });
+    document.getElementById('mode-prompt').addEventListener('click', () => setEditMode('prompt'));
+    document.getElementById('mode-tasks').addEventListener('click', () => setEditMode('tasks'));
+    document.getElementById('edit-trigger-type').addEventListener('change', updateTriggerRefVisibility);
+    document.getElementById('add-task-btn').addEventListener('click', () => {
+      editTasks.push({ name: '', prompt: '' });
+      renderEditTasks();
+    });
+
+    document.getElementById('edit-save').addEventListener('click', async () => {
+      const wf = window.__wf;
+      if (!wf) return;
+      editErr.classList.remove('show');
+      editErr.textContent = '';
+
+      const body = {
+        name: document.getElementById('edit-name').value.trim(),
+        description: document.getElementById('edit-description').value,
+        interval: document.getElementById('edit-interval').value.trim(),
+        enabled: document.getElementById('edit-enabled').checked,
+        trigger: {
+          type: document.getElementById('edit-trigger-type').value,
+          ref: document.getElementById('edit-trigger-ref').value.trim(),
+        },
+      };
+      if (!body.name) {
+        editErr.textContent = 'Name is required.';
+        editErr.classList.add('show');
+        return;
+      }
+      if (editMode === 'prompt') {
+        body.prompt = document.getElementById('edit-prompt').value;
+        body.tasks = []; // clear tasks when switching to monoflow
+        if (!body.prompt.trim()) {
+          editErr.textContent = 'Prompt is required in monoflow mode.';
+          editErr.classList.add('show');
+          return;
+        }
+      } else {
+        const cleaned = editTasks
+          .map(t => ({ name: (t.name || '').trim(), prompt: (t.prompt || '').trim() }))
+          .filter(t => t.name || t.prompt);
+        if (cleaned.length === 0) {
+          editErr.textContent = 'At least one task is required in subflow mode.';
+          editErr.classList.add('show');
+          return;
+        }
+        for (let i = 0; i < cleaned.length; i++) {
+          if (!cleaned[i].name || !cleaned[i].prompt) {
+            editErr.textContent = 'Task ' + (i+1) + ' needs both a name and a prompt.';
+            editErr.classList.add('show');
+            return;
+          }
+        }
+        body.tasks = cleaned;
+        body.prompt = ''; // clear prompt when switching to subflow
+      }
+
+      const saveBtn = document.getElementById('edit-save');
+      const original = saveBtn.textContent;
+      saveBtn.disabled = true;
+      saveBtn.textContent = 'Saving…';
+      try {
+        const res = await fetch('/api/workflows/' + encodeURIComponent(wf.agent) + '/' + encodeURIComponent(wf.id), {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        if (!res.ok) {
+          const text = await res.text().catch(() => '');
+          editErr.textContent = 'Save failed: ' + (text || res.status);
+          editErr.classList.add('show');
+          return;
+        }
+        closeEdit();
+        await load().catch(() => {});
+      } catch (e) {
+        editErr.textContent = 'Save error: ' + (e && e.message ? e.message : e);
+        editErr.classList.add('show');
+      } finally {
+        saveBtn.disabled = false;
+        saveBtn.textContent = original;
       }
     });
   </script>
