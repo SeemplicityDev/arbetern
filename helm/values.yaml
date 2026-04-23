@@ -38,6 +38,7 @@ env:
   # UI_ALLOWED_CIDRS: "10.0.0.0/8,203.0.113.10/32"  # Comma-separated CIDRs; empty = no restriction.
   # THREAD_SESSION_TTL: "3m"  # How long a thread session stays active (Go duration: 3m, 5m30s, etc.)
   # MAX_TOOL_ROUNDS: "50"  # Max LLM tool-call rounds per request. Increase for complex multi-file tasks.
+  # AWS_REGION: "us-east-1"   # Region used to sign Cost Explorer SigV4 calls. CE is global; leave as us-east-1 unless you have a reason not to.
 
 # Persistent data directory shared by dashboards + workflows JSON snapshots.
 # Both features store their files under `persistence.mountPath/<subdir>/<agent>/...`.
@@ -106,6 +107,14 @@ secretValues:
   # dd-app-key-us: ""   # Datadog US Application key
   # dd-api-key-eu: ""   # Datadog EU API key (datadoghq.eu)
   # dd-app-key-eu: ""   # Datadog EU Application key
+  # AWS Cost Explorer (optional — enables aws_get_cost_and_usage / aws_get_cost_forecast /
+  # aws_list_dimension_values). Preferred auth in-cluster is IRSA: annotate the service
+  # account (`serviceAccount.annotations.eks.amazonaws.com/role-arn: ...`) with an IAM
+  # role that has `ce:GetCostAndUsage`, `ce:GetCostForecast`, `ce:GetDimensionValues`.
+  # The static credentials below are a fallback for non-EKS clusters.
+  # aws-access-key-id: ""       # IAM access key ID
+  # aws-secret-access-key: ""   # IAM secret access key
+  # aws-session-token: ""       # Optional, for STS temporary credentials
 
 service:
   type: ClusterIP

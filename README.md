@@ -80,6 +80,8 @@ Every layer — agent selection, intent routing, tool availability, model switch
 | `DD_APP_KEY_US` | no | Datadog US Application key. Found in Organization Settings → Application Keys |
 | `DD_API_KEY_EU` | no | Datadog EU (datadoghq.eu) API key. Found in Organization Settings → API Keys |
 | `DD_APP_KEY_EU` | no | Datadog EU Application key. Found in Organization Settings → Application Keys |
+| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | no | AWS static credentials. Any of these (or `AWS_PROFILE`, or EKS IRSA via `AWS_WEB_IDENTITY_TOKEN_FILE`+`AWS_ROLE_ARN`) enables the Cost Explorer tools (`aws_get_cost_and_usage`, `aws_get_cost_forecast`, `aws_list_dimension_values`). The IAM principal needs `ce:GetCostAndUsage`, `ce:GetCostForecast`, `ce:GetDimensionValues`. Note: each CE API call costs $0.01 |
+| `AWS_REGION` | no | Region used to sign Cost Explorer SigV4 calls (default `us-east-1`, the only region that hosts the CE endpoint). Cost data returned is account-global regardless |
 | `CUSTOM_PROMPTS_DIR` | no | Directory containing custom prompt YAML files that are **appended** to built-in agent prompts. Used for org-specific context via Kubernetes ConfigMap. Set automatically by the Helm chart when `customPrompts` is configured |
 | `AGENT_RBAC_DIR` | no | Directory containing per-agent RBAC overrides (`<agent-id>.yaml` with `allowed_teams` list). Overrides `config.yaml` allowed_teams at deploy time. Set automatically by the Helm chart when `agentRBAC` is configured |
 | `UI_HEADER` | no | Custom header text for the web UI (default: `arbetern`) |
@@ -553,6 +555,7 @@ Global prompts (e.g. `security`) are defined in `agents/prompts.yaml` and inheri
 | NVD | [NVD API](https://nvd.nist.gov/developers) | goldsai |
 | Salesforce | SOQL Query API (OAuth 2.0 client credentials) | pulse |
 | Chorus / ZoomInfo | [docs/CHORUS.md](docs/CHORUS.md) | pulse |
+| AWS Cost Explorer | [docs/AWS.md](docs/AWS.md) | ovad (and any agent running AWS cost workflows) |
 
 ## Contributing
 

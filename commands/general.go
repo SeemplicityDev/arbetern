@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/justmike1/arbetern/atlassian"
+	"github.com/justmike1/arbetern/aws"
 	"github.com/justmike1/arbetern/chorus"
 	"github.com/justmike1/arbetern/config"
 	"github.com/justmike1/arbetern/dashboards"
@@ -54,6 +55,7 @@ type GeneralHandler struct {
 	sfClient         *salesforce.Client
 	chorusClient     *chorus.Client
 	datadogClients   *datadog.MultiClient
+	awsClient        *aws.Client
 	dashboards       *dashboards.Registry
 	workflows        *workflows.Registry
 	contextProvider  *ContextProvider
@@ -1184,6 +1186,61 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 						"site":{"type":"string","enum":["us","eu"],"description":"Datadog site to query: 'us' (datadoghq.com), 'eu' (datadoghq.eu). Infer from URLs in the user's message. Omit to query all configured sites."}
 					},
 					"required":["query"]
+				}`),
+			},
+		})
+	}
+
+	// AWS tools — only Cost Explorer for now. Enabled when AWS credentials
+	// resolved at startup. All three tools share the single us-east-1-signed
+	// Cost Explorer client; cost data returned is account-global.
+	if h.awsClient != nil {
+		tools = append(tools, llm.Tool{
+			Type: "function",
+			Function: llm.ToolFunction{
+				Name:        "aws_get_cost_and_usage",
+				Description: "Query AWS Cost Explorer for cost and usage data. Use this for daily/weekly/monthly cost reports, cost-by-service breakdowns, cost-by-account (for payer / linked accounts), week-over-week trend analysis, and anomaly spotting. 'start' and 'end' are YYYY-MM-DD and 'end' is EXCLUSIVE (Cost Explorer convention: to report through 2026-04-21 inclusive, pass end=2026-04-22). Default window is the last 8 days at DAILY granularity with UnblendedCost — enough to show 7 completed days plus today-in-progress for a daily cost report workflow. Set group_by to break down by SERVICE (e.g. 'Amazon Elastic Compute Cloud - Compute', 'Amazon Relational Database Service', 'AWS Lambda'), LINKED_ACCOUNT, REGION, USAGE_TYPE, INSTANCE_TYPE, OPERATION, PURCHASE_TYPE, RECORD_TYPE. Use service_filter to restrict to one exact service name (find the exact string via aws_list_dimension_values with dimension=SERVICE). WARNING: each Cost Explorer API call costs $0.01 — avoid looping over services; prefer one grouped call over N filtered calls.",
+				Parameters: json.RawMessage(`{
+					"type":"object",
+					"properties":{
+						"start":{"type":"string","description":"Start date YYYY-MM-DD, inclusive. Defaults to 8 days ago."},
+						"end":{"type":"string","description":"End date YYYY-MM-DD, EXCLUSIVE. Defaults to today."},
+						"granularity":{"type":"string","enum":["DAILY","MONTHLY","HOURLY"],"description":"Granularity. Default DAILY."},
+						"metric":{"type":"string","enum":["UnblendedCost","BlendedCost","AmortizedCost","NetAmortizedCost","NetUnblendedCost","UsageQuantity"],"description":"Cost metric. Default UnblendedCost (what the console shows by default)."},
+						"group_by":{"type":"string","enum":["SERVICE","LINKED_ACCOUNT","REGION","USAGE_TYPE","INSTANCE_TYPE","OPERATION","PURCHASE_TYPE","RECORD_TYPE","AVAILABILITY_ZONE","PLATFORM","TENANCY","DATABASE_ENGINE"],"description":"Optional grouping dimension. Omit for a single total per period."},
+						"service_filter":{"type":"string","description":"Exact AWS service name to restrict to (case-sensitive, e.g. 'Amazon Elastic Compute Cloud - Compute'). Use aws_list_dimension_values with dimension=SERVICE to discover exact strings."}
+					}
+				}`),
+			},
+		}, llm.Tool{
+			Type: "function",
+			Function: llm.ToolFunction{
+				Name:        "aws_get_cost_forecast",
+				Description: "Project future AWS spend using Cost Explorer's forecast model. Use this when the user asks 'how much will we spend next month / this week?'. 'start' must be >= today (CE rejects past dates) and 'end' must be within 12 months. Default window: tomorrow → +30 days at DAILY granularity.",
+				Parameters: json.RawMessage(`{
+					"type":"object",
+					"properties":{
+						"start":{"type":"string","description":"Start date YYYY-MM-DD, inclusive. Must be >= today. Defaults to tomorrow."},
+						"end":{"type":"string","description":"End date YYYY-MM-DD, exclusive. Defaults to 30 days from now."},
+						"granularity":{"type":"string","enum":["DAILY","MONTHLY"],"description":"Forecast granularity. Default DAILY."},
+						"metric":{"type":"string","enum":["UnblendedCost","BlendedCost","AmortizedCost","NetAmortizedCost","NetUnblendedCost","UsageQuantity"],"description":"Cost metric. Default UnblendedCost."}
+					}
+				}`),
+			},
+		}, llm.Tool{
+			Type: "function",
+			Function: llm.ToolFunction{
+				Name:        "aws_list_dimension_values",
+				Description: "Enumerate possible values for a Cost Explorer dimension (e.g. list every SERVICE that accrued cost in the last 30 days). Useful to discover the exact service name strings before using them as service_filter in aws_get_cost_and_usage — service names are long and finicky ('Amazon Elastic Compute Cloud - Compute', not 'EC2').",
+				Parameters: json.RawMessage(`{
+					"type":"object",
+					"properties":{
+						"dimension":{"type":"string","enum":["SERVICE","LINKED_ACCOUNT","REGION","USAGE_TYPE","INSTANCE_TYPE","OPERATION","PURCHASE_TYPE","RECORD_TYPE","AVAILABILITY_ZONE","PLATFORM","TENANCY","DATABASE_ENGINE"],"description":"Dimension to list values for."},
+						"start":{"type":"string","description":"Start date YYYY-MM-DD, inclusive. Defaults to 30 days ago."},
+						"end":{"type":"string","description":"End date YYYY-MM-DD, exclusive. Defaults to today."},
+						"search":{"type":"string","description":"Optional substring filter applied server-side."}
+					},
+					"required":["dimension"]
 				}`),
 			},
 		})
@@ -2778,6 +2835,93 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		}
 		log.Printf("[user=%s channel=%s] queried Datadog metrics (site=%s, query=%q, from=%q, to=%q)", userID, channelID, args.Site, args.Query, args.From, args.To)
 		return result
+
+	// ---- AWS Cost Explorer tools ----
+
+	case "aws_get_cost_and_usage":
+		if h.awsClient == nil {
+			return "Error: AWS integration is not configured. Set AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY (or AWS_PROFILE, or EKS IRSA via AWS_WEB_IDENTITY_TOKEN_FILE + AWS_ROLE_ARN) to enable Cost Explorer tools."
+		}
+		args, errMsg := parseToolArgs[struct {
+			Start         string `json:"start"`
+			End           string `json:"end"`
+			Granularity   string `json:"granularity"`
+			Metric        string `json:"metric"`
+			GroupBy       string `json:"group_by"`
+			ServiceFilter string `json:"service_filter"`
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
+		}
+		res, err := h.awsClient.GetCostAndUsage(ctx, aws.CostAndUsageOpts{
+			Start:         args.Start,
+			End:           args.End,
+			Granularity:   args.Granularity,
+			Metric:        args.Metric,
+			GroupBy:       args.GroupBy,
+			ServiceFilter: args.ServiceFilter,
+		})
+		if err != nil {
+			return fmt.Sprintf("Error fetching AWS cost and usage: %v", err)
+		}
+		log.Printf("[user=%s channel=%s] aws cost_and_usage (%s→%s, gran=%s, metric=%s, group_by=%s, filter=%q)",
+			userID, channelID, res.Start, res.End, res.Granularity, res.Metric, res.GroupBy, args.ServiceFilter)
+		return aws.FormatCostAndUsage(res)
+
+	case "aws_get_cost_forecast":
+		if h.awsClient == nil {
+			return "Error: AWS integration is not configured. Set AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY (or AWS_PROFILE, or EKS IRSA via AWS_WEB_IDENTITY_TOKEN_FILE + AWS_ROLE_ARN) to enable Cost Explorer tools."
+		}
+		args, errMsg := parseToolArgs[struct {
+			Start       string `json:"start"`
+			End         string `json:"end"`
+			Granularity string `json:"granularity"`
+			Metric      string `json:"metric"`
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
+		}
+		res, err := h.awsClient.GetCostForecast(ctx, aws.ForecastOpts{
+			Start:       args.Start,
+			End:         args.End,
+			Granularity: args.Granularity,
+			Metric:      args.Metric,
+		})
+		if err != nil {
+			return fmt.Sprintf("Error fetching AWS cost forecast: %v", err)
+		}
+		log.Printf("[user=%s channel=%s] aws cost_forecast (%s→%s, gran=%s, metric=%s)",
+			userID, channelID, res.Start, res.End, res.Granularity, res.Metric)
+		return aws.FormatForecast(res)
+
+	case "aws_list_dimension_values":
+		if h.awsClient == nil {
+			return "Error: AWS integration is not configured. Set AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY (or AWS_PROFILE, or EKS IRSA via AWS_WEB_IDENTITY_TOKEN_FILE + AWS_ROLE_ARN) to enable Cost Explorer tools."
+		}
+		args, errMsg := parseToolArgs[struct {
+			Dimension string `json:"dimension"`
+			Start     string `json:"start"`
+			End       string `json:"end"`
+			Search    string `json:"search"`
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
+		}
+		if args.Dimension == "" {
+			return "Error: dimension is required (e.g. SERVICE, LINKED_ACCOUNT, REGION)."
+		}
+		res, err := h.awsClient.GetDimensionValues(ctx, aws.DimensionValuesOpts{
+			Dimension: args.Dimension,
+			Start:     args.Start,
+			End:       args.End,
+			Search:    args.Search,
+		})
+		if err != nil {
+			return fmt.Sprintf("Error listing AWS dimension values: %v", err)
+		}
+		log.Printf("[user=%s channel=%s] aws list_dimension_values (%s, %s→%s, %d values)",
+			userID, channelID, res.Dimension, res.Start, res.End, len(res.Values))
+		return aws.FormatDimensionValues(res)
 
 	default:
 		return fmt.Sprintf("Unknown tool: %s", name)
