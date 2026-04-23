@@ -9,6 +9,7 @@
 *.dylib
 *.local.values.yaml
 *.png
+!screenshots/*.png
 
 # Test binary, built with `go test -c`
 *.test
