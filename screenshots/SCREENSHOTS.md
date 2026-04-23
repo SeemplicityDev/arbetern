@@ -4,10 +4,19 @@ A visual tour of the Arbetern UI.
 
 ## Home
 
-The landing page lists every configured agent and links into their dashboards,
-workflows, and chat surfaces.
+The landing page opens on the **integrations** view — every configured
+integration with its live permission state.
 
-![Home](home.png)
+![Home — integrations](home_1.png)
+
+Scrolling down reveals the **agents** roster alongside the changelog feed.
+
+![Home — agents & changelog](home_2.png)
+
+Clicking an agent card expands its **prompt set** — one panel per prompt
+(general, security, debug, etc.) with the exact text sent to the LLM.
+
+![Home — agent prompts](home_3.png)
 
 ## Dashboard
 

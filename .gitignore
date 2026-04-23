@@ -7,6 +7,9 @@
 *.dll
 *.so
 *.dylib
+
+# ...
+.DS_Store
 *.local.values.yaml
 *.png
 !screenshots/*.png

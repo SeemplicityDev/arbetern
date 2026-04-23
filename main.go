@@ -384,6 +384,7 @@ func refreshIntegrations(
 	sfClient *salesforce.Client,
 	chorusClient *chorus.Client,
 	datadogClients *datadog.MultiClient,
+	awsClient *aws.Client,
 	modelsClient *llm.Client,
 	codeModelsClient *llm.Client,
 ) {
@@ -763,6 +764,32 @@ func refreshIntegrations(
 		})
 	}
 
+	// --- AWS (Cost Explorer) ---
+	{
+		awsConnected := awsClient != nil
+		awsPerms := []permission{
+			{Scope: "ce:GetCostAndUsage", Description: "Query daily / monthly cost and usage aggregates with optional group-by (SERVICE, LINKED_ACCOUNT, …)", Required: true, Granted: boolPtr(awsConnected)},
+			{Scope: "ce:GetCostForecast", Description: "Forecast upcoming cost (tomorrow through +30 days by default)", Required: true, Granted: boolPtr(awsConnected)},
+			{Scope: "ce:GetDimensionValues", Description: "Enumerate valid dimension values (service names, accounts, usage types) for filtering", Required: false, Granted: boolPtr(awsConnected)},
+		}
+		activeRegion := map[string]string{}
+		if awsConnected {
+			activeRegion["Signing region"] = awsClient.Region()
+		}
+		authMode := ""
+		if cfg.AWSConfigured() {
+			authMode = "SDK default credential chain (env / profile / IRSA / IMDS)"
+		}
+		result = append(result, integration{
+			ID:           "aws",
+			Name:         "AWS",
+			Configured:   awsConnected,
+			AuthMode:     authMode,
+			Permissions:  awsPerms,
+			ActiveModels: activeRegion,
+		})
+	}
+
 	integrationsMu.Lock()
 	integrationsCache = result
 	integrationsMu.Unlock()
@@ -779,16 +806,17 @@ func startIntegrationsRefresher(
 	sfClient *salesforce.Client,
 	chorusClient *chorus.Client,
 	datadogClients *datadog.MultiClient,
+	awsClient *aws.Client,
 	modelsClient *llm.Client,
 	codeModelsClient *llm.Client,
 ) {
-	refreshIntegrations(cfg, slackClient, ghClient, jiraClient, sfClient, chorusClient, datadogClients, modelsClient, codeModelsClient)
+	refreshIntegrations(cfg, slackClient, ghClient, jiraClient, sfClient, chorusClient, datadogClients, awsClient, modelsClient, codeModelsClient)
 
 	go func() {
 		ticker := time.NewTicker(1 * time.Hour)
 		defer ticker.Stop()
 		for range ticker.C {
-			refreshIntegrations(cfg, slackClient, ghClient, jiraClient, sfClient, chorusClient, datadogClients, modelsClient, codeModelsClient)
+			refreshIntegrations(cfg, slackClient, ghClient, jiraClient, sfClient, chorusClient, datadogClients, awsClient, modelsClient, codeModelsClient)
 		}
 	}()
 }
@@ -918,7 +946,7 @@ func main() {
 	}
 
 	// Start background integration permission refresher (runs once now, then every hour).
-	startIntegrationsRefresher(cfg, slackClient, ghClient, jiraClient, sfClient, chorusClient, datadogClients, modelsClient, codeModelsClient)
+	startIntegrationsRefresher(cfg, slackClient, ghClient, jiraClient, sfClient, chorusClient, datadogClients, awsClient, modelsClient, codeModelsClient)
 
 	// Thread session store — enables follow-up replies in threads without /commands.
 	sessions := commands.NewSessionStore(cfg.ThreadSessionTTL)

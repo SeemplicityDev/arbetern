@@ -9,7 +9,7 @@
 
 An orchestration platform for AI agents in the enterprise. Each agent lives in its own directory under `agents/`, with dedicated prompts and a defined professional scope. Arbetern provides the runtime, routing, UI, and integrations — agents bring the expertise.
 
-![Arbetern UI](screenshots/home.png)
+![Arbetern UI](screenshots/home_1.png)
 
 ### Screenshots
 
