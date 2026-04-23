@@ -63,6 +63,7 @@ func (h *GeneralHandler) workflowTools() []llm.Tool {
 						"short_name":{"type":"string","description":"Short slug shown on the agent card (lowercase, hyphenated, <=24 chars)."},
 						"description":{"type":"string","description":"One-sentence summary."},
 						"interval":{"type":"string","description":"Go duration between ticks for scheduled workflows (1m-168h, default 5m). Ignored for event-triggered or manual workflows."},
+						"run_at_utc":{"type":"string","description":"Optional HH:MM UTC time-of-day for the FIRST scheduled tick. The workflow then re-runs every 'interval'. Use this for daily/weekly digests that must fire at a specific wall-clock time (e.g. '05:00' for a 5 AM UTC daily report). Omit for 'run immediately on start, then every interval'."},
 						"prompt":{"type":"string","description":"Monoflow prompt. Required unless 'tasks' is provided. Must be complete and self-contained (include channel IDs, project keys, repos, labels, assignees)."},
 						"tasks":{"type":"array","description":"Ordered multi-step task list (flow-of-subflows pattern). Each task's output is fed into the next task's context.","items":{"type":"object","properties":{"name":{"type":"string"},"prompt":{"type":"string"}},"required":["name","prompt"]}},
 						"trigger":{"type":"object","description":"Execution trigger. Omit for schedule. Use {type:'on_success'|'on_failure', ref:'<agent>/<id>'} for event-driven. Use {type:'manual'} to disable ticks entirely.","properties":{"type":{"type":"string","enum":["schedule","on_success","on_failure","manual"]},"ref":{"type":"string"}}}
@@ -97,6 +98,7 @@ func (h *GeneralHandler) workflowTools() []llm.Tool {
 						"name":{"type":"string","description":"New human title. Omit to leave unchanged."},
 						"description":{"type":"string","description":"New one-sentence summary. Omit to leave unchanged."},
 						"interval":{"type":"string","description":"New Go duration between ticks (1m-168h). Omit to leave unchanged."},
+						"run_at_utc":{"type":"string","description":"New HH:MM UTC time-of-day for the first scheduled tick. Pass an empty string to clear (run immediately on start, then every interval). Omit to leave unchanged."},
 						"prompt":{"type":"string","description":"New monoflow prompt. Omit to leave unchanged. Pass an empty string ONLY if you are simultaneously providing a non-empty 'tasks' array."},
 						"tasks":{"type":"array","description":"Replacement ordered task list. Omit to leave unchanged. Pass an empty array to switch the workflow to a prompt-only monoflow.","items":{"type":"object","properties":{"name":{"type":"string"},"prompt":{"type":"string"}},"required":["name","prompt"]}},
 						"trigger":{"type":"object","description":"Replacement trigger. Omit to leave unchanged.","properties":{"type":{"type":"string","enum":["schedule","on_success","on_failure","manual"]},"ref":{"type":"string"}}},
@@ -125,6 +127,7 @@ func (h *GeneralHandler) executeWorkflowTool(ctx context.Context, userID, channe
 			ShortName   string            `json:"short_name"`
 			Description string            `json:"description"`
 			Interval    string            `json:"interval"`
+			RunAtUTC    string            `json:"run_at_utc"`
 			Prompt      string            `json:"prompt"`
 			Tasks       []workflows.Task  `json:"tasks"`
 			Trigger     workflows.Trigger `json:"trigger"`
@@ -151,6 +154,7 @@ func (h *GeneralHandler) executeWorkflowTool(ctx context.Context, userID, channe
 			ShortName:   args.ShortName,
 			Description: args.Description,
 			Interval:    interval,
+			RunAtUTC:    args.RunAtUTC,
 			Prompt:      args.Prompt,
 			Tasks:       args.Tasks,
 			Trigger:     args.Trigger,
@@ -237,6 +241,13 @@ func (h *GeneralHandler) executeWorkflowTool(ctx context.Context, userID, channe
 				return fmt.Sprintf("Error: 'interval' must be a string: %v", err), true
 			}
 			opts.Interval = &s
+		}
+		if v, ok := raw["run_at_utc"]; ok {
+			var s string
+			if err := json.Unmarshal(v, &s); err != nil {
+				return fmt.Sprintf("Error: 'run_at_utc' must be a string: %v", err), true
+			}
+			opts.RunAtUTC = &s
 		}
 		if v, ok := raw["prompt"]; ok {
 			var s string

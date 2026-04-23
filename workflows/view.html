@@ -199,6 +199,11 @@
         </div>
       </div>
 
+      <div class="form-row">
+        <label for="edit-run-at-utc">Run at UTC (optional, HH:MM)</label>
+        <input type="text" id="edit-run-at-utc" placeholder="e.g. 05:00 — leave empty to run immediately on start" autocomplete="off" />
+      </div>
+
       <div class="form-row two">
         <div class="form-row" style="margin-bottom:0">
           <label for="edit-trigger-type">Trigger type</label>
@@ -648,6 +653,7 @@
       document.getElementById('edit-name').value = wf.name || '';
       document.getElementById('edit-description').value = wf.description || '';
       document.getElementById('edit-interval').value = wf.interval || '';
+      document.getElementById('edit-run-at-utc').value = wf.run_at_utc || '';
       document.getElementById('edit-enabled').checked = !!wf.enabled;
       const trig = wf.trigger || {};
       document.getElementById('edit-trigger-type').value = trig.type || 'schedule';
@@ -685,6 +691,7 @@
         name: document.getElementById('edit-name').value.trim(),
         description: document.getElementById('edit-description').value,
         interval: document.getElementById('edit-interval').value.trim(),
+        run_at_utc: document.getElementById('edit-run-at-utc').value.trim(),
         enabled: document.getElementById('edit-enabled').checked,
         trigger: {
           type: document.getElementById('edit-trigger-type').value,

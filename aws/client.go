@@ -268,6 +268,15 @@ func (c *Client) GetCostForecast(ctx context.Context, opts ForecastOpts) (*Forec
 	if metric == "" {
 		metric = DefaultMetric
 	}
+	// Cost Explorer's GetCostForecast uses a DIFFERENT metric enum than
+	// GetCostAndUsage: UPPER_SNAKE_CASE (AMORTIZED_COST) rather than
+	// CamelCase (AmortizedCost). Translate the familiar CamelCase form
+	// callers already use for GetCostAndUsage so the tool surface stays
+	// consistent.
+	forecastMetric, err := toForecastMetric(metric)
+	if err != nil {
+		return nil, err
+	}
 
 	in := &costexplorer.GetCostForecastInput{
 		TimePeriod: &cetypes.DateInterval{
@@ -275,7 +284,7 @@ func (c *Client) GetCostForecast(ctx context.Context, opts ForecastOpts) (*Forec
 			End:   awsv2.String(end),
 		},
 		Granularity: cetypes.Granularity(gran),
-		Metric:      cetypes.Metric(metric),
+		Metric:      forecastMetric,
 	}
 	out, err := c.ce.GetCostForecast(ctx, in)
 	if err != nil {
@@ -408,4 +417,31 @@ func parseAmount(s string) float64 {
 		return 0
 	}
 	return v
+}
+
+// toForecastMetric translates a GetCostAndUsage-style metric
+// ("AmortizedCost") into the GetCostForecast enum value
+// ("AMORTIZED_COST"). If callers already pass the UPPER_SNAKE form it is
+// accepted verbatim. Cost Explorer unfortunately accepts CamelCase for
+// GetCostAndUsage but strictly UPPER_SNAKE for GetCostForecast, so we
+// normalize here using the AWS SDK's typed constants.
+func toForecastMetric(m string) (cetypes.Metric, error) {
+	switch strings.TrimSpace(m) {
+	case "AmortizedCost", string(cetypes.MetricAmortizedCost):
+		return cetypes.MetricAmortizedCost, nil
+	case "UnblendedCost", string(cetypes.MetricUnblendedCost):
+		return cetypes.MetricUnblendedCost, nil
+	case "BlendedCost", string(cetypes.MetricBlendedCost):
+		return cetypes.MetricBlendedCost, nil
+	case "NetAmortizedCost", string(cetypes.MetricNetAmortizedCost):
+		return cetypes.MetricNetAmortizedCost, nil
+	case "NetUnblendedCost", string(cetypes.MetricNetUnblendedCost):
+		return cetypes.MetricNetUnblendedCost, nil
+	case "UsageQuantity", string(cetypes.MetricUsageQuantity):
+		return cetypes.MetricUsageQuantity, nil
+	case "NormalizedUsageAmount", string(cetypes.MetricNormalizedUsageAmount):
+		return cetypes.MetricNormalizedUsageAmount, nil
+	default:
+		return "", fmt.Errorf("invalid forecast metric %q (want AmortizedCost, UnblendedCost, BlendedCost, NetAmortizedCost, NetUnblendedCost, UsageQuantity, or NormalizedUsageAmount)", m)
+	}
 }

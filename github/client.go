@@ -253,6 +253,13 @@ func (c *Client) ListOrgRepos(ctx context.Context, org string) ([]string, error)
 			return nil, fmt.Errorf("failed to list repositories for org %s: %w", org, err)
 		}
 		for _, r := range repos {
+			// Skip archived repos — they never receive commits, so
+			// including them in activity digests just wastes API calls
+			// and rate-limit budget. Same for disabled repos (blocked
+			// by GitHub), which the caller can never read from.
+			if r.GetArchived() || r.GetDisabled() {
+				continue
+			}
 			allRepos = append(allRepos, r.GetFullName())
 		}
 		if resp.NextPage == 0 {

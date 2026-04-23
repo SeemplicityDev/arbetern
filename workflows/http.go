@@ -186,6 +186,14 @@ func (r *Registry) handleAPIUpdate(agent, id string, w http.ResponseWriter, req 
 		}
 		opts.Interval = &s
 	}
+	if v, ok := raw["run_at_utc"]; ok {
+		var s string
+		if err := json.Unmarshal(v, &s); err != nil {
+			http.Error(w, "'run_at_utc' must be a string (HH:MM UTC, or empty to clear)", http.StatusBadRequest)
+			return
+		}
+		opts.RunAtUTC = &s
+	}
 	if v, ok := raw["prompt"]; ok {
 		var s string
 		if err := json.Unmarshal(v, &s); err != nil {

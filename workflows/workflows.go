@@ -120,21 +120,26 @@ type RunLog struct {
 
 // Workflow is the on-disk descriptor.
 type Workflow struct {
-	ID          string  `json:"id"`
-	Agent       string  `json:"agent"`
-	Name        string  `json:"name"`
-	ShortName   string  `json:"short_name"`
-	Description string  `json:"description,omitempty"`
-	Interval    string  `json:"interval"`
-	Prompt      string  `json:"prompt,omitempty"`
-	Tasks       []Task  `json:"tasks,omitempty"`
-	Trigger     Trigger `json:"trigger,omitempty"`
-	CreatedBy   string  `json:"created_by,omitempty"`
-	CreatedAt   string  `json:"created_at"`
-	Enabled     bool    `json:"enabled"`
-	LastRun     string  `json:"last_run,omitempty"`
-	LastError   string  `json:"last_error,omitempty"`
-	LastResult  string  `json:"last_result,omitempty"`
+	ID          string `json:"id"`
+	Agent       string `json:"agent"`
+	Name        string `json:"name"`
+	ShortName   string `json:"short_name"`
+	Description string `json:"description,omitempty"`
+	Interval    string `json:"interval"`
+	// RunAtUTC, when set to "HH:MM", delays the first scheduled tick until
+	// that time-of-day in UTC and then runs every Interval after. Intended
+	// for daily reports that need to fire at a fixed wall-clock time rather
+	// than "every 24h from server start". Ignored for non-schedule triggers.
+	RunAtUTC   string  `json:"run_at_utc,omitempty"`
+	Prompt     string  `json:"prompt,omitempty"`
+	Tasks      []Task  `json:"tasks,omitempty"`
+	Trigger    Trigger `json:"trigger,omitempty"`
+	CreatedBy  string  `json:"created_by,omitempty"`
+	CreatedAt  string  `json:"created_at"`
+	Enabled    bool    `json:"enabled"`
+	LastRun    string  `json:"last_run,omitempty"`
+	LastError  string  `json:"last_error,omitempty"`
+	LastResult string  `json:"last_result,omitempty"`
 	// ConsecutiveFailures is incremented on every failed or partially-failed
 	// tick and reset to 0 on a clean run. When it reaches
 	// MaxConsecutiveFailures the workflow is auto-disabled.
@@ -301,6 +306,7 @@ type CreateOpts struct {
 	ShortName   string
 	Description string
 	Interval    string
+	RunAtUTC    string
 	Prompt      string
 	Tasks       []Task
 	Trigger     Trigger
@@ -359,6 +365,7 @@ func (r *Registry) Create(ctx context.Context, opts CreateOpts) (*Workflow, erro
 		ShortName:   shortName,
 		Description: opts.Description,
 		Interval:    interval,
+		RunAtUTC:    strings.TrimSpace(opts.RunAtUTC),
 		Prompt:      opts.Prompt,
 		Tasks:       opts.Tasks,
 		Trigger:     trig,
@@ -415,6 +422,7 @@ type UpdateOpts struct {
 	Name        *string
 	Description *string
 	Interval    *string
+	RunAtUTC    *string
 	Prompt      *string
 	Tasks       *[]Task  // nil = unchanged; non-nil (even empty) = replace
 	Trigger     *Trigger // nil = unchanged
@@ -449,6 +457,15 @@ func (r *Registry) Update(ctx context.Context, agent, id string, opts UpdateOpts
 			return nil, fmt.Errorf("invalid interval %q: %w", *opts.Interval, err)
 		}
 		updated.Interval = *opts.Interval
+	}
+	if opts.RunAtUTC != nil {
+		v := strings.TrimSpace(*opts.RunAtUTC)
+		if v != "" {
+			if _, err := time.Parse("15:04", v); err != nil {
+				return nil, fmt.Errorf("invalid run_at_utc %q (want HH:MM, e.g. 05:00): %w", v, err)
+			}
+		}
+		updated.RunAtUTC = v
 	}
 	if opts.Prompt != nil {
 		updated.Prompt = *opts.Prompt
@@ -599,11 +616,17 @@ func (r *Registry) startRunner(parent context.Context, w *Workflow) {
 
 	go func() {
 		defer close(run.done)
-		// Fire an initial tick so the user sees activity without waiting a
-		// full interval for the first execution. The initial tick is run in
-		// this goroutine so the ticker only starts after it completes — the
-		// ticker then represents the cadence of scheduled ticks relative to
-		// that baseline.
+		// If RunAtUTC is set, wait until the next HH:MM UTC boundary
+		// before firing the initial tick. Otherwise fire immediately so
+		// the user sees activity without waiting a full interval.
+		if delay, ok := parseRunAtDelay(w.RunAtUTC); ok {
+			log.Printf("[workflows] %s/%s aligning first tick to %s UTC (in %s)", agent, id, w.RunAtUTC, delay.Round(time.Second))
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(delay):
+			}
+		}
 		_, _ = r.runOnce(ctx, agent, id, "schedule:initial")
 
 		ticker := time.NewTicker(interval)
@@ -692,7 +715,7 @@ func (r *Registry) runOnce(ctx context.Context, agent, id, triggeredBy string) (
 		var prior []string
 		for _, task := range w.Tasks {
 			tStart := time.Now()
-			composed := composeTaskPrompt(task, prior)
+			composed := withClock(composeTaskPrompt(task, prior))
 			out, err := exec.Run(ctx, &w, composed)
 			tr := TaskResult{
 				Name:       task.Name,
@@ -714,7 +737,7 @@ func (r *Registry) runOnce(ctx context.Context, agent, id, triggeredBy string) (
 			finalResult = out
 		}
 	} else {
-		out, err := exec.Run(ctx, &w, w.Prompt)
+		out, err := exec.Run(ctx, &w, withClock(w.Prompt))
 		finalResult = out
 		firstError = err
 	}
@@ -836,6 +859,43 @@ func composeTaskPrompt(task Task, prior []string) string {
 		joined = joined[:MaxTaskContextChars] + "\n…(truncated)"
 	}
 	return fmt.Sprintf("Previous task results:\n%s\n\n---\nCurrent task: %s\n%s", joined, task.Name, task.Prompt)
+}
+
+// withClock prepends the current wall-clock time to a prompt. LLMs trained
+// months or years ago otherwise default to their training cutoff when asked
+// to compute "yesterday" or "2 days ago" — which is the wrong baseline for
+// any workflow that queries a live API for date-bounded data (AWS cost
+// reports, Slack windows, commit digests, etc.). Adding the real timestamp
+// to every tick is an ~80-byte prepend that fixes this for all workflows.
+func withClock(prompt string) string {
+	now := time.Now().UTC()
+	return fmt.Sprintf(
+		"Current UTC time: %s (date: %s, weekday: %s). Use THIS as today's date — do not rely on your training cutoff.\n\n---\n%s",
+		now.Format("2006-01-02 15:04:05"),
+		now.Format("2006-01-02"),
+		now.Weekday(),
+		prompt,
+	)
+}
+
+// parseRunAtDelay parses an "HH:MM" UTC time-of-day string and returns the
+// duration from now until the next occurrence of that time. ok=false means
+// the input was empty or malformed (caller should skip alignment).
+func parseRunAtDelay(runAt string) (time.Duration, bool) {
+	runAt = strings.TrimSpace(runAt)
+	if runAt == "" {
+		return 0, false
+	}
+	t, err := time.Parse("15:04", runAt)
+	if err != nil {
+		return 0, false
+	}
+	now := time.Now().UTC()
+	target := time.Date(now.Year(), now.Month(), now.Day(), t.Hour(), t.Minute(), 0, 0, time.UTC)
+	if !target.After(now) {
+		target = target.Add(24 * time.Hour)
+	}
+	return target.Sub(now), true
 }
 
 func (r *Registry) persist(w *Workflow) error {
