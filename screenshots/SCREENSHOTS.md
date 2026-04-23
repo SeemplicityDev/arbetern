@@ -11,7 +11,7 @@ integration with its live permission state.
 
 Scrolling down reveals the **agents** roster alongside the changelog feed.
 
-<!-- ![Home — agents & changelog](home_2.png) -->
+![Home — agents & changelog](home_2.png)
 
 Clicking an agent card expands its **prompt set** — one panel per prompt
 (general, security, debug, etc.) with the exact text sent to the LLM.
