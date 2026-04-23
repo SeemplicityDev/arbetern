@@ -14,6 +14,7 @@ env:
   GENERAL_MODEL: "gpt-4o"
   # CODE_MODEL: "gpt-4o"  # Separate model for code tasks (search, file edits, PRs). Defaults to GENERAL_MODEL.
   # UI_ALLOWED_CIDRS: "0.0.0.0/0"
+  # AWS_REGION: "us-east-1"   # Cost Explorer SigV4 signing region. CE is global; us-east-1 is the canonical choice.
 
 secretValues:
   github-token: "ghp_your_github_token"
@@ -45,6 +46,17 @@ secretValues:
   # dd-app-key-us: "your-dd-app-key-us"   # Datadog US → Organization Settings → Application Keys
   # dd-api-key-eu: "your-dd-api-key-eu"   # Datadog EU (datadoghq.eu) → Organization Settings → API Keys
   # dd-app-key-eu: "your-dd-app-key-eu"   # Datadog EU → Organization Settings → Application Keys
+  # AWS Cost Explorer (optional — enables aws_get_cost_and_usage / aws_get_cost_forecast / aws_list_dimension_values).
+  # Preferred auth on EKS is IRSA — annotate the service account instead of setting static keys:
+  #   serviceAccount:
+  #     annotations:
+  #       eks.amazonaws.com/role-arn: arn:aws:iam::123456789012:role/arbetern-cost-explorer
+  # The IAM role needs ce:GetCostAndUsage, ce:GetCostForecast, ce:GetDimensionValues.
+  # Each CE API call costs $0.01 — keep an eye on workflow intervals.
+  # Static credentials are a fallback for non-EKS clusters:
+  # aws-access-key-id: "AKIA..."
+  # aws-secret-access-key: "your-aws-secret-access-key"
+  # aws-session-token: ""  # only needed for STS temporary credentials
 
 # ingress:
 #   enabled: true

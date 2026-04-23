@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/justmike1/arbetern/atlassian"
+	"github.com/justmike1/arbetern/aws"
 	"github.com/justmike1/arbetern/chorus"
 	"github.com/justmike1/arbetern/dashboards"
 	"github.com/justmike1/arbetern/datadog"
@@ -29,6 +30,7 @@ type Router struct {
 	sfClient         *salesforce.Client
 	chorusClient     *chorus.Client
 	datadogClients   *datadog.MultiClient
+	awsClient        *aws.Client
 	dashboards       *dashboards.Registry
 	workflows        *workflows.Registry
 	contextProvider  *ContextProvider
@@ -41,7 +43,7 @@ type Router struct {
 	userContextStore *UserContextStore
 }
 
-func NewRouter(slackClient SlackClient, ghClient *github.Client, modelsClient *llm.Client, codeModelsClient *llm.Client, jiraClient *atlassian.Client, nvdClient *nvd.Client, sfClient *salesforce.Client, chorusClient *chorus.Client, datadogClients *datadog.MultiClient, dashboardRegistry *dashboards.Registry, workflowRegistry *workflows.Registry, pp PromptProvider, agentID, appURL string, sessions *SessionStore, maxToolRounds int, userContextStore *UserContextStore) *Router {
+func NewRouter(slackClient SlackClient, ghClient *github.Client, modelsClient *llm.Client, codeModelsClient *llm.Client, jiraClient *atlassian.Client, nvdClient *nvd.Client, sfClient *salesforce.Client, chorusClient *chorus.Client, datadogClients *datadog.MultiClient, awsClient *aws.Client, dashboardRegistry *dashboards.Registry, workflowRegistry *workflows.Registry, pp PromptProvider, agentID, appURL string, sessions *SessionStore, maxToolRounds int, userContextStore *UserContextStore) *Router {
 	return &Router{
 		slackClient:      slackClient,
 		ghClient:         ghClient,
@@ -52,6 +54,7 @@ func NewRouter(slackClient SlackClient, ghClient *github.Client, modelsClient *l
 		sfClient:         sfClient,
 		chorusClient:     chorusClient,
 		datadogClients:   datadogClients,
+		awsClient:        awsClient,
 		dashboards:       dashboardRegistry,
 		workflows:        workflowRegistry,
 		contextProvider:  NewContextProvider(slackClient),
@@ -224,6 +227,7 @@ func (r *Router) newGeneralHandler(userContext string, session *ThreadSession) *
 		sfClient:         r.sfClient,
 		chorusClient:     r.chorusClient,
 		datadogClients:   r.datadogClients,
+		awsClient:        r.awsClient,
 		dashboards:       r.dashboards,
 		workflows:        r.workflows,
 		contextProvider:  r.contextProvider,

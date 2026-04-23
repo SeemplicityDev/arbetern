@@ -185,6 +185,25 @@ spec:
                   name: {{ .Values.secretName }}
                   key: dd-app-key-eu
             {{- end }}
+            {{- if index .Values.secretValues "aws-access-key-id" }}
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: aws-access-key-id
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: aws-secret-access-key
+            {{- end }}
+            {{- if index .Values.secretValues "aws-session-token" }}
+            - name: AWS_SESSION_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: aws-session-token
+            {{- end }}
             - name: GOMEMLIMIT
               value: {{ .Values.goRuntime.goMemLimit | quote }}
             - name: GOGC

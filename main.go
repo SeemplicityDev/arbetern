@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/justmike1/arbetern/atlassian"
+	"github.com/justmike1/arbetern/aws"
 	"github.com/justmike1/arbetern/chorus"
 	"github.com/justmike1/arbetern/commands"
 	"github.com/justmike1/arbetern/config"
@@ -888,6 +889,25 @@ func main() {
 		log.Printf("Datadog integration enabled (sites: %s)", datadogClients.Sites())
 	}
 
+	// AWS Cost Explorer client — credentials resolved via the default SDK
+	// chain (env vars / AWS_PROFILE / IRSA / IMDS). We only attempt to
+	// construct the client when something in the environment looks like
+	// AWS credentials, so that local dev without AWS does not spam warning
+	// lines. A failed Retrieve() in NewClient is logged and the client is
+	// left nil so tools report a clear "not configured" error.
+	var awsClient *aws.Client
+	if cfg.AWSConfigured() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		awsClient, err = aws.NewClient(ctx, cfg.AWSRegion)
+		cancel()
+		if err != nil {
+			log.Printf("AWS integration misconfigured (tools will be unavailable): %v", err)
+			awsClient = nil
+		} else {
+			log.Printf("AWS integration enabled (signing region: %s)", awsClient.Region())
+		}
+	}
+
 	// Discover agents and register per-agent webhook routes (/<agent>/webhook).
 	agents, err := prompts.DiscoverAgents("")
 	if err != nil {
@@ -971,7 +991,7 @@ func main() {
 		}
 
 		agentID := agent.ID // capture for closure
-		router := commands.NewRouter(slackClient, ghClient, modelsClient, codeModelsClient, jiraClient, nvdClient, sfClient, chorusClient, datadogClients, dashRegistry, wfRegistry, ap, agent.ID, cfg.AppURL, sessions, cfg.MaxToolRounds, userContextStore)
+		router := commands.NewRouter(slackClient, ghClient, modelsClient, codeModelsClient, jiraClient, nvdClient, sfClient, chorusClient, datadogClients, awsClient, dashRegistry, wfRegistry, ap, agent.ID, cfg.AppURL, sessions, cfg.MaxToolRounds, userContextStore)
 		routers[agent.ID] = router
 
 		// Wrap router.Handle with RBAC check.

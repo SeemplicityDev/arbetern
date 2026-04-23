@@ -53,8 +53,16 @@ type Config struct {
 	DDAppKeyUS            string
 	DDAPIKeyEU            string // Datadog EU (datadoghq.eu)
 	DDAppKeyEU            string
-	DashboardsDir         string // Directory where dashboard JSON snapshots are persisted.
-	WorkflowsDir          string // Directory where workflow JSON snapshots are persisted.
+	// AWSRegion controls where Cost Explorer SigV4 calls are signed. Empty
+	// falls back to the aws package default (us-east-1, where the CE
+	// endpoint lives). Credentials are resolved via the standard AWS SDK
+	// chain — env vars (AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY), a
+	// shared profile (AWS_PROFILE), or EKS IRSA
+	// (AWS_WEB_IDENTITY_TOKEN_FILE + AWS_ROLE_ARN) all work.
+	AWSRegion     string
+	AWSEnabled    bool   // set true when AWS credentials appear present (enables the cost-explorer tools).
+	DashboardsDir string // Directory where dashboard JSON snapshots are persisted.
+	WorkflowsDir  string // Directory where workflow JSON snapshots are persisted.
 }
 
 // UseAzure returns true when Azure OpenAI credentials are configured.
@@ -101,6 +109,14 @@ func (c *Config) DatadogEUConfigured() bool {
 	return c.DDAPIKeyEU != "" && c.DDAppKeyEU != ""
 }
 
+// AWSConfigured returns true when at least one of the canonical AWS
+// credential sources appears to be set. This is a hint to the integration
+// wiring only; the aws package still does a real STS-style probe on
+// NewClient, so a "yes" here does not guarantee working credentials.
+func (c *Config) AWSConfigured() bool {
+	return c.AWSEnabled
+}
+
 func Load() (*Config, error) {
 	cfg := &Config{
 		SlackBotToken:         os.Getenv("SLACK_BOT_TOKEN"),
@@ -130,9 +146,18 @@ func Load() (*Config, error) {
 		DDAppKeyUS:            os.Getenv("DD_APP_KEY_US"),
 		DDAPIKeyEU:            os.Getenv("DD_API_KEY_EU"),
 		DDAppKeyEU:            os.Getenv("DD_APP_KEY_EU"),
+		AWSRegion:             os.Getenv("AWS_REGION"),
 		DashboardsDir:         os.Getenv("DASHBOARDS_DIR"),
 		WorkflowsDir:          os.Getenv("WORKFLOWS_DIR"),
 	}
+	// AWS credentials can arrive via several standard channels. We set
+	// AWSEnabled when any of them is present; the real credential probe
+	// happens in aws.NewClient.
+	cfg.AWSEnabled = os.Getenv("AWS_ACCESS_KEY_ID") != "" ||
+		os.Getenv("AWS_PROFILE") != "" ||
+		os.Getenv("AWS_WEB_IDENTITY_TOKEN_FILE") != "" ||
+		os.Getenv("AWS_ROLE_ARN") != "" ||
+		os.Getenv("AWS_SHARED_CREDENTIALS_FILE") != ""
 
 	if cfg.SlackBotToken == "" {
 		return nil, fmt.Errorf("SLACK_BOT_TOKEN is required")
