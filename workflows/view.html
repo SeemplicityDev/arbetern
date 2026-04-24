@@ -373,7 +373,8 @@
       const trigType = (wf.trigger && wf.trigger.type) || 'schedule';
       let triggerNode;
       if (trigType === 'schedule') {
-        triggerNode = nodeHTML({ kind:'trigger', iconSvg:CLOCK_SVG, name:'Schedule', sub:'every ' + (wf.interval || '—') });
+        const everySub = 'every ' + (wf.interval || '—') + (wf.run_at_utc ? ' · at ' + wf.run_at_utc + ' UTC' : '');
+        triggerNode = nodeHTML({ kind:'trigger', iconSvg:CLOCK_SVG, name:'Schedule', sub:everySub });
       } else if (trigType === 'on_success' || trigType === 'on_failure') {
         triggerNode = nodeHTML({ kind:'trigger', iconSvg:BOLT_SVG, name:trigType.replace('_',' '), sub:wf.trigger.ref });
       } else {
@@ -432,7 +433,7 @@
       document.title = 'arbetern — ' + (wf.name || wf.id);
       document.getElementById('title').textContent = wf.name || wf.id;
       document.getElementById('subtitle').textContent =
-        '/' + wf.agent + ' · id ' + wf.id + ' · every ' + wf.interval + ' · created ' + formatTime(wf.created_at);
+        '/' + wf.agent + ' · id ' + wf.id + ' · every ' + wf.interval + (wf.run_at_utc ? ' at ' + wf.run_at_utc + ' UTC' : '') + ' · created ' + formatTime(wf.created_at);
 
       const badge = document.getElementById('status-badge');
       if (wf.running) {
@@ -505,6 +506,7 @@
         { label: 'Agent', value: '/' + wf.agent },
         { label: 'Pattern', value: pattern },
         { label: 'Interval', value: trigType === 'schedule' ? wf.interval : '—' },
+        { label: 'Run at UTC', value: trigType === 'schedule' && wf.run_at_utc ? wf.run_at_utc : '—' },
         { label: 'Trigger', value: trigType + (trig.ref ? ' (' + trig.ref + ')' : '') },
         { label: 'Enabled', value: wf.enabled ? 'yes' : 'no' },
         { label: 'Created by', value: wf.created_by || '—' },
