@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log"
 	"strings"
-	"time"
 
 	"github.com/justmike1/arbetern/llm"
 	"github.com/justmike1/arbetern/workflows"
@@ -42,7 +41,7 @@ func (h *GeneralHandler) workflowTools() []llm.Tool {
 			Type: "function",
 			Function: llm.ToolFunction{
 				Name:        "list_workflows",
-				Description: "List the scheduled workflows currently owned by this agent, returning their ids, names, short names, intervals, patterns, and last-run timestamps.",
+				Description: "List the scheduled workflows currently owned by this agent, returning their ids, names, short names, cron schedules, patterns, and last-run timestamps.",
 				Parameters:  json.RawMessage(`{"type":"object","properties":{}}`),
 			},
 		},
@@ -55,15 +54,14 @@ func (h *GeneralHandler) workflowTools() []llm.Tool {
 			Type: "function",
 			Function: llm.ToolFunction{
 				Name:        "create_workflow",
-				Description: "Create a scheduled or event-triggered workflow owned by the current agent. Each run re-invokes this same agent's tool-loop so prompts can freely use Jira search, GitHub PR creation, Slack posting (post_slack_message), etc. Four execution patterns are supported:\n\n  - Monoflow: supply `prompt` only. One LLM call per tick.\n  - Flow of subflows: supply `tasks` (ordered list of {name, prompt}). Each task runs sequentially; outputs thread forward as context.\n  - Flow of deployments: write a `prompt` that instructs the agent to use `call_workflow` against already-registered child workflows.\n  - Event-triggered: set `trigger.type` to 'on_success' or 'on_failure' and `trigger.ref` to '<agent>/<id>' of the upstream workflow. Interval is ignored.\n\nUse scheduled monoflow when the user says 'every N minutes', 'poll X and do Y'. Use tasks for multi-step recurring processes. Use event triggers when something should happen 'after workflow X succeeds / fails'. A JSON descriptor is persisted at <WORKFLOWS_DIR>/<agent>/<id>.json and an HTML viewer is rendered at /" + h.agentID + "/workflow/<id>. Returns the id, short_name, and view URL which you MUST include in your reply.",
+				Description: "Create a scheduled or event-triggered workflow owned by the current agent. Each run re-invokes this same agent's tool-loop so prompts can freely use Jira search, GitHub PR creation, Slack posting (post_slack_message), etc. Four execution patterns are supported:\n\n  - Monoflow: supply `prompt` only. One LLM call per tick.\n  - Flow of subflows: supply `tasks` (ordered list of {name, prompt}). Each task runs sequentially; outputs thread forward as context.\n  - Flow of deployments: write a `prompt` that instructs the agent to use `call_workflow` against already-registered child workflows.\n  - Event-triggered: set `trigger.type` to 'on_success' or 'on_failure' and `trigger.ref` to '<agent>/<id>' of the upstream workflow. Cron is ignored.\n\nScheduled workflows fire on a `cron` expression in UTC. Use scheduled monoflow when the user says 'every N minutes', 'poll X and do Y', 'daily at HH:MM UTC'. Use tasks for multi-step recurring processes. Use event triggers when something should happen 'after workflow X succeeds / fails'. A JSON descriptor is persisted at <WORKFLOWS_DIR>/<agent>/<id>.json and an HTML viewer is rendered at /" + h.agentID + "/workflow/<id>. Returns the id, short_name, and view URL which you MUST include in your reply.",
 				Parameters: json.RawMessage(`{
 					"type":"object",
 					"properties":{
 						"name":{"type":"string","description":"Human title of the workflow."},
 						"short_name":{"type":"string","description":"Short slug shown on the agent card (lowercase, hyphenated, <=24 chars)."},
 						"description":{"type":"string","description":"One-sentence summary."},
-						"interval":{"type":"string","description":"Go duration between ticks for scheduled workflows (1m-168h, default 5m). Ignored for event-triggered or manual workflows."},
-						"run_at_utc":{"type":"string","description":"Optional HH:MM UTC time-of-day for the FIRST scheduled tick. The workflow then re-runs every 'interval'. Use this for daily/weekly digests that must fire at a specific wall-clock time (e.g. '05:00' for a 5 AM UTC daily report). Omit for 'run immediately on start, then every interval'."},
+						"cron":{"type":"string","description":"Standard 5-field UTC cron expression for scheduled workflows. Examples: '0 5 * * *' = daily at 05:00 UTC, '*/15 * * * *' = every 15 minutes, '0 18 * * 1-4' = Mon-Thu at 18:00 UTC, '0 5 * * 0-4' = Sun-Thu at 05:00 UTC (skip Fri/Sat), '0 9,17 * * 1-5' = weekdays at 09:00 and 17:00 UTC. Descriptors '@every 1h', '@daily', '@hourly' also accepted. Default '@every 5m' when omitted. Ignored for event-triggered or manual workflows. Cron-driven workflows automatically catch up missed runs on server restart so daily reports are not lost across deploys."},
 						"prompt":{"type":"string","description":"Monoflow prompt. Required unless 'tasks' is provided. Must be complete and self-contained (include channel IDs, project keys, repos, labels, assignees)."},
 						"tasks":{"type":"array","description":"Ordered multi-step task list (flow-of-subflows pattern). Each task's output is fed into the next task's context.","items":{"type":"object","properties":{"name":{"type":"string"},"prompt":{"type":"string"}},"required":["name","prompt"]}},
 						"trigger":{"type":"object","description":"Execution trigger. Omit for schedule. Use {type:'on_success'|'on_failure', ref:'<agent>/<id>'} for event-driven. Use {type:'manual'} to disable ticks entirely.","properties":{"type":{"type":"string","enum":["schedule","on_success","on_failure","manual"]},"ref":{"type":"string"}}}
@@ -90,15 +88,14 @@ func (h *GeneralHandler) workflowTools() []llm.Tool {
 			Type: "function",
 			Function: llm.ToolFunction{
 				Name:        "update_workflow",
-				Description: "Edit an existing workflow owned by the current agent. Only the fields you pass are changed; all others (including run history, id, created_at, and short_name) are preserved. Use this when the user asks to 'update', 'edit', 'change', 'tweak', 'amend', 'fix', or 'modify' a workflow's behaviour — for example changing the prompt to always post a Slack message, adjusting the interval, pausing/resuming, switching trigger type, or rewriting the task list. The tick goroutine is restarted so the change takes effect on the next run. Requires the workflow id (discover via list_workflows if the user only gave a name). Returns the updated descriptor and its view URL.",
+				Description: "Edit an existing workflow owned by the current agent. Only the fields you pass are changed; all others (including run history, id, created_at, and short_name) are preserved. Use this when the user asks to 'update', 'edit', 'change', 'tweak', 'amend', 'fix', or 'modify' a workflow's behaviour — for example changing the prompt to always post a Slack message, adjusting the cron schedule, pausing/resuming, switching trigger type, or rewriting the task list. The tick goroutine is restarted so the change takes effect on the next run. Requires the workflow id (discover via list_workflows if the user only gave a name). Returns the updated descriptor and its view URL.",
 				Parameters: json.RawMessage(`{
 					"type":"object",
 					"properties":{
 						"id":{"type":"string","description":"Workflow id (16-hex segment from the view URL). Required."},
 						"name":{"type":"string","description":"New human title. Omit to leave unchanged."},
 						"description":{"type":"string","description":"New one-sentence summary. Omit to leave unchanged."},
-						"interval":{"type":"string","description":"New Go duration between ticks (1m-168h). Omit to leave unchanged."},
-						"run_at_utc":{"type":"string","description":"New HH:MM UTC time-of-day for the first scheduled tick. Pass an empty string to clear (run immediately on start, then every interval). Omit to leave unchanged."},
+						"cron":{"type":"string","description":"New standard 5-field UTC cron expression (e.g. '0 5 * * *' for daily 05:00 UTC, '0 5 * * 0-4' for Sun-Thu 05:00 UTC, '*/15 * * * *' for every 15 minutes, '@every 1h' for every hour). Cannot be empty. Omit to leave unchanged."},
 						"prompt":{"type":"string","description":"New monoflow prompt. Omit to leave unchanged. Pass an empty string ONLY if you are simultaneously providing a non-empty 'tasks' array."},
 						"tasks":{"type":"array","description":"Replacement ordered task list. Omit to leave unchanged. Pass an empty array to switch the workflow to a prompt-only monoflow.","items":{"type":"object","properties":{"name":{"type":"string"},"prompt":{"type":"string"}},"required":["name","prompt"]}},
 						"trigger":{"type":"object","description":"Replacement trigger. Omit to leave unchanged.","properties":{"type":{"type":"string","enum":["schedule","on_success","on_failure","manual"]},"ref":{"type":"string"}}},
@@ -126,8 +123,7 @@ func (h *GeneralHandler) executeWorkflowTool(ctx context.Context, userID, channe
 			Name        string            `json:"name"`
 			ShortName   string            `json:"short_name"`
 			Description string            `json:"description"`
-			Interval    string            `json:"interval"`
-			RunAtUTC    string            `json:"run_at_utc"`
+			Cron        string            `json:"cron"`
 			Prompt      string            `json:"prompt"`
 			Tasks       []workflows.Task  `json:"tasks"`
 			Trigger     workflows.Trigger `json:"trigger"`
@@ -141,20 +137,13 @@ func (h *GeneralHandler) executeWorkflowTool(ctx context.Context, userID, channe
 		if strings.TrimSpace(args.Prompt) == "" && len(args.Tasks) == 0 {
 			return "Error: either 'prompt' or a non-empty 'tasks' list is required.", true
 		}
-		interval := args.Interval
-		if interval == "" {
-			interval = workflows.DefaultInterval.String()
-		} else if _, err := time.ParseDuration(interval); err != nil {
-			return fmt.Sprintf("Error: invalid interval %q: %v", interval, err), true
-		}
 		w, err := h.workflows.Create(ctx, workflows.CreateOpts{
 			Agent:       h.agentID,
 			CreatedBy:   userID,
 			Name:        args.Name,
 			ShortName:   args.ShortName,
 			Description: args.Description,
-			Interval:    interval,
-			RunAtUTC:    args.RunAtUTC,
+			Cron:        args.Cron,
 			Prompt:      args.Prompt,
 			Tasks:       args.Tasks,
 			Trigger:     args.Trigger,
@@ -178,7 +167,7 @@ func (h *GeneralHandler) executeWorkflowTool(ctx context.Context, userID, channe
 			if lastRun == "" {
 				lastRun = "pending"
 			}
-			fmt.Fprintf(&b, "- %s — %s (short=%s, pattern=%s, every %s, last run %s)\n  %s\n", w.ID, w.Name, w.ShortName, w.Pattern(), w.Interval, lastRun, h.appURL+w.ViewURL())
+			fmt.Fprintf(&b, "- %s — %s (short=%s, pattern=%s, cron=%s, last run %s)\n  %s\n", w.ID, w.Name, w.ShortName, w.Pattern(), w.Cron, lastRun, h.appURL+w.ViewURL())
 		}
 		return b.String(), true
 
@@ -235,19 +224,12 @@ func (h *GeneralHandler) executeWorkflowTool(ctx context.Context, userID, channe
 			}
 			opts.Description = &s
 		}
-		if v, ok := raw["interval"]; ok {
+		if v, ok := raw["cron"]; ok {
 			var s string
 			if err := json.Unmarshal(v, &s); err != nil {
-				return fmt.Sprintf("Error: 'interval' must be a string: %v", err), true
+				return fmt.Sprintf("Error: 'cron' must be a string: %v", err), true
 			}
-			opts.Interval = &s
-		}
-		if v, ok := raw["run_at_utc"]; ok {
-			var s string
-			if err := json.Unmarshal(v, &s); err != nil {
-				return fmt.Sprintf("Error: 'run_at_utc' must be a string: %v", err), true
-			}
-			opts.RunAtUTC = &s
+			opts.Cron = &s
 		}
 		if v, ok := raw["prompt"]; ok {
 			var s string
@@ -283,8 +265,8 @@ func (h *GeneralHandler) executeWorkflowTool(ctx context.Context, userID, channe
 		}
 		log.Printf("[user=%s channel=%s] updated workflow agent=%s id=%s pattern=%s", userID, channelID, h.agentID, w.ID, w.Pattern())
 		url := h.appURL + w.ViewURL()
-		return fmt.Sprintf("Updated workflow %q (id=%s, pattern=%s, every %s, enabled=%t). View: %s",
-			w.Name, w.ID, w.Pattern(), w.Interval, w.Enabled, url), true
+		return fmt.Sprintf("Updated workflow %q (id=%s, pattern=%s, cron=%s, enabled=%t). View: %s",
+			w.Name, w.ID, w.Pattern(), w.Cron, w.Enabled, url), true
 
 	case "call_workflow":
 		var args struct {

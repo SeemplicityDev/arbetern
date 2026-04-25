@@ -44,18 +44,17 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/robfig/cron/v3"
 )
 
 const (
 	// DefaultDir is used when WORKFLOWS_DIR is unset.
 	DefaultDir = "./data/workflows"
 
-	// MinInterval is the shortest allowed trigger interval.
-	MinInterval = 1 * time.Minute
-	// MaxInterval caps runaway intervals at one week.
-	MaxInterval = 7 * 24 * time.Hour
-	// DefaultInterval is used when the caller omits or provides an invalid value.
-	DefaultInterval = 5 * time.Minute
+	// DefaultCron is the cron expression used when a scheduled workflow is
+	// created without an explicit one (every 5 minutes from runner start).
+	DefaultCron = "@every 5m"
 
 	// MaxRunHistory bounds the per-workflow on-disk run log.
 	MaxRunHistory = 20
@@ -72,7 +71,7 @@ const (
 	// PRs / Slack / 429s indefinitely.
 	MaxConsecutiveFailures = 3
 
-	// TriggerSchedule runs the workflow on its Interval.
+	// TriggerSchedule runs the workflow on its Cron expression.
 	TriggerSchedule = "schedule"
 	// TriggerOnSuccess runs the workflow right after Trigger.Ref succeeds.
 	TriggerOnSuccess = "on_success"
@@ -125,12 +124,17 @@ type Workflow struct {
 	Name        string `json:"name"`
 	ShortName   string `json:"short_name"`
 	Description string `json:"description,omitempty"`
-	Interval    string `json:"interval"`
-	// RunAtUTC, when set to "HH:MM", delays the first scheduled tick until
-	// that time-of-day in UTC and then runs every Interval after. Intended
-	// for daily reports that need to fire at a fixed wall-clock time rather
-	// than "every 24h from server start". Ignored for non-schedule triggers.
-	RunAtUTC   string  `json:"run_at_utc,omitempty"`
+	// Cron is the standard 5-field UTC cron expression that schedules this
+	// workflow (e.g. "0 5 * * *" for daily at 05:00 UTC, "*/15 * * * *"
+	// for every 15 minutes, "0 18 * * 4" for Thursday 18:00,
+	// "0 5 * * 0-4" for Sunday–Thursday at 05:00). Descriptors like
+	// "@every 1h", "@daily", "@hourly" are also accepted. The next fire
+	// time is always the next match of the expression after now (in UTC).
+	// On server restart, if the most recent expected fire time is after
+	// LastRun, the runner fires a single catch-up tick immediately so a
+	// missed daily report is delivered after a redeploy. Required for
+	// schedule-triggered workflows; ignored for manual / event-triggered.
+	Cron       string  `json:"cron,omitempty"`
 	Prompt     string  `json:"prompt,omitempty"`
 	Tasks      []Task  `json:"tasks,omitempty"`
 	Trigger    Trigger `json:"trigger,omitempty"`
@@ -181,18 +185,6 @@ func (w *Workflow) triggerType() string {
 	return w.Trigger.Type
 }
 
-// intervalDur parses Interval, returning DefaultInterval on failure.
-func (w *Workflow) intervalDur() time.Duration {
-	dur, err := time.ParseDuration(w.Interval)
-	if err != nil || dur < MinInterval {
-		return DefaultInterval
-	}
-	if dur > MaxInterval {
-		return MaxInterval
-	}
-	return dur
-}
-
 // Executor runs a single prompt (a monoflow or a single task from a
 // multi-task workflow) and returns a human-readable result summary.
 // Implementations wire in the agent LLM tool-loop.
@@ -212,9 +204,10 @@ type runner struct {
 	// busy is set to 1 while this workflow has a tick in flight. It is used
 	// as a non-blocking try-lock so overlapping triggers (e.g. a manual
 	// /run firing while a scheduled tick is mid-execution, or a very slow
-	// tick whose interval elapses before it finishes) do not spawn a
-	// concurrent second run of the same workflow, which would double-post
-	// to Slack, double-create PRs, and race on persistence.
+	// tick whose runtime exceeds the inter-fire delta before it finishes)
+	// do not spawn a concurrent second run of the same workflow, which
+	// would double-post to Slack, double-create PRs, and race on
+	// persistence.
 	busy atomic.Int32
 }
 
@@ -308,15 +301,14 @@ func (r *Registry) LoadAll(ctx context.Context) error {
 }
 
 // CreateOpts captures the full set of knobs for Create. Fields left empty
-// fall back to sensible defaults (TriggerSchedule, DefaultInterval, etc.).
+// fall back to sensible defaults (TriggerSchedule, DefaultCron, etc.).
 type CreateOpts struct {
 	Agent       string
 	CreatedBy   string
 	Name        string
 	ShortName   string
 	Description string
-	Interval    string
-	RunAtUTC    string
+	Cron        string
 	Prompt      string
 	Tasks       []Task
 	Trigger     Trigger
@@ -342,9 +334,12 @@ func (r *Registry) Create(ctx context.Context, opts CreateOpts) (*Workflow, erro
 			}
 		}
 	}
-	interval := opts.Interval
-	if _, err := time.ParseDuration(interval); err != nil {
-		interval = DefaultInterval.String()
+	cronExpr := strings.TrimSpace(opts.Cron)
+	if cronExpr == "" {
+		cronExpr = DefaultCron
+	}
+	if _, err := cron.ParseStandard(cronExpr); err != nil {
+		return nil, fmt.Errorf("invalid cron %q: %w", cronExpr, err)
 	}
 	trig := opts.Trigger
 	switch trig.Type {
@@ -374,8 +369,7 @@ func (r *Registry) Create(ctx context.Context, opts CreateOpts) (*Workflow, erro
 		Name:        opts.Name,
 		ShortName:   shortName,
 		Description: opts.Description,
-		Interval:    interval,
-		RunAtUTC:    strings.TrimSpace(opts.RunAtUTC),
+		Cron:        cronExpr,
 		Prompt:      opts.Prompt,
 		Tasks:       opts.Tasks,
 		Trigger:     trig,
@@ -390,7 +384,7 @@ func (r *Registry) Create(ctx context.Context, opts CreateOpts) (*Workflow, erro
 	r.items[key(opts.Agent, id)] = w
 	r.mu.Unlock()
 	r.startRunner(w, true)
-	log.Printf("[workflows] created %s/%s (%q, pattern=%s, every %s)", opts.Agent, id, opts.Name, w.Pattern(), w.intervalDur())
+	log.Printf("[workflows] created %s/%s (%q, pattern=%s, cron=%s)", opts.Agent, id, opts.Name, w.Pattern(), w.Cron)
 	return w, nil
 }
 
@@ -440,8 +434,7 @@ func (r *Registry) isRunning(agent, id string) bool {
 type UpdateOpts struct {
 	Name        *string
 	Description *string
-	Interval    *string
-	RunAtUTC    *string
+	Cron        *string
 	Prompt      *string
 	Tasks       *[]Task  // nil = unchanged; non-nil (even empty) = replace
 	Trigger     *Trigger // nil = unchanged
@@ -449,7 +442,7 @@ type UpdateOpts struct {
 }
 
 // Update applies a partial edit to an existing workflow. The tick goroutine
-// is restarted so the new prompt / interval / trigger take effect on the next
+// is restarted so the new prompt / cron / trigger take effect on the next
 // scheduled run. Run history, last-run timestamp, and created metadata are
 // preserved. Fields left as nil pointers are untouched.
 func (r *Registry) Update(ctx context.Context, agent, id string, opts UpdateOpts) (*Workflow, error) {
@@ -471,20 +464,15 @@ func (r *Registry) Update(ctx context.Context, agent, id string, opts UpdateOpts
 	if opts.Description != nil {
 		updated.Description = *opts.Description
 	}
-	if opts.Interval != nil {
-		if _, err := time.ParseDuration(*opts.Interval); err != nil {
-			return nil, fmt.Errorf("invalid interval %q: %w", *opts.Interval, err)
+	if opts.Cron != nil {
+		v := strings.TrimSpace(*opts.Cron)
+		if v == "" {
+			return nil, fmt.Errorf("cron expression cannot be empty")
 		}
-		updated.Interval = *opts.Interval
-	}
-	if opts.RunAtUTC != nil {
-		v := strings.TrimSpace(*opts.RunAtUTC)
-		if v != "" {
-			if _, err := time.Parse("15:04", v); err != nil {
-				return nil, fmt.Errorf("invalid run_at_utc %q (want HH:MM, e.g. 05:00): %w", v, err)
-			}
+		if _, err := cron.ParseStandard(v); err != nil {
+			return nil, fmt.Errorf("invalid cron %q: %w", v, err)
 		}
-		updated.RunAtUTC = v
+		updated.Cron = v
 	}
 	if opts.Prompt != nil {
 		updated.Prompt = *opts.Prompt
@@ -539,8 +527,7 @@ func (r *Registry) Update(ctx context.Context, agent, id string, opts UpdateOpts
 	// on the next tick because runOnce re-reads the stored workflow, so
 	// there is no reason to cancel the ticker — cancelling it would also
 	// kill any in-flight manual run (its ctx is derived from the runner's).
-	scheduleChanged := orig.Interval != updated.Interval ||
-		orig.RunAtUTC != updated.RunAtUTC ||
+	scheduleChanged := orig.Cron != updated.Cron ||
 		orig.Trigger.Type != updated.Trigger.Type ||
 		orig.Trigger.Ref != updated.Trigger.Ref
 	enabledChanged := orig.Enabled != updated.Enabled
@@ -562,8 +549,8 @@ func (r *Registry) Update(ctx context.Context, agent, id string, opts UpdateOpts
 		// which also got killed by the HTTP request context).
 		r.startRunner(&updated, false)
 	}
-	log.Printf("[workflows] updated %s/%s (%q, pattern=%s, every %s, enabled=%t)",
-		agent, id, updated.Name, updated.Pattern(), updated.intervalDur(), updated.Enabled)
+	log.Printf("[workflows] updated %s/%s (%q, pattern=%s, cron=%s, enabled=%t)",
+		agent, id, updated.Name, updated.Pattern(), updated.Cron, updated.Enabled)
 	cp := updated
 	return &cp, nil
 }
@@ -645,7 +632,6 @@ func (r *Registry) startRunner(w *Workflow, runInitial bool) {
 	agent := w.Agent
 	id := w.ID
 	tType := w.triggerType()
-	interval := w.intervalDur()
 
 	// Only TriggerSchedule drives a ticker goroutine. Manual + event-triggered
 	// workflows sit idle until RunOnce is invoked by the API / event bus.
@@ -655,44 +641,71 @@ func (r *Registry) startRunner(w *Workflow, runInitial bool) {
 		return
 	}
 
+	cronExpr := strings.TrimSpace(w.Cron)
+	if cronExpr == "" {
+		cronExpr = DefaultCron
+	}
+	schedule, err := cron.ParseStandard(cronExpr)
+	if err != nil {
+		// Persisted descriptor was already validated on Create/Update,
+		// but guard against a tampered file or a future incompatible
+		// expression. Log and bail so a bad expression cannot crash the
+		// runner; the workflow simply won't tick until the user fixes it.
+		log.Printf("[workflows] %s/%s invalid cron %q (%v); runner will not start", agent, id, cronExpr, err)
+		close(run.done)
+		return
+	}
+
 	go func() {
 		defer close(run.done)
-		// If RunAtUTC is set, wait until the next HH:MM UTC boundary
-		// before firing the initial tick. Otherwise fire immediately so
-		// the user sees activity without waiting a full interval — but
-		// only when runInitial is true (i.e. fresh create / server boot).
-		// Updates pass runInitial=false so saving the edit modal does
-		// NOT trigger a new tick (and does not cancel any in-flight run).
-		if delay, ok := parseRunAtDelay(w.RunAtUTC); ok {
-			log.Printf("[workflows] %s/%s aligning first tick to %s UTC (in %s)", agent, id, w.RunAtUTC, delay.Round(time.Second))
+
+		// Catch-up on fresh create or server boot: if there's no LastRun
+		// (fresh create) OR the most recent expected fire has been missed
+		// since LastRun, fire one tick immediately. Then loop on
+		// schedule.Next.
+		if runInitial {
+			nowUTC := time.Now().UTC()
+			var lastRun time.Time
+			if w.LastRun != "" {
+				lastRun, _ = time.Parse(time.RFC3339, w.LastRun)
+			}
+			shouldCatchup := false
+			reason := ""
+			if lastRun.IsZero() {
+				shouldCatchup = true
+				reason = "fresh create"
+			} else if !schedule.Next(lastRun).After(nowUTC) {
+				shouldCatchup = true
+				reason = fmt.Sprintf("missed expected fire (last_run=%s)", lastRun.UTC().Format(time.RFC3339))
+			}
+			if shouldCatchup {
+				log.Printf("[workflows] %s/%s cron catchup: %s", agent, id, reason)
+				_, _ = r.runOnce(ctx, agent, id, "schedule:catchup")
+			}
+		}
+
+		for {
+			next := schedule.Next(time.Now().UTC())
+			delay := time.Until(next)
+			if delay < 0 {
+				delay = 0
+			}
+			log.Printf("[workflows] %s/%s next cron tick at %s UTC (in %s)", agent, id, next.Format(time.RFC3339), delay.Round(time.Second))
 			select {
 			case <-ctx.Done():
 				return
 			case <-time.After(delay):
 			}
-		}
-		if runInitial {
-			_, _ = r.runOnce(ctx, agent, id, "schedule:initial")
-		}
-
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				// Each scheduled tick runs in its own goroutine so a tick
-				// that takes longer than the interval does not block later
-				// ticks of THIS workflow from starting on time, and does
-				// not block any other workflow's ticker (each workflow has
-				// its own startRunner goroutine). runOnce uses the per-
-				// workflow `busy` try-lock so an overlapping tick is
-				// skipped rather than run concurrently.
-				go func() {
-					_, _ = r.runOnce(ctx, agent, id, "schedule")
-				}()
-			}
+			// Each scheduled tick runs in its own goroutine so a tick
+			// that takes longer than the inter-fire delta does not block
+			// later ticks of THIS workflow from starting on time, and
+			// does not block any other workflow's runner (each workflow
+			// has its own startRunner goroutine). runOnce uses the per-
+			// workflow `busy` try-lock so an overlapping tick is skipped
+			// rather than run concurrently.
+			go func() {
+				_, _ = r.runOnce(ctx, agent, id, "schedule")
+			}()
 		}
 	}()
 }
@@ -922,26 +935,6 @@ func withClock(prompt string) string {
 		now.Weekday(),
 		prompt,
 	)
-}
-
-// parseRunAtDelay parses an "HH:MM" UTC time-of-day string and returns the
-// duration from now until the next occurrence of that time. ok=false means
-// the input was empty or malformed (caller should skip alignment).
-func parseRunAtDelay(runAt string) (time.Duration, bool) {
-	runAt = strings.TrimSpace(runAt)
-	if runAt == "" {
-		return 0, false
-	}
-	t, err := time.Parse("15:04", runAt)
-	if err != nil {
-		return 0, false
-	}
-	now := time.Now().UTC()
-	target := time.Date(now.Year(), now.Month(), now.Day(), t.Hour(), t.Minute(), 0, 0, time.UTC)
-	if !target.After(now) {
-		target = target.Add(24 * time.Hour)
-	}
-	return target.Sub(now), true
 }
 
 func (r *Registry) persist(w *Workflow) error {

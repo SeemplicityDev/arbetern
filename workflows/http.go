@@ -178,21 +178,13 @@ func (r *Registry) handleAPIUpdate(agent, id string, w http.ResponseWriter, req 
 		}
 		opts.Description = &s
 	}
-	if v, ok := raw["interval"]; ok {
+	if v, ok := raw["cron"]; ok {
 		var s string
 		if err := json.Unmarshal(v, &s); err != nil {
-			http.Error(w, "'interval' must be a string", http.StatusBadRequest)
+			http.Error(w, "'cron' must be a string (5-field cron expression in UTC, or '@every 1h' / '@daily' descriptor)", http.StatusBadRequest)
 			return
 		}
-		opts.Interval = &s
-	}
-	if v, ok := raw["run_at_utc"]; ok {
-		var s string
-		if err := json.Unmarshal(v, &s); err != nil {
-			http.Error(w, "'run_at_utc' must be a string (HH:MM UTC, or empty to clear)", http.StatusBadRequest)
-			return
-		}
-		opts.RunAtUTC = &s
+		opts.Cron = &s
 	}
 	if v, ok := raw["prompt"]; ok {
 		var s string

@@ -39,7 +39,7 @@ source/output integrations.
 
 ## Workflow Editor
 
-Editing a workflow: prompt, schedule (`interval` or `run_at_utc`), trigger
+Editing a workflow: prompt, schedule (`cron` UTC expression), trigger
 type, and the auto-detected source/output integration flow diagram.
 
 ![Workflow editor](workflow_edit.png)

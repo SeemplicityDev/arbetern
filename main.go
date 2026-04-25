@@ -298,7 +298,7 @@ func buildWorkflowsMessage(reg *workflows.Registry, agents []prompts.AgentConfig
 			if w.LastError != "" {
 				status = "error"
 			}
-			fmt.Fprintf(&b, "• <%s|%s> — %s (%s, every %s, last run %s, %s)\n", url, label, w.Name, w.Pattern(), w.Interval, lastRun, status)
+			fmt.Fprintf(&b, "• <%s|%s> — %s (%s, cron %s, last run %s, %s)\n", url, label, w.Name, w.Pattern(), w.Cron, lastRun, status)
 			total++
 		}
 		b.WriteString("\n")

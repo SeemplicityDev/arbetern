@@ -1168,7 +1168,7 @@
       const chips = list.map(w => {
         const label = escapeHtml(w.short_name || w.name || w.id);
         const url = `/${agentId}/workflow/${encodeURIComponent(w.id)}`;
-        const title = escapeHtml(w.name + (w.description ? ' — ' + w.description : '') + ' · every ' + w.interval);
+        const title = escapeHtml(w.name + (w.description ? ' — ' + w.description : '') + ' · cron ' + (w.cron || '—'));
         const cls = w.last_error ? ' err' : '';
         return `<a class="agent-workflow-chip${cls}" href="${url}" target="_blank" rel="noopener" title="${title}" onclick="event.stopPropagation()">${label}<button class="wf-delete" title="Delete workflow" onclick="event.preventDefault();event.stopPropagation();deleteWorkflow('${agentId}','${w.id}');">×</button></a>`;
       }).join('');

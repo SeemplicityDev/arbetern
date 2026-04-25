@@ -392,7 +392,7 @@ will review.
 The owning agent synthesises a complete, credentialless prompt (channel IDs,
 repo names, labels, assignees — everything needed so the tick is reproducible),
 persists a JSON descriptor at `<WORKFLOWS_DIR>/<agent>/<id>.json`, and starts
-a goroutine that ticks on the requested interval. Each run's result + error
+a goroutine that ticks on the requested cron schedule. Each run's result + error
 is appended to the descriptor; the viewer at `/<agent>/workflow/<id>` renders
 the run history and auto-refreshes adaptively (every 3 seconds while a tick
 is in flight, every 30 seconds otherwise). The header badge shows `running…`
@@ -408,13 +408,35 @@ user-initiated work (Create, the Run-now button, manual API calls) still
 executes immediately. This keeps deploys quiet — a pod roll won't blast
 every upstream the moment it comes up.
 
-### Time-of-day scheduling (`run_at_utc`)
+### Cron scheduling (`cron`)
 
-By default a workflow's first tick fires immediately when its runner starts
-and then repeats every `interval`. Set `run_at_utc` to a `HH:MM` string to
-align the first tick to a wall-clock time in UTC instead — useful for daily
-reports that should always land at, say, 05:00 UTC regardless of when the
-server booted. The field is editable from the workflow edit modal.
+Scheduled workflows fire on a standard 5-field UTC cron expression. The
+`cron` field is required for `trigger.type = schedule`; it defaults to
+`@every 5m` when omitted on create.
+
+```
+0 5 * * *        # daily at 05:00 UTC
+0 5 * * 0-4      # Sun–Thu at 05:00 UTC (skip Fri/Sat)
+*/15 * * * *     # every 15 minutes
+0 9,17 * * 1-5   # weekdays at 09:00 and 17:00 UTC
+@every 1h        # every 1 hour from runner start
+@daily           # midnight UTC
+@hourly          # top of every hour
+```
+
+The runner sleeps until the next match of the expression (computed in UTC
+via [`robfig/cron/v3`](https://github.com/robfig/cron)) and then fires the
+tick in its own goroutine, so a slow tick never blocks the next scheduled
+fire of the same workflow. Overlapping ticks are skipped via a per-workflow
+busy try-lock so a long-running tick can't double-post or double-PR.
+
+**Restart-resilient catch-up.** On server boot, if the most recent expected
+fire time is after the workflow's recorded `last_run`, the runner fires a
+single catch-up tick immediately (logged as `schedule:catchup`). This means
+a daily 05:00 UTC report is delivered even when the pod was rolled at
+05:30 UTC. Fresh creates also fire one catch-up tick because their
+`last_run` is empty; manual edits do NOT (saving the form does not trigger
+an extra run).
 
 Every workflow prompt is also prefixed with the **real current UTC time**
 before being sent to the LLM (`Current UTC time: YYYY-MM-DD HH:MM:SS…`),
@@ -466,7 +488,7 @@ tight coupling                                          loose coupling
 ```
 
 **Monoflow** is the default. Supply a single `prompt` — the agent re-runs the
-exact same instruction every interval.
+exact same instruction on every cron tick.
 
 **Flow of subflows** splits a workflow into an ordered `tasks` list. Each
 task's output is compacted and fed forward as context for the next task's
@@ -488,8 +510,8 @@ API endpoint.
 
 | Tool | Purpose |
 |------|---------|
-| `create_workflow` | Register a new workflow with name, short_name, interval, and either `prompt` (monoflow) or `tasks` (subflows), and optional `trigger`. |
-| `list_workflows` | List this agent's workflows with their ids, patterns, intervals, and last-run timestamps. |
+| `create_workflow` | Register a new workflow with name, short_name, cron, and either `prompt` (monoflow) or `tasks` (subflows), and optional `trigger`. |
+| `list_workflows` | List this agent's workflows with their ids, patterns, cron schedules, and last-run timestamps. |
 | `delete_workflow` | Stop the background execution and remove the stored JSON. |
 | `call_workflow` | Run another workflow once and return its final result. The canonical "flow of deployments" primitive. |
 
@@ -512,7 +534,8 @@ off the first time.
 ### Configuration
 
 - `WORKFLOWS_DIR` — where descriptors are persisted (default `./data/workflows`).
-- Interval is clamped to `[1m, 168h]`; default is `5m`.
+- Schedule is a standard 5-field UTC cron expression (`@every 1h`, `@daily`,
+  `@hourly` descriptors also accepted); default `@every 5m` when omitted.
 - Only a workflow's own agent can create / delete / list it via the LLM tools;
   `call_workflow` can target any agent.
 
