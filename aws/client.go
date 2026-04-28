@@ -90,6 +90,12 @@ type CostAndUsageOpts struct {
 	Metric        string // UnblendedCost (default), BlendedCost, AmortizedCost, NetUnblendedCost, NetAmortizedCost, UsageQuantity.
 	GroupBy       string // "" (no grouping), SERVICE, LINKED_ACCOUNT, REGION, USAGE_TYPE, INSTANCE_TYPE, OPERATION, PURCHASE_TYPE, RECORD_TYPE, AVAILABILITY_ZONE, PLATFORM, TENANCY, DATABASE_ENGINE.
 	ServiceFilter string // Exact AWS service name to filter to (e.g. "Amazon Elastic Compute Cloud - Compute"). Case-sensitive.
+	// ExcludeChargeTypes restricts results to exclude rows whose RECORD_TYPE
+	// matches any of these values. Mirrors the console's default "Charge type"
+	// filter, where Credit, "Solution Provider Program Discount", Tax, and
+	// Refund are excluded from cost reporting. Values are matched
+	// case-sensitively against Cost Explorer's RECORD_TYPE dimension.
+	ExcludeChargeTypes []string
 }
 
 // CostPeriod is one granule (day, month, etc.) of cost data.
@@ -157,13 +163,8 @@ func (c *Client) GetCostAndUsage(ctx context.Context, opts CostAndUsageOpts) (*C
 			Key:  awsv2.String(groupBy),
 		}}
 	}
-	if sf := strings.TrimSpace(opts.ServiceFilter); sf != "" {
-		input.Filter = &cetypes.Expression{
-			Dimensions: &cetypes.DimensionValues{
-				Key:    cetypes.DimensionService,
-				Values: []string{sf},
-			},
-		}
+	if filter := buildCostFilter(opts.ServiceFilter, opts.ExcludeChargeTypes); filter != nil {
+		input.Filter = filter
 	}
 
 	out, err := c.ce.GetCostAndUsage(ctx, input)
@@ -225,6 +226,11 @@ type ForecastOpts struct {
 	End         string // YYYY-MM-DD, exclusive. Defaults to 30 days from now.
 	Granularity string // DAILY (default) or MONTHLY.
 	Metric      string // UnblendedCost (default), BlendedCost, AmortizedCost, NetUnblendedCost, NetAmortizedCost, UsageQuantity.
+	// ExcludeChargeTypes mirrors CostAndUsageOpts.ExcludeChargeTypes — RECORD_TYPE
+	// values to exclude from the forecast input. Matches the console's default
+	// "Charge type" filter (Credit, Solution Provider Program Discount, Tax,
+	// Refund) when those are passed.
+	ExcludeChargeTypes []string
 }
 
 // ForecastResult is the flattened forecast response.
@@ -285,6 +291,9 @@ func (c *Client) GetCostForecast(ctx context.Context, opts ForecastOpts) (*Forec
 		},
 		Granularity: cetypes.Granularity(gran),
 		Metric:      forecastMetric,
+	}
+	if filter := buildCostFilter("", opts.ExcludeChargeTypes); filter != nil {
+		in.Filter = filter
 	}
 	out, err := c.ce.GetCostForecast(ctx, in)
 	if err != nil {
@@ -417,6 +426,51 @@ func parseAmount(s string) float64 {
 		return 0
 	}
 	return v
+}
+
+// buildCostFilter assembles a Cost Explorer filter Expression that
+// optionally pins to a single SERVICE and/or excludes a set of RECORD_TYPE
+// (charge type) values. Returns nil when neither constraint is set.
+//
+// Cost Explorer requires Expression.And to contain at least two children;
+// when only one constraint applies it must live at the top level. Charge-type
+// exclusion is expressed as Not { Dimensions { RECORD_TYPE in [...] } } so
+// that any row matching one of the listed types is dropped (mirrors the
+// console's "Charge type" filter where Credit, Refund, Tax, and Solution
+// Provider Program Discount are excluded by default).
+func buildCostFilter(serviceFilter string, excludeChargeTypes []string) *cetypes.Expression {
+	var parts []cetypes.Expression
+	if sf := strings.TrimSpace(serviceFilter); sf != "" {
+		parts = append(parts, cetypes.Expression{
+			Dimensions: &cetypes.DimensionValues{
+				Key:    cetypes.DimensionService,
+				Values: []string{sf},
+			},
+		})
+	}
+	cleaned := make([]string, 0, len(excludeChargeTypes))
+	for _, v := range excludeChargeTypes {
+		if t := strings.TrimSpace(v); t != "" {
+			cleaned = append(cleaned, t)
+		}
+	}
+	if len(cleaned) > 0 {
+		inner := cetypes.Expression{
+			Dimensions: &cetypes.DimensionValues{
+				Key:    cetypes.DimensionRecordType,
+				Values: cleaned,
+			},
+		}
+		parts = append(parts, cetypes.Expression{Not: &inner})
+	}
+	switch len(parts) {
+	case 0:
+		return nil
+	case 1:
+		return &parts[0]
+	default:
+		return &cetypes.Expression{And: parts}
+	}
 }
 
 // toForecastMetric translates a GetCostAndUsage-style metric
