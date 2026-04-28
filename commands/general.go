@@ -909,7 +909,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 			Type: "function",
 			Function: llm.ToolFunction{
 				Name:        "create_jira_ticket",
-				Description: "Create a Jira ticket (issue). Use this when the user asks to create a ticket, task, story, or bug from the conversation content (e.g., a test plan, action item, or bug report). Populate the summary and description from the relevant content discussed in the conversation. IMPORTANT: Format the description using markdown — use # for headers, - for bullet lists, 1) for numbered lists, **bold** for emphasis, and `code` for inline code. Structure the ticket professionally with clear sections (e.g., ## Context, ## Scope, ## Acceptance Criteria). If the user asks to assign the ticket to a person, use the assignee field. If the user asks to assign to a team, use the team field. Both can be used at the same time.",
+				Description: "Create a Jira ticket (issue). Use this when the user asks to create a ticket, task, story, or bug from the conversation content (e.g., a test plan, action item, or bug report). Populate the summary and description from the relevant content discussed in the conversation. IMPORTANT: Format the description using markdown — use # for headers, - for bullet lists, 1) for numbered lists, **bold** for emphasis, and `code` for inline code. Structure the ticket professionally with clear sections (e.g., ## Context, ## Scope, ## Acceptance Criteria). If the user asks to assign the ticket to a person, use the assignee field — or pass account_id directly when you already have the Jira accountId from resolve_jira_user (skips the fuzzy name search). If the user asks to assign to a team, use the team field. Set use_active_sprint=true to drop the new ticket into the project's currently active sprint. Use fields for arbitrary Jira fields like priority or custom fields (e.g. {\"priority\":{\"name\":\"High\"}}); typed parameters above always win on conflict.",
 				Parameters: json.RawMessage(`{
 					"type":"object",
 					"properties":{
@@ -917,8 +917,11 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 						"description":{"type":"string","description":"Detailed, well-structured description using markdown formatting. Use ## for section headers, - for bullet points, 1) for numbered steps, **bold** for key terms, and backticks for code references. Organize into clear sections like Context, Scope, Test Plan, Acceptance Criteria, References, etc."},
 						"issue_type":{"type":"string","description":"Issue type: 'Task', 'Bug', 'Story', 'Epic', etc. Default: 'Task'."},
 						"labels":{"type":"array","items":{"type":"string"},"description":"Optional labels to apply to the ticket (e.g. ['qa','automated-test'])."},
-						"assignee":{"type":"string","description":"Name of the person to assign the ticket to (e.g. 'Udi', 'John Smith'). The system will search for a matching Jira user."},
-						"team":{"type":"string","description":"Name of the team to assign the ticket to (e.g. 'Application', 'DevOps', 'asgard'). The system will search for a matching Jira team."}
+						"assignee":{"type":"string","description":"Name of the person to assign the ticket to (e.g. 'Udi', 'John Smith'). The system will search for a matching Jira user. Ignored when account_id is set."},
+						"account_id":{"type":"string","description":"Jira accountId of the assignee (e.g. '712020:abc-def'). When set, skips the fuzzy name search performed for 'assignee'. Get one via resolve_jira_user."},
+						"team":{"type":"string","description":"Name of the team to assign the ticket to (e.g. 'Application', 'DevOps', 'asgard'). The system will search for a matching Jira team."},
+						"use_active_sprint":{"type":"boolean","description":"When true, drop the new ticket into the project's currently active sprint (if a scrum board with an active sprint exists). Silently skipped when no active sprint is found."},
+						"fields":{"type":"object","additionalProperties":true,"description":"Arbitrary Jira fields to set at create time (e.g. {\"priority\":{\"name\":\"High\"}}, {\"components\":[{\"name\":\"API\"}]}, custom fields like {\"customfield_10010\":\"value\"}). Typed parameters above (summary, description, issue_type, labels, assignee/account_id) always win on conflict."}
 					},
 					"required":["summary","description"]
 				}`),
@@ -970,6 +973,49 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 						"description":{"type":"string","description":"New description for the ticket in markdown format. Structure with clear sections like ## Context, ## Requirements, ## Acceptance Criteria, etc."}
 					},
 					"required":["issue_key"]
+				}`),
+			},
+		}, llm.Tool{
+			Type: "function",
+			Function: llm.ToolFunction{
+				Name:        "add_jira_comment",
+				Description: "Post a comment on a Jira issue. The body is rendered from markdown to ADF (Atlassian Document Format) automatically — supports # headers, - bullets, 1) ordered lists, **bold**, and `code`. Use when the user asks to comment on, reply to, or annotate a ticket.",
+				Parameters: json.RawMessage(`{
+					"type":"object",
+					"properties":{
+						"issue_key":{"type":"string","description":"Jira issue key (e.g. 'ENG-123')."},
+						"body":{"type":"string","description":"Comment body in markdown. Will be converted to ADF before posting."}
+					},
+					"required":["issue_key","body"]
+				}`),
+			},
+		}, llm.Tool{
+			Type: "function",
+			Function: llm.ToolFunction{
+				Name:        "list_jira_comments",
+				Description: "List the most recent comments on a Jira issue, newest first. Use to summarize discussion on a ticket or pull recent context before replying.",
+				Parameters: json.RawMessage(`{
+					"type":"object",
+					"properties":{
+						"issue_key":{"type":"string","description":"Jira issue key (e.g. 'ENG-123')."},
+						"limit":{"type":"integer","description":"Max comments to return (default 20, max 100)."}
+					},
+					"required":["issue_key"]
+				}`),
+			},
+		}, llm.Tool{
+			Type: "function",
+			Function: llm.ToolFunction{
+				Name:        "link_jira_issues",
+				Description: "Create a typed link between two Jira issues. The 'link_type' is the relationship name as it appears in Jira (e.g. 'Relates', 'Blocks', 'Causes', 'Duplicates', 'Cloners'). The inward issue is the source of the relationship and the outward issue is the target — e.g. for 'Blocks', inward_key blocks outward_key.",
+				Parameters: json.RawMessage(`{
+					"type":"object",
+					"properties":{
+						"inward_key":{"type":"string","description":"Source issue key (e.g. 'ENG-123')."},
+						"outward_key":{"type":"string","description":"Target issue key (e.g. 'ENG-456')."},
+						"link_type":{"type":"string","description":"Link type as shown in Jira (e.g. 'Relates', 'Blocks', 'Causes', 'Duplicates')."}
+					},
+					"required":["inward_key","outward_key","link_type"]
 				}`),
 			},
 		})
@@ -1932,13 +1978,16 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 			return errMsg
 		}
 		args, errMsg := parseToolArgs[struct {
-			Project     string   `json:"project"`
-			Summary     string   `json:"summary"`
-			Description string   `json:"description"`
-			IssueType   string   `json:"issue_type"`
-			Labels      []string `json:"labels"`
-			Assignee    string   `json:"assignee"`
-			Team        string   `json:"team"`
+			Project         string                 `json:"project"`
+			Summary         string                 `json:"summary"`
+			Description     string                 `json:"description"`
+			IssueType       string                 `json:"issue_type"`
+			Labels          []string               `json:"labels"`
+			Assignee        string                 `json:"assignee"`
+			AccountID       string                 `json:"account_id"`
+			Team            string                 `json:"team"`
+			UseActiveSprint bool                   `json:"use_active_sprint"`
+			Fields          map[string]interface{} `json:"fields"`
 		}](argsJSON)
 		if errMsg != "" {
 			return errMsg
@@ -1955,9 +2004,13 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		}
 		args.Description += stamp
 
-		// Resolve assignee name to Jira account ID.
+		// Resolve assignee. Prefer an explicit account_id (skips fuzzy search
+		// and any silent mismatches); fall back to name-based search otherwise.
 		var assigneeID string
-		if args.Assignee != "" {
+		if args.AccountID != "" {
+			assigneeID = args.AccountID
+			log.Printf("[user=%s channel=%s] using provided assignee account_id %s", userID, channelID, assigneeID)
+		} else if args.Assignee != "" {
 			project := args.Project
 			users, err := h.jiraClient.SearchAssignableUsers(args.Assignee, project)
 			if err != nil {
@@ -1998,6 +2051,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 			IssueType:   args.IssueType,
 			Labels:      args.Labels,
 			AssigneeID:  assigneeID,
+			Fields:      args.Fields,
 		})
 		if err != nil {
 			return fmt.Sprintf("Error creating Jira ticket: %v", err)
@@ -2009,6 +2063,26 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 				log.Printf("[user=%s channel=%s] failed to set team %s on %s: %v", userID, channelID, teamDisplayName, issue.Key, err)
 			} else {
 				log.Printf("[user=%s channel=%s] set team %s on %s", userID, channelID, teamDisplayName, issue.Key)
+			}
+		}
+
+		// Drop into the active sprint if requested. Done post-create because
+		// the Sprint custom field id has to be discovered first and Jira
+		// Cloud rejects sprint writes inside the create payload on some
+		// instances; the update path is the reliable one.
+		if args.UseActiveSprint {
+			sprint, err := h.jiraClient.GetActiveSprintForProject(args.Project)
+			switch {
+			case err != nil:
+				log.Printf("[user=%s channel=%s] active sprint lookup failed for %s: %v", userID, channelID, issue.Key, err)
+			case sprint == nil:
+				log.Printf("[user=%s channel=%s] no active sprint found for project of %s", userID, channelID, issue.Key)
+			default:
+				if err := h.jiraClient.SetSprintField(issue.Key, sprint.ID); err != nil {
+					log.Printf("[user=%s channel=%s] failed to set sprint %d on %s: %v", userID, channelID, sprint.ID, issue.Key, err)
+				} else {
+					log.Printf("[user=%s channel=%s] added %s to active sprint %q (id %d)", userID, channelID, issue.Key, sprint.Name, sprint.ID)
+				}
 			}
 		}
 
@@ -2143,6 +2217,72 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		}
 		log.Printf("[user=%s channel=%s] updated Jira issue %s (%s)", userID, channelID, args.IssueKey, strings.Join(updated, ", "))
 		return fmt.Sprintf("Successfully updated %s: %s", args.IssueKey, strings.Join(updated, " and "))
+
+	case "add_jira_comment":
+		if errMsg := requireReady("Jira", h.jiraClient); errMsg != "" {
+			return errMsg
+		}
+		args, errMsg := parseToolArgs[struct {
+			IssueKey string `json:"issue_key"`
+			Body     string `json:"body"`
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
+		}
+		comment, err := h.jiraClient.AddComment(args.IssueKey, args.Body)
+		if err != nil {
+			return fmt.Sprintf("Error adding comment to %s: %v", args.IssueKey, err)
+		}
+		log.Printf("[user=%s channel=%s] added Jira comment %s on %s", userID, channelID, comment.ID, args.IssueKey)
+		return fmt.Sprintf("Comment added to %s (id %s) by %s.", args.IssueKey, comment.ID, comment.Author.DisplayName)
+
+	case "list_jira_comments":
+		if errMsg := requireReady("Jira", h.jiraClient); errMsg != "" {
+			return errMsg
+		}
+		args, errMsg := parseToolArgs[struct {
+			IssueKey string `json:"issue_key"`
+			Limit    int    `json:"limit"`
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
+		}
+		comments, err := h.jiraClient.ListComments(args.IssueKey, args.Limit)
+		if err != nil {
+			return fmt.Sprintf("Error listing comments on %s: %v", args.IssueKey, err)
+		}
+		if len(comments) == 0 {
+			return fmt.Sprintf("No comments on %s.", args.IssueKey)
+		}
+		var sb strings.Builder
+		fmt.Fprintf(&sb, "Comments on %s (newest first, %d):\n", args.IssueKey, len(comments))
+		for _, c := range comments {
+			body := strings.TrimSpace(c.Body)
+			if len(body) > 800 {
+				body = body[:800] + "…"
+			}
+			fmt.Fprintf(&sb, "\n— %s (%s) [%s]\n%s\n", c.Author.DisplayName, c.Created, c.ID, body)
+		}
+		log.Printf("[user=%s channel=%s] listed %d comments on %s", userID, channelID, len(comments), args.IssueKey)
+		return sb.String()
+
+	case "link_jira_issues":
+		if errMsg := requireReady("Jira", h.jiraClient); errMsg != "" {
+			return errMsg
+		}
+		args, errMsg := parseToolArgs[struct {
+			InwardKey  string `json:"inward_key"`
+			OutwardKey string `json:"outward_key"`
+			LinkType   string `json:"link_type"`
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
+		}
+		if err := h.jiraClient.LinkIssues(args.InwardKey, args.OutwardKey, args.LinkType); err != nil {
+			return fmt.Sprintf("Error linking %s → %s as %q: %v", args.InwardKey, args.OutwardKey, args.LinkType, err)
+		}
+		log.Printf("[user=%s channel=%s] linked %s -> %s as %q", userID, channelID, args.InwardKey, args.OutwardKey, args.LinkType)
+		return fmt.Sprintf("Linked %s → %s as %q.", args.InwardKey, args.OutwardKey, args.LinkType)
 
 	case "get_slack_user_info":
 		args, errMsg := parseToolArgs[struct {

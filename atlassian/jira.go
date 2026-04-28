@@ -79,6 +79,13 @@ type CreateIssueInput struct {
 	IssueType   string // e.g. "Task", "Bug", "Story"
 	Labels      []string
 	AssigneeID  string // Jira account ID of the assignee (optional)
+	// Fields is an escape hatch for arbitrary Jira create-issue fields
+	// (e.g. "priority": {"name":"High"}, "components": [{"name":"API"}],
+	// or any "customfield_XXXXX"). Values are merged into the request
+	// payload's "fields" object. Typed fields above (Summary, Description,
+	// IssueType, Labels, AssigneeID, Project) always win on conflict so a
+	// caller cannot silently drop them by passing the same key here.
+	Fields map[string]interface{}
 }
 
 // createIssuePayload is the JSON body sent to the Jira API.
@@ -496,7 +503,7 @@ func (c *Client) CreateIssue(input CreateIssueInput) (*Issue, error) {
 		payload.Fields.Assignee = &accountRef{AccountID: input.AssigneeID}
 	}
 
-	body, err := json.Marshal(payload)
+	body, err := marshalCreateIssueBody(payload, input.Fields)
 	if err != nil {
 		return nil, fmt.Errorf("marshal payload: %w", err)
 	}
@@ -1886,4 +1893,367 @@ func (c *Client) GetFilter(filterID string) (*FilterDetail, error) {
 		return nil, fmt.Errorf("unmarshal filter: %w", err)
 	}
 	return &filter, nil
+}
+
+// ---------------------------------------------------------------------------
+// Comments, issue links, sprints
+// ---------------------------------------------------------------------------
+
+// marshalCreateIssueBody serializes the typed createIssuePayload while merging
+// arbitrary extra fields supplied via CreateIssueInput.Fields. Typed fields
+// already populated on the payload (Project, Summary, IssueType, Description,
+// Labels, Assignee) take precedence — extras never overwrite them.
+func marshalCreateIssueBody(payload createIssuePayload, extras map[string]interface{}) ([]byte, error) {
+	if len(extras) == 0 {
+		return json.Marshal(payload)
+	}
+
+	// Marshal the typed payload then re-decode into a generic map so we can
+	// overlay extras without losing the strict typing/omitempty semantics.
+	typedBytes, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+	var wrapper struct {
+		Fields map[string]interface{} `json:"fields"`
+	}
+	if err := json.Unmarshal(typedBytes, &wrapper); err != nil {
+		return nil, err
+	}
+	if wrapper.Fields == nil {
+		wrapper.Fields = map[string]interface{}{}
+	}
+	for k, v := range extras {
+		if _, taken := wrapper.Fields[k]; taken {
+			// Typed payload already set this key — never let extras
+			// silently clobber a typed value.
+			continue
+		}
+		wrapper.Fields[k] = v
+	}
+	return json.Marshal(wrapper)
+}
+
+// Comment represents a Jira issue comment.
+type Comment struct {
+	ID     string `json:"id"`
+	Author struct {
+		AccountID   string `json:"accountId"`
+		DisplayName string `json:"displayName"`
+		EmailAddr   string `json:"emailAddress,omitempty"`
+	} `json:"author"`
+	Body    string `json:"-"` // plain-text rendering of the ADF body
+	Created string `json:"created"`
+	Updated string `json:"updated"`
+}
+
+// commentEnvelope mirrors the Jira REST API's comment shape, where the body is
+// an ADF document on writes/reads. We render it down to plain text for
+// downstream LLM consumption.
+type commentEnvelope struct {
+	ID     string `json:"id"`
+	Author struct {
+		AccountID   string `json:"accountId"`
+		DisplayName string `json:"displayName"`
+		EmailAddr   string `json:"emailAddress,omitempty"`
+	} `json:"author"`
+	Body    json.RawMessage `json:"body"`
+	Created string          `json:"created"`
+	Updated string          `json:"updated"`
+}
+
+func (e commentEnvelope) toComment() Comment {
+	return Comment{
+		ID:      e.ID,
+		Author:  e.Author,
+		Body:    adfToPlainText(e.Body),
+		Created: e.Created,
+		Updated: e.Updated,
+	}
+}
+
+// AddComment posts a comment on a Jira issue. The body is converted from
+// markdown-flavoured text to ADF using the same converter used by issue
+// descriptions. Returns the created comment.
+func (c *Client) AddComment(issueKey, body string) (*Comment, error) {
+	if strings.TrimSpace(issueKey) == "" {
+		return nil, fmt.Errorf("issue key is required")
+	}
+	if strings.TrimSpace(body) == "" {
+		return nil, fmt.Errorf("comment body is required")
+	}
+	doc := textToADF(body)
+	if doc == nil {
+		return nil, fmt.Errorf("comment body produced empty ADF document")
+	}
+	payload := map[string]interface{}{"body": doc}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("marshal payload: %w", err)
+	}
+
+	reqURL := fmt.Sprintf("%s/rest/api/3/issue/%s/comment", c.baseURL, url.PathEscape(issueKey))
+	req, err := http.NewRequest(http.MethodPost, reqURL, bytes.NewReader(raw))
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	if err := c.authRequest(req); err != nil {
+		return nil, fmt.Errorf("auth request: %w", err)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("send request: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
+	if err != nil {
+		return nil, fmt.Errorf("read response: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("jira API error (HTTP %d): %s", resp.StatusCode, string(respBody))
+	}
+	var env commentEnvelope
+	if err := json.Unmarshal(respBody, &env); err != nil {
+		return nil, fmt.Errorf("unmarshal response: %w", err)
+	}
+	cm := env.toComment()
+	return &cm, nil
+}
+
+// ListComments returns the most recent comments on a Jira issue, newest first.
+// limit caps the number returned (server-side ordering is ascending by
+// created date, so we fetch up to limit*2 and reverse client-side). Pass
+// limit <= 0 to use a default of 20. limit is capped at 100.
+func (c *Client) ListComments(issueKey string, limit int) ([]Comment, error) {
+	if strings.TrimSpace(issueKey) == "" {
+		return nil, fmt.Errorf("issue key is required")
+	}
+	if limit <= 0 {
+		limit = 20
+	}
+	if limit > 100 {
+		limit = 100
+	}
+	// orderBy=-created asks Jira for newest first; older Jira deployments
+	// ignore the param and return ascending order, so we re-sort below.
+	reqURL := fmt.Sprintf("%s/rest/api/3/issue/%s/comment?orderBy=-created&maxResults=%d",
+		c.baseURL, url.PathEscape(issueKey), limit)
+	req, err := http.NewRequest(http.MethodGet, reqURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set("Accept", "application/json")
+	if err := c.authRequest(req); err != nil {
+		return nil, fmt.Errorf("auth request: %w", err)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("send request: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
+	if err != nil {
+		return nil, fmt.Errorf("read response: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("jira API error (HTTP %d): %s", resp.StatusCode, string(respBody))
+	}
+	var result struct {
+		Comments []commentEnvelope `json:"comments"`
+	}
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, fmt.Errorf("unmarshal response: %w", err)
+	}
+	out := make([]Comment, 0, len(result.Comments))
+	for _, env := range result.Comments {
+		out = append(out, env.toComment())
+	}
+	// Force newest-first regardless of server's ordering behaviour. Created
+	// is an ISO-8601 string so lexicographic comparison sorts correctly.
+	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
+		if out[i].Created < out[j].Created {
+			out[i], out[j] = out[j], out[i]
+		}
+	}
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
+// LinkIssues creates a directional link between two issues. linkType is the
+// relationship name as it appears in Jira (e.g. "Relates", "Blocks",
+// "Causes", "Duplicates"). The inward issue is the "source" and the outward
+// issue is the "target": for "Blocks", inward blocks outward.
+func (c *Client) LinkIssues(inwardKey, outwardKey, linkType string) error {
+	inwardKey = strings.TrimSpace(inwardKey)
+	outwardKey = strings.TrimSpace(outwardKey)
+	linkType = strings.TrimSpace(linkType)
+	if inwardKey == "" || outwardKey == "" {
+		return fmt.Errorf("both inward and outward issue keys are required")
+	}
+	if linkType == "" {
+		return fmt.Errorf("link type is required (e.g. Relates, Blocks, Causes, Duplicates)")
+	}
+	payload := map[string]interface{}{
+		"type":         map[string]string{"name": linkType},
+		"inwardIssue":  map[string]string{"key": inwardKey},
+		"outwardIssue": map[string]string{"key": outwardKey},
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("marshal payload: %w", err)
+	}
+	reqURL := fmt.Sprintf("%s/rest/api/3/issueLink", c.baseURL)
+	req, err := http.NewRequest(http.MethodPost, reqURL, bytes.NewReader(raw))
+	if err != nil {
+		return fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if err := c.authRequest(req); err != nil {
+		return fmt.Errorf("auth request: %w", err)
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("send request: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
+		return fmt.Errorf("jira API error (HTTP %d): %s", resp.StatusCode, string(body))
+	}
+	return nil
+}
+
+// Sprint represents a Jira Software (Agile) sprint.
+type Sprint struct {
+	ID           int    `json:"id"`
+	Name         string `json:"name"`
+	State        string `json:"state"` // "active", "closed", "future"
+	BoardID      int    `json:"originBoardId"`
+	StartDate    string `json:"startDate,omitempty"`
+	EndDate      string `json:"endDate,omitempty"`
+	CompleteDate string `json:"completeDate,omitempty"`
+	Goal         string `json:"goal,omitempty"`
+}
+
+// SprintFieldID returns the customfield_XXXXX id of the Sprint field. Triggers
+// lazy discovery on first call. Returns "" if the field could not be located
+// (e.g. instance has no Jira Software / scrum boards).
+func (c *Client) SprintFieldID() string {
+	c.discoverExtraFields()
+	return c.sprintFieldID
+}
+
+// GetActiveSprintForProject locates the scrum board associated with a project
+// and returns its currently active sprint, if any. projectKey defaults to the
+// client's configured default project. Returns (nil, nil) when no scrum board
+// or active sprint exists — that's a normal state, not an error.
+func (c *Client) GetActiveSprintForProject(projectKey string) (*Sprint, error) {
+	if strings.TrimSpace(projectKey) == "" {
+		projectKey = c.projectKey
+	}
+	if projectKey == "" {
+		return nil, fmt.Errorf("project key is required (no default configured)")
+	}
+
+	// Find scrum boards for the project. Kanban boards don't have sprints.
+	boardURL := fmt.Sprintf("%s/rest/agile/1.0/board?projectKeyOrId=%s&type=scrum",
+		c.baseURL, url.QueryEscape(projectKey))
+	req, err := http.NewRequest(http.MethodGet, boardURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create board request: %w", err)
+	}
+	req.Header.Set("Accept", "application/json")
+	if err := c.authRequest(req); err != nil {
+		return nil, fmt.Errorf("auth board request: %w", err)
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("board request failed: %w", err)
+	}
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
+	_ = resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("board lookup HTTP %d: %s", resp.StatusCode, string(body))
+	}
+	var boards struct {
+		Values []struct {
+			ID   int    `json:"id"`
+			Name string `json:"name"`
+			Type string `json:"type"`
+		} `json:"values"`
+	}
+	if err := json.Unmarshal(body, &boards); err != nil {
+		return nil, fmt.Errorf("unmarshal boards: %w", err)
+	}
+	if len(boards.Values) == 0 {
+		return nil, nil
+	}
+
+	// Walk scrum boards in order; first active sprint wins. Multiple boards
+	// per project is rare but real (e.g. team-specific scrum boards under
+	// one project), and we don't have a signal to pick a "best" one.
+	for _, b := range boards.Values {
+		sprintURL := fmt.Sprintf("%s/rest/agile/1.0/board/%d/sprint?state=active",
+			c.baseURL, b.ID)
+		sreq, err := http.NewRequest(http.MethodGet, sprintURL, nil)
+		if err != nil {
+			continue
+		}
+		sreq.Header.Set("Accept", "application/json")
+		if err := c.authRequest(sreq); err != nil {
+			continue
+		}
+		sresp, err := c.httpClient.Do(sreq)
+		if err != nil {
+			continue
+		}
+		sbody, _ := io.ReadAll(io.LimitReader(sresp.Body, maxResponseBody))
+		_ = sresp.Body.Close()
+		if sresp.StatusCode < 200 || sresp.StatusCode >= 300 {
+			continue
+		}
+		var sprints struct {
+			Values []Sprint `json:"values"`
+		}
+		if err := json.Unmarshal(sbody, &sprints); err != nil {
+			continue
+		}
+		if len(sprints.Values) > 0 {
+			s := sprints.Values[0]
+			if s.BoardID == 0 {
+				s.BoardID = b.ID
+			}
+			return &s, nil
+		}
+	}
+	return nil, nil
+}
+
+// SetSprintField assigns an issue to a sprint by ID. Jira Cloud's create-issue
+// and update-issue endpoints reject the array form Jira returns on reads —
+// the write contract is a SCALAR sprint id (not [id]) on the Sprint custom
+// field. Discovery of the field id is automatic; callers can pre-flight with
+// SprintFieldID() to bail out gracefully when no Sprint field exists.
+func (c *Client) SetSprintField(issueKey string, sprintID int) error {
+	if strings.TrimSpace(issueKey) == "" {
+		return fmt.Errorf("issue key is required")
+	}
+	if sprintID <= 0 {
+		return fmt.Errorf("sprintID must be > 0")
+	}
+	fid := c.SprintFieldID()
+	if fid == "" {
+		return fmt.Errorf("sprint custom field not found on this Jira instance")
+	}
+	return c.UpdateIssueFields(issueKey, map[string]interface{}{
+		fid: sprintID,
+	})
 }
