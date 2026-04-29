@@ -7,109 +7,68 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
-	"strings"
 	"time"
+
+	"github.com/justmike1/arbetern/internal/crud"
 )
 
 //go:embed view.html
 var viewHTML string
 
-// RegisterRoutes wires the per-agent view and API endpoints onto the given mux.
+// RegisterRoutes wires the per-agent view and workflow CRUD API onto the
+// given mux. The shared GET/DELETE/list/data.json plumbing lives in
+// internal/crud; the workflow-specific verbs (POST /<id>/run, PATCH/PUT
+// for partial updates) are handled by the Custom hook below.
 //
-// Per-agent:
+//	GET    /<agent>/workflow/<id>            → embedded HTML viewer
+//	GET    /<agent>/workflow/<id>/data.json  → latest stored JSON
+//	GET    /api/workflows                    → list (optional ?agent=)
+//	GET    /api/workflows/<agent>/<id>       → get
+//	PATCH  /api/workflows/<agent>/<id>       → partial update
+//	DELETE /api/workflows/<agent>/<id>       → delete
+//	POST   /api/workflows/<agent>/<id>/run   → run now (returns 202)
 //
-//	GET /<agent>/workflow/<id>           → embedded HTML viewer
-//	GET /<agent>/workflow/<id>/data.json → latest stored JSON
-//
-// API:
-//
-//	GET    /api/workflows              → list all workflows (optional ?agent=)
-//	DELETE /api/workflows/<agent>/<id> → delete a workflow
-//
-// Access control is handled upstream by the global IP gate in main; this
-// package deliberately stays transport-agnostic.
+// Access control is enforced upstream by the global IP gate in main.
 func (r *Registry) RegisterRoutes(mux *http.ServeMux, apiMux *http.ServeMux, knownAgents map[string]bool) {
-	for agent := range knownAgents {
-		a := agent
-		mux.HandleFunc("/"+a+"/workflow/", func(w http.ResponseWriter, req *http.Request) {
-			r.handleAgentView(a, w, req)
-		})
-	}
-	apiMux.HandleFunc("/api/workflows", r.handleList)
-	apiMux.HandleFunc("/api/workflows/", r.handleAPIItem)
+	crud.Mount(mux, apiMux, knownAgents, crud.Spec{
+		Kind:       "workflow",
+		KindPlural: "workflows",
+		ViewHTML:   viewHTML,
+		Get: func(agent, id string) (any, string, bool) {
+			wf, ok := r.Get(agent, id)
+			if !ok {
+				return nil, "", false
+			}
+			return wf, wf.Source, true
+		},
+		List: func(agent string) any {
+			return r.List(agent)
+		},
+		Delete: func(agent, id string) error {
+			return r.Delete(agent, id)
+		},
+		Custom: r.handleCustom,
+	})
 }
 
-func (r *Registry) handleAgentView(agent string, w http.ResponseWriter, req *http.Request) {
-	trimmed := strings.TrimPrefix(req.URL.Path, "/"+agent+"/workflow/")
-	parts := strings.SplitN(trimmed, "/", 2)
-	if len(parts) == 0 || parts[0] == "" {
-		http.NotFound(w, req)
-		return
-	}
-	id := parts[0]
-	if !idValidRe.MatchString(id) {
-		http.Error(w, "invalid workflow id", http.StatusBadRequest)
-		return
-	}
-	wf, ok := r.Get(agent, id)
-	if !ok {
-		http.NotFound(w, req)
-		return
-	}
-	if len(parts) == 2 && parts[1] == "data.json" {
-		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("Cache-Control", "no-store")
-		_ = json.NewEncoder(w).Encode(wf)
-		return
-	}
-	if len(parts) == 2 && parts[1] != "" {
-		http.NotFound(w, req)
-		return
-	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_, _ = w.Write([]byte(viewHTML))
-}
-
-func (r *Registry) handleList(w http.ResponseWriter, req *http.Request) {
-	if req.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	agent := req.URL.Query().Get("agent")
-	list := r.List(agent)
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(list)
-}
-
-func (r *Registry) handleAPIItem(w http.ResponseWriter, req *http.Request) {
-	trimmed := strings.TrimPrefix(req.URL.Path, "/api/workflows/")
-	parts := strings.Split(trimmed, "/")
-	// Accept /api/workflows/<agent>/<id> and /api/workflows/<agent>/<id>/run
-	if len(parts) < 2 || parts[0] == "" || parts[1] == "" {
-		http.Error(w, "usage: /api/workflows/<agent>/<id>[/run]", http.StatusBadRequest)
-		return
-	}
-	agent, id := parts[0], parts[1]
-	if !agentValidRe.MatchString(agent) || !idValidRe.MatchString(id) {
-		http.Error(w, "invalid path", http.StatusBadRequest)
-		return
-	}
-	if len(parts) == 3 && parts[2] == "run" {
+// handleCustom dispatches workflow-specific verbs. crud.Mount has already
+// validated agent/id and stripped the `/api/workflows/<agent>/<id>` prefix
+// into subpath.
+func (r *Registry) handleCustom(w http.ResponseWriter, req *http.Request, agent, id string, subpath []string) bool {
+	// /<agent>/<id>/run — fire-and-forget manual trigger.
+	if len(subpath) == 1 && subpath[0] == "run" {
 		if req.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
+			return true
 		}
-		// Kick the workflow off in its own goroutine and return 202 Accepted
-		// immediately. A workflow tick can easily take several minutes
-		// (LLM tool loops, GitHub API, rate-limit back-offs); blocking the
-		// HTTP response that long ties up the "Run now" UI button and the
-		// request itself will usually be killed by intermediate proxies
-		// before the tick completes. The caller polls /data.json to see
-		// the result appear in the run-history list.
-		//
-		// The per-workflow `busy` try-lock inside runOnce still prevents
-		// concurrent runs of the same workflow, so double-clicking the
-		// button (or a schedule overlapping a manual trigger) is safe.
+		// Run in its own goroutine and return 202 immediately. Workflow
+		// ticks routinely run for several minutes (LLM tool loops, GitHub
+		// API, rate-limit back-offs); blocking the HTTP response that long
+		// ties up the "Run now" UI button and is usually killed by
+		// intermediate proxies before the tick completes. The caller polls
+		// /data.json to see results in run history. The per-workflow busy
+		// try-lock inside runOnce still prevents concurrent runs of the
+		// same workflow.
 		go func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 			defer cancel()
@@ -123,48 +82,25 @@ func (r *Registry) handleAPIItem(w http.ResponseWriter, req *http.Request) {
 			"id":       id,
 			"message":  "workflow run queued; poll /data.json to see the result appear in run history",
 		})
-		return
+		return true
 	}
-	if len(parts) != 2 {
-		http.Error(w, "usage: /api/workflows/<agent>/<id>[/run]", http.StatusBadRequest)
-		return
-	}
-	switch req.Method {
-	case http.MethodGet:
-		wf, ok := r.Get(agent, id)
-		if !ok {
-			http.NotFound(w, req)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(wf)
-	case http.MethodPatch, http.MethodPut:
+
+	// Bare /<agent>/<id> with PATCH/PUT — partial update.
+	if len(subpath) == 0 && (req.Method == http.MethodPatch || req.Method == http.MethodPut) {
 		r.handleAPIUpdate(agent, id, w, req)
-	case http.MethodDelete:
-		if existing, ok := r.Get(agent, id); ok && existing.Source == "gitops" {
-			http.Error(w, "workflow is managed via GitOps and cannot be deleted from the UI; remove the file from the source repo instead", http.StatusForbidden)
-			return
-		}
-		if err := r.Delete(agent, id); err != nil {
-			http.Error(w, err.Error(), http.StatusNotFound)
-			return
-		}
-		w.WriteHeader(http.StatusNoContent)
-	default:
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return true
 	}
+	return false
 }
 
 // handleAPIUpdate applies a partial edit to a workflow from the UI. Body is a
 // JSON object; only the keys actually present in the payload are treated as
-// intentional edits (mirrors the update_workflow tool semantics so a missing
+// intentional edits (mirrors update_workflow tool semantics so a missing
 // field means "unchanged" rather than "clear").
 func (r *Registry) handleAPIUpdate(agent, id string, w http.ResponseWriter, req *http.Request) {
-	// Reject UI edits to gitops-managed workflows (toggling enabled is the
-	// only allowed mutation; everything else would be reverted on the next
-	// reconcile).
+	// Reject UI edits to gitops-managed workflows. Toggling enabled is the
+	// only allowed mutation; everything else is reverted on the next reconcile.
 	if existing, ok := r.Get(agent, id); ok && existing.Source == "gitops" {
-		// Peek the body to allow enabled-only edits through.
 		bodyBytes, _ := io.ReadAll(req.Body)
 		_ = req.Body.Close()
 		var peek map[string]json.RawMessage
