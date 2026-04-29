@@ -1,9 +1,11 @@
 package workflows
 
 import (
+	"bytes"
 	"context"
 	_ "embed"
 	"encoding/json"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -139,6 +141,10 @@ func (r *Registry) handleAPIItem(w http.ResponseWriter, req *http.Request) {
 	case http.MethodPatch, http.MethodPut:
 		r.handleAPIUpdate(agent, id, w, req)
 	case http.MethodDelete:
+		if existing, ok := r.Get(agent, id); ok && existing.Source == "gitops" {
+			http.Error(w, "workflow is managed via GitOps and cannot be deleted from the UI; remove the file from the source repo instead", http.StatusForbidden)
+			return
+		}
 		if err := r.Delete(agent, id); err != nil {
 			http.Error(w, err.Error(), http.StatusNotFound)
 			return
@@ -154,6 +160,31 @@ func (r *Registry) handleAPIItem(w http.ResponseWriter, req *http.Request) {
 // intentional edits (mirrors the update_workflow tool semantics so a missing
 // field means "unchanged" rather than "clear").
 func (r *Registry) handleAPIUpdate(agent, id string, w http.ResponseWriter, req *http.Request) {
+	// Reject UI edits to gitops-managed workflows (toggling enabled is the
+	// only allowed mutation; everything else would be reverted on the next
+	// reconcile).
+	if existing, ok := r.Get(agent, id); ok && existing.Source == "gitops" {
+		// Peek the body to allow enabled-only edits through.
+		bodyBytes, _ := io.ReadAll(req.Body)
+		_ = req.Body.Close()
+		var peek map[string]json.RawMessage
+		if err := json.Unmarshal(bodyBytes, &peek); err != nil {
+			http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		onlyEnabled := len(peek) > 0
+		for k := range peek {
+			if k != "enabled" {
+				onlyEnabled = false
+				break
+			}
+		}
+		if !onlyEnabled {
+			http.Error(w, "workflow is managed via GitOps and cannot be edited from the UI; edit the file in the source repo instead", http.StatusForbidden)
+			return
+		}
+		req.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+	}
 	var raw map[string]json.RawMessage
 	dec := json.NewDecoder(req.Body)
 	dec.DisallowUnknownFields()

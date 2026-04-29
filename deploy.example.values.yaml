@@ -94,6 +94,17 @@ secretValues:
 #   enabled: true
 # workflows:
 #   enabled: true
+#   # GitOps: poll a remote GitHub repo and reconcile workflow JSON
+#   # descriptors found at <basePath>/<agent>/<id>.json into the local
+#   # registry on `interval`. See docs/WORKFLOWS_GITOPS.md.
+#   gitops:
+#     enabled: true
+#     # owner: "your-org"        # optional; defaults to bot's resolved owner
+#     repo: "<your-workflows-repo>"
+#     # branch: "main"           # empty == repo default branch
+#     basePath: "arbetern/workflows"
+#     interval: "5m"
+#     prune: false               # set true to delete workflows removed from git
 # persistence:
 #   enabled: true
 #   mountPath: /var/lib/arbetern

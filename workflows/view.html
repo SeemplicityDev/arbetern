@@ -148,6 +148,7 @@
   </header>
   <main>
     <p class="description" id="description"></p>
+    <div id="gitops-banner" style="display:none;background:rgba(99,138,229,.08);border:1px solid rgba(99,138,229,.45);border-radius:10px;padding:12px 14px;margin-bottom:14px;color:var(--text);font-size:13px;line-height:1.55"></div>
     <div id="disabled-banner" style="display:none;background:rgba(196,64,64,.08);border:1px solid rgba(196,64,64,.35);border-radius:10px;padding:14px 16px;margin-bottom:18px;color:var(--red);font-size:13px;line-height:1.55"></div>
     <div class="meta-grid" id="meta-grid"></div>
 
@@ -286,6 +287,16 @@
     function formatTime(s) {
       if (!s) return '—';
       try { return new Date(s).toLocaleString(); } catch (_) { return s; }
+    }
+    // sourceRefToURL parses a "<owner>/<repo>@<branch>:<path>" SourceRef
+    // into a github.com blob URL, or returns null when the format doesn't
+    // match.
+    function sourceRefToURL(ref) {
+      if (!ref || typeof ref !== 'string') return null;
+      const m = ref.match(/^([^/\s]+)\/([^@\s]+)@([^:\s]+):(.+)$/);
+      if (!m) return null;
+      return 'https://github.com/' + encodeURIComponent(m[1]) + '/' + encodeURIComponent(m[2]) +
+        '/blob/' + encodeURIComponent(m[3]) + '/' + m[4].split('/').map(encodeURIComponent).join('/');
     }
 
     // Scan text for integrations. Returns an ordered list of unique integrations.
@@ -475,6 +486,24 @@
           '<strong>⚠ Auto-disabled</strong> — ' + escapeHtml(wf.disabled_reason);
       } else {
         disabledBanner.style.display = 'none';
+      }
+
+      // GitOps-managed workflows are read-only in the UI: edits made here
+      // would be overwritten on the next reconcile, so we hide the edit
+      // button and show a banner linking back to the source file in git.
+      const editBtn = document.getElementById('edit-btn');
+      const gitopsBanner = document.getElementById('gitops-banner');
+      if (wf.source === 'gitops') {
+        editBtn.style.display = 'none';
+        toggleBtn.style.display = 'none';
+        const link = sourceRefToURL(wf.source_ref);
+        gitopsBanner.style.display = 'block';
+        gitopsBanner.innerHTML = link
+          ? 'This workflow is managed via GitOps — edit it at <a href="' + link + '" target="_blank" rel="noopener">' + escapeHtml(wf.source_ref) + '</a>.'
+          : 'This workflow is managed via GitOps — edits here would be overwritten on the next sync.';
+      } else {
+        editBtn.style.display = '';
+        gitopsBanner.style.display = 'none';
       }
 
       document.getElementById('description').textContent = wf.description || '';

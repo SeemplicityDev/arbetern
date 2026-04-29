@@ -21,6 +21,7 @@ import (
 	"github.com/justmike1/arbetern/commands"
 	"github.com/justmike1/arbetern/config"
 	"github.com/justmike1/arbetern/dashboards"
+	dashgitops "github.com/justmike1/arbetern/dashboards/gitopssync"
 	"github.com/justmike1/arbetern/datadog"
 	"github.com/justmike1/arbetern/github"
 	"github.com/justmike1/arbetern/llm"
@@ -29,6 +30,7 @@ import (
 	"github.com/justmike1/arbetern/salesforce"
 	"github.com/justmike1/arbetern/slack"
 	"github.com/justmike1/arbetern/workflows"
+	"github.com/justmike1/arbetern/workflows/gitopssync"
 )
 
 //go:embed ui/*
@@ -1246,6 +1248,57 @@ func main() {
 	// tick goroutines for every workflow that was loaded from disk.
 	wfRegistry.SetExecutor(&workflowExecutor{routers: routers})
 	wfRegistry.StartAllEnabled(context.Background())
+
+	// Optional GitOps sync: reconcile remote workflow descriptors into the
+	// registry when WORKFLOWS_GITOPS_REPO is set. See docs/WORKFLOWS_GITOPS.md.
+	var wfSyncer *gitopssync.Syncer
+	if cfg.WorkflowsGitOpsRepo != "" {
+		if ghClient == nil {
+			log.Printf("warn: WORKFLOWS_GITOPS_REPO is set but GITHUB_TOKEN is not — gitops sync disabled")
+		} else {
+			s, err := gitopssync.New(gitopssync.Config{
+				Owner:    cfg.WorkflowsGitOpsOwner,
+				Repo:     cfg.WorkflowsGitOpsRepo,
+				Branch:   cfg.WorkflowsGitOpsBranch,
+				BasePath: cfg.WorkflowsGitOpsBasePath,
+				Interval: cfg.WorkflowsGitOpsInterval,
+				Prune:    cfg.WorkflowsGitOpsPrune,
+			}, ghClient, wfRegistry)
+			if err != nil {
+				log.Printf("warn: gitops sync init failed: %v", err)
+			} else {
+				wfSyncer = s
+				wfSyncer.Start(context.Background())
+				defer wfSyncer.Stop()
+			}
+		}
+	}
+	_ = wfSyncer
+
+	// Optional GitOps sync for dashboards (mirrors the workflows poller).
+	var dashSyncer *dashgitops.Syncer
+	if cfg.DashboardsGitOpsRepo != "" {
+		if ghClient == nil {
+			log.Printf("warn: DASHBOARDS_GITOPS_REPO is set but GITHUB_TOKEN is not — gitops sync disabled")
+		} else {
+			s, err := dashgitops.New(dashgitops.Config{
+				Owner:    cfg.DashboardsGitOpsOwner,
+				Repo:     cfg.DashboardsGitOpsRepo,
+				Branch:   cfg.DashboardsGitOpsBranch,
+				BasePath: cfg.DashboardsGitOpsBasePath,
+				Interval: cfg.DashboardsGitOpsInterval,
+				Prune:    cfg.DashboardsGitOpsPrune,
+			}, ghClient, dashRegistry)
+			if err != nil {
+				log.Printf("warn: dashboards gitops sync init failed: %v", err)
+			} else {
+				dashSyncer = s
+				dashSyncer.Start(context.Background())
+				defer dashSyncer.Stop()
+			}
+		}
+	}
+	_ = dashSyncer
 
 	log.Printf("arbetern server starting on :%s", cfg.Port)
 

@@ -98,6 +98,7 @@
 </header>
 <main>
   <div class="description" id="description"></div>
+  <div id="gitops-banner" style="display:none;background:rgba(99,138,229,.08);border:1px solid rgba(99,138,229,.45);border-radius:10px;padding:12px 14px;margin-bottom:14px;color:var(--text);font-size:13px;line-height:1.55"></div>
   <div id="account-panel" style="display:none"></div>
   <div id="sources"></div>
   <div class="footer">
@@ -107,6 +108,12 @@
 <script>
   function escapeHtml(s){const d=document.createElement('div');d.textContent=String(s??'');return d.innerHTML}
   function fmtTime(s){if(!s)return '';try{return new Date(s).toLocaleString()}catch(e){return s}}
+  function sourceRefToURL(ref){
+    if(!ref||typeof ref!=='string')return null;
+    const m=ref.match(/^([^/\s]+)\/([^@\s]+)@([^:\s]+):(.+)$/);
+    if(!m)return null;
+    return 'https://github.com/'+encodeURIComponent(m[1])+'/'+encodeURIComponent(m[2])+'/blob/'+encodeURIComponent(m[3])+'/'+m[4].split('/').map(encodeURIComponent).join('/');
+  }
 
   // Render text that may contain Slack-style mrkdwn (*bold*, `code`, <url|label>,
   // :emoji:, <br>) into safe HTML.
@@ -608,6 +615,16 @@
         'agent: ' + d.agent + '  ·  every ' + d.sync_interval +
         '  ·  last sync: ' + (d.last_sync ? fmtTime(d.last_sync) : 'pending');
       document.getElementById('description').textContent = d.description || '';
+      const gitopsBanner = document.getElementById('gitops-banner');
+      if (d.source === 'gitops') {
+        const link = sourceRefToURL(d.source_ref);
+        gitopsBanner.style.display = 'block';
+        gitopsBanner.innerHTML = link
+          ? 'This dashboard is managed via GitOps — edit it at <a href="' + link + '" target="_blank" rel="noopener">' + escapeHtml(d.source_ref) + '</a>.'
+          : 'This dashboard is managed via GitOps — edits here would be overwritten on the next sync.';
+      } else {
+        gitopsBanner.style.display = 'none';
+      }
       const badge = document.getElementById('sync-badge');
       if (d.last_error) { badge.textContent = 'error'; badge.className = 'badge err'; }
       else if (d.last_sync) { badge.textContent = 'live'; badge.className = 'badge ok'; }

@@ -106,6 +106,10 @@ func (r *Registry) handleAPIItem(w http.ResponseWriter, req *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(d)
 	case http.MethodDelete:
+		if existing, ok := r.Get(agent, id); ok && existing.Source == "gitops" {
+			http.Error(w, "dashboard is managed via GitOps and cannot be deleted from the UI; remove the file from the source repo instead", http.StatusForbidden)
+			return
+		}
 		if err := r.Delete(agent, id); err != nil {
 			http.Error(w, err.Error(), http.StatusNotFound)
 			return

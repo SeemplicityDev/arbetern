@@ -173,8 +173,14 @@ type Workflow struct {
 	// DisabledReason is set when the registry auto-disables a workflow
 	// (empty when the user manually toggled enabled=false). The UI surfaces
 	// this to explain why a workflow stopped ticking.
-	DisabledReason string   `json:"disabled_reason,omitempty"`
-	Runs           []RunLog `json:"runs,omitempty"`
+	DisabledReason string `json:"disabled_reason,omitempty"`
+	// Source identifies how the workflow was created. "" / "ui" =
+	// interactive; "gitops" = managed by the GitOps poller.
+	Source string `json:"source,omitempty"`
+	// SourceRef is an informational pointer to the upstream definition
+	// for non-ui sources (e.g. "<owner>/<repo>@<branch>:<path>").
+	SourceRef string   `json:"source_ref,omitempty"`
+	Runs      []RunLog `json:"runs,omitempty"`
 	// Running is a transient, never-persisted flag populated by Get/List
 	// from the live runner state. True while a tick is in flight.
 	Running bool `json:"running,omitempty"`
@@ -575,6 +581,222 @@ func (r *Registry) Update(ctx context.Context, agent, id string, opts UpdateOpts
 		agent, id, updated.Name, updated.Pattern(), updated.Cron, updated.Enabled)
 	cp := updated
 	return &cp, nil
+}
+
+// UpsertSpec is the declarative shape used by id-stable callers (e.g.
+// the GitOps syncer). All fields replace the stored value; runtime
+// bookkeeping (run history, LastRun, ConsecutiveFailures) is preserved.
+type UpsertSpec struct {
+	ID          string
+	Agent       string
+	Name        string
+	ShortName   string // slugified from Name when empty
+	Description string
+	Cron        string
+	Prompt      string
+	Tasks       []Task
+	Trigger     Trigger
+	CreatedBy   string // applied only on first create
+	Enabled     bool
+	Source      string
+	SourceRef   string
+}
+
+// Upsert creates a workflow at spec.ID or replaces the existing one in
+// place. Returns changed=false when the spec matches the stored copy.
+func (r *Registry) Upsert(ctx context.Context, spec UpsertSpec) (w *Workflow, changed bool, err error) {
+	if !agentValidRe.MatchString(spec.Agent) {
+		return nil, false, fmt.Errorf("invalid agent id %q", spec.Agent)
+	}
+	if !idValidRe.MatchString(spec.ID) {
+		return nil, false, fmt.Errorf("invalid workflow id %q", spec.ID)
+	}
+	if strings.TrimSpace(spec.Name) == "" {
+		return nil, false, fmt.Errorf("workflow name is required")
+	}
+	hasPrompt := strings.TrimSpace(spec.Prompt) != ""
+	hasTasks := len(spec.Tasks) > 0
+	if !hasPrompt && !hasTasks {
+		return nil, false, fmt.Errorf("workflow requires either prompt or at least one task")
+	}
+	if hasTasks {
+		for i, t := range spec.Tasks {
+			if strings.TrimSpace(t.Name) == "" || strings.TrimSpace(t.Prompt) == "" {
+				return nil, false, fmt.Errorf("task %d requires non-empty name and prompt", i+1)
+			}
+		}
+	}
+	cronExpr := strings.TrimSpace(spec.Cron)
+	if cronExpr == "" {
+		cronExpr = DefaultCron
+	}
+	if _, err := cron.ParseStandard(cronExpr); err != nil {
+		return nil, false, fmt.Errorf("invalid cron %q: %w", cronExpr, err)
+	}
+	trig := spec.Trigger
+	switch trig.Type {
+	case "", TriggerSchedule:
+		trig.Type = TriggerSchedule
+		trig.Ref = ""
+	case TriggerOnSuccess, TriggerOnFailure:
+		if !strings.Contains(trig.Ref, "/") {
+			return nil, false, fmt.Errorf("trigger ref must be '<agent>/<id>' for %s trigger", trig.Type)
+		}
+	case TriggerManual:
+		trig.Ref = ""
+	default:
+		return nil, false, fmt.Errorf("unknown trigger type %q", trig.Type)
+	}
+	shortName := spec.ShortName
+	if shortName == "" {
+		shortName = slugify(spec.Name)
+	}
+
+	r.mu.Lock()
+	orig, exists := r.items[key(spec.Agent, spec.ID)]
+	r.mu.Unlock()
+
+	if !exists {
+		w := &Workflow{
+			ID:          spec.ID,
+			Agent:       spec.Agent,
+			Name:        spec.Name,
+			ShortName:   shortName,
+			Description: spec.Description,
+			Cron:        cronExpr,
+			Prompt:      spec.Prompt,
+			Tasks:       spec.Tasks,
+			Trigger:     trig,
+			CreatedBy:   spec.CreatedBy,
+			CreatedAt:   time.Now().UTC().Format(time.RFC3339),
+			Enabled:     spec.Enabled,
+			Source:      spec.Source,
+			SourceRef:   spec.SourceRef,
+		}
+		if err := r.persist(w); err != nil {
+			return nil, false, err
+		}
+		r.mu.Lock()
+		r.items[key(spec.Agent, spec.ID)] = w
+		r.mu.Unlock()
+		if w.Enabled {
+			r.startRunner(w, false)
+		}
+		log.Printf("[workflows] upsert created %s/%s (%q, source=%s)", spec.Agent, spec.ID, spec.Name, spec.Source)
+		return w, true, nil
+	}
+
+	updated := *orig
+	scheduleChanged := updated.Cron != cronExpr ||
+		updated.Trigger.Type != trig.Type ||
+		updated.Trigger.Ref != trig.Ref
+	enabledChanged := updated.Enabled != spec.Enabled
+
+	// Distinguish no-op from actual change before persisting.
+	specHash := upsertFingerprint(spec, cronExpr, shortName, trig)
+	currentHash := upsertFingerprint(specFromWorkflow(orig), orig.Cron, orig.ShortName, orig.Trigger)
+	if specHash == currentHash {
+		return orig, false, nil
+	}
+
+	updated.Name = spec.Name
+	updated.ShortName = shortName
+	updated.Description = spec.Description
+	updated.Cron = cronExpr
+	updated.Prompt = spec.Prompt
+	updated.Tasks = append([]Task(nil), spec.Tasks...)
+	updated.Trigger = trig
+	updated.Enabled = spec.Enabled
+	updated.Source = spec.Source
+	updated.SourceRef = spec.SourceRef
+	if spec.Enabled {
+		// Re-enable clears any auto-disable banner.
+		updated.ConsecutiveFailures = 0
+		updated.DisabledReason = ""
+	}
+
+	if err := r.persist(&updated); err != nil {
+		return nil, false, err
+	}
+	r.mu.Lock()
+	r.items[key(spec.Agent, spec.ID)] = &updated
+	r.mu.Unlock()
+
+	if !updated.Enabled {
+		if enabledChanged {
+			r.mu.Lock()
+			if run, ok := r.runners[key(spec.Agent, spec.ID)]; ok {
+				run.cancel()
+				delete(r.runners, key(spec.Agent, spec.ID))
+			}
+			r.mu.Unlock()
+		}
+	} else if scheduleChanged || enabledChanged {
+		r.startRunner(&updated, false)
+	}
+	log.Printf("[workflows] upsert updated %s/%s (%q, source=%s)", spec.Agent, spec.ID, spec.Name, spec.Source)
+	cp := updated
+	return &cp, true, nil
+}
+
+// ListBySource returns shallow copies of workflows whose Source equals src.
+func (r *Registry) ListBySource(src string) []*Workflow {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make([]*Workflow, 0)
+	for _, w := range r.items {
+		if w.Source != src {
+			continue
+		}
+		cp := *w
+		cp.Running = r.isRunning(w.Agent, w.ID)
+		out = append(out, &cp)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt < out[j].CreatedAt })
+	return out
+}
+
+// upsertFingerprint hashes the fields that should trigger a write so
+// no-op reconciles do not bounce the runner or rewrite the descriptor.
+func upsertFingerprint(spec UpsertSpec, cron, shortName string, trig Trigger) string {
+	type fp struct {
+		Name, ShortName, Description, Cron, Prompt, Source, SourceRef string
+		TriggerType, TriggerRef                                       string
+		Tasks                                                         []Task
+		Enabled                                                       bool
+	}
+	body, _ := json.Marshal(fp{
+		Name:        spec.Name,
+		ShortName:   shortName,
+		Description: spec.Description,
+		Cron:        cron,
+		Prompt:      spec.Prompt,
+		Source:      spec.Source,
+		SourceRef:   spec.SourceRef,
+		TriggerType: trig.Type,
+		TriggerRef:  trig.Ref,
+		Tasks:       spec.Tasks,
+		Enabled:     spec.Enabled,
+	})
+	return string(body)
+}
+
+func specFromWorkflow(w *Workflow) UpsertSpec {
+	return UpsertSpec{
+		ID:          w.ID,
+		Agent:       w.Agent,
+		Name:        w.Name,
+		ShortName:   w.ShortName,
+		Description: w.Description,
+		Cron:        w.Cron,
+		Prompt:      w.Prompt,
+		Tasks:       w.Tasks,
+		Trigger:     w.Trigger,
+		CreatedBy:   w.CreatedBy,
+		Enabled:     w.Enabled,
+		Source:      w.Source,
+		SourceRef:   w.SourceRef,
+	}
 }
 
 // Delete stops the tick goroutine, removes the file, and deletes from memory.

@@ -146,12 +146,10 @@ func fetchWorkflowLogsBulk(ctx context.Context, ghClient *github.Client, text, u
 	return result
 }
 
-// httpGetClient is a shared client for the http_get tool. Short timeout to
-// avoid stalling a workflow tick on a slow upstream.
+// httpGetClient is shared by http_get and helm_index_latest_version.
 var httpGetClient = &http.Client{
 	Timeout: 25 * time.Second,
-	// Disallow redirects to private/loopback hosts (mitigates SSRF if a
-	// crafted prompt tricks the model into pivoting through a redirect).
+	// Re-validate on redirect to mitigate SSRF via 30x.
 	CheckRedirect: func(req *http.Request, via []*http.Request) error {
 		if len(via) >= 5 {
 			return fmt.Errorf("too many redirects")
@@ -160,10 +158,8 @@ var httpGetClient = &http.Client{
 	},
 }
 
-// validatePublicURL rejects schemes other than http/https and obvious
-// internal targets (localhost, link-local, private IPs by hostname). This is
-// best-effort; net.LookupIP-based checks happen implicitly via the OS but we
-// don't want to add network calls before the request itself.
+// validatePublicURL rejects non-http(s) schemes and obvious internal
+// targets. No DNS resolution — hostname-level checks only.
 func validatePublicURL(raw string) error {
 	u, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil {
@@ -192,9 +188,8 @@ func validatePublicURL(raw string) error {
 	return nil
 }
 
-// doHTTPGet implements the http_get tool. Returns a model-facing string with
-// status, content-type, and (truncated) body. Errors are returned inline so
-// the LLM can react and try a different URL.
+// doHTTPGet implements the http_get tool. Errors are returned inline so
+// the LLM can react and retry.
 func doHTTPGet(ctx context.Context, rawURL, accept string, maxBytes int, userID, channelID string) string {
 	rawURL = strings.TrimSpace(rawURL)
 	if rawURL == "" {
@@ -248,10 +243,9 @@ func doHTTPGet(ctx context.Context, rawURL, accept string, maxBytes int, userID,
 	return header + string(body)
 }
 
-// doHelmIndexLatest fetches a Helm repository's index.yaml, locates the
-// requested chart, and returns the highest stable semver — without ever
-// pasting the (often multi-MB) index back into the LLM. We stream the body
-// up to a hard cap (16 MiB) and parse only the entries we need.
+// doHelmIndexLatest fetches a Helm repo index.yaml, parses it server-side,
+// and returns only the requested chart's latest stable version. The index
+// itself (often multi-MB) is never returned to the model.
 func doHelmIndexLatest(ctx context.Context, repoURL, chart, userID, channelID string) string {
 	repoURL = strings.TrimSpace(repoURL)
 	chart = strings.TrimSpace(chart)
@@ -304,7 +298,6 @@ func doHelmIndexLatest(ctx context.Context, repoURL, chart, userID, channelID st
 	}
 	entries, ok := idx.Entries[chart]
 	if !ok || len(entries) == 0 {
-		// Case-insensitive fallback.
 		lc := strings.ToLower(chart)
 		for k, v := range idx.Entries {
 			if strings.ToLower(k) == lc {
@@ -316,7 +309,7 @@ func doHelmIndexLatest(ctx context.Context, repoURL, chart, userID, channelID st
 		}
 	}
 	if !ok || len(entries) == 0 {
-		// Suggest a few available chart names so the model can self-correct.
+		// Surface a sample of available chart names so the model can self-correct.
 		names := make([]string, 0, len(idx.Entries))
 		for k := range idx.Entries {
 			names = append(names, k)
@@ -379,9 +372,7 @@ func doHelmIndexLatest(ctx context.Context, repoURL, chart, userID, channelID st
 	return out
 }
 
-// isHelmPrerelease returns true for any version that semver considers a
-// pre-release (a "-" suffix in the version core). Build metadata after "+"
-// is ignored.
+// isHelmPrerelease reports whether v carries a semver pre-release suffix.
 func isHelmPrerelease(v string) bool {
 	v = strings.TrimPrefix(strings.TrimSpace(v), "v")
 	if i := strings.Index(v, "+"); i >= 0 {
@@ -390,8 +381,7 @@ func isHelmPrerelease(v string) bool {
 	return strings.ContainsRune(v, '-')
 }
 
-// compareHelmSemver does a permissive component-wise semver compare.
-// Returns >0 if a is newer, <0 if older, 0 if equal.
+// compareHelmSemver returns >0 if a>b, <0 if a<b, 0 if equal.
 func compareHelmSemver(a, b string) int {
 	an := normalizeHelmVer(a)
 	bn := normalizeHelmVer(b)

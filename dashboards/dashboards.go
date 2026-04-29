@@ -81,6 +81,12 @@ type Dashboard struct {
 	// Account is populated for Kind=="account" dashboards and drives the health
 	// summary panel (score badge, risks, actions, signal bars).
 	Account *AccountSummary `json:"account,omitempty"`
+	// Source identifies how the dashboard was created. "" / "ui" =
+	// interactive; "gitops" = managed by the GitOps poller.
+	Source string `json:"source,omitempty"`
+	// SourceRef is an informational pointer to the upstream definition
+	// for non-ui sources (e.g. "<owner>/<repo>@<branch>:<path>").
+	SourceRef string `json:"source_ref,omitempty"`
 }
 
 // AccountSummary captures the health-score output for an account dashboard.
@@ -390,6 +396,163 @@ func (r *Registry) StopAll() {
 	r.mu.Unlock()
 	for _, run := range runs {
 		run.cancel()
+	}
+}
+
+// UpsertSpec is the declarative shape used by id-stable callers (e.g. the
+// GitOps syncer). All fields replace the stored value; runtime bookkeeping
+// (Data, LastSync, LastError, Account) is preserved across updates.
+type UpsertSpec struct {
+	ID           string
+	Agent        string
+	Name         string
+	ShortName    string // slugified from Name when empty
+	Description  string
+	Kind         string
+	SyncInterval string
+	Sources      []DataSource
+	CreatedBy    string // applied only on first create
+	Source       string
+	SourceRef    string
+}
+
+// UpsertFromSpec creates a dashboard at spec.ID or replaces the existing
+// one in place. Returns changed=false when the spec matches the stored copy.
+// The sync runner is restarted only when the schedule or sources actually
+// change so a no-op tick does not bounce live syncs.
+func (r *Registry) UpsertFromSpec(ctx context.Context, spec UpsertSpec) (d *Dashboard, changed bool, err error) {
+	if !agentValidRe.MatchString(spec.Agent) {
+		return nil, false, fmt.Errorf("invalid agent id %q", spec.Agent)
+	}
+	if !idValidRe.MatchString(spec.ID) {
+		return nil, false, fmt.Errorf("invalid dashboard id %q", spec.ID)
+	}
+	if strings.TrimSpace(spec.Name) == "" {
+		return nil, false, fmt.Errorf("dashboard name is required")
+	}
+	if len(spec.Sources) == 0 {
+		return nil, false, fmt.Errorf("at least one source is required")
+	}
+	interval := strings.TrimSpace(spec.SyncInterval)
+	if interval == "" {
+		interval = DefaultSyncInterval.String()
+	} else if _, e := time.ParseDuration(interval); e != nil {
+		interval = DefaultSyncInterval.String()
+	}
+	shortName := spec.ShortName
+	if shortName == "" {
+		shortName = slugify(spec.Name)
+	}
+
+	r.mu.Lock()
+	orig, exists := r.items[key(spec.Agent, spec.ID)]
+	r.mu.Unlock()
+
+	if !exists {
+		nd := &Dashboard{
+			ID:           spec.ID,
+			Agent:        spec.Agent,
+			Name:         spec.Name,
+			ShortName:    shortName,
+			Description:  spec.Description,
+			Kind:         spec.Kind,
+			SyncInterval: interval,
+			Sources:      spec.Sources,
+			CreatedBy:    spec.CreatedBy,
+			CreatedAt:    time.Now().UTC().Format(time.RFC3339),
+			Source:       spec.Source,
+			SourceRef:    spec.SourceRef,
+		}
+		if err := r.persist(nd); err != nil {
+			return nil, false, err
+		}
+		r.mu.Lock()
+		r.items[key(spec.Agent, spec.ID)] = nd
+		r.mu.Unlock()
+		r.startRunner(ctx, nd, false)
+		log.Printf("[dashboards] upsert created %s/%s (%q, source=%s)", spec.Agent, spec.ID, spec.Name, spec.Source)
+		return nd, true, nil
+	}
+
+	specHash := upsertFingerprint(spec, interval, shortName)
+	currentHash := upsertFingerprint(specFromDashboard(orig), orig.SyncInterval, orig.ShortName)
+	if specHash == currentHash {
+		return orig, false, nil
+	}
+
+	updated := *orig
+	scheduleChanged := updated.SyncInterval != interval
+	updated.Name = spec.Name
+	updated.ShortName = shortName
+	updated.Description = spec.Description
+	updated.Kind = spec.Kind
+	updated.SyncInterval = interval
+	updated.Sources = append([]DataSource(nil), spec.Sources...)
+	updated.Source = spec.Source
+	updated.SourceRef = spec.SourceRef
+
+	if err := r.persist(&updated); err != nil {
+		return nil, false, err
+	}
+	r.mu.Lock()
+	r.items[key(spec.Agent, spec.ID)] = &updated
+	r.mu.Unlock()
+	if scheduleChanged {
+		r.startRunner(ctx, &updated, false)
+	}
+	log.Printf("[dashboards] upsert updated %s/%s (%q, source=%s)", spec.Agent, spec.ID, spec.Name, spec.Source)
+	cp := updated
+	return &cp, true, nil
+}
+
+// ListBySource returns shallow copies of dashboards whose Source equals src.
+func (r *Registry) ListBySource(src string) []*Dashboard {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make([]*Dashboard, 0)
+	for _, d := range r.items {
+		if d.Source != src {
+			continue
+		}
+		cp := *d
+		out = append(out, &cp)
+	}
+	return out
+}
+
+// upsertFingerprint hashes the fields that should trigger a write so
+// no-op reconciles do not bounce the runner or rewrite the descriptor.
+func upsertFingerprint(spec UpsertSpec, interval, shortName string) string {
+	type fp struct {
+		Name, ShortName, Description, Kind, SyncInterval, Source, SourceRef string
+		Sources                                                             []DataSource
+	}
+	body, _ := json.Marshal(fp{
+		Name:         spec.Name,
+		ShortName:    shortName,
+		Description:  spec.Description,
+		Kind:         spec.Kind,
+		SyncInterval: interval,
+		Source:       spec.Source,
+		SourceRef:    spec.SourceRef,
+		Sources:      spec.Sources,
+	})
+	return string(body)
+}
+
+func specFromDashboard(d *Dashboard) UpsertSpec {
+	return UpsertSpec{
+		ID:           d.ID,
+		Agent:        d.Agent,
+		Name:         d.Name,
+		ShortName:    d.ShortName,
+		Description:  d.Description,
+		Kind:         d.Kind,
+		SyncInterval: d.SyncInterval,
+		Sources:      d.Sources,
+		CreatedBy:    d.CreatedBy,
+		Source:       d.Source,
+		SourceRef:    d.SourceRef,
 	}
 }
 

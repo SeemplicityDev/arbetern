@@ -219,10 +219,54 @@ spec:
             {{- if .Values.dashboards.enabled }}
             - name: DASHBOARDS_DIR
               value: "{{ .Values.persistence.mountPath }}/{{ .Values.dashboards.subPath }}"
+            {{- if and .Values.dashboards.gitops .Values.dashboards.gitops.enabled }}
+            {{- if .Values.dashboards.gitops.owner }}
+            - name: DASHBOARDS_GITOPS_OWNER
+              value: "{{ .Values.dashboards.gitops.owner }}"
+            {{- end }}
+            - name: DASHBOARDS_GITOPS_REPO
+              value: "{{ required "dashboards.gitops.repo is required when dashboards.gitops.enabled" .Values.dashboards.gitops.repo }}"
+            {{- if .Values.dashboards.gitops.branch }}
+            - name: DASHBOARDS_GITOPS_BRANCH
+              value: "{{ .Values.dashboards.gitops.branch }}"
+            {{- end }}
+            {{- if .Values.dashboards.gitops.basePath }}
+            - name: DASHBOARDS_GITOPS_BASE_PATH
+              value: "{{ .Values.dashboards.gitops.basePath }}"
+            {{- end }}
+            {{- if .Values.dashboards.gitops.interval }}
+            - name: DASHBOARDS_GITOPS_INTERVAL
+              value: "{{ .Values.dashboards.gitops.interval }}"
+            {{- end }}
+            - name: DASHBOARDS_GITOPS_PRUNE
+              value: {{ .Values.dashboards.gitops.prune | default false | quote }}
+            {{- end }}
             {{- end }}
             {{- if .Values.workflows.enabled }}
             - name: WORKFLOWS_DIR
               value: "{{ .Values.persistence.mountPath }}/{{ .Values.workflows.subPath }}"
+            {{- if and .Values.workflows.gitops .Values.workflows.gitops.enabled }}
+            {{- if .Values.workflows.gitops.owner }}
+            - name: WORKFLOWS_GITOPS_OWNER
+              value: "{{ .Values.workflows.gitops.owner }}"
+            {{- end }}
+            - name: WORKFLOWS_GITOPS_REPO
+              value: "{{ required "workflows.gitops.repo is required when workflows.gitops.enabled" .Values.workflows.gitops.repo }}"
+            {{- if .Values.workflows.gitops.branch }}
+            - name: WORKFLOWS_GITOPS_BRANCH
+              value: "{{ .Values.workflows.gitops.branch }}"
+            {{- end }}
+            {{- if .Values.workflows.gitops.basePath }}
+            - name: WORKFLOWS_GITOPS_BASE_PATH
+              value: "{{ .Values.workflows.gitops.basePath }}"
+            {{- end }}
+            {{- if .Values.workflows.gitops.interval }}
+            - name: WORKFLOWS_GITOPS_INTERVAL
+              value: "{{ .Values.workflows.gitops.interval }}"
+            {{- end }}
+            - name: WORKFLOWS_GITOPS_PRUNE
+              value: {{ .Values.workflows.gitops.prune | default false | quote }}
+            {{- end }}
             {{- end }}
           {{- with .Values.livenessProbe }}
           livenessProbe:

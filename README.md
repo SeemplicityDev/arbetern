@@ -89,6 +89,14 @@ Every layer — agent selection, intent routing, tool availability, model switch
 | `UI_HEADER` | no | Custom header text for the web UI (default: `arbetern`) |
 | `DASHBOARDS_DIR` | no | Directory where dashboard JSON snapshots are persisted (default: `./data/dashboards`). Set automatically by the Helm chart when `dashboards.enabled` is true |
 | `WORKFLOWS_DIR` | no | Directory where workflow JSON descriptors + run history are persisted (default: `./data/workflows`). Set automatically by the Helm chart when `workflows.enabled` is true |
+| `WORKFLOWS_GITOPS_REPO` | no | Enables GitOps sync for workflows: poll `<owner>/<repo>` for `<basePath>/<agent>/<id>.json` descriptors and reconcile them into the registry. Reuses `GITHUB_TOKEN`. See [docs/GITOPS.md](docs/GITOPS.md) |
+| `WORKFLOWS_GITOPS_OWNER` | no | Repo owner for workflows GitOps sync. Defaults to the bot's resolved owner |
+| `WORKFLOWS_GITOPS_BRANCH` | no | Branch for workflows GitOps sync. Defaults to the repo's default branch |
+| `WORKFLOWS_GITOPS_BASE_PATH` | no | Base path inside the repo for workflow JSONs (default: `arbetern/workflows`) |
+| `WORKFLOWS_GITOPS_INTERVAL` | no | Poll interval (Go duration, e.g. `5m`, `30s`). Default `5m`, minimum `30s` |
+| `WORKFLOWS_GITOPS_PRUNE` | no | When `true`, locally-managed workflows that disappear from git are deleted. Default `false` |
+| `DASHBOARDS_GITOPS_REPO` | no | Enables GitOps sync for dashboards (same model as workflows). Default base path: `arbetern/dashboards`. See [docs/GITOPS.md](docs/GITOPS.md) |
+| `DASHBOARDS_GITOPS_OWNER` / `DASHBOARDS_GITOPS_BRANCH` / `DASHBOARDS_GITOPS_BASE_PATH` / `DASHBOARDS_GITOPS_INTERVAL` / `DASHBOARDS_GITOPS_PRUNE` | no | Same semantics as the `WORKFLOWS_GITOPS_*` knobs above |
 
 ### Run Locally
 
@@ -407,6 +415,39 @@ an immediate tick / sync**. Scheduled ticks run on their normal cadence;
 user-initiated work (Create, the Run-now button, manual API calls) still
 executes immediately. This keeps deploys quiet — a pod roll won't blast
 every upstream the moment it comes up.
+
+### GitOps sync (managing workflows + dashboards from a git repo)
+
+Both workflows and dashboards can be **declared in a separate GitHub
+repository** and auto-reconciled into their registries by a built-in
+poller. Set `workflows.gitops.enabled=true` and/or
+`dashboards.gitops.enabled=true` in `values.yaml` (or
+`WORKFLOWS_GITOPS_REPO=...` / `DASHBOARDS_GITOPS_REPO=...` on the
+deployment) and arbetern will poll the configured repo every 5 minutes
+(configurable) for files matching `<basePath>/<agent>/<id>.json`:
+
+```
+arbetern/
+├── workflows/
+│   ├── ovad/
+│   │   ├── aws-daily-cost.json
+│   │   └── arbetern-autofix.json
+│   └── seihin/
+│       └── seihin-application-triage.json
+└── dashboards/
+    └── ovad/
+        └── infra-overview.json
+```
+
+Each file uses the same shape as the corresponding on-disk registry
+descriptor; runtime fields (run history for workflows, source data for
+dashboards) are ignored on read so committing a file pulled from
+`/api/workflows/...` or `/api/dashboards/...` Just Works. Items synced
+this way are tagged `source = "gitops"` and become read-only in the UI
+— the edit button is hidden, a banner links back to the source file in
+git, and the API rejects non-`enabled` mutations on workflows /
+deletes on either kind. See [docs/GITOPS.md](docs/GITOPS.md) for the
+full reference, configuration matrix, and ConfigMap example.
 
 ### Cron scheduling (`cron`)
 

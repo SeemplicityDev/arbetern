@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -71,6 +72,25 @@ type Config struct {
 	AWSEnabled    bool   // set true when AWS credentials appear present (enables the cost-explorer tools).
 	DashboardsDir string // Directory where dashboard JSON snapshots are persisted.
 	WorkflowsDir  string // Directory where workflow JSON snapshots are persisted.
+
+	// GitOps sync: when WorkflowsGitOpsRepo is set, arbetern reconciles
+	// workflow JSON descriptors from a remote GitHub repo into the local
+	// registry. See docs/WORKFLOWS_GITOPS.md.
+	WorkflowsGitOpsOwner    string
+	WorkflowsGitOpsRepo     string        // required to enable
+	WorkflowsGitOpsBranch   string        // empty == repo default branch
+	WorkflowsGitOpsBasePath string        // defaults to "arbetern/workflows"
+	WorkflowsGitOpsInterval time.Duration // defaults to 5m, minimum 30s
+	WorkflowsGitOpsPrune    bool
+
+	// GitOps sync: same model as workflows, but for dashboards. The base
+	// path defaults to "arbetern/dashboards".
+	DashboardsGitOpsOwner    string
+	DashboardsGitOpsRepo     string
+	DashboardsGitOpsBranch   string
+	DashboardsGitOpsBasePath string
+	DashboardsGitOpsInterval time.Duration
+	DashboardsGitOpsPrune    bool
 }
 
 // UseAzure returns true when Azure OpenAI credentials are configured.
@@ -157,6 +177,32 @@ func Load() (*Config, error) {
 		AWSRegion:             os.Getenv("AWS_REGION"),
 		DashboardsDir:         os.Getenv("DASHBOARDS_DIR"),
 		WorkflowsDir:          os.Getenv("WORKFLOWS_DIR"),
+
+		WorkflowsGitOpsOwner:    os.Getenv("WORKFLOWS_GITOPS_OWNER"),
+		WorkflowsGitOpsRepo:     os.Getenv("WORKFLOWS_GITOPS_REPO"),
+		WorkflowsGitOpsBranch:   os.Getenv("WORKFLOWS_GITOPS_BRANCH"),
+		WorkflowsGitOpsBasePath: os.Getenv("WORKFLOWS_GITOPS_BASE_PATH"),
+		WorkflowsGitOpsPrune:    strings.EqualFold(strings.TrimSpace(os.Getenv("WORKFLOWS_GITOPS_PRUNE")), "true"),
+
+		DashboardsGitOpsOwner:    os.Getenv("DASHBOARDS_GITOPS_OWNER"),
+		DashboardsGitOpsRepo:     os.Getenv("DASHBOARDS_GITOPS_REPO"),
+		DashboardsGitOpsBranch:   os.Getenv("DASHBOARDS_GITOPS_BRANCH"),
+		DashboardsGitOpsBasePath: os.Getenv("DASHBOARDS_GITOPS_BASE_PATH"),
+		DashboardsGitOpsPrune:    strings.EqualFold(strings.TrimSpace(os.Getenv("DASHBOARDS_GITOPS_PRUNE")), "true"),
+	}
+	if s := strings.TrimSpace(os.Getenv("WORKFLOWS_GITOPS_INTERVAL")); s != "" {
+		if d, err := time.ParseDuration(s); err == nil {
+			cfg.WorkflowsGitOpsInterval = d
+		} else {
+			return nil, fmt.Errorf("invalid WORKFLOWS_GITOPS_INTERVAL %q: %w", s, err)
+		}
+	}
+	if s := strings.TrimSpace(os.Getenv("DASHBOARDS_GITOPS_INTERVAL")); s != "" {
+		if d, err := time.ParseDuration(s); err == nil {
+			cfg.DashboardsGitOpsInterval = d
+		} else {
+			return nil, fmt.Errorf("invalid DASHBOARDS_GITOPS_INTERVAL %q: %w", s, err)
+		}
 	}
 	// AWS credentials can arrive via several standard channels. We set
 	// AWSEnabled when any of them is present; the real credential probe

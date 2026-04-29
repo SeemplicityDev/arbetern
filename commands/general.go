@@ -1318,11 +1318,9 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 		})
 	}
 
-	// Generic outbound HTTP fetch — read-only GET to public/internet
-	// endpoints. Used by workflows that need to read upstream metadata such
-	// as Helm repo index.yaml files, GitHub /releases/latest JSON, plain
-	// text version manifests, etc. Body is capped to keep tool output
-	// bounded in the LLM context.
+	// http_get + helm_index_latest_version: read-only outbound HTTP for
+	// workflows that need upstream metadata (release JSON, version files,
+	// Helm chart indexes). See commands/helpers.go for SSRF guards.
 	tools = append(tools, llm.Tool{
 		Type: "function",
 		Function: llm.ToolFunction{
