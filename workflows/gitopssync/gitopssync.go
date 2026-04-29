@@ -20,6 +20,7 @@ import (
 type (
 	Config = core.Config
 	Syncer = core.Syncer
+	Status = core.Status
 )
 
 const SourceMarker = core.SourceMarker

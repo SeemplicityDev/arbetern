@@ -4,6 +4,7 @@ import (
 	"context"
 	"embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log"
@@ -61,6 +62,59 @@ var (
 )
 
 func boolPtr(v bool) *bool { return &v }
+
+// errGitOpsDisabled is returned by the gitops sync HTTP handler when no
+// syncer is configured for that kind (e.g. WORKFLOWS_GITOPS_REPO unset).
+var errGitOpsDisabled = errors.New("gitops sync is not enabled for this kind")
+
+// registerGitOpsRoutes mounts the per-kind GitOps inspection endpoints on
+// apiMux:
+//
+//	GET  /api/<kindPlural>/_gitops        → status JSON ({enabled:false} if syncer is nil)
+//	POST /api/<kindPlural>/_gitops/sync   → trigger an out-of-band reconcile
+//
+// Both paths are exact matches and therefore take precedence over the
+// crud package's `/api/<kindPlural>/` prefix handler.
+func registerGitOpsRoutes(apiMux *http.ServeMux, kindPlural string, statusFn func() any, syncFn func(context.Context) error) {
+	apiMux.HandleFunc("/api/"+kindPlural+"/_gitops", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-store")
+		st := statusFn()
+		if st == nil {
+			_ = json.NewEncoder(w).Encode(map[string]any{"enabled": false})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"enabled": true, "status": st})
+	})
+	apiMux.HandleFunc("/api/"+kindPlural+"/_gitops/sync", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
+		defer cancel()
+		if err := syncFn(ctx); err != nil {
+			if errors.Is(err, errGitOpsDisabled) {
+				http.Error(w, err.Error(), http.StatusServiceUnavailable)
+				return
+			}
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		st := statusFn()
+		if st == nil {
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "status": st})
+	})
+}
 
 // routerKeys returns the agent IDs from the routers map (for logging).
 func routerKeys(m map[string]*commands.Router) []string {
@@ -1273,7 +1327,17 @@ func main() {
 			}
 		}
 	}
-	_ = wfSyncer
+	registerGitOpsRoutes(apiMux, "workflows", func() any {
+		if wfSyncer == nil {
+			return nil
+		}
+		return wfSyncer.Status()
+	}, func(ctx context.Context) error {
+		if wfSyncer == nil {
+			return errGitOpsDisabled
+		}
+		return wfSyncer.SyncNow(ctx)
+	})
 
 	// Optional GitOps sync for dashboards (mirrors the workflows poller).
 	var dashSyncer *dashgitops.Syncer
@@ -1298,7 +1362,17 @@ func main() {
 			}
 		}
 	}
-	_ = dashSyncer
+	registerGitOpsRoutes(apiMux, "dashboards", func() any {
+		if dashSyncer == nil {
+			return nil
+		}
+		return dashSyncer.Status()
+	}, func(ctx context.Context) error {
+		if dashSyncer == nil {
+			return errGitOpsDisabled
+		}
+		return dashSyncer.SyncNow(ctx)
+	})
 
 	log.Printf("arbetern server starting on :%s", cfg.Port)
 

@@ -93,6 +93,9 @@
   </div>
   <div style="display:flex;gap:10px;align-items:center">
     <span class="badge" id="sync-badge">syncing</span>
+    <button id="gitops-sync-btn" class="badge" type="button"
+      style="cursor:pointer;font-family:inherit;color:var(--text);background:var(--card);display:none;"
+      title="Reconcile this dashboard registry with the source repo right now.">⟳ sync now</button>
     <a class="badge" href="/ui/">← agents</a>
   </div>
 </header>
@@ -113,6 +116,61 @@
     const m=ref.match(/^([^/\s]+)\/([^@\s]+)@([^:\s]+):(.+)$/);
     if(!m)return null;
     return 'https://github.com/'+encodeURIComponent(m[1])+'/'+encodeURIComponent(m[2])+'/blob/'+encodeURIComponent(m[3])+'/'+m[4].split('/').map(encodeURIComponent).join('/');
+  }
+
+  // ---------- GitOps status / sync-now ----------
+  function gitopsStatusLine(st){
+    const parts=[];
+    parts.push(st.repo+(st.branch?'@'+st.branch:'@<default>'));
+    if(st.last_sync){
+      const t=new Date(st.last_sync);
+      if(!isNaN(t.getTime())&&t.getTime()>0)parts.push('last reconcile '+t.toLocaleString());
+    } else {
+      parts.push('not yet reconciled');
+    }
+    if(st.running)parts.push('syncing now…');
+    return parts.join(' · ');
+  }
+  async function refreshGitopsStatus(kind){
+    const el=document.getElementById('gitops-status');
+    if(!el)return;
+    try{
+      const r=await fetch('/api/'+kind+'/_gitops',{cache:'no-store'});
+      if(!r.ok)throw new Error('HTTP '+r.status);
+      const body=await r.json();
+      if(!body.enabled||!body.status){
+        el.textContent='Sync polling is not configured on this server.';
+        el.style.color='var(--text-muted)';
+        const btn=document.getElementById('gitops-sync-btn');
+        if(btn){btn.disabled=true;btn.style.opacity='.5';btn.style.cursor='not-allowed';btn.title='GitOps sync is not enabled on this server.';}
+        return;
+      }
+      const st=body.status;
+      el.textContent=gitopsStatusLine(st);
+      el.style.color=st.last_error?'var(--red)':'var(--text-muted)';
+      if(st.last_error)el.textContent+=' — error: '+st.last_error;
+    } catch(e){
+      el.textContent='Could not load sync status: '+e.message;
+      el.style.color='var(--red)';
+    }
+  }
+  async function triggerGitopsSync(kind){
+    const btn=document.getElementById('gitops-sync-btn');
+    const el=document.getElementById('gitops-status');
+    if(!btn)return;
+    const orig=btn.textContent;
+    btn.disabled=true;btn.textContent='⟳ syncing…';btn.style.cursor='wait';
+    if(el){el.textContent='Reconciling against the source repo…';el.style.color='var(--text-muted)';}
+    try{
+      const r=await fetch('/api/'+kind+'/_gitops/sync',{method:'POST'});
+      if(!r.ok){const txt=await r.text();throw new Error(txt||('HTTP '+r.status));}
+      await refreshGitopsStatus(kind);
+      if(typeof load==='function')load();
+    } catch(e){
+      if(el){el.textContent='Sync failed: '+e.message;el.style.color='var(--red)';}
+    } finally {
+      btn.disabled=false;btn.textContent=orig;btn.style.cursor='pointer';
+    }
   }
 
   // Render text that may contain Slack-style mrkdwn (*bold*, `code`, <url|label>,
@@ -616,14 +674,25 @@
         '  ·  last sync: ' + (d.last_sync ? fmtTime(d.last_sync) : 'pending');
       document.getElementById('description').textContent = d.description || '';
       const gitopsBanner = document.getElementById('gitops-banner');
+      const gitopsSyncBtn = document.getElementById('gitops-sync-btn');
       if (d.source === 'gitops') {
         const link = sourceRefToURL(d.source_ref);
+        const sourceLine = link
+          ? 'Edit it at <a href="' + link + '" target="_blank" rel="noopener">' + escapeHtml(d.source_ref) + '</a>.'
+          : 'Edits here would be overwritten on the next sync.';
         gitopsBanner.style.display = 'block';
-        gitopsBanner.innerHTML = link
-          ? 'This dashboard is managed via GitOps — edit it at <a href="' + link + '" target="_blank" rel="noopener">' + escapeHtml(d.source_ref) + '</a>.'
-          : 'This dashboard is managed via GitOps — edits here would be overwritten on the next sync.';
+        gitopsBanner.innerHTML =
+          '<div><strong>Managed via GitOps.</strong> ' + sourceLine + '</div>' +
+          '<div id="gitops-status" style="font-size:12px;color:var(--text-muted);margin-top:6px">checking sync status…</div>';
+        gitopsSyncBtn.style.display = '';
+        if (!gitopsSyncBtn.dataset.bound) {
+          gitopsSyncBtn.addEventListener('click', () => triggerGitopsSync('dashboards'));
+          gitopsSyncBtn.dataset.bound = '1';
+        }
+        refreshGitopsStatus('dashboards');
       } else {
         gitopsBanner.style.display = 'none';
+        gitopsSyncBtn.style.display = 'none';
       }
       const badge = document.getElementById('sync-badge');
       if (d.last_error) { badge.textContent = 'error'; badge.className = 'badge err'; }

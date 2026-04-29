@@ -85,12 +85,33 @@ type Syncer struct {
 	backend Backend
 	prefix  string
 
+	// runMu serialises reconcile() so a manual SyncNow can never overlap
+	// with the periodic tick.
+	runMu sync.Mutex
+
 	mu       sync.Mutex
 	stop     chan struct{}
 	stopped  chan struct{}
 	lastErr  error
 	lastSync time.Time
 	managed  map[string]string // agent/id -> repo path from last successful sync
+	owner    string            // resolved repo owner (cached for SyncNow)
+	running  bool              // a reconcile is currently in progress
+}
+
+// Status is a UI-facing snapshot of the syncer's configuration and the
+// most recent reconcile result.
+type Status struct {
+	Owner     string    `json:"owner"`
+	Repo      string    `json:"repo"`
+	Branch    string    `json:"branch"`
+	BasePath  string    `json:"base_path"`
+	Interval  string    `json:"interval"`
+	Prune     bool      `json:"prune"`
+	LastSync  time.Time `json:"last_sync"`
+	LastError string    `json:"last_error,omitempty"`
+	Managed   int       `json:"managed"`
+	Running   bool      `json:"running"`
 }
 
 // New validates cfg and returns a Syncer. Call Start to begin polling.
@@ -152,6 +173,70 @@ func (s *Syncer) LastResult() (time.Time, error) {
 	return s.lastSync, s.lastErr
 }
 
+// Status returns a snapshot suitable for serving over HTTP.
+func (s *Syncer) Status() Status {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	st := Status{
+		Owner:    s.owner,
+		Repo:     s.cfg.Repo,
+		Branch:   s.cfg.Branch,
+		BasePath: s.cfg.BasePath,
+		Interval: s.cfg.Interval.String(),
+		Prune:    s.cfg.Prune,
+		LastSync: s.lastSync,
+		Managed:  len(s.managed),
+		Running:  s.running,
+	}
+	if s.cfg.Owner != "" {
+		st.Owner = s.cfg.Owner
+	}
+	if s.lastErr != nil {
+		st.LastError = s.lastErr.Error()
+	}
+	return st
+}
+
+// SyncNow triggers an out-of-band reconcile and blocks until it
+// completes (or the context is cancelled). It is safe to call
+// concurrently with the periodic loop — runMu serialises both paths.
+func (s *Syncer) SyncNow(ctx context.Context) error {
+	s.runMu.Lock()
+	defer s.runMu.Unlock()
+
+	s.mu.Lock()
+	owner := s.owner
+	if owner == "" {
+		owner = s.cfg.Owner
+	}
+	s.running = true
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		s.running = false
+		s.mu.Unlock()
+	}()
+
+	if owner == "" {
+		o, err := s.gh.ResolveOwner(ctx)
+		if err != nil {
+			wrapped := fmt.Errorf("resolve owner: %w", err)
+			s.recordResult(wrapped)
+			return wrapped
+		}
+		owner = o
+		s.mu.Lock()
+		s.owner = o
+		s.mu.Unlock()
+	}
+	err := s.reconcile(ctx, owner)
+	s.recordResult(err)
+	if err != nil {
+		log.Printf("%s manual reconcile failed: %v", s.prefix, err)
+	}
+	return err
+}
+
 func (s *Syncer) run(ctx context.Context) {
 	defer close(s.stopped)
 	owner := s.cfg.Owner
@@ -164,20 +249,34 @@ func (s *Syncer) run(ctx context.Context) {
 			owner = o
 		}
 	}
+	s.mu.Lock()
+	s.owner = owner
+	s.mu.Unlock()
 	log.Printf("%s polling %s/%s@%s:%s every %s (prune=%t)",
 		s.prefix, nonEmpty(owner, "<unresolved>"), s.cfg.Repo, nonEmpty(s.cfg.Branch, "<default>"),
 		s.cfg.BasePath, s.cfg.Interval, s.cfg.Prune)
 
 	tick := func() {
+		s.runMu.Lock()
+		defer s.runMu.Unlock()
 		if owner == "" {
 			if o, err := s.gh.ResolveOwner(ctx); err == nil {
 				owner = o
+				s.mu.Lock()
+				s.owner = o
+				s.mu.Unlock()
 			} else {
 				s.recordResult(fmt.Errorf("resolve owner: %w", err))
 				return
 			}
 		}
+		s.mu.Lock()
+		s.running = true
+		s.mu.Unlock()
 		err := s.reconcile(ctx, owner)
+		s.mu.Lock()
+		s.running = false
+		s.mu.Unlock()
 		s.recordResult(err)
 		if err != nil {
 			log.Printf("%s reconcile failed: %v", s.prefix, err)

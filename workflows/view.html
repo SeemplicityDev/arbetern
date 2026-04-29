@@ -135,6 +135,9 @@
       <button id="run-now-btn" class="badge" type="button"
         style="cursor:pointer;font-family:inherit;color:var(--text);background:var(--card);"
         title="Trigger this workflow immediately, outside its schedule.">▶ run now</button>
+      <button id="gitops-sync-btn" class="badge" type="button"
+        style="cursor:pointer;font-family:inherit;color:var(--text);background:var(--card);display:none;"
+        title="Reconcile this workflow registry with the source repo right now.">⟳ sync now</button>
       <button id="toggle-btn" class="badge" type="button"
         style="cursor:pointer;font-family:inherit;color:var(--text);background:var(--card);display:none;"
         title="Pause or resume this workflow. Paused workflows stop ticking and stop responding to on_success / on_failure triggers.">⏸ pause</button>
@@ -297,6 +300,72 @@
       if (!m) return null;
       return 'https://github.com/' + encodeURIComponent(m[1]) + '/' + encodeURIComponent(m[2]) +
         '/blob/' + encodeURIComponent(m[3]) + '/' + m[4].split('/').map(encodeURIComponent).join('/');
+    }
+
+    // ---------- GitOps status / sync-now (shared with the dashboards view) ----
+    // The status endpoint reports whether a syncer is wired and, if so, when
+    // it last reconciled. The sync endpoint is fire-and-block; the button is
+    // disabled while a request is in flight to prevent double-clicks.
+    function gitopsStatusLine(st) {
+      const parts = [];
+      parts.push(st.repo + (st.branch ? '@' + st.branch : '@<default>'));
+      if (st.last_sync) {
+        const t = new Date(st.last_sync);
+        if (!isNaN(t.getTime()) && t.getTime() > 0) parts.push('last reconcile ' + t.toLocaleString());
+      } else {
+        parts.push('not yet reconciled');
+      }
+      if (st.running) parts.push('syncing now…');
+      return parts.join(' · ');
+    }
+    async function refreshGitopsStatus(kind) {
+      const el = document.getElementById('gitops-status');
+      if (!el) return;
+      try {
+        const r = await fetch('/api/' + kind + '/_gitops', { cache: 'no-store' });
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        const body = await r.json();
+        if (!body.enabled || !body.status) {
+          el.textContent = 'Sync polling is not configured on this server.';
+          el.style.color = 'var(--text-muted)';
+          const btn = document.getElementById('gitops-sync-btn');
+          if (btn) { btn.disabled = true; btn.style.opacity = '.5'; btn.style.cursor = 'not-allowed'; btn.title = 'GitOps sync is not enabled on this server.'; }
+          return;
+        }
+        const st = body.status;
+        el.textContent = gitopsStatusLine(st);
+        el.style.color = st.last_error ? 'var(--red)' : 'var(--text-muted)';
+        if (st.last_error) el.textContent += ' — error: ' + st.last_error;
+      } catch (e) {
+        el.textContent = 'Could not load sync status: ' + e.message;
+        el.style.color = 'var(--red)';
+      }
+    }
+    async function triggerGitopsSync(kind) {
+      const btn = document.getElementById('gitops-sync-btn');
+      const el = document.getElementById('gitops-status');
+      if (!btn) return;
+      const orig = btn.textContent;
+      btn.disabled = true;
+      btn.textContent = '⟳ syncing…';
+      btn.style.cursor = 'wait';
+      if (el) { el.textContent = 'Reconciling against the source repo…'; el.style.color = 'var(--text-muted)'; }
+      try {
+        const r = await fetch('/api/' + kind + '/_gitops/sync', { method: 'POST' });
+        if (!r.ok) {
+          const txt = await r.text();
+          throw new Error(txt || ('HTTP ' + r.status));
+        }
+        await refreshGitopsStatus(kind);
+        // Reload the entity so any changes from the sync are visible.
+        if (typeof load === 'function') load();
+      } catch (e) {
+        if (el) { el.textContent = 'Sync failed: ' + e.message; el.style.color = 'var(--red)'; }
+      } finally {
+        btn.disabled = false;
+        btn.textContent = orig;
+        btn.style.cursor = 'pointer';
+      }
     }
 
     // Scan text for integrations. Returns an ordered list of unique integrations.
@@ -493,17 +562,28 @@
       // button and show a banner linking back to the source file in git.
       const editBtn = document.getElementById('edit-btn');
       const gitopsBanner = document.getElementById('gitops-banner');
+      const gitopsSyncBtn = document.getElementById('gitops-sync-btn');
       if (wf.source === 'gitops') {
         editBtn.style.display = 'none';
         toggleBtn.style.display = 'none';
         const link = sourceRefToURL(wf.source_ref);
+        const sourceLine = link
+          ? 'Edit it at <a href="' + link + '" target="_blank" rel="noopener">' + escapeHtml(wf.source_ref) + '</a>.'
+          : 'Edits here would be overwritten on the next sync.';
         gitopsBanner.style.display = 'block';
-        gitopsBanner.innerHTML = link
-          ? 'This workflow is managed via GitOps — edit it at <a href="' + link + '" target="_blank" rel="noopener">' + escapeHtml(wf.source_ref) + '</a>.'
-          : 'This workflow is managed via GitOps — edits here would be overwritten on the next sync.';
+        gitopsBanner.innerHTML =
+          '<div><strong>Managed via GitOps.</strong> ' + sourceLine + '</div>' +
+          '<div id="gitops-status" style="font-size:12px;color:var(--text-muted);margin-top:6px">checking sync status…</div>';
+        gitopsSyncBtn.style.display = '';
+        if (!gitopsSyncBtn.dataset.bound) {
+          gitopsSyncBtn.addEventListener('click', () => triggerGitopsSync('workflows'));
+          gitopsSyncBtn.dataset.bound = '1';
+        }
+        refreshGitopsStatus('workflows');
       } else {
         editBtn.style.display = '';
         gitopsBanner.style.display = 'none';
+        gitopsSyncBtn.style.display = 'none';
       }
 
       document.getElementById('description').textContent = wf.description || '';
