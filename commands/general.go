@@ -1327,7 +1327,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 		Type: "function",
 		Function: llm.ToolFunction{
 			Name:        "http_get",
-			Description: "Perform a read-only HTTP GET against a public URL and return the response body (truncated). Intended for fetching public metadata such as Helm repository index.yaml files (e.g. https://argoproj.github.io/argo-helm/index.yaml), GitHub releases JSON (e.g. https://api.github.com/repos/<owner>/<repo>/releases/latest), or other small public JSON/YAML/text endpoints. Only http(s) schemes are allowed; the request must NOT carry credentials. Do NOT use for OCI registries (auth-challenged) — for those, ask the user. Do NOT use to circumvent existing tools (use get_file_content, github_*, datadog_*, etc. when applicable).",
+			Description: "Perform a read-only HTTP GET against a public URL and return the response body (truncated). Intended for fetching public metadata such as GitHub releases JSON (e.g. https://api.github.com/repos/<owner>/<repo>/releases/latest) or other small public JSON/YAML/text endpoints. Only http(s) schemes are allowed; the request must NOT carry credentials. Do NOT use for Helm repository index.yaml files — use helm_index_latest_version instead, which parses server-side and returns only the chart entry you ask for. Do NOT use for OCI registries (auth-challenged). Do NOT use to circumvent existing tools (use get_file_content, github_*, datadog_*, etc. when applicable).",
 			Parameters: json.RawMessage(`{
 				"type":"object",
 				"properties":{
@@ -1336,6 +1336,20 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 					"max_bytes":{"type":"integer","description":"Cap on the response body returned to the model (1..1048576). Defaults to 200000. Larger responses are truncated with a marker."}
 				},
 				"required":["url"]
+			}`),
+		},
+	}, llm.Tool{
+		Type: "function",
+		Function: llm.ToolFunction{
+			Name:        "helm_index_latest_version",
+			Description: "Resolve the latest stable (non-prerelease) version of a chart from a standard HTTP Helm repository. The tool fetches <repo_url>/index.yaml server-side, parses it, picks the highest semver under entries[chart] (skipping versions containing '-alpha', '-beta', '-rc', '-dev', '-pre', or any '-' suffix), and returns ONLY that single chart's summary — the full multi-megabyte index is never sent back to the model. Use this for every https:// Helm repo (argo-helm, kedacore/charts, kubernetes-sigs/external-dns, datadoghq, cloudnative-pg, oauth2-proxy, peerdb-enterprise, ot-container-kit, etc.). Does NOT support OCI (oci://) repositories.",
+			Parameters: json.RawMessage(`{
+				"type":"object",
+				"properties":{
+					"repo_url":{"type":"string","description":"Helm repository base URL, no trailing /index.yaml. Example: https://argoproj.github.io/argo-helm"},
+					"chart":{"type":"string","description":"Chart name as it appears under entries in index.yaml. Example: argo-cd"}
+				},
+				"required":["repo_url","chart"]
 			}`),
 		},
 	})
@@ -3186,6 +3200,16 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 			return errMsg
 		}
 		return doHTTPGet(ctx, args.URL, args.Accept, args.MaxBytes, userID, channelID)
+
+	case "helm_index_latest_version":
+		args, errMsg := parseToolArgs[struct {
+			RepoURL string `json:"repo_url"`
+			Chart   string `json:"chart"`
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
+		}
+		return doHelmIndexLatest(ctx, args.RepoURL, args.Chart, userID, channelID)
 
 	default:
 		return fmt.Sprintf("Unknown tool: %s", name)
