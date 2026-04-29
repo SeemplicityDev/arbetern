@@ -8,6 +8,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/justmike1/arbetern/internal/store"
 )
 
 // AccountCacheTTL is the default per-account cache lifetime. First request of
@@ -66,15 +68,7 @@ func (c *AccountCache) Put(slug string, d *Dashboard) error {
 		return fmt.Errorf("cache slug is empty")
 	}
 	path := filepath.Join(c.root, slug+".json")
-	tmp := path + ".tmp"
-	body, err := json.MarshalIndent(d, "", "  ")
-	if err != nil {
-		return err
-	}
-	if err := os.WriteFile(tmp, body, 0o644); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
+	return store.WriteJSONAt(path, d)
 }
 
 // Invalidate removes a cached entry, ignoring missing-file errors.

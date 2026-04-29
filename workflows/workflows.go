@@ -31,14 +31,11 @@ package workflows
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -46,6 +43,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/justmike1/arbetern/internal/store"
 	"github.com/robfig/cron/v3"
 )
 
@@ -284,8 +282,12 @@ func (r *Registry) SetExecutor(exec Executor) {
 
 func key(agent, id string) string { return agent + "/" + id }
 
-var agentValidRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
-var idValidRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
+// Re-exported so the http layer (in this same package) can keep using the
+// short names without importing internal/store directly.
+var (
+	agentValidRe = store.AgentRe
+	idValidRe    = store.IDRe
+)
 
 // LoadAll scans the workflows directory and loads each workflow into memory.
 // It does NOT start tick goroutines — StartAllEnabled handles that once the
@@ -1182,60 +1184,22 @@ func withClock(prompt string) string {
 }
 
 func (r *Registry) persist(w *Workflow) error {
-	dir := filepath.Join(r.dir, w.Agent)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return err
-	}
-	path := r.pathFor(w)
-	tmp := path + ".tmp"
-	body, err := json.MarshalIndent(w, "", "  ")
-	if err != nil {
-		return err
-	}
-	if err := os.WriteFile(tmp, body, 0o644); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
+	return store.WriteJSON(r.dir, w.Agent, w.ID, w)
 }
 
 func (r *Registry) pathFor(w *Workflow) string {
-	return filepath.Join(r.dir, w.Agent, w.ID+".json")
+	return store.PathFor(r.dir, w.Agent, w.ID)
 }
 
 func readFile(path string) (*Workflow, error) {
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	var w Workflow
-	if err := json.Unmarshal(raw, &w); err != nil {
-		return nil, err
-	}
-	if w.ID == "" || w.Agent == "" || !idValidRe.MatchString(w.ID) || !agentValidRe.MatchString(w.Agent) {
-		return nil, fmt.Errorf("invalid workflow descriptor")
-	}
-	return &w, nil
+	return store.ReadJSON[Workflow](path, func(w *Workflow) error {
+		if w.ID == "" || w.Agent == "" || !idValidRe.MatchString(w.ID) || !agentValidRe.MatchString(w.Agent) {
+			return fmt.Errorf("invalid workflow descriptor")
+		}
+		return nil
+	})
 }
 
-func newID() (string, error) {
-	b := make([]byte, 8)
-	if _, err := rand.Read(b); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(b), nil
-}
+func newID() (string, error) { return store.NewID() }
 
-var slugRe = regexp.MustCompile(`[^a-z0-9]+`)
-
-func slugify(s string) string {
-	s = strings.ToLower(strings.TrimSpace(s))
-	s = slugRe.ReplaceAllString(s, "-")
-	s = strings.Trim(s, "-")
-	if s == "" {
-		s = "workflow"
-	}
-	if len(s) > 48 {
-		s = s[:48]
-	}
-	return s
-}
+func slugify(s string) string { return store.Slugify(s, "workflow") }

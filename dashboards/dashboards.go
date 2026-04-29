@@ -16,18 +16,17 @@ package dashboards
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/justmike1/arbetern/internal/store"
 )
 
 const (
@@ -179,11 +178,12 @@ func (r *Registry) Dir() string { return r.dir }
 
 func key(agent, id string) string { return agent + "/" + id }
 
-// agentValidRe allows only lowercase/letters/digits/dashes for agent IDs.
-var agentValidRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
-
-// idValidRe constrains dashboard IDs to a safe URL-friendly alphabet.
-var idValidRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
+// Re-exported so the http layer (in this same package) can keep the short
+// names. The actual rules live in internal/store.
+var (
+	agentValidRe = store.AgentRe
+	idValidRe    = store.IDRe
+)
 
 // LoadAll scans the dashboards directory and loads each dashboard into
 // memory. It does NOT start sync goroutines — call StartAll afterwards to
@@ -679,61 +679,23 @@ func (r *Registry) syncOne(ctx context.Context, agent, id string) {
 
 // persist atomically writes a dashboard to disk.
 func (r *Registry) persist(d *Dashboard) error {
-	dir := filepath.Join(r.dir, d.Agent)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return err
-	}
-	path := r.pathFor(d)
-	tmp := path + ".tmp"
-	body, err := json.MarshalIndent(d, "", "  ")
-	if err != nil {
-		return err
-	}
-	if err := os.WriteFile(tmp, body, 0o644); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
+	return store.WriteJSON(r.dir, d.Agent, d.ID, d)
 }
 
 func (r *Registry) pathFor(d *Dashboard) string {
-	return filepath.Join(r.dir, d.Agent, d.ID+".json")
+	return store.PathFor(r.dir, d.Agent, d.ID)
 }
 
 func readFile(path string) (*Dashboard, error) {
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	var d Dashboard
-	if err := json.Unmarshal(raw, &d); err != nil {
-		return nil, err
-	}
-	if d.ID == "" || d.Agent == "" || !idValidRe.MatchString(d.ID) || !agentValidRe.MatchString(d.Agent) {
-		return nil, fmt.Errorf("invalid dashboard descriptor")
-	}
-	return &d, nil
+	return store.ReadJSON[Dashboard](path, func(d *Dashboard) error {
+		if d.ID == "" || d.Agent == "" || !idValidRe.MatchString(d.ID) || !agentValidRe.MatchString(d.Agent) {
+			return fmt.Errorf("invalid dashboard descriptor")
+		}
+		return nil
+	})
 }
 
 // newID generates an 8-byte URL-safe hex identifier.
-func newID() (string, error) {
-	b := make([]byte, 8)
-	if _, err := rand.Read(b); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(b), nil
-}
+func newID() (string, error) { return store.NewID() }
 
-var slugRe = regexp.MustCompile(`[^a-z0-9]+`)
-
-func slugify(s string) string {
-	s = strings.ToLower(strings.TrimSpace(s))
-	s = slugRe.ReplaceAllString(s, "-")
-	s = strings.Trim(s, "-")
-	if s == "" {
-		s = "dashboard"
-	}
-	if len(s) > 48 {
-		s = s[:48]
-	}
-	return s
-}
+func slugify(s string) string { return store.Slugify(s, "dashboard") }
