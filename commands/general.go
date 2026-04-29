@@ -1318,6 +1318,28 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 		})
 	}
 
+	// Generic outbound HTTP fetch — read-only GET to public/internet
+	// endpoints. Used by workflows that need to read upstream metadata such
+	// as Helm repo index.yaml files, GitHub /releases/latest JSON, plain
+	// text version manifests, etc. Body is capped to keep tool output
+	// bounded in the LLM context.
+	tools = append(tools, llm.Tool{
+		Type: "function",
+		Function: llm.ToolFunction{
+			Name:        "http_get",
+			Description: "Perform a read-only HTTP GET against a public URL and return the response body (truncated). Intended for fetching public metadata such as Helm repository index.yaml files (e.g. https://argoproj.github.io/argo-helm/index.yaml), GitHub releases JSON (e.g. https://api.github.com/repos/<owner>/<repo>/releases/latest), or other small public JSON/YAML/text endpoints. Only http(s) schemes are allowed; the request must NOT carry credentials. Do NOT use for OCI registries (auth-challenged) — for those, ask the user. Do NOT use to circumvent existing tools (use get_file_content, github_*, datadog_*, etc. when applicable).",
+			Parameters: json.RawMessage(`{
+				"type":"object",
+				"properties":{
+					"url":{"type":"string","description":"Full https:// (or http://) URL to GET. No auth headers, no body, no redirects to private hosts."},
+					"accept":{"type":"string","description":"Optional Accept header. Defaults to 'application/json, application/yaml, text/yaml, text/plain, */*'."},
+					"max_bytes":{"type":"integer","description":"Cap on the response body returned to the model (1..1048576). Defaults to 200000. Larger responses are truncated with a marker."}
+				},
+				"required":["url"]
+			}`),
+		},
+	})
+
 	tools = append(tools, h.dashboardTools()...)
 	tools = append(tools, h.workflowTools()...)
 
@@ -3153,6 +3175,17 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		log.Printf("[user=%s channel=%s] aws list_dimension_values (%s, %s→%s, %d values)",
 			userID, channelID, res.Dimension, res.Start, res.End, len(res.Values))
 		return aws.FormatDimensionValues(res)
+
+	case "http_get":
+		args, errMsg := parseToolArgs[struct {
+			URL      string `json:"url"`
+			Accept   string `json:"accept"`
+			MaxBytes int    `json:"max_bytes"`
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
+		}
+		return doHTTPGet(ctx, args.URL, args.Accept, args.MaxBytes, userID, channelID)
 
 	default:
 		return fmt.Sprintf("Unknown tool: %s", name)

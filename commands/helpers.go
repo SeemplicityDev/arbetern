@@ -4,9 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
+	"net"
+	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/justmike1/arbetern/github"
 	"github.com/justmike1/arbetern/slack"
@@ -136,4 +141,106 @@ func fetchWorkflowLogsBulk(ctx context.Context, ghClient *github.Client, text, u
 		result += github.FormatWorkflowRunSummary(summary)
 	}
 	return result
+}
+
+// httpGetClient is a shared client for the http_get tool. Short timeout to
+// avoid stalling a workflow tick on a slow upstream.
+var httpGetClient = &http.Client{
+	Timeout: 25 * time.Second,
+	// Disallow redirects to private/loopback hosts (mitigates SSRF if a
+	// crafted prompt tricks the model into pivoting through a redirect).
+	CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 5 {
+			return fmt.Errorf("too many redirects")
+		}
+		return validatePublicURL(req.URL.String())
+	},
+}
+
+// validatePublicURL rejects schemes other than http/https and obvious
+// internal targets (localhost, link-local, private IPs by hostname). This is
+// best-effort; net.LookupIP-based checks happen implicitly via the OS but we
+// don't want to add network calls before the request itself.
+func validatePublicURL(raw string) error {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return fmt.Errorf("invalid url: %w", err)
+	}
+	scheme := strings.ToLower(u.Scheme)
+	if scheme != "http" && scheme != "https" {
+		return fmt.Errorf("only http(s) URLs are allowed (got %q)", u.Scheme)
+	}
+	host := strings.ToLower(u.Hostname())
+	if host == "" {
+		return fmt.Errorf("url is missing a host")
+	}
+	switch host {
+	case "localhost", "ip6-localhost", "ip6-loopback":
+		return fmt.Errorf("refusing to fetch from %s", host)
+	}
+	if strings.HasSuffix(host, ".local") || strings.HasSuffix(host, ".internal") {
+		return fmt.Errorf("refusing to fetch from internal host %s", host)
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsUnspecified() {
+			return fmt.Errorf("refusing to fetch from non-public IP %s", host)
+		}
+	}
+	return nil
+}
+
+// doHTTPGet implements the http_get tool. Returns a model-facing string with
+// status, content-type, and (truncated) body. Errors are returned inline so
+// the LLM can react and try a different URL.
+func doHTTPGet(ctx context.Context, rawURL, accept string, maxBytes int, userID, channelID string) string {
+	rawURL = strings.TrimSpace(rawURL)
+	if rawURL == "" {
+		return "Error: url is required."
+	}
+	if err := validatePublicURL(rawURL); err != nil {
+		return fmt.Sprintf("Error: %v", err)
+	}
+	if maxBytes <= 0 {
+		maxBytes = 200_000
+	}
+	if maxBytes > 1_048_576 {
+		maxBytes = 1_048_576
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return fmt.Sprintf("Error building request: %v", err)
+	}
+	req.Header.Set("User-Agent", "arbetern-http-get/1.0")
+	if strings.TrimSpace(accept) == "" {
+		accept = "application/json, application/yaml, text/yaml, text/plain, */*"
+	}
+	req.Header.Set("Accept", accept)
+
+	resp, err := httpGetClient.Do(req)
+	if err != nil {
+		return fmt.Sprintf("Error fetching %s: %v", rawURL, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	body, rerr := io.ReadAll(io.LimitReader(resp.Body, int64(maxBytes)+1))
+	if rerr != nil {
+		return fmt.Sprintf("Error reading response from %s: %v", rawURL, rerr)
+	}
+	truncated := false
+	if len(body) > maxBytes {
+		body = body[:maxBytes]
+		truncated = true
+	}
+	log.Printf("[user=%s channel=%s] http_get %s -> HTTP %d (%d bytes%s)",
+		userID, channelID, rawURL, resp.StatusCode, len(body), map[bool]string{true: ", truncated", false: ""}[truncated])
+
+	header := fmt.Sprintf("GET %s\nStatus: %d %s\nContent-Type: %s\nBody bytes: %d%s\n---\n",
+		rawURL,
+		resp.StatusCode, http.StatusText(resp.StatusCode),
+		resp.Header.Get("Content-Type"),
+		len(body),
+		map[bool]string{true: " (truncated — re-request with a more specific URL or higher max_bytes if needed)", false: ""}[truncated],
+	)
+	return header + string(body)
 }
