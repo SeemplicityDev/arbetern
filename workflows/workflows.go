@@ -40,6 +40,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -56,8 +57,10 @@ const (
 	// created without an explicit one (every 5 minutes from runner start).
 	DefaultCron = "@every 5m"
 
-	// MaxRunHistory bounds the per-workflow on-disk run log.
-	MaxRunHistory = 20
+	// defaultMaxRunHistory is the fallback used when WORKFLOW_RUN_HISTORY
+	// is unset or invalid. See MaxRunHistory.
+	defaultMaxRunHistory = 20
+
 	// MaxResultChars bounds a single stored run's result text.
 	MaxResultChars = 8000
 	// MaxTaskContextChars bounds the prior-task summary fed into the next task.
@@ -81,6 +84,25 @@ const (
 	// or a call_workflow tool call can fire the workflow.
 	TriggerManual = "manual"
 )
+
+// MaxRunHistory bounds the per-workflow on-disk run log. Default is 20;
+// override via the WORKFLOW_RUN_HISTORY environment variable (positive
+// integer). The bound is applied on every persist, so shrinking it takes
+// effect on the next tick — older entries are dropped, never resurrected.
+// The cap exists so a busy hourly workflow doesn't grow data.json
+// unbounded. It's a package-level var (rather than a const) so the env
+// override can take effect at process start.
+var MaxRunHistory = resolveMaxRunHistory()
+
+func resolveMaxRunHistory() int {
+	if s := strings.TrimSpace(os.Getenv("WORKFLOW_RUN_HISTORY")); s != "" {
+		if n, err := strconv.Atoi(s); err == nil && n > 0 {
+			return n
+		}
+		log.Printf("[workflows] invalid WORKFLOW_RUN_HISTORY %q; falling back to default %d", s, defaultMaxRunHistory)
+	}
+	return defaultMaxRunHistory
+}
 
 // Task is one step in a multi-step workflow. Each task is an independent
 // prompt; the registry serialises tasks, threading each result forward as

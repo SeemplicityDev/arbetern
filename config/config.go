@@ -20,7 +20,15 @@ const (
 	defaultModel            = "openai/gpt-4o"
 	defaultAzureModel       = "gpt-4o"
 	defaultThreadSessionTTL = 3 * time.Minute
-	defaultMaxToolRounds    = 50
+	// defaultMaxToolRounds bounds the LLM tool-loop per request. Multi-step
+	// scheduled workflows (e.g. an auto-fix tick that walks 10 Jira tickets,
+	// fetches several SKILL.md files, opens PRs, and posts comments) can
+	// easily issue 100+ tool calls in a single tick. The previous ceiling of
+	// 50 caused those workflows to auto-disable after 3 consecutive
+	// max-rounds failures, even when each individual tool call succeeded.
+	// 200 leaves headroom for the worst observed legitimate flow without
+	// becoming a license to loop forever.
+	defaultMaxToolRounds = 200
 )
 
 type Config struct {
