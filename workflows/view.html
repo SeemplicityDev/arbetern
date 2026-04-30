@@ -565,7 +565,9 @@
       const gitopsSyncBtn = document.getElementById('gitops-sync-btn');
       if (wf.source === 'gitops') {
         editBtn.style.display = 'none';
-        toggleBtn.style.display = 'none';
+        // Pause/resume stays available for GitOps workflows: it only toggles
+        // the runtime trigger (cron ticks, on_success / on_failure events) and
+        // doesn't mutate the workflow definition that GitOps reconciles.
         const link = sourceRefToURL(wf.source_ref);
         const sourceLine = link
           ? 'Edit it at <a href="' + link + '" target="_blank" rel="noopener">' + escapeHtml(wf.source_ref) + '</a>.'
