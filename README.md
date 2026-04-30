@@ -675,13 +675,7 @@ Global prompts (e.g. `security`) are defined in `agents/prompts.yaml` and inheri
 
 ## Contributing
 
-Contributions are welcome! Please open an issue or submit a pull request.
-
-1. Fork the repository
-2. Create your feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
+Pull requests are disabled on this repository. Contributions are accepted through issues only — please [open an issue](https://github.com/justmike1/arbetern/issues) to report bugs, request features, or propose changes. For anything else, contact the maintainer directly via [@justmike1](https://github.com/justmike1).
 
 ## Author & Maintainer
 
