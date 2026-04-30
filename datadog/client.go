@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"time"
 )
@@ -285,6 +286,27 @@ func FormatLogSearch(resp *LogSearchResponse, site string) string {
 		fmt.Fprintf(&sb, "%s `%s` | service:%s | host:%s | %s\n", statusEmoji, ts, svc, host, status)
 		if msg != "" {
 			fmt.Fprintf(&sb, "  %s\n", msg)
+		}
+		if len(attrs.Tags) > 0 {
+			fmt.Fprintf(&sb, "  %s\n", strings.Join(attrs.Tags, " "))
+		}
+		if len(attrs.Attributes) > 0 {
+			keys := make([]string, 0, len(attrs.Attributes))
+			for k, v := range attrs.Attributes {
+				switch v.(type) {
+				case map[string]interface{}, []interface{}:
+					continue
+				}
+				keys = append(keys, k)
+			}
+			if len(keys) > 0 {
+				sort.Strings(keys)
+				parts := make([]string, 0, len(keys))
+				for _, k := range keys {
+					parts = append(parts, fmt.Sprintf("%s:%v", k, attrs.Attributes[k]))
+				}
+				fmt.Fprintf(&sb, "  attrs: %s\n", strings.Join(parts, " "))
+			}
 		}
 		sb.WriteString("\n")
 	}
