@@ -77,11 +77,17 @@ func (b *backend) Parse(dirAgent string, body []byte) (string, string, core.Upse
 	if strings.TrimSpace(spec.ID) == "" {
 		return "", "", nil, nil
 	}
-	enabled := true
-	if spec.Enabled != nil {
-		enabled = *spec.Enabled
-	}
 	upsert := func(ctx context.Context, sourceRef string) (bool, error) {
+		// Preserve a UI-driven pause across reconciles: when the descriptor
+		// doesn't pin `enabled` explicitly, fall back to the current registry
+		// state (default true for first-time creates) instead of forcing
+		// enabled=true on every sync.
+		effective := true
+		if spec.Enabled != nil {
+			effective = *spec.Enabled
+		} else if existing, ok := b.reg.Get(spec.Agent, spec.ID); ok {
+			effective = existing.Enabled
+		}
 		_, changed, err := b.reg.Upsert(ctx, workflows.UpsertSpec{
 			ID:          spec.ID,
 			Agent:       spec.Agent,
@@ -93,7 +99,7 @@ func (b *backend) Parse(dirAgent string, body []byte) (string, string, core.Upse
 			Tasks:       spec.Tasks,
 			Trigger:     spec.Trigger,
 			CreatedBy:   spec.CreatedBy,
-			Enabled:     enabled,
+			Enabled:     effective,
 			Source:      SourceMarker,
 			SourceRef:   sourceRef,
 		})
