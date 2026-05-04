@@ -992,6 +992,20 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 		}, llm.Tool{
 			Type: "function",
 			Function: llm.ToolFunction{
+				Name:        "assign_jira_team",
+				Description: "Assign an existing Jira issue to a team by team UUID. The Jira Teams integration uses UUIDs (NOT display names) — call resolve_jira_team first to obtain the UUID. Team field is the only thing mutated — summary, description, status, assignee, sprint are untouched. No-op (returns success) when the team is already set to the requested UUID.",
+				Parameters: json.RawMessage(`{
+					"type":"object",
+					"properties":{
+						"issue_key":{"type":"string","description":"Jira issue key (e.g. 'ENG-123')."},
+						"team_id":{"type":"string","description":"Team UUID (from resolve_jira_team). Display names are NOT accepted."}
+					},
+					"required":["issue_key","team_id"]
+				}`),
+			},
+		}, llm.Tool{
+			Type: "function",
+			Function: llm.ToolFunction{
 				Name:        "add_jira_comment",
 				Description: "Post a comment on a Jira issue. The body is rendered from markdown to ADF (Atlassian Document Format) automatically — supports # headers, - bullets, 1) ordered lists, **bold**, and `code`. Use when the user asks to comment on, reply to, or annotate a ticket.",
 				Parameters: json.RawMessage(`{
@@ -2306,6 +2320,33 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		}
 		log.Printf("[user=%s channel=%s] assigned %s to active sprint %q (id %d) on project %s", userID, channelID, issueKey, sprint.Name, sprint.ID, project)
 		return fmt.Sprintf("Assigned %s to active sprint %q (id %d).", issueKey, sprint.Name, sprint.ID)
+
+	case "assign_jira_team":
+		if errMsg := requireReady("Jira", h.jiraClient); errMsg != "" {
+			return errMsg
+		}
+		args, errMsg := parseToolArgs[struct {
+			IssueKey string `json:"issue_key"`
+			TeamID   string `json:"team_id"`
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
+		}
+		issueKey := strings.TrimSpace(args.IssueKey)
+		teamID := strings.TrimSpace(args.TeamID)
+		if issueKey == "" || teamID == "" {
+			return "Error: issue_key and team_id are both required."
+		}
+		fields, err := h.jiraClient.FindTeamFields()
+		if err != nil || len(fields) == 0 {
+			return fmt.Sprintf("Error discovering Team field on Jira instance: %v", err)
+		}
+		fieldID := fields[0].ID
+		if err := h.jiraClient.SetTeamField(issueKey, fieldID, teamID); err != nil {
+			return fmt.Sprintf("Error setting team %s on %s: %v", teamID, issueKey, err)
+		}
+		log.Printf("[user=%s channel=%s] assigned %s to team %s (field %s)", userID, channelID, issueKey, teamID, fieldID)
+		return fmt.Sprintf("Assigned %s to team %s.", issueKey, teamID)
 
 	case "add_jira_comment":
 		if errMsg := requireReady("Jira", h.jiraClient); errMsg != "" {
