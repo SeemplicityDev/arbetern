@@ -28,18 +28,25 @@ type UserContextStore struct {
 
 const (
 	// UserContextTTL is the garbage collection horizon for context files.
-	UserContextTTL = 7 * 24 * time.Hour
+	// Each new append refreshes the file's mtime, so an active user's
+	// context effectively never expires; the TTL only fires after a
+	// stretch of silence.
+	UserContextTTL = 30 * 24 * time.Hour
 	// userContextMaxEntries caps the number of turns kept in a single file
-	// so it never grows unbounded.
-	userContextMaxEntries = 30
+	// so it never grows unbounded. Entries are expected to be compact
+	// summaries (the agent itself summarises before persisting), so this
+	// roughly mirrors the 50-message channel-history window.
+	userContextMaxEntries = 50
 	// userContextMaxAnswerLen truncates assistant responses before storing
 	// them — we only need a topical hint, not the full output.
-	userContextMaxAnswerLen = 2000
+	userContextMaxAnswerLen = 1200
 	// userContextMaxQuestionLen truncates the user question similarly.
-	userContextMaxQuestionLen = 1500
+	userContextMaxQuestionLen = 800
 	// userContextMaxFileBytes is a hard ceiling on the file size. Defence in
 	// depth against pathological inputs slipping past the per-entry limits.
-	userContextMaxFileBytes = 128 * 1024
+	// At ~2 KB/entry × 50 entries ≈ 100 KB worst case, 96 KB is a snug fit
+	// that keeps the system-prompt injection well under model limits.
+	userContextMaxFileBytes = 96 * 1024
 	// userContextEntrySep separates entries inside the file.
 	userContextEntrySep = "\n---\n"
 )

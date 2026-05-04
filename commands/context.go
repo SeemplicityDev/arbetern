@@ -12,7 +12,11 @@ import (
 )
 
 const (
-	contextMessageLimit = 30
+	// contextMessageLimit is the number of recent Slack messages we fetch
+	// from the conversation (channel or DM) to ground the agent's reply.
+	// We always fetch this many regardless of conversation type so DMs and
+	// channels receive equivalent recent-history context.
+	contextMessageLimit = 50
 	contextCacheTTL     = 30 * time.Second
 )
 

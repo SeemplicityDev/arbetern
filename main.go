@@ -449,8 +449,8 @@ func refreshIntegrations(
 		{Scope: "chat:write", Description: "Post messages and thread replies in channels", Required: true},
 		{Scope: "channels:history", Description: "Read message history in public channels", Required: true},
 		{Scope: "groups:history", Description: "Read message history in private channels", Required: true},
-		{Scope: "im:history", Description: "Read message history in DMs", Required: false},
-		{Scope: "mpim:history", Description: "Read message history in group DMs", Required: false},
+		{Scope: "im:history", Description: "Read message history in DMs", Required: true},
+		{Scope: "mpim:history", Description: "Read message history in group DMs", Required: true},
 		{Scope: "users:read", Description: "Read user profile information (name, email)", Required: true},
 		{Scope: "usergroups:read", Description: "Read user group membership for RBAC enforcement", Required: true},
 		{Scope: "commands", Description: "Register and receive slash commands", Required: true},
@@ -1008,9 +1008,12 @@ func main() {
 	sessions := commands.NewSessionStore(cfg.ThreadSessionTTL)
 	log.Printf("Thread session TTL: %s", cfg.ThreadSessionTTL)
 
-	// Per-user context store (ephemeral, on local disk — NOT in the
-	// persistent mount). Populated after each Slack request and read on
-	// subsequent ones so the agent can recognise recurring user topics.
+	// Per-user context store. Populated after every Slack request (DMs,
+	// channels, and in-thread follow-ups all flow through the same
+	// handlers) and read back into the system prompt on every subsequent
+	// request so the agent can recognise recurring user topics. When
+	// USER_CONTEXT_DIR points at the chart's persistent mount the files
+	// survive pod restarts; otherwise a temp dir is used (dev only).
 	// Files older than the retention window are garbage collected.
 	userContextDir := os.Getenv("USER_CONTEXT_DIR")
 	userContextStore := commands.NewUserContextStore(userContextDir)

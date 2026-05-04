@@ -268,6 +268,10 @@ spec:
               value: {{ .Values.workflows.gitops.prune | default false | quote }}
             {{- end }}
             {{- end }}
+            {{- if and .Values.persistence.enabled .Values.userContext .Values.userContext.enabled }}
+            - name: USER_CONTEXT_DIR
+              value: "{{ .Values.persistence.mountPath }}/{{ .Values.userContext.subPath }}"
+            {{- end }}
           {{- with .Values.livenessProbe }}
           livenessProbe:
             {{- toYaml . | nindent 12 }}
