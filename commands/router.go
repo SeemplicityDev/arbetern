@@ -44,6 +44,15 @@ type Router struct {
 }
 
 func NewRouter(slackClient SlackClient, ghClient *github.Client, modelsClient *llm.Client, codeModelsClient *llm.Client, jiraClient *atlassian.Client, nvdClient *nvd.Client, sfClient *salesforce.Client, chorusClient *chorus.Client, datadogClients *datadog.MultiClient, awsClient *aws.Client, dashboardRegistry *dashboards.Registry, workflowRegistry *workflows.Registry, pp PromptProvider, agentID, appURL string, sessions *SessionStore, maxToolRounds int, userContextStore *UserContextStore) *Router {
+	// Channel-context cache reuses the thread session window so that an
+	// active in-thread conversation does not re-fetch Slack history on
+	// every turn. Falls back to the package default when sessions is nil.
+	cacheTTL := defaultContextCacheTTL
+	if sessions != nil {
+		if t := sessions.TTL(); t > 0 {
+			cacheTTL = t
+		}
+	}
 	return &Router{
 		slackClient:      slackClient,
 		ghClient:         ghClient,
@@ -57,7 +66,7 @@ func NewRouter(slackClient SlackClient, ghClient *github.Client, modelsClient *l
 		awsClient:        awsClient,
 		dashboards:       dashboardRegistry,
 		workflows:        workflowRegistry,
-		contextProvider:  NewContextProvider(slackClient),
+		contextProvider:  NewContextProvider(slackClient, cacheTTL),
 		memory:           NewConversationMemory(),
 		prompts:          pp,
 		agentID:          agentID,
@@ -67,6 +76,14 @@ func NewRouter(slackClient SlackClient, ghClient *github.Client, modelsClient *l
 		userContextStore: userContextStore,
 	}
 }
+
+// ContextProvider exposes the channel-history cache so callers (e.g.
+// main) can attach a background GC sweeper.
+func (r *Router) ContextProvider() *ContextProvider { return r.contextProvider }
+
+// Memory exposes the in-memory short-term conversation cache so callers
+// can attach a background GC sweeper.
+func (r *Router) Memory() *ConversationMemory { return r.memory }
 
 func (r *Router) Handle(channelID, userID, text, responseURL string) {
 	text = strings.TrimSpace(text)

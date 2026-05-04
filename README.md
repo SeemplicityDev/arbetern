@@ -15,19 +15,30 @@ UI screenshots — home, dashboards, workflow grid, workflow editor — are in [
 
 ### Architecture — [Bernoulli Naive Bayes](https://en.wikipedia.org/wiki/Naive_Bayes_classifier) by Design
 
-Arbetern's end-to-end request resolution pipeline maps naturally to a **Bernoulli Naive Bayes** model. A user message enters as raw text and exits as a fully resolved response through a series of independent binary feature evaluations — no model-context protocol (MCP), no external orchestrator, no shared state bus.
+Arbetern's request pipeline is a chain of independent binary decisions — no MCP,
+no external orchestrator, no shared state bus. Each stage observes one feature
+and picks a class without influencing the next:
 
-**1. Agent dispatch (prior selection).** Slack routes each slash command (`/ovad`, `/pulse`, `/goldsai`, …) to a dedicated HTTP handler. The agent ID acts as the **class prior** — it determines which prompt set, RBAC policy, and tool palette apply before any content is evaluated. Each agent is an isolated classifier with its own feature weights (prompts) and feature space (available tools).
+1. **Agent dispatch (prior).** Slack routes `/ovad`, `/pulse`, … to a dedicated
+   HTTP handler. The agent ID picks the prompt set, RBAC policy, and tool
+   palette before any content is read.
+2. **Intent classification (binary scan).** Keyword lists fire independently
+   (`isIntroIntent`, `isDebugIntent`); `requiresAction` acts as a conditional
+   exclusion. First match wins.
+3. **Tool loop (posterior update).** The general handler iterates LLM → tool
+   calls → results until the model stops calling tools. The tool palette is
+   feature-gated: each integration's `Ready()` flag toggles its tools in/out
+   of the LLM's function list at request time.
+4. **Model switch.** Detecting a code-related tool call dynamically swaps the
+   general model for `CODE_MODEL` mid-inference, without restarting the loop.
+5. **Thread sessions (temporal memory).** After the first reply a session is
+   registered on the Slack thread; follow-ups re-enter the same router with
+   accumulated history (see [Conversation Context](#conversation-context)).
 
-**2. Intent classification (binary feature scan).** The router inspects the lowercased message against keyword lists — each keyword is a **binary Bernoulli feature** (present = 1, absent = 0). Features are evaluated independently: `isIntroIntent` checks one feature set, `isDebugIntent` checks another, and `requiresAction` acts as a **conditional exclusion** (if action keywords fire, the debug class is suppressed). The first matching class wins — the `switch` ordering encodes implicit priors. No feature influences the evaluation of another, mirroring the Naive Bayes independence assumption.
-
-**3. Tool-loop execution (iterative posterior update).** The general handler enters a bounded loop: send the message + available tools to the LLM, receive tool calls, execute them, feed results back. Each iteration refines the response — analogous to **updating the posterior** as new evidence (tool results) arrives. The tool palette itself is feature-gated: each integration client exposes a `Ready()` boolean, and tools only appear in the LLM's function list when their feature is true. The LLM never sees tools for disconnected integrations, so the feature space dynamically shrinks or grows based on runtime state.
-
-**4. Model selection (feature-conditional class switch).** The system starts with the general model and dynamically switches to the code model when code-related tool calls are detected. This is a **conditional class reassignment** — the observation of a specific feature (code tool invocation) triggers a switch to a more specialized classifier mid-inference, without restarting the loop.
-
-**5. Thread sessions (temporal feature memory).** After the initial response, a session is registered on the Slack thread. Follow-up messages bypass the slash command and re-enter the same router with accumulated conversation history. This gives the classifier **temporal features** — prior messages act as additional binary evidence for subsequent classifications within the same session window.
-
-Every layer — agent selection, intent routing, tool availability, model switching, session continuity — operates as an independent binary decision. There is no sequential boosting (each stage does not correct the previous one), no ensemble voting (a single pass decides), and no external orchestration layer. The system is the product of independent feature states, which is the core assumption of Bernoulli Naive Bayes.
+Every layer is an independent binary decision — no sequential boosting, no
+ensemble voting, no external orchestration. The system is the product of
+independent feature states, which is the core assumption of Bernoulli Naive
+Bayes.
 
 ## Current Agents
 
@@ -50,53 +61,93 @@ Every layer — agent selection, intent routing, tool availability, model switch
 
 ### Environment Variables
 
+The core variables you'll set on day one:
+
 | Variable | Required | Description |
 |---|---|---|
 | `SLACK_BOT_TOKEN` | yes | Slack bot OAuth token (`xoxb-...`) |
 | `SLACK_SIGNING_SECRET` | yes | Slack app signing secret |
-| `GITHUB_TOKEN` | yes* | GitHub PAT (*or* use Azure OpenAI) |
-| `GENERAL_MODEL` | no | General/default model ID (default: `openai/gpt-4o`) |
-| `CODE_MODEL` | no | Model/deployment used for code-related tasks — reading, reviewing, searching, and modifying code in GitHub (default: same as `GENERAL_MODEL`) |
-| `AZURE_OPEN_AI_ENDPOINT` | no | Azure OpenAI endpoint URL |
-| `AZURE_API_KEY` | no | Azure OpenAI API key |
+| `GITHUB_TOKEN` | yes\* | GitHub PAT (\*or use Azure OpenAI for inference) |
+| `GENERAL_MODEL` | no | General model ID (default: `openai/gpt-4o`) |
+| `CODE_MODEL` | no | Model used for code-related tasks (default: same as `GENERAL_MODEL`) |
+| `AZURE_OPEN_AI_ENDPOINT` / `AZURE_API_KEY` | no | Azure OpenAI credentials (alternative to GitHub Models) |
+| `APP_URL` | no | Public app URL (used for Jira ticket stamps and Slack links) |
 | `PORT` | no | HTTP port (default: `8080`) |
-| `ATLASSIAN_URL` | no | Atlassian instance URL (e.g. `https://yourorg.atlassian.net`) |
-| `ATLASSIAN_EMAIL` | no | Atlassian service account email (Basic Auth) |
-| `ATLASSIAN_API_TOKEN` | no | Atlassian API token (Basic Auth) |
-| `JIRA_PROJECT` | no | Default Jira project key (e.g. `ENG`) |
-| `ATLASSIAN_CLIENT_ID` | no | Atlassian OAuth 2.0 client ID (for client-credentials flow — alternative to Basic Auth with `ATLASSIAN_EMAIL`/`ATLASSIAN_API_TOKEN`) |
-| `ATLASSIAN_CLIENT_SECRET` | no | Atlassian OAuth 2.0 client secret |
-| `APP_URL` | no | Public app URL (used for Jira ticket stamps) |
-| `UI_ALLOWED_CIDRS` | no | Comma-separated CIDRs allowed to access the UI |
-| `SLACK_APP_TOKEN` | no | Slack app-level token (`xapp-...`) for Socket Mode — enables thread follow-ups without slash commands (see [docs/SLACK_BOT.md](docs/SLACK_BOT.md#socket-mode-thread-follow-ups)) |
-| `THREAD_SESSION_TTL` | no | Duration a thread session stays active (default: `3m`). Go duration format, e.g. `5m`, `2m30s` |
-| `MAX_TOOL_ROUNDS` | no | Max LLM tool-call rounds per request (default: `50`). Increase for complex multi-file tasks |
-| `SHOW_USAGE_STAMP` | no | Appends model/token usage metadata to Slack replies. Enabled by default; set to `false` to hide the usage/cost line. |
-| `NVD_API_KEY` | no | NVD (National Vulnerability Database) API key for CVE lookups. Get one free at <https://nvd.nist.gov/developers/request-an-api-key>. Without a key, requests are rate-limited (~5 req/30s vs ~50 req/30s with a key) |
-| `SF_CONSUMER_KEY` | no | Salesforce Connected App consumer key (OAuth 2.0 client credentials flow) |
-| `SF_CONSUMER_SECRET` | no | Salesforce Connected App consumer secret |
-| `SF_LOGIN_URL` | no | Salesforce login URL (default: `https://login.salesforce.com`). Use `https://test.salesforce.com` for sandbox orgs |
-| `CHORUS_API_TOKEN` | no | Chorus (ZoomInfo) API token for call intelligence and deal momentum. Generated in Chorus → Personal Settings |
-| `CHORUS_BASE_URL` | no | Chorus API base URL (default: `https://chorus.ai`). Override for a custom or on-prem endpoint |
-| `DD_API_KEY_US` | no | Datadog US (datadoghq.com) API key. Found in Organization Settings → API Keys |
-| `DD_APP_KEY_US` | no | Datadog US Application key. Found in Organization Settings → Application Keys |
-| `DD_API_KEY_EU` | no | Datadog EU (datadoghq.eu) API key. Found in Organization Settings → API Keys |
-| `DD_APP_KEY_EU` | no | Datadog EU Application key. Found in Organization Settings → Application Keys |
-| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | no | AWS static credentials. Any of these (or `AWS_PROFILE`, or EKS IRSA via `AWS_WEB_IDENTITY_TOKEN_FILE`+`AWS_ROLE_ARN`) enables the Cost Explorer tools (`aws_get_cost_and_usage`, `aws_get_cost_forecast`, `aws_list_dimension_values`). The IAM principal needs `ce:GetCostAndUsage`, `ce:GetCostForecast`, `ce:GetDimensionValues`. Note: each CE API call costs $0.01 |
-| `AWS_REGION` | no | Region used to sign Cost Explorer SigV4 calls (default `us-east-1`, the only region that hosts the CE endpoint). Cost data returned is account-global regardless |
-| `CUSTOM_PROMPTS_DIR` | no | Directory containing custom prompt YAML files that are **appended** to built-in agent prompts. Used for org-specific context via Kubernetes ConfigMap. Set automatically by the Helm chart when `customPrompts` is configured |
-| `AGENT_RBAC_DIR` | no | Directory containing per-agent RBAC overrides (`<agent-id>.yaml` with `allowed_teams` list). Overrides `config.yaml` allowed_teams at deploy time. Set automatically by the Helm chart when `agentRBAC` is configured |
-| `UI_HEADER` | no | Custom header text for the web UI (default: `arbetern`) |
-| `DASHBOARDS_DIR` | no | Directory where dashboard JSON snapshots are persisted (default: `./data/dashboards`). Set automatically by the Helm chart when `dashboards.enabled` is true |
-| `WORKFLOWS_DIR` | no | Directory where workflow JSON descriptors + run history are persisted (default: `./data/workflows`). Set automatically by the Helm chart when `workflows.enabled` is true |
-| `WORKFLOWS_GITOPS_REPO` | no | Enables GitOps sync for workflows: poll `<owner>/<repo>` for `<basePath>/<agent>/<id>.json` descriptors and reconcile them into the registry. Reuses `GITHUB_TOKEN`. See [docs/GITOPS.md](docs/GITOPS.md) |
-| `WORKFLOWS_GITOPS_OWNER` | no | Repo owner for workflows GitOps sync. Defaults to the bot's resolved owner |
-| `WORKFLOWS_GITOPS_BRANCH` | no | Branch for workflows GitOps sync. Defaults to the repo's default branch |
-| `WORKFLOWS_GITOPS_BASE_PATH` | no | Base path inside the repo for workflow JSONs (default: `arbetern/workflows`) |
-| `WORKFLOWS_GITOPS_INTERVAL` | no | Poll interval (Go duration, e.g. `5m`, `30s`). Default `5m`, minimum `30s` |
-| `WORKFLOWS_GITOPS_PRUNE` | no | When `true`, locally-managed workflows that disappear from git are deleted. Default `false` |
-| `DASHBOARDS_GITOPS_REPO` | no | Enables GitOps sync for dashboards (same model as workflows). Default base path: `arbetern/dashboards`. See [docs/GITOPS.md](docs/GITOPS.md) |
-| `DASHBOARDS_GITOPS_OWNER` / `DASHBOARDS_GITOPS_BRANCH` / `DASHBOARDS_GITOPS_BASE_PATH` / `DASHBOARDS_GITOPS_INTERVAL` / `DASHBOARDS_GITOPS_PRUNE` | no | Same semantics as the `WORKFLOWS_GITOPS_*` knobs above |
+
+<details>
+<summary><b>Runtime tuning</b> — sessions, tool rounds, UI access</summary>
+
+| Variable | Description |
+|---|---|
+| `SLACK_APP_TOKEN` | Slack app-level token (`xapp-...`) for Socket Mode — enables thread follow-ups without slash commands (see [docs/SLACK_BOT.md](docs/SLACK_BOT.md#socket-mode-thread-follow-ups)) |
+| `THREAD_SESSION_TTL` | Duration a thread session stays active (default `3m`, Go duration). Also controls the channel-context cache TTL |
+| `MAX_TOOL_ROUNDS` | Max LLM tool-call rounds per request (default `200`) |
+| `SHOW_USAGE_STAMP` | Append model/token usage metadata to Slack replies. Default `true` |
+| `UI_ALLOWED_CIDRS` | Comma-separated CIDRs allowed to access the UI |
+| `UI_HEADER` | Custom header text for the web UI (default `arbetern`) |
+
+</details>
+
+<details>
+<summary><b>Persistence</b> — dashboards, workflows, user context</summary>
+
+All three live under `persistence.mountPath` in the chart and default to `./data/<feature>` locally. See [Helm / persistence](#helm--persistence) for the consolidated values block.
+
+| Variable | Description |
+|---|---|
+| `DASHBOARDS_DIR` | Directory for dashboard JSON snapshots (default `./data/dashboards`) |
+| `WORKFLOWS_DIR` | Directory for workflow descriptors + run history (default `./data/workflows`) |
+| `USER_CONTEXT_DIR` | Directory for per-user rolling conversation summaries (`<agent>/<user>/context.txt`). Defaults to a temp dir; the chart points it at the PVC when `userContext.enabled` is true |
+| `CUSTOM_PROMPTS_DIR` | Directory of custom prompt YAML files **appended** to built-in agent prompts. Set automatically by the chart when `customPrompts` is configured |
+| `AGENT_RBAC_DIR` | Directory of per-agent RBAC overrides (`<agent-id>.yaml` with `allowed_teams`). Set automatically by the chart when `agentRBAC` is configured |
+
+</details>
+
+<details>
+<summary><b>Atlassian (Jira + Confluence)</b></summary>
+
+| Variable | Description |
+|---|---|
+| `ATLASSIAN_URL` | Atlassian instance URL (e.g. `https://yourorg.atlassian.net`) |
+| `ATLASSIAN_EMAIL` / `ATLASSIAN_API_TOKEN` | Basic Auth credentials |
+| `ATLASSIAN_CLIENT_ID` / `ATLASSIAN_CLIENT_SECRET` | OAuth 2.0 client-credentials (alternative to Basic Auth) |
+| `JIRA_PROJECT` | Default Jira project key (e.g. `ENG`) |
+
+</details>
+
+<details>
+<summary><b>Other integrations</b> — NVD, Salesforce, Chorus, Datadog, AWS</summary>
+
+| Variable | Description |
+|---|---|
+| `NVD_API_KEY` | NVD API key for CVE lookups. Free at <https://nvd.nist.gov/developers/request-an-api-key>. Without one, requests are rate-limited (~5 vs ~50 req/30s) |
+| `SF_CONSUMER_KEY` / `SF_CONSUMER_SECRET` | Salesforce Connected App credentials (OAuth 2.0 client credentials flow) |
+| `SF_LOGIN_URL` | Salesforce login URL (default `https://login.salesforce.com`; use `https://test.salesforce.com` for sandbox) |
+| `CHORUS_API_TOKEN` | Chorus (ZoomInfo) API token. Generated in Chorus → Personal Settings |
+| `CHORUS_BASE_URL` | Chorus API base URL (default `https://chorus.ai`) |
+| `DD_API_KEY_US` / `DD_APP_KEY_US` | Datadog US (datadoghq.com) API + Application keys |
+| `DD_API_KEY_EU` / `DD_APP_KEY_EU` | Datadog EU (datadoghq.eu) API + Application keys |
+| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | AWS static creds. `AWS_PROFILE` and EKS IRSA (`AWS_WEB_IDENTITY_TOKEN_FILE` + `AWS_ROLE_ARN`) also work. Enables Cost Explorer tools; the IAM principal needs `ce:GetCostAndUsage`, `ce:GetCostForecast`, `ce:GetDimensionValues`. Each CE API call costs $0.01 |
+| `AWS_REGION` | Region used to sign Cost Explorer SigV4 calls (default `us-east-1` — the only region hosting the CE endpoint) |
+
+</details>
+
+<details>
+<summary><b>GitOps sync</b> — workflows + dashboards from a git repo</summary>
+
+See [docs/GITOPS.md](docs/GITOPS.md). All variables reuse `GITHUB_TOKEN`.
+
+| Variable | Description |
+|---|---|
+| `WORKFLOWS_GITOPS_REPO` | Enables sync: poll `<owner>/<repo>` for `<basePath>/<agent>/<id>.json` |
+| `WORKFLOWS_GITOPS_OWNER` | Repo owner (defaults to bot's resolved owner) |
+| `WORKFLOWS_GITOPS_BRANCH` | Branch (defaults to repo default) |
+| `WORKFLOWS_GITOPS_BASE_PATH` | Base path inside the repo (default `arbetern/workflows`) |
+| `WORKFLOWS_GITOPS_INTERVAL` | Poll interval (Go duration, default `5m`, minimum `30s`) |
+| `WORKFLOWS_GITOPS_PRUNE` | When `true`, locally-managed workflows that disappear from git are deleted (default `false`) |
+| `DASHBOARDS_GITOPS_*` | Same semantics as the `WORKFLOWS_GITOPS_*` knobs above. Default base path `arbetern/dashboards` |
+
+</details>
 
 ### Run Locally
 
@@ -140,6 +191,36 @@ Visit `/ui/` to see all registered agents. Click an agent card to view its promp
 4. Create a Slack slash command pointing to `https://<your-host>/<agent-name>/webhook`
 
 > **Note:** Each agent directory under `agents/` is automatically discovered at startup and registered with its own webhook route (`/<agent>/webhook`). Create a Slack slash command per agent pointing to the corresponding path.
+
+## Conversation Context
+
+Every Slack-driven request — DMs, channel mentions, slash commands, and in-thread follow-ups — is grounded in a layered context that the router composes into the LLM system prompt. Each layer has its own scope, retention, and size cap so the prompt stays useful without growing unbounded.
+
+| Layer | Scope | Retention | Size cap |
+| --- | --- | --- | --- |
+| **Agent prompt** | Per agent, static | File on disk (read-only) | Whatever you author in `agents/<id>/prompts.yaml` (+ `CUSTOM_PROMPTS_DIR` overrides) |
+| **Slack user profile** | Per request | Refetched every turn via `users.info` | A few hundred bytes (Slack ID, real name, display name, email, title) |
+| **Channel context** | Per channel/DM | In-memory cache, TTL = `THREAD_SESSION_TTL` (default 3m). Background sweeper evicts stale entries; hard cap of 4096 channels with oldest-first eviction | Up to 50 most recent Slack messages (no per-message char cap) |
+| **Conversation memory** | Per `(channel, user)` | In-memory, 10-minute TTL on inactivity. Background sweeper runs every minute; hard cap of 8192 pairs | Up to 10 turns (no per-turn char cap) |
+| **User context (persistent)** | Per `(agent, user)`, shared across DMs and channels | File on disk at `<USER_CONTEXT_DIR>/<agent>/<user>/context.txt`. 30-day TTL on inactivity (refreshed on every append). PVC-backed in the Helm chart when `userContext.enabled` is true | Up to 50 entries (oldest dropped first), each capped at 800 chars (question) + 1200 chars (answer) + ~30 chars overhead, with a hard 96 KiB file ceiling |
+
+### How it flows
+
+1. **Read on every request.** All five layers are assembled before the LLM is called. The user-context file is read for both DMs and channels — `channelID` is *not* part of its key, so DM and channel turns merge into the same per-user file.
+2. **Append on every completed turn.** When the model finishes, a compact `(question, answer)` entry is appended to the user-context file regardless of whether the request came from a DM or a channel. Scheduled workflow ticks (`ExecuteHeadless`) intentionally skip persistence.
+3. **Cache reuse.** The channel-history cache TTL is wired to `THREAD_SESSION_TTL`, so a multi-turn thread reuses the same cached 50-message window for the entire session window without re-hitting Slack.
+
+### Knobs
+
+- **`THREAD_SESSION_TTL`** — controls both the thread-session lifetime *and* the channel-context cache TTL.
+- **`USER_CONTEXT_DIR`** — where the persistent per-user files live. The Helm chart sets it under `persistence.mountPath` when `userContext.enabled` is true.
+- All other size caps are constants in [commands/user_context.go](commands/user_context.go), [commands/context.go](commands/context.go), and [commands/memory.go](commands/memory.go) — adjust there if you need a different envelope.
+
+### Persistence in Kubernetes
+
+The user-context store shares the same PVC as dashboards and workflows. Set
+`userContext.enabled: true` (default) and enable the PVC \u2014 see
+[Workflows \u2192 Helm / persistence](#helm--persistence) for the full values block.
 
 ## Custom Prompts (Org-Specific Context)
 
@@ -256,31 +337,11 @@ chips — click to open, `×` to delete.
 - Sync interval is clamped to `[30s, 24h]`; the default is `5m`.
 - Each source type maps 1:1 to an existing integration client and is read-only.
 
-**Helm / persistence:**
-
-Dashboards share a single PVC with workflows (see the [Workflows](#workflows) section
-for the full persistence block). To enable the feature:
-
-```yaml
-dashboards:
-  enabled: true
-workflows:
-  enabled: true
-
-# One PVC, two subdirectories — /var/lib/arbetern/{dashboards,workflows}.
-persistence:
-  enabled: true
-  mountPath: /var/lib/arbetern
-  persistentVolumeClaim:
-    enabled: true                   # false = emptyDir (rebuilt on each roll)
-    size: 2Gi
-    storageClass: "gp3"
-```
-
-> **Pod security:** the Helm chart sets `podSecurityContext.fsGroup=65532` (matching the
-> `distroless/static:nonroot` user) so kubelet chowns the mounted dashboards volume on
-> pod start. Without this, the non-root process cannot create `<agent>/` subdirectories
-> inside the PVC and every sync fails with `mkdir: permission denied`.
+**Helm / persistence:** dashboards share the same PVC as workflows and the
+user-context store — see [Workflows → Helm / persistence](#helm--persistence)
+for the full values block. Setting `dashboards.enabled: true` is enough; the
+chart wires `DASHBOARDS_DIR` to `<persistence.mountPath>/dashboards`
+automatically.
 
 **Global cross-agent command:** in any Slack channel, run `/arbetern list dashboards` to
 get a single list of every active dashboard across every agent, with clickable view
@@ -334,9 +395,11 @@ from CDN), a coloured score badge, and the full source-panel tables underneath.
 
 Every agent with `create_dashboard` available can also build **custom, sync-on-a-
 timer dashboards** from its integration sources. Copy a prompt below verbatim as
-the body of a slash command:
+the body of a slash command.
 
-### `/pulse` — Customer Success
+<details>
+<summary><code>/pulse</code> — Customer Success</summary>
+
 ```
 create dashboard "Paypal 360" short-name paypal-360 that syncs every 10m with:
 - jira_search of JQL `project = ENG AND labels = paypal AND resolution = Unresolved ORDER BY priority DESC`
@@ -344,7 +407,11 @@ create dashboard "Paypal 360" short-name paypal-360 that syncs every 10m with:
 - chorus_list_conversations with participants_email = @paypal.com over the last 30 days, with_trackers: true
 ```
 
-### `/ovad` — DevOps & SRE
+</details>
+
+<details>
+<summary><code>/ovad</code> — DevOps & SRE</summary>
+
 ```
 create dashboard "Prod incidents today" short-name prod-today, every 5m, with:
 - datadog_search_logs query `env:prod status:error` over the last 24h, limit 25
@@ -352,33 +419,45 @@ create dashboard "Prod incidents today" short-name prod-today, every 5m, with:
 - github_list_prs for repo infra-live, state open, limit 15
 ```
 
-### `/agent-q` — QA & Test
+</details>
+
+<details>
+<summary><code>/agent-q</code> — QA & Test</summary>
+
 ```
 create dashboard "Flaky tests board" short-name flaky-tests that refreshes every 15m:
 - jira_search JQL `labels in (flaky, test-failure) AND statusCategory != Done ORDER BY updated DESC`
 - github_list_prs for repo api-service state open limit 20 (to cross-reference open test fixes)
 ```
 
-### `/goldsai` — Security Research
+</details>
+
+<details>
+<summary><code>/goldsai</code> — Security Research</summary>
+
 ```
 create dashboard "Open vulns this quarter" short-name secops-q, every 30m, with:
 - jira_search JQL `project = SEC AND labels = cve AND resolution = Unresolved ORDER BY priority DESC`
 - confluence_search cql `label = "security-advisory" AND lastModified > now("-90d")`
 ```
 
-### `/seihin` — Sr. Technical PM
+</details>
+
+<details>
+<summary><code>/seihin</code> — Sr. Technical PM</summary>
+
 ```
 create dashboard "PM intake queue" short-name pm-intake that syncs every 15m:
 - jira_search JQL `project = PROD AND status = "Intake" ORDER BY created ASC` max_results 30
 - confluence_search cql `label = "pm-rfc" AND lastModified > now("-14d")`
 ```
 
-Tips for good results:
-- Always provide a `short_name` so the chip on the agent card stays compact.
-- Quote JQL / SOQL / CQL values exactly as you'd type them in the native UI.
-- Start with a 5–15m `sync_interval`; the system clamps below 30s and above 24h.
-- Each integration must be **configured** — ask the agent `what integrations do you
-  have` if you aren't sure which sources will resolve.
+</details>
+
+**Tips:** always provide a `short_name` (keeps the agent-card chip compact);
+quote JQL/SOQL/CQL exactly as you'd type it in the native UI; start with a
+5–15m `sync_interval` (clamped to `[30s, 24h]`); ask the agent
+`what integrations do you have` if unsure which sources will resolve.
 
 ## Workflows
 
@@ -582,32 +661,40 @@ off the first time.
 
 ### Helm / persistence
 
-Workflows share a single PVC with dashboards — one volume, two sub-directories:
+A single PVC backs every stateful feature — dashboards, workflows, and the
+per-user context store live in their own sub-directory under
+`persistence.mountPath`:
 
 ```yaml
 dashboards:
-  enabled: true
+  enabled: true                        # DASHBOARDS_DIR  = $mountPath/dashboards
 workflows:
-  enabled: true
+  enabled: true                        # WORKFLOWS_DIR   = $mountPath/workflows
+userContext:
+  enabled: true                        # USER_CONTEXT_DIR = $mountPath/user-context
 
 persistence:
   enabled: true
-  mountPath: /var/lib/arbetern           # DASHBOARDS_DIR = $mountPath/dashboards
-                                         # WORKFLOWS_DIR  = $mountPath/workflows
+  mountPath: /var/lib/arbetern
   persistentVolumeClaim:
-    enabled: true                        # false = emptyDir (rebuilt every roll)
+    enabled: true                      # false = emptyDir (rebuilt every roll)
     size: 2Gi
     storageClass: "gp3"
 ```
 
 When `persistentVolumeClaim.enabled=false`, the mount falls back to an
-`emptyDir` and both dashboards and workflows are rebuilt from scratch on each
+`emptyDir` and all three feature stores are rebuilt from scratch on each
 pod roll.
 
 > **Pod security:** the Helm chart sets `podSecurityContext.fsGroup=65532`
 > (matching the `distroless/static:nonroot` user) so kubelet chowns the shared
 > volume on pod start, letting the non-root process create the `<agent>/`
 > sub-directories.
+>
+> **StatefulSet immutability:** `volumeClaimTemplates` are immutable once
+> created. Switching `persistentVolumeClaim.enabled` from `false` to `true`
+> on an existing release requires deleting the StatefulSet first
+> (`kubectl delete statefulset arbetern`) before `helm upgrade`.
 
 ### Cross-agent list command
 

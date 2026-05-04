@@ -1086,6 +1086,14 @@ func main() {
 		router := commands.NewRouter(slackClient, ghClient, modelsClient, codeModelsClient, jiraClient, nvdClient, sfClient, chorusClient, datadogClients, awsClient, dashRegistry, wfRegistry, ap, agent.ID, cfg.AppURL, sessions, cfg.MaxToolRounds, userContextStore)
 		routers[agent.ID] = router
 
+		// Background sweepers for the per-router in-memory caches so
+		// stale (channel, user) pairs and channel history entries do not
+		// accumulate indefinitely. Sweep cadence matches each cache's
+		// TTL — entries expire on access already; this just reclaims the
+		// memory promptly for inactive keys.
+		router.ContextProvider().StartGC(context.Background(), router.ContextProvider().TTL())
+		router.Memory().StartGC(context.Background(), time.Minute)
+
 		// Wrap router.Handle with RBAC check.
 		rbacHandler := func(channelID, userID, text, responseURL string) {
 			if !checkAgentRBAC(rbacCache, slackClient, agentID, userID, agentRBAC[agentID]) {

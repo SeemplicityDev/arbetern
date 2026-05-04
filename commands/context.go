@@ -1,7 +1,9 @@
 package commands
 
 import (
+	"context"
 	"fmt"
+	"log"
 	"regexp"
 	"strconv"
 	"strings"
@@ -17,11 +19,20 @@ const (
 	// We always fetch this many regardless of conversation type so DMs and
 	// channels receive equivalent recent-history context.
 	contextMessageLimit = 50
-	contextCacheTTL     = 30 * time.Second
+	// defaultContextCacheTTL is the fallback cache horizon used when the
+	// caller does not supply a TTL. It mirrors DefaultSessionTTL so a
+	// thread that's still active reuses the cached channel context for
+	// the entire session window without re-hitting Slack.
+	defaultContextCacheTTL = DefaultSessionTTL
+	// contextCacheMaxEntries caps the number of distinct channels held in
+	// memory. The expiry sweeper handles steady-state pruning; this cap
+	// is a hard safety net against pathological key growth.
+	contextCacheMaxEntries = 4096
 )
 
 type ContextProvider struct {
 	slackClient SlackClient
+	ttl         time.Duration
 	mu          sync.Mutex
 	cache       map[string]*contextEntry
 }
@@ -31,17 +42,27 @@ type contextEntry struct {
 	fetchedAt time.Time
 }
 
-func NewContextProvider(slackClient SlackClient) *ContextProvider {
+// NewContextProvider builds a Slack-backed channel context cache. ttl
+// controls how long a fetched window is reused before re-hitting Slack;
+// passing zero falls back to defaultContextCacheTTL.
+func NewContextProvider(slackClient SlackClient, ttl time.Duration) *ContextProvider {
+	if ttl <= 0 {
+		ttl = defaultContextCacheTTL
+	}
 	return &ContextProvider{
 		slackClient: slackClient,
+		ttl:         ttl,
 		cache:       make(map[string]*contextEntry),
 	}
 }
 
+// TTL returns the cache horizon currently in effect.
+func (cp *ContextProvider) TTL() time.Duration { return cp.ttl }
+
 func (cp *ContextProvider) GetChannelContext(channelID string) (string, error) {
 	cp.mu.Lock()
 	entry, ok := cp.cache[channelID]
-	if ok && time.Since(entry.fetchedAt) < contextCacheTTL {
+	if ok && time.Since(entry.fetchedAt) < cp.ttl {
 		cp.mu.Unlock()
 		return formatMessages(entry.messages), nil
 	}
@@ -61,9 +82,92 @@ func (cp *ContextProvider) GetFreshChannelContext(channelID string) (string, err
 		messages:  messages,
 		fetchedAt: time.Now(),
 	}
+	// Defensive cap: if the map has somehow grown past the safety
+	// threshold (e.g. GC sweeper hasn't run yet), evict the oldest
+	// entries inline so memory cannot grow unbounded between sweeps.
+	if len(cp.cache) > contextCacheMaxEntries {
+		cp.evictOldestLocked(len(cp.cache) - contextCacheMaxEntries)
+	}
 	cp.mu.Unlock()
 
 	return formatMessages(messages), nil
+}
+
+// StartGC launches a background goroutine that sweeps the cache every
+// `interval`, dropping entries older than the cache TTL. The goroutine
+// exits when ctx is cancelled. Safe to call with a nil receiver.
+func (cp *ContextProvider) StartGC(ctx context.Context, interval time.Duration) {
+	if cp == nil {
+		return
+	}
+	if interval <= 0 {
+		interval = cp.ttl
+		if interval <= 0 {
+			interval = defaultContextCacheTTL
+		}
+	}
+	go func() {
+		t := time.NewTicker(interval)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				cp.sweep()
+			}
+		}
+	}()
+}
+
+func (cp *ContextProvider) sweep() {
+	cp.mu.Lock()
+	defer cp.mu.Unlock()
+	if len(cp.cache) == 0 {
+		return
+	}
+	cutoff := time.Now().Add(-cp.ttl)
+	removed := 0
+	for k, v := range cp.cache {
+		if v.fetchedAt.Before(cutoff) {
+			delete(cp.cache, k)
+			removed++
+		}
+	}
+	if removed > 0 {
+		log.Printf("[context-cache] gc: removed %d stale channel entries (remaining=%d)",
+			removed, len(cp.cache))
+	}
+}
+
+// evictOldestLocked drops the n oldest entries from the cache. Caller
+// must hold cp.mu. Used as a safety valve when the map grows past the
+// hard cap between GC sweeps.
+func (cp *ContextProvider) evictOldestLocked(n int) {
+	if n <= 0 {
+		return
+	}
+	type kv struct {
+		key string
+		ts  time.Time
+	}
+	all := make([]kv, 0, len(cp.cache))
+	for k, v := range cp.cache {
+		all = append(all, kv{k, v.fetchedAt})
+	}
+	// Partial sort would be cheaper, but n is bounded and this only fires
+	// in pathological cases — keep the implementation simple.
+	for i := 0; i < n && len(all) > 0; i++ {
+		oldest := 0
+		for j := 1; j < len(all); j++ {
+			if all[j].ts.Before(all[oldest].ts) {
+				oldest = j
+			}
+		}
+		delete(cp.cache, all[oldest].key)
+		all[oldest] = all[len(all)-1]
+		all = all[:len(all)-1]
+	}
 }
 
 func formatMessages(messages []slacklib.Message) string {
