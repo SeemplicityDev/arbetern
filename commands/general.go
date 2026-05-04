@@ -978,6 +978,20 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 		}, llm.Tool{
 			Type: "function",
 			Function: llm.ToolFunction{
+				Name:        "assign_jira_active_sprint",
+				Description: "Move an existing Jira issue into the project's currently active sprint, overriding any prior (stale/closed) sprint value. No-op when the issue is already in the active sprint. Returns an informative message when no scrum board or active sprint exists for the project. Sprint field is the only thing mutated — summary, description, status, assignee are untouched.",
+				Parameters: json.RawMessage(`{
+					"type":"object",
+					"properties":{
+						"issue_key":{"type":"string","description":"Jira issue key (e.g. 'ENG-123')."},
+						"project":{"type":"string","description":"Optional project key. Defaults to the issue's project (derived from issue_key prefix) when omitted."}
+					},
+					"required":["issue_key"]
+				}`),
+			},
+		}, llm.Tool{
+			Type: "function",
+			Function: llm.ToolFunction{
 				Name:        "add_jira_comment",
 				Description: "Post a comment on a Jira issue. The body is rendered from markdown to ADF (Atlassian Document Format) automatically — supports # headers, - bullets, 1) ordered lists, **bold**, and `code`. Use when the user asks to comment on, reply to, or annotate a ticket.",
 				Parameters: json.RawMessage(`{
@@ -2251,6 +2265,47 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		}
 		log.Printf("[user=%s channel=%s] updated Jira issue %s (%s)", userID, channelID, args.IssueKey, strings.Join(updated, ", "))
 		return fmt.Sprintf("Successfully updated %s: %s", args.IssueKey, strings.Join(updated, " and "))
+
+	case "assign_jira_active_sprint":
+		if errMsg := requireReady("Jira", h.jiraClient); errMsg != "" {
+			return errMsg
+		}
+		args, errMsg := parseToolArgs[struct {
+			IssueKey string `json:"issue_key"`
+			Project  string `json:"project"`
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
+		}
+		issueKey := strings.TrimSpace(args.IssueKey)
+		if issueKey == "" {
+			return "Error: issue_key is required."
+		}
+		project := strings.TrimSpace(args.Project)
+		if project == "" {
+			if i := strings.Index(issueKey, "-"); i > 0 {
+				project = issueKey[:i]
+			}
+		}
+		if project == "" {
+			return "Error: could not determine project from issue_key; pass project explicitly."
+		}
+		sprint, err := h.jiraClient.GetActiveSprintForProject(project)
+		if err != nil {
+			return fmt.Sprintf("Error resolving active sprint for project %s: %v", project, err)
+		}
+		if sprint == nil {
+			return fmt.Sprintf("No active sprint on project %s — nothing to assign.", project)
+		}
+		// Skip if the issue is already in the named active sprint.
+		if issue, err := h.jiraClient.GetIssue(issueKey); err == nil && strings.EqualFold(issue.Sprint, sprint.Name) {
+			return fmt.Sprintf("%s is already in active sprint %q (id %d) — no change.", issueKey, sprint.Name, sprint.ID)
+		}
+		if err := h.jiraClient.SetSprintField(issueKey, sprint.ID); err != nil {
+			return fmt.Sprintf("Error assigning %s to active sprint %q (id %d): %v", issueKey, sprint.Name, sprint.ID, err)
+		}
+		log.Printf("[user=%s channel=%s] assigned %s to active sprint %q (id %d) on project %s", userID, channelID, issueKey, sprint.Name, sprint.ID, project)
+		return fmt.Sprintf("Assigned %s to active sprint %q (id %d).", issueKey, sprint.Name, sprint.ID)
 
 	case "add_jira_comment":
 		if errMsg := requireReady("Jira", h.jiraClient); errMsg != "" {

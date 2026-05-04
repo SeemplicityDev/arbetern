@@ -339,7 +339,7 @@ the body of a slash command:
 ### `/pulse` — Customer Success
 ```
 create dashboard "Paypal 360" short-name paypal-360 that syncs every 10m with:
-- jira_search of JQL `project = WAK AND labels = paypal AND resolution = Unresolved ORDER BY priority DESC`
+- jira_search of JQL `project = ENG AND labels = paypal AND resolution = Unresolved ORDER BY priority DESC`
 - salesforce_query SOQL `SELECT Id, Name, StageName, CloseDate, Amount FROM Opportunity WHERE Account.Name = 'Paypal' AND IsClosed = false`
 - chorus_list_conversations with participants_email = @paypal.com over the last 30 days, with_trackers: true
 ```
@@ -391,7 +391,7 @@ Example prompt (the one that kicked off this feature):
 
 ```
 /ovad create for me a workflow which polls every 5 minutes from jira open bug
-tickets from the wakanda project with the label "arbetern", reads and executes
+tickets from the engineering project with the label "arbetern", reads and executes
 upon the bug in github, and sends a slack message to channel C02S5BP9LHX that
 a PR is created — when you create the PR, set claude as the assignee too so it
 will review.

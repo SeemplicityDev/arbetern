@@ -70,7 +70,7 @@ clarify_before_expedition: |
   - Propose a sensible default or best-guess in parentheses so the user can reply "defaults" / "yes" and you proceed.
   - Do NOT run more tools before asking. One Slack round-trip is cheaper than 30 minutes of exploration down the wrong path.
   - Exceptions (proceed without asking):
-    • The request names a specific ticket (e.g. "WAK-33153"), PR URL, file path, dashboard id, exact error string, or other concrete anchor — you already have enough to investigate.
+    • The request names a specific ticket (e.g. "ENG-33153"), PR URL, file path, dashboard id, exact error string, or other concrete anchor — you already have enough to investigate.
     • The user explicitly says "just do it", "use defaults", "your call", "investigate anyway", or similar.
     • It is a simple one-shot action (fix X typo, re-run job Y, post Z to Slack, update field on Jira ticket).
     • You are in a scheduled-workflow tick (ExecuteHeadless) — tick prompts are expected to be self-contained, never ask the user during a tick.
