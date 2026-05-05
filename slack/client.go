@@ -60,7 +60,11 @@ func (c *Client) FetchChannelHistoryWindow(channelID, oldest string, limit int) 
 }
 
 func (c *Client) PostMessage(channelID, text string) (string, error) {
-	_, ts, err := c.api.PostMessage(channelID, slack.MsgOptionText(text, false))
+	_, ts, err := c.api.PostMessage(channelID,
+		slack.MsgOptionText(text, false),
+		slack.MsgOptionDisableLinkUnfurl(),
+		slack.MsgOptionDisableMediaUnfurl(),
+	)
 	if err != nil {
 		return "", fmt.Errorf("failed to post message: %w", err)
 	}
@@ -71,7 +75,11 @@ func (c *Client) PostMessage(channelID, text string) (string, error) {
 // and returns the new message's ts. When threadTS is empty, behaves like
 // PostMessage (posts as a top-level message).
 func (c *Client) PostMessageInThread(channelID, threadTS, text string) (string, error) {
-	opts := []slack.MsgOption{slack.MsgOptionText(text, false)}
+	opts := []slack.MsgOption{
+		slack.MsgOptionText(text, false),
+		slack.MsgOptionDisableLinkUnfurl(),
+		slack.MsgOptionDisableMediaUnfurl(),
+	}
 	if strings.TrimSpace(threadTS) != "" {
 		opts = append(opts, slack.MsgOptionTS(threadTS))
 	}
@@ -83,7 +91,12 @@ func (c *Client) PostMessageInThread(channelID, threadTS, text string) (string, 
 }
 
 func (c *Client) PostThreadReply(channelID, threadTS, text string) error {
-	_, _, err := c.api.PostMessage(channelID, slack.MsgOptionText(text, false), slack.MsgOptionTS(threadTS))
+	_, _, err := c.api.PostMessage(channelID,
+		slack.MsgOptionText(text, false),
+		slack.MsgOptionTS(threadTS),
+		slack.MsgOptionDisableLinkUnfurl(),
+		slack.MsgOptionDisableMediaUnfurl(),
+	)
 	if err != nil {
 		return fmt.Errorf("failed to post thread reply: %w", err)
 	}
@@ -98,6 +111,8 @@ func (c *Client) PostBlocks(channelID, fallback string, blocks []slack.Block) (s
 	_, ts, err := c.api.PostMessage(channelID,
 		slack.MsgOptionText(fallback, false),
 		slack.MsgOptionBlocks(blocks...),
+		slack.MsgOptionDisableLinkUnfurl(),
+		slack.MsgOptionDisableMediaUnfurl(),
 	)
 	if err != nil {
 		return "", fmt.Errorf("failed to post blocks: %w", err)
@@ -111,6 +126,8 @@ func (c *Client) PostThreadBlocks(channelID, threadTS, fallback string, blocks [
 		slack.MsgOptionText(fallback, false),
 		slack.MsgOptionBlocks(blocks...),
 		slack.MsgOptionTS(threadTS),
+		slack.MsgOptionDisableLinkUnfurl(),
+		slack.MsgOptionDisableMediaUnfurl(),
 	)
 	if err != nil {
 		return fmt.Errorf("failed to post thread blocks: %w", err)
@@ -131,7 +148,11 @@ func (c *Client) FetchThreadReplies(channelID, threadTS string, limit int) ([]sl
 }
 
 func (c *Client) PostEphemeral(channelID, userID, text string) error {
-	_, err := c.api.PostEphemeral(channelID, userID, slack.MsgOptionText(text, false))
+	_, err := c.api.PostEphemeral(channelID, userID,
+		slack.MsgOptionText(text, false),
+		slack.MsgOptionDisableLinkUnfurl(),
+		slack.MsgOptionDisableMediaUnfurl(),
+	)
 	if err != nil {
 		return fmt.Errorf("failed to post ephemeral message: %w", err)
 	}

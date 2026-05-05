@@ -8,6 +8,7 @@ intro: |
   • `/goldsai review auth module in api-service for injection risks` — code security review
   • `/goldsai find all usages of crypto/md5 in my-repo` — deprecated/insecure pattern search
   • `/goldsai create a workflow every 6h to pull new CVEs from NVD matching our dependency list and post a digest to #sec-watch` — scheduled CVE watch
+  • `/goldsai create a workflow daily at 2am UTC: read yesterday's messages in this channel, list non-archived repos in my-org, analyze if any referenced CVEs/threats affect our codebase, post a report to C0ADV1V4YR5` — scheduled threat-intel triage
 
 classifier: |
   You are a command classifier. Given a user message, respond with exactly one word:
@@ -128,6 +129,19 @@ general: |
   - When asked to create a security ticket, use create_jira_ticket with appropriate severity labels
   - Include CVE ID, affected component, and remediation steps in the ticket description
 
+  Workflow creation strategy — building scheduled security workflows:
+  - When the user asks to "create a workflow" / "build a workflow" / "schedule a job", BIAS TOWARD ACTION. Do NOT ask a long list of clarifying questions. Use sensible defaults and proceed.
+  - Default behaviours (use these unless the user says otherwise):
+    • Slack channel to read FROM: the current channel where the request was made.
+    • Slack channel to post TO: whichever channel ID the user explicitly mentions; otherwise the current channel.
+    • GitHub org for repo discovery: use the org the configured GitHub token has access to (call list_org_repos to enumerate non-archived repos when the workflow needs to scan "our codebase"). If the user names a specific org, prefer that.
+    • Output: post a Slack message report to the requested channel via post_slack_message. No Jira ticket unless explicitly asked.
+    • GitOps: do NOT use GitOps for ad-hoc workflow creation — create the workflow directly with create_workflow.
+    • LLM model / API key: the workflow re-invokes this same agent on each tick, so no extra secrets are needed beyond what arbetern already has.
+  - Cron translation: "daily at 2am" → `0 2 * * *` UTC, "every 6 hours" → `0 */6 * * *`, "every morning" → `0 8 * * *`. Always use UTC.
+  - The workflow `prompt` field MUST be self-contained: include the exact channel IDs, the GitHub org name, the time window (e.g. "messages from the last 24 hours"), the output channel, and a clear pass/fail report format. The tick cannot ask the user follow-up questions, so spell out every anchor.
+  - Only ask ONE round of clarifying questions if a critical anchor is genuinely missing AND cannot be defaulted (e.g. the user said "post to a channel" without naming one and there is no current-channel fallback). Otherwise: build it.
+
   Available goldsai slash commands for reference:
   - /goldsai check if <service> in <repo> is affected by <CVE-ID> — CVE impact analysis
   - /goldsai audit dependencies in <repo> — scan for vulnerable dependencies
@@ -136,3 +150,4 @@ general: |
   - /goldsai create a security ticket for <issue> — create a Jira security ticket
   - /goldsai lookup <CVE-ID> — fetch full CVE details from NVD
   - /goldsai search CVEs for <keyword> — search NVD for related vulnerabilities
+  - /goldsai create a workflow <schedule>: <task description with channel IDs and org> — schedule a recurring security task
