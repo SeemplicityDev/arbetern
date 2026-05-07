@@ -78,7 +78,8 @@ reconciles).
 | `short_name`  | optional          | Slugified from `name` when omitted.                                                                |
 | `description` | optional          | One-line description for the UI.                                                                   |
 | `cron`        | yes for schedules | Standard 5-field UTC cron expression (e.g. `0 9 * * *`) or `@daily` / `@hourly` / `@every 1h`.     |
-| `prompt`      | yes\*             | Natural-language prompt; `\*` either `prompt` OR `tasks` is required.                              |
+| `prompt`      | yes\*             | Natural-language prompt; `\*` either `prompt`, `prompt_path`, or `tasks` is required.              |
+| `prompt_path` | optional          | Load the prompt from a companion file. See [Prompt files](#prompt-files) below. Wins over `prompt` if both are set. |
 | `tasks`       | yes\*             | Ordered list of `{name, prompt}` for multi-step (subflows) workflows.                              |
 | `trigger`     | optional          | `{ "type": "schedule" }` (default), `manual`, `on_success`/`on_failure` (with `"ref":"agent/id"`). |
 | `enabled`     | optional          | Defaults to `true`.                                                                                |
@@ -87,6 +88,49 @@ reconciles).
 Run-history fields like `last_run`, `runs`, `consecutive_failures`,
 `disabled_reason` are silently ignored on read — feel free to leave them
 out, or to commit a registry-exported file as-is.
+
+#### Prompt files
+
+For long-form prompts it can be cleaner to keep the markdown next to the
+descriptor instead of escaping it into a JSON string. Set `prompt_path`
+to one of:
+
+- **Relative to the descriptor** — `"./arbetern-autofix-prompt.md"`,
+  `"prompt.md"`, `"../shared/triage.md"`. Resolved against the directory
+  the descriptor lives in (`arbetern/workflows/<agent>/`).
+- **Repo-absolute** — `"/arbetern/workflows/_shared/prompt.md"`. Treated
+  as a path from the source repo's root.
+- **Cross-repo URL** — `"https://github.com/<owner>/<repo>/blob/<branch>/<path>"`.
+  The same `GITHUB_TOKEN` is used to fetch it, so it must have read
+  access to the target repo. Branch names containing slashes are not
+  supported.
+
+```jsonc
+{
+  "id": "e177e78b522ab2ef",
+  "agent": "ovad",
+  "name": "Arbetern Bug Auto-Fix from Jira",
+  "short_name": "arbetern-autofix",
+  "description": "Polls Jira every hour for open WAK tickets ...",
+  "cron": "0 * * * 0-4",
+  "prompt_path": "./arbetern-autofix-prompt.md",
+  "trigger": { "type": "schedule" },
+  "enabled": true
+}
+```
+
+When the file is fetched, its contents become the workflow prompt and
+are persisted into the orchestrator's local `data.json` under the usual
+`prompt` field — `prompt_path` is purely a source-of-truth indirection
+for git, never written back to local state. If both `prompt` and
+`prompt_path` appear in the same descriptor, `prompt_path` wins and a
+warning is logged. Resolution failures (missing file, 404, escapes repo
+root) skip the workflow on that reconcile and surface in the syncer's
+last-error status.
+
+This indirection is **gitops-only**. Workflows created or edited via the
+UI / HTTP API continue to use the inline `prompt` field exactly as
+before.
 
 ### Dashboards
 

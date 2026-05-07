@@ -57,7 +57,7 @@ type fileSpec struct {
 	CreatedBy    string                  `json:"created_by"`
 }
 
-func (b *backend) Parse(dirAgent string, body []byte) (string, string, core.UpsertFunc, error) {
+func (b *backend) Parse(ctx context.Context, dirAgent, repoPath string, body []byte, fetch core.FetchFunc) (string, string, core.UpsertFunc, error) {
 	var spec fileSpec
 	if err := json.Unmarshal(body, &spec); err != nil {
 		return "", "", nil, fmt.Errorf("parse: %w", err)

@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"strings"
 
 	core "github.com/justmike1/arbetern/internal/gitopssync"
@@ -50,20 +51,23 @@ func (b *backend) Delete(agent, id string) error { return b.reg.Delete(agent, id
 // workflows.Workflow are absent so contributors can paste registry
 // exports unchanged.
 type fileSpec struct {
-	ID          string            `json:"id"`
-	Agent       string            `json:"agent"`
-	Name        string            `json:"name"`
-	ShortName   string            `json:"short_name"`
-	Description string            `json:"description"`
-	Cron        string            `json:"cron"`
-	Prompt      string            `json:"prompt"`
-	Tasks       []workflows.Task  `json:"tasks"`
-	Trigger     workflows.Trigger `json:"trigger"`
-	CreatedBy   string            `json:"created_by"`
-	Enabled     *bool             `json:"enabled"`
+	ID          string `json:"id"`
+	Agent       string `json:"agent"`
+	Name        string `json:"name"`
+	ShortName   string `json:"short_name"`
+	Description string `json:"description"`
+	Cron        string `json:"cron"`
+	Prompt      string `json:"prompt"`
+	// PromptPath, when set, loads the prompt from a companion file via the
+	// gitops fetcher. See docs/GITOPS.md for the supported reference forms.
+	PromptPath string            `json:"prompt_path"`
+	Tasks      []workflows.Task  `json:"tasks"`
+	Trigger    workflows.Trigger `json:"trigger"`
+	CreatedBy  string            `json:"created_by"`
+	Enabled    *bool             `json:"enabled"`
 }
 
-func (b *backend) Parse(dirAgent string, body []byte) (string, string, core.UpsertFunc, error) {
+func (b *backend) Parse(ctx context.Context, dirAgent, repoPath string, body []byte, fetch core.FetchFunc) (string, string, core.UpsertFunc, error) {
 	var spec fileSpec
 	if err := json.Unmarshal(body, &spec); err != nil {
 		return "", "", nil, fmt.Errorf("parse: %w", err)
@@ -76,6 +80,16 @@ func (b *backend) Parse(dirAgent string, body []byte) (string, string, core.Upse
 	}
 	if strings.TrimSpace(spec.ID) == "" {
 		return "", "", nil, nil
+	}
+	if pp := strings.TrimSpace(spec.PromptPath); pp != "" {
+		if strings.TrimSpace(spec.Prompt) != "" {
+			log.Printf("[gitopssync] %s: both 'prompt' and 'prompt_path' set — prompt_path wins", repoPath)
+		}
+		content, err := fetch(ctx, pp)
+		if err != nil {
+			return "", "", nil, fmt.Errorf("resolve prompt_path %q: %w", pp, err)
+		}
+		spec.Prompt = content
 	}
 	upsert := func(ctx context.Context, sourceRef string) (bool, error) {
 		// Preserve a UI-driven pause across reconciles: when the descriptor

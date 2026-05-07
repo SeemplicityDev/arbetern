@@ -44,6 +44,19 @@ type ManagedItem struct {
 	Name  string
 }
 
+// FetchFunc fetches the contents of another file referenced from a
+// descriptor during Parse. `ref` is either:
+//
+//   - a path relative to the directory of the descriptor being parsed
+//     (e.g. "./prompt.md", "prompt.md", "../shared/prompt.md"), or
+//   - a repo-absolute path starting with "/", or
+//   - an absolute https://github.com/<owner>/<repo>/blob/<ref>/<path> URL
+//     (cross-repo / cross-branch references).
+//
+// The fetcher is scoped to the reconcile that produced it (owner/repo/
+// branch are captured) and is safe to call only from within Parse.
+type FetchFunc func(ctx context.Context, ref string) (string, error)
+
 // Backend is the kind-specific glue between the generic reconcile loop
 // and a concrete registry. Implementations are expected to be small.
 type Backend interface {
@@ -55,7 +68,10 @@ type Backend interface {
 	DefaultBasePath() string
 	// Parse decodes one JSON file body. dirAgent is the directory name and
 	// is authoritative — the implementation should log + override any
-	// mismatching `agent` field in the file.
+	// mismatching `agent` field in the file. repoPath is the descriptor's
+	// path inside the source repo (used to resolve relative references).
+	// fetch may be used to load companion files (e.g. an external prompt
+	// markdown) referenced from the descriptor.
 	//
 	// Returns the desired item's id and human-readable name, plus an upsert
 	// closure that performs the registry write. The closure receives the
@@ -64,7 +80,7 @@ type Backend interface {
 	//
 	// When the file is unusable (missing id, malformed JSON), Parse returns
 	// a non-nil error and the file is skipped.
-	Parse(dirAgent string, body []byte) (id, name string, upsert UpsertFunc, err error)
+	Parse(ctx context.Context, dirAgent, repoPath string, body []byte, fetch FetchFunc) (id, name string, upsert UpsertFunc, err error)
 	// ListManaged returns the current set of items managed by this Backend
 	// (Source field == SourceMarker). Used for prune diffs.
 	ListManaged() []ManagedItem
@@ -359,7 +375,8 @@ func (s *Syncer) reconcile(ctx context.Context, owner string) error {
 				log.Printf("%s read %s: %v (skipping file)", s.prefix, filePath, err)
 				continue
 			}
-			id, _, upsertFn, err := s.backend.Parse(agent, []byte(content))
+			fetch := s.makeFetcher(owner, branch, filePath)
+			id, _, upsertFn, err := s.backend.Parse(ctx, agent, filePath, []byte(content), fetch)
 			if err != nil {
 				log.Printf("%s parse %s: %v (skipping file)", s.prefix, filePath, err)
 				continue
@@ -475,4 +492,63 @@ func nonEmpty(s, fallback string) string {
 		return fallback
 	}
 	return s
+}
+
+// makeFetcher returns a FetchFunc that resolves references encountered
+// while parsing a descriptor at descriptorPath. Relative references are
+// resolved against the descriptor's directory in the current
+// owner/repo@branch; absolute https://github.com/.../blob/... URLs are
+// honoured as-is and may target a different repo or branch.
+func (s *Syncer) makeFetcher(owner, branch, descriptorPath string) FetchFunc {
+	repo := s.cfg.Repo
+	descDir := path.Dir(descriptorPath)
+	return func(ctx context.Context, ref string) (string, error) {
+		ref = strings.TrimSpace(ref)
+		if ref == "" {
+			return "", fmt.Errorf("empty file reference")
+		}
+		if strings.HasPrefix(ref, "https://github.com/") || strings.HasPrefix(ref, "http://github.com/") {
+			o, r, b, p, err := parseGitHubBlobURL(ref)
+			if err != nil {
+				return "", err
+			}
+			content, _, err := s.gh.GetFileContent(ctx, o, r, p, b)
+			return content, err
+		}
+		var resolved string
+		if strings.HasPrefix(ref, "/") {
+			resolved = path.Clean(strings.TrimPrefix(ref, "/"))
+		} else {
+			resolved = path.Clean(path.Join(descDir, ref))
+		}
+		if strings.HasPrefix(resolved, "../") || resolved == ".." {
+			return "", fmt.Errorf("reference %q escapes repo root", ref)
+		}
+		content, _, err := s.gh.GetFileContent(ctx, owner, repo, resolved, branch)
+		return content, err
+	}
+}
+
+// parseGitHubBlobURL parses a https://github.com/<owner>/<repo>/blob/<branch>/<path>
+// URL. Branch names containing slashes are not supported.
+func parseGitHubBlobURL(raw string) (owner, repo, branch, filePath string, err error) {
+	trimmed := raw
+	for _, prefix := range []string{"https://github.com/", "http://github.com/"} {
+		if strings.HasPrefix(trimmed, prefix) {
+			trimmed = strings.TrimPrefix(trimmed, prefix)
+			break
+		}
+	}
+	parts := strings.SplitN(trimmed, "/", 5)
+	if len(parts) < 5 || parts[2] != "blob" {
+		return "", "", "", "", fmt.Errorf("unsupported github URL %q (expected https://github.com/<owner>/<repo>/blob/<branch>/<path>)", raw)
+	}
+	owner = parts[0]
+	repo = parts[1]
+	branch = parts[3]
+	filePath = parts[4]
+	if owner == "" || repo == "" || branch == "" || filePath == "" {
+		return "", "", "", "", fmt.Errorf("unsupported github URL %q", raw)
+	}
+	return owner, repo, branch, filePath, nil
 }
