@@ -573,6 +573,17 @@ template is used as a fallback. Only the FIRST write call per repo per tick
 establishes the PR body — subsequent calls grouped into the same PR ignore
 their `pr_body` argument.
 
+The same three tools also accept optional `branch_name` and `pr_title`
+arguments for prompts that need to enforce a naming convention (e.g.
+`<JIRA-KEY>/<agent>-<slug>` head branches and `<JIRA-KEY>/<agent>: …` PR
+titles for ticket-driven workflows). When omitted (the default), the
+platform auto-generates a unique head branch (`<agent-id>/patch-<unix-ts>`)
+and uses `<agent-id>: <description>` as the PR title — unchanged from prior
+behavior. When provided, both values are used VERBATIM (no agent-name
+prefix is added). They are only honored on the FIRST write call per repo
+per tick — the one that creates the branch and opens the PR; subsequent
+calls grouped into the same PR ignore them.
+
 Every PR opened by these tools also requests **GitHub Copilot as a reviewer**
 best-effort: a REST attempt with the magic `Copilot` login, falling back to
 a GraphQL `requestReviews` mutation that resolves the Copilot bot via

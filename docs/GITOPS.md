@@ -111,7 +111,7 @@ to one of:
   "agent": "ovad",
   "name": "Arbetern Bug Auto-Fix from Jira",
   "short_name": "arbetern-autofix",
-  "description": "Polls Jira every hour for open WAK tickets ...",
+  "description": "Polls Jira every hour for open ENG tickets ...",
   "cron": "0 * * * 0-4",
   "prompt_path": "./arbetern-autofix-prompt.md",
   "trigger": { "type": "schedule" },
