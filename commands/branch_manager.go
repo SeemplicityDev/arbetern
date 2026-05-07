@@ -66,9 +66,16 @@ type CommitResult struct {
 // commitFn receives the target branch name and must perform the actual
 // git commit (UpdateFile or CreateFile). prBody is used only when creating
 // a new PR.
+//
+// branchOverride and prTitleOverride are optional. When non-empty, they are
+// used in place of the auto-generated branch name and the default
+// "<agentID>: <description>" PR title. Both are only consulted when a new
+// branch/PR is being created for this repo in the current run; subsequent
+// write calls for the same repo group into the existing PR and the
+// overrides are ignored.
 func (bm *BranchManager) CommitAndPR(
 	ctx context.Context,
-	owner, repo, baseBranch, userID, description, prBody string,
+	owner, repo, baseBranch, userID, description, prBody, branchOverride, prTitleOverride string,
 	commitFn func(branch string) error,
 ) (*CommitResult, error) {
 	repoKey := owner + "/" + repo
@@ -86,7 +93,10 @@ func (bm *BranchManager) CommitAndPR(
 	}
 
 	// Create a new branch, commit, and open a PR.
-	branchName := github.GenerateBranchName(bm.agentID)
+	branchName := branchOverride
+	if branchName == "" {
+		branchName = github.GenerateBranchName(bm.agentID)
+	}
 	if err := bm.ghClient.CreateBranch(ctx, owner, repo, baseBranch, branchName); err != nil {
 		return nil, fmt.Errorf("creating branch: %w", err)
 	}
@@ -95,7 +105,10 @@ func (bm *BranchManager) CommitAndPR(
 		return nil, fmt.Errorf("committing file: %w", err)
 	}
 
-	prTitle := fmt.Sprintf("%s: %s", bm.agentID, description)
+	prTitle := prTitleOverride
+	if prTitle == "" {
+		prTitle = fmt.Sprintf("%s: %s", bm.agentID, description)
+	}
 	prURL, err := bm.ghClient.CreatePullRequest(ctx, owner, repo, baseBranch, branchName, prTitle, prBody)
 	if err != nil {
 		return nil, fmt.Errorf("changes committed to branch %s but PR creation failed: %w", branchName, err)
