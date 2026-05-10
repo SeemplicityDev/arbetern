@@ -10,14 +10,11 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
-	"sort"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/justmike1/arbetern/github"
 	"github.com/justmike1/arbetern/slack"
-	"gopkg.in/yaml.v3"
 )
 
 // stripWhitespace removes every whitespace character from s so two strings
@@ -146,7 +143,7 @@ func fetchWorkflowLogsBulk(ctx context.Context, ghClient *github.Client, text, u
 	return result
 }
 
-// httpGetClient is shared by http_get and helm_index_latest_version.
+// httpGetClient is shared by http_get.
 var httpGetClient = &http.Client{
 	Timeout: 25 * time.Second,
 	// Re-validate on redirect to mitigate SSRF via 30x.
@@ -241,194 +238,4 @@ func doHTTPGet(ctx context.Context, rawURL, accept string, maxBytes int, userID,
 		map[bool]string{true: " (truncated — re-request with a more specific URL or higher max_bytes if needed)", false: ""}[truncated],
 	)
 	return header + string(body)
-}
-
-// doHelmIndexLatest fetches a Helm repo index.yaml, parses it server-side,
-// and returns only the requested chart's latest stable version. The index
-// itself (often multi-MB) is never returned to the model.
-func doHelmIndexLatest(ctx context.Context, repoURL, chart, userID, channelID string) string {
-	repoURL = strings.TrimSpace(repoURL)
-	chart = strings.TrimSpace(chart)
-	if repoURL == "" || chart == "" {
-		return "Error: repo_url and chart are required."
-	}
-	idxURL := strings.TrimRight(repoURL, "/") + "/index.yaml"
-	if err := validatePublicURL(idxURL); err != nil {
-		return fmt.Sprintf("Error: %v", err)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, idxURL, nil)
-	if err != nil {
-		return fmt.Sprintf("Error building request: %v", err)
-	}
-	req.Header.Set("User-Agent", "arbetern-helm-index/1.0")
-	req.Header.Set("Accept", "application/yaml, text/yaml, application/x-yaml, */*")
-
-	resp, err := httpGetClient.Do(req)
-	if err != nil {
-		return fmt.Sprintf("Error fetching %s: %v", idxURL, err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode/100 != 2 {
-		preview, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
-		return fmt.Sprintf("Error: HTTP %d from %s — %s",
-			resp.StatusCode, idxURL, strings.TrimSpace(string(preview)))
-	}
-
-	const maxIndexBytes = 16 * 1024 * 1024
-	body, rerr := io.ReadAll(io.LimitReader(resp.Body, maxIndexBytes+1))
-	if rerr != nil {
-		return fmt.Sprintf("Error reading %s: %v", idxURL, rerr)
-	}
-	if len(body) > maxIndexBytes {
-		return fmt.Sprintf("Error: index.yaml at %s exceeded %d bytes", idxURL, maxIndexBytes)
-	}
-
-	var idx struct {
-		Entries map[string][]struct {
-			Version    string   `yaml:"version"`
-			AppVersion string   `yaml:"appVersion"`
-			URLs       []string `yaml:"urls"`
-			Created    string   `yaml:"created"`
-		} `yaml:"entries"`
-	}
-	if err := yaml.Unmarshal(body, &idx); err != nil {
-		return fmt.Sprintf("Error parsing index.yaml at %s: %v", idxURL, err)
-	}
-	entries, ok := idx.Entries[chart]
-	if !ok || len(entries) == 0 {
-		lc := strings.ToLower(chart)
-		for k, v := range idx.Entries {
-			if strings.ToLower(k) == lc {
-				entries = v
-				chart = k
-				ok = true
-				break
-			}
-		}
-	}
-	if !ok || len(entries) == 0 {
-		// Surface a sample of available chart names so the model can self-correct.
-		names := make([]string, 0, len(idx.Entries))
-		for k := range idx.Entries {
-			names = append(names, k)
-		}
-		sort.Strings(names)
-		preview := names
-		if len(preview) > 25 {
-			preview = append(preview[:25:25], "...")
-		}
-		return fmt.Sprintf("Error: chart %q not found in %s. Available entries (sample): %s",
-			chart, idxURL, strings.Join(preview, ", "))
-	}
-
-	versions := make([]string, 0, len(entries))
-	appByVer := make(map[string]string, len(entries))
-	urlByVer := make(map[string]string, len(entries))
-	for _, e := range entries {
-		v := strings.TrimSpace(e.Version)
-		if v == "" || isHelmPrerelease(v) {
-			continue
-		}
-		versions = append(versions, v)
-		if _, seen := appByVer[v]; !seen {
-			appByVer[v] = e.AppVersion
-			if len(e.URLs) > 0 {
-				urlByVer[v] = e.URLs[0]
-			}
-		}
-	}
-	if len(versions) == 0 {
-		return fmt.Sprintf("Error: no stable versions for %s in %s", chart, idxURL)
-	}
-	sort.Slice(versions, func(i, j int) bool {
-		return compareHelmSemver(versions[i], versions[j]) > 0
-	})
-	latest := versions[0]
-	recent := versions
-	truncated := false
-	if len(recent) > 10 {
-		recent = recent[:10]
-		truncated = true
-	}
-
-	log.Printf("[user=%s channel=%s] helm_index_latest_version %s @ %s -> %s",
-		userID, channelID, chart, repoURL, latest)
-
-	out := fmt.Sprintf("Chart: %s\nRepo: %s\nLatest stable version: %s",
-		chart, repoURL, latest)
-	if av := appByVer[latest]; av != "" {
-		out += fmt.Sprintf("\nApp version: %s", av)
-	}
-	if u := urlByVer[latest]; u != "" {
-		out += fmt.Sprintf("\nChart URL: %s", u)
-	}
-	suffix := ""
-	if truncated {
-		suffix = " (showing 10 most recent)"
-	}
-	out += fmt.Sprintf("\nRecent stable versions%s: %s", suffix, strings.Join(recent, ", "))
-	return out
-}
-
-// isHelmPrerelease reports whether v carries a semver pre-release suffix.
-func isHelmPrerelease(v string) bool {
-	v = strings.TrimPrefix(strings.TrimSpace(v), "v")
-	if i := strings.Index(v, "+"); i >= 0 {
-		v = v[:i]
-	}
-	return strings.ContainsRune(v, '-')
-}
-
-// compareHelmSemver returns >0 if a>b, <0 if a<b, 0 if equal.
-func compareHelmSemver(a, b string) int {
-	an := normalizeHelmVer(a)
-	bn := normalizeHelmVer(b)
-	la := strings.FieldsFunc(an, func(r rune) bool { return r == '.' || r == '-' || r == '_' })
-	lb := strings.FieldsFunc(bn, func(r rune) bool { return r == '.' || r == '-' || r == '_' })
-	n := len(la)
-	if len(lb) > n {
-		n = len(lb)
-	}
-	for i := 0; i < n; i++ {
-		var ai, bi string
-		if i < len(la) {
-			ai = la[i]
-		}
-		if i < len(lb) {
-			bi = lb[i]
-		}
-		if ai == bi {
-			continue
-		}
-		ax, aerr := strconv.Atoi(ai)
-		bx, berr := strconv.Atoi(bi)
-		if aerr == nil && berr == nil {
-			if ax < bx {
-				return -1
-			}
-			return 1
-		}
-		if ai == "" {
-			return -1
-		}
-		if bi == "" {
-			return 1
-		}
-		if ai < bi {
-			return -1
-		}
-		return 1
-	}
-	return 0
-}
-
-func normalizeHelmVer(v string) string {
-	v = strings.TrimSpace(v)
-	v = strings.TrimPrefix(v, "v")
-	if i := strings.Index(v, "+"); i >= 0 {
-		v = v[:i]
-	}
-	return v
 }
