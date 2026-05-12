@@ -1,11 +1,15 @@
-# arbetern
+<p align="center">
+  <img src="assets/logo-full-text.png" alt="Arbetern — AI Agent Orchestration" width="400">
+</p>
 
-[![Stars](https://img.shields.io/github/stars/justmike1/arbetern?style=social)](https://github.com/justmike1/arbetern/stargazers)
-[![Go](https://img.shields.io/badge/Go-1.26+-00ADD8?logo=go&logoColor=white)](https://go.dev)
-[![License](https://img.shields.io/github/license/justmike1/arbetern)](LICENSE)
-[![Docker](https://img.shields.io/badge/Docker-ready-2496ED?logo=docker&logoColor=white)](Dockerfile)
+<p align="center">
+  <a href="https://github.com/justmike1/arbetern/stargazers"><img src="https://img.shields.io/github/stars/justmike1/arbetern?style=social" alt="Stars"></a>
+  <a href="https://go.dev"><img src="https://img.shields.io/badge/Go-1.26+-00ADD8?logo=go&logoColor=white" alt="Go"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/justmike1/arbetern" alt="License"></a>
+  <a href="Dockerfile"><img src="https://img.shields.io/badge/Docker-ready-2496ED?logo=docker&logoColor=white" alt="Docker"></a>
+</p>
 
-*Yiddish for "workers." (with a typo, but it's cooler)*
+<p align="center"><em>Yiddish for "workers." (with a typo, but it's cooler)</em></p>
 
 An orchestration platform for AI agents in the enterprise. Each agent lives in its own directory under `agents/`, with dedicated prompts and a defined professional scope. Arbetern provides the runtime, routing, UI, and integrations — agents bring the expertise.
 

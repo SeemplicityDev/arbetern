@@ -13,6 +13,8 @@
 *.local.values.yaml
 *.png
 !screenshots/*.png
+!assets/*.png
+!ui/logo.png
 
 # Test binary, built with `go test -c`
 *.test
