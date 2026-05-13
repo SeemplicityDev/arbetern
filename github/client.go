@@ -440,6 +440,47 @@ func (c *Client) ListUserRepos(ctx context.Context) ([]string, error) {
 	return allRepos, nil
 }
 
+// RepoTeamAccess describes a team's grant on a single repository.
+type RepoTeamAccess struct {
+	// Slug is the GitHub team slug (e.g. "backend"); fully-qualified as
+	// "<org>/<slug>" for display.
+	Slug string `json:"slug"`
+	// Name is the human-readable team name.
+	Name string `json:"name"`
+	// Permission is the highest-level role bound to this team on the
+	// repository: "admin", "maintain", "push", "triage", or "pull".
+	Permission string `json:"permission"`
+}
+
+// ListRepoTeams returns the teams that have been granted direct access to
+// the given repository, along with their permission level. This mirrors
+// the "Settings → Collaborators and teams → Direct access" tab in the
+// GitHub UI. Requires a token with `read:org` (or `admin:org`) plus repo
+// access; users without admin on the repo may receive 403 from GitHub —
+// surface the error verbatim rather than masking it.
+func (c *Client) ListRepoTeams(ctx context.Context, owner, repo string) ([]RepoTeamAccess, error) {
+	var out []RepoTeamAccess
+	opts := &gh.ListOptions{PerPage: 100}
+	for {
+		teams, resp, err := c.api.Repositories.ListTeams(ctx, owner, repo, opts)
+		if err != nil {
+			return nil, fmt.Errorf("failed to list teams for %s/%s: %w", owner, repo, err)
+		}
+		for _, t := range teams {
+			out = append(out, RepoTeamAccess{
+				Slug:       t.GetSlug(),
+				Name:       t.GetName(),
+				Permission: t.GetPermission(),
+			})
+		}
+		if resp.NextPage == 0 {
+			break
+		}
+		opts.Page = resp.NextPage
+	}
+	return out, nil
+}
+
 var workflowRunURLPattern = regexp.MustCompile(`https://github\.com/([^/]+)/([^/]+)/actions/runs/(\d+)`)
 
 // prURLPattern matches GitHub PR URLs like https://github.com/owner/repo/pull/123

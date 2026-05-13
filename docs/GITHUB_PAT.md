@@ -67,7 +67,7 @@ Check the following scopes:
 | Scope | Why arbetern needs it |
 |---|---|
 | `repo` | Full access to repositories — read files, create branches, commit, open PRs, and read Actions/Checks data |
-| `read:org` | List organization repositories (only needed if arbetern operates across an org) |
+| `read:org` | List organization repositories and resolve which teams have direct access to a repo (powers `list_org_repos` and `list_repo_teams`) |
 
 ### Step 3: Generate and Copy
 

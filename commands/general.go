@@ -412,6 +412,20 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 		{
 			Type: "function",
 			Function: llm.ToolFunction{
+				Name:        "list_repo_teams",
+				Description: "List the GitHub teams that have direct access to a repository, with each team's permission level (admin, maintain, push, triage, or pull). This mirrors Settings → Collaborators and teams → Direct access in the GitHub UI. Use this to answer 'who can trigger / merge / admin <repo>'. Requires the bot's token to have read:org plus access to the repo; a 403 from GitHub usually means the token lacks read:org or the repo is private to another team.",
+				Parameters: json.RawMessage(`{
+					"type":"object",
+					"properties":{
+						"repo":{"type":"string","description":"Repository name (without owner)"}
+					},
+					"required":["repo"]
+				}`),
+			},
+		},
+		{
+			Type: "function",
+			Function: llm.ToolFunction{
 				Name:        "get_file_content",
 				Description: "Read the content of a file from a GitHub repository.",
 				Parameters: json.RawMessage(`{
@@ -1411,6 +1425,31 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		}
 		log.Printf("[user=%s channel=%s] listed %d user repos", userID, channelID, len(repos))
 		return fmt.Sprintf("Repositories (%d):\n%s", len(repos), strings.Join(repos, "\n"))
+
+	case "list_repo_teams":
+		args, errMsg := parseToolArgs[struct {
+			Repo string `json:"repo"`
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
+		}
+		owner, err := h.ghClient.ResolveOwner(ctx)
+		if err != nil {
+			return fmt.Sprintf("Error resolving owner: %v", err)
+		}
+		teams, err := h.ghClient.ListRepoTeams(ctx, owner, args.Repo)
+		if err != nil {
+			return fmt.Sprintf("Error listing teams for %s/%s: %v", owner, args.Repo, err)
+		}
+		if len(teams) == 0 {
+			return fmt.Sprintf("No teams have direct access to %s/%s.", owner, args.Repo)
+		}
+		lines := make([]string, 0, len(teams))
+		for _, t := range teams {
+			lines = append(lines, fmt.Sprintf("- @%s/%s (%s) — permission: %s", owner, t.Slug, t.Name, t.Permission))
+		}
+		log.Printf("[user=%s channel=%s] listed %d teams for %s/%s", userID, channelID, len(teams), owner, args.Repo)
+		return fmt.Sprintf("Teams with direct access to %s/%s (%d):\n%s", owner, args.Repo, len(teams), strings.Join(lines, "\n"))
 
 	case "get_file_content":
 		args, errMsg := parseToolArgs[struct {
