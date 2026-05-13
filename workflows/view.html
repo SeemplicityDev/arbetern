@@ -320,25 +320,29 @@
     }
     async function refreshGitopsStatus(kind) {
       const el = document.getElementById('gitops-status');
-      if (!el) return;
+      const btn = document.getElementById('gitops-sync-btn');
       try {
         const r = await fetch('/api/' + kind + '/_gitops', { cache: 'no-store' });
         if (!r.ok) throw new Error('HTTP ' + r.status);
         const body = await r.json();
         if (!body.enabled || !body.status) {
-          el.textContent = 'Sync polling is not configured on this server.';
-          el.style.color = 'var(--text-muted)';
-          const btn = document.getElementById('gitops-sync-btn');
-          if (btn) { btn.disabled = true; btn.style.opacity = '.5'; btn.style.cursor = 'not-allowed'; btn.title = 'GitOps sync is not enabled on this server.'; }
+          if (el) {
+            el.textContent = 'Sync polling is not configured on this server.';
+            el.style.color = 'var(--text-muted)';
+          }
+          if (btn) { btn.disabled = true; btn.style.opacity = '.5'; btn.style.cursor = 'not-allowed'; btn.title = 'GitOps sync is not enabled on this server.'; btn.style.display = 'none'; }
           return;
         }
+        if (!el) return;
         const st = body.status;
         el.textContent = gitopsStatusLine(st);
         el.style.color = st.last_error ? 'var(--red)' : 'var(--text-muted)';
         if (st.last_error) el.textContent += ' — error: ' + st.last_error;
       } catch (e) {
-        el.textContent = 'Could not load sync status: ' + e.message;
-        el.style.color = 'var(--red)';
+        if (el) {
+          el.textContent = 'Could not load sync status: ' + e.message;
+          el.style.color = 'var(--red)';
+        }
       }
     }
     async function triggerGitopsSync(kind) {
@@ -585,7 +589,21 @@
       } else {
         editBtn.style.display = '';
         gitopsBanner.style.display = 'none';
-        gitopsSyncBtn.style.display = 'none';
+        // The GitOps sync button is still useful for non-gitops workflows:
+        // pressing it triggers a server-wide reconcile, which can pull in a
+        // newly added descriptor from the source repo (e.g. when the user
+        // just committed a new workflow JSON and wants it visible without
+        // waiting for the poll interval). It is hidden only when the
+        // server has no GitOps syncer configured at all.
+        gitopsSyncBtn.style.display = '';
+        if (!gitopsSyncBtn.dataset.bound) {
+          gitopsSyncBtn.addEventListener('click', () => triggerGitopsSync('workflows'));
+          gitopsSyncBtn.dataset.bound = '1';
+        }
+        // refreshGitopsStatus disables the button (and changes its title)
+        // when the server reports `enabled: false`, so we get the right
+        // affordance for both states with no extra branching here.
+        refreshGitopsStatus('workflows');
       }
 
       document.getElementById('description').textContent = wf.description || '';
