@@ -413,13 +413,53 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 			Type: "function",
 			Function: llm.ToolFunction{
 				Name:        "list_repo_teams",
-				Description: "List the GitHub teams that have direct access to a repository, with each team's permission level (admin, maintain, push, triage, or pull). This mirrors Settings → Collaborators and teams → Direct access in the GitHub UI. Use this to answer 'who can trigger / merge / admin <repo>'. Requires the bot's token to have read:org plus access to the repo; a 403 from GitHub usually means the token lacks read:org or the repo is private to another team.",
+				Description: "List the GitHub teams that have direct access to a repository, with each team's permission level (admin, maintain, push, triage, or pull). This mirrors Settings → Collaborators and teams → Direct access in the GitHub UI. Use this to answer 'who can trigger / merge / admin <repo>'. Requires the bot's token to have read:org plus access to the repo; a 403 from GitHub usually means the token lacks read:org or the repo is private to another team. For more than ~3 repos, prefer `list_repo_teams_bulk` instead (parallel fetch).",
 				Parameters: json.RawMessage(`{
 					"type":"object",
 					"properties":{
 						"repo":{"type":"string","description":"Repository name (without owner)"}
 					},
 					"required":["repo"]
+				}`),
+			},
+		},
+		{
+			Type: "function",
+			Function: llm.ToolFunction{
+				Name:        "list_repo_teams_bulk",
+				Description: "Parallel version of list_repo_teams. Pass an array of repo names (without owner); GitHub is queried with up to 8 concurrent requests and a single combined response is returned. Per-repo errors (404 for missing-admin, etc.) are reported inline alongside the successful entries — they do NOT abort the whole call. Use this whenever you need teams for more than a handful of repos at once; calling list_repo_teams in a loop is strictly slower.",
+				Parameters: json.RawMessage(`{
+					"type":"object",
+					"properties":{
+						"repos":{"type":"array","items":{"type":"string"},"description":"List of repository names (without owner). Duplicates are deduplicated server-side."}
+					},
+					"required":["repos"]
+				}`),
+			},
+		},
+		{
+			Type: "function",
+			Function: llm.ToolFunction{
+				Name:        "get_files_bulk",
+				Description: "Parallel version of get_file_content. Pass an array of {repo, path, branch?} specs; GitHub is queried with up to 8 concurrent requests and a single combined response is returned. Per-file errors are reported inline alongside the successful entries — they do NOT abort the whole call. Use this whenever you need more than a handful of files at once; calling get_file_content in a loop is strictly slower. Each file is independently truncated to 32000 chars.",
+				Parameters: json.RawMessage(`{
+					"type":"object",
+					"properties":{
+						"files":{
+							"type":"array",
+							"description":"List of files to fetch.",
+							"items":{
+								"type":"object",
+								"properties":{
+									"repo":{"type":"string","description":"Repository name (without owner)"},
+									"path":{"type":"string","description":"File path within the repo"},
+									"branch":{"type":"string","description":"Optional branch (default: repo default branch)"}
+								},
+								"required":["repo","path"]
+							}
+						}
+					},
+					"required":["files"]
 				}`),
 			},
 		},
@@ -1450,6 +1490,105 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		}
 		log.Printf("[user=%s channel=%s] listed %d teams for %s/%s", userID, channelID, len(teams), owner, args.Repo)
 		return fmt.Sprintf("Teams with direct access to %s/%s (%d):\n%s", owner, args.Repo, len(teams), strings.Join(lines, "\n"))
+
+	case "list_repo_teams_bulk":
+		args, errMsg := parseToolArgs[struct {
+			Repos []string `json:"repos"`
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
+		}
+		// Dedupe + drop empties so the LLM can be sloppy.
+		seen := make(map[string]bool, len(args.Repos))
+		repos := make([]string, 0, len(args.Repos))
+		for _, r := range args.Repos {
+			r = strings.TrimSpace(r)
+			if r == "" || seen[r] {
+				continue
+			}
+			seen[r] = true
+			repos = append(repos, r)
+		}
+		if len(repos) == 0 {
+			return "Error: list_repo_teams_bulk requires a non-empty `repos` array."
+		}
+		owner, err := h.ghClient.ResolveOwner(ctx)
+		if err != nil {
+			return fmt.Sprintf("Error resolving owner: %v", err)
+		}
+		results, err := h.ghClient.ListReposTeamsBulk(ctx, owner, repos)
+		if err != nil {
+			return fmt.Sprintf("Error listing teams in bulk: %v", err)
+		}
+		var sb strings.Builder
+		okCount, errCount := 0, 0
+		for _, r := range results {
+			if r.Error != "" {
+				errCount++
+				fmt.Fprintf(&sb, "\n=== %s/%s — ERROR: %s ===\n", owner, r.Repo, r.Error)
+				continue
+			}
+			okCount++
+			if len(r.Teams) == 0 {
+				fmt.Fprintf(&sb, "\n=== %s/%s (no teams with direct access) ===\n", owner, r.Repo)
+				continue
+			}
+			fmt.Fprintf(&sb, "\n=== %s/%s (%d teams) ===\n", owner, r.Repo, len(r.Teams))
+			for _, t := range r.Teams {
+				fmt.Fprintf(&sb, "- @%s/%s (%s) — permission: %s\n", owner, t.Slug, t.Name, t.Permission)
+			}
+		}
+		log.Printf("[user=%s channel=%s] list_repo_teams_bulk: %d ok, %d errors (of %d repos)", userID, channelID, okCount, errCount, len(repos))
+		return fmt.Sprintf("Bulk list_repo_teams: %d ok, %d errors (of %d repos):%s", okCount, errCount, len(repos), sb.String())
+
+	case "get_files_bulk":
+		args, errMsg := parseToolArgs[struct {
+			Files []github.FileFetchSpec `json:"files"`
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
+		}
+		// Drop entries missing repo or path so a single bad entry doesn't
+		// abort the whole call (kept consistent with get_file_content's
+		// empty-arg guard).
+		clean := make([]github.FileFetchSpec, 0, len(args.Files))
+		for _, f := range args.Files {
+			if strings.TrimSpace(f.Repo) == "" || strings.TrimSpace(f.Path) == "" {
+				continue
+			}
+			clean = append(clean, f)
+		}
+		if len(clean) == 0 {
+			return "Error: get_files_bulk requires a non-empty `files` array where every entry has both `repo` and `path`."
+		}
+		owner, err := h.ghClient.ResolveOwner(ctx)
+		if err != nil {
+			return fmt.Sprintf("Error resolving owner: %v", err)
+		}
+		results, err := h.ghClient.GetFilesBulk(ctx, owner, clean)
+		if err != nil {
+			return fmt.Sprintf("Error fetching files in bulk: %v", err)
+		}
+		var sb strings.Builder
+		okCount, errCount := 0, 0
+		for _, r := range results {
+			if r.Error != "" {
+				errCount++
+				fmt.Fprintf(&sb, "\n=== %s:%s — ERROR: %s ===\n", r.Repo, r.Path, r.Error)
+				continue
+			}
+			okCount++
+			content := r.Content
+			if len(content) > maxFileContentLen {
+				totalLen := len(content)
+				content = content[:maxFileContentLen] + fmt.Sprintf(
+					"\n... (TRUNCATED — %d of %d chars shown)",
+					maxFileContentLen, totalLen)
+			}
+			fmt.Fprintf(&sb, "\n=== %s:%s ===\n%s\n", r.Repo, r.Path, content)
+		}
+		log.Printf("[user=%s channel=%s] get_files_bulk: %d ok, %d errors (of %d files)", userID, channelID, okCount, errCount, len(clean))
+		return fmt.Sprintf("Bulk get_file_content: %d ok, %d errors (of %d files):%s", okCount, errCount, len(clean), sb.String())
 
 	case "get_file_content":
 		args, errMsg := parseToolArgs[struct {

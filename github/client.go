@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	gh "github.com/google/go-github/v60/github"
@@ -479,6 +480,107 @@ func (c *Client) ListRepoTeams(ctx context.Context, owner, repo string) ([]RepoT
 		opts.Page = resp.NextPage
 	}
 	return out, nil
+}
+
+// bulkConcurrency caps the number of in-flight GitHub API calls a Bulk* helper
+// will issue at once. 8 is comfortably below GitHub's default secondary
+// rate-limit threshold (~80 concurrent reqs) while still cutting wall-clock
+// time by ~8× compared to a sequential loop.
+const bulkConcurrency = 8
+
+// FileFetchSpec is one entry in a GetFilesBulk request.
+type FileFetchSpec struct {
+	Repo   string `json:"repo"`
+	Path   string `json:"path"`
+	Branch string `json:"branch,omitempty"` // empty == default branch
+}
+
+// FileFetchResult mirrors FileFetchSpec and adds the fetched bytes / error.
+// Exactly one of Content / Error is populated.
+type FileFetchResult struct {
+	Repo    string `json:"repo"`
+	Path    string `json:"path"`
+	Branch  string `json:"branch,omitempty"`
+	Content string `json:"content,omitempty"`
+	SHA     string `json:"sha,omitempty"`
+	Error   string `json:"error,omitempty"`
+}
+
+// GetFilesBulk fetches many files in parallel (up to bulkConcurrency at a
+// time). Per-file failures are captured in the result's Error field so the
+// caller can render a partial answer; the function itself only returns an
+// error if ctx is cancelled. Order of returned results matches the input.
+func (c *Client) GetFilesBulk(ctx context.Context, owner string, specs []FileFetchSpec) ([]FileFetchResult, error) {
+	results := make([]FileFetchResult, len(specs))
+	sem := make(chan struct{}, bulkConcurrency)
+	var wg sync.WaitGroup
+	for i, spec := range specs {
+		i, spec := i, spec
+		wg.Add(1)
+		sem <- struct{}{}
+		go func() {
+			defer wg.Done()
+			defer func() { <-sem }()
+			results[i] = FileFetchResult{Repo: spec.Repo, Path: spec.Path, Branch: spec.Branch}
+			if ctx.Err() != nil {
+				results[i].Error = ctx.Err().Error()
+				return
+			}
+			content, sha, err := c.GetFileContent(ctx, owner, spec.Repo, spec.Path, spec.Branch)
+			if err != nil {
+				results[i].Error = err.Error()
+				return
+			}
+			results[i].Content = content
+			results[i].SHA = sha
+		}()
+	}
+	wg.Wait()
+	if err := ctx.Err(); err != nil {
+		return results, err
+	}
+	return results, nil
+}
+
+// RepoTeamsBulkResult is one entry in the response of ListReposTeamsBulk.
+// Exactly one of Teams / Error is populated.
+type RepoTeamsBulkResult struct {
+	Repo  string           `json:"repo"`
+	Teams []RepoTeamAccess `json:"teams,omitempty"`
+	Error string           `json:"error,omitempty"`
+}
+
+// ListReposTeamsBulk runs ListRepoTeams for many repos in parallel. Same
+// fan-out and error semantics as GetFilesBulk.
+func (c *Client) ListReposTeamsBulk(ctx context.Context, owner string, repos []string) ([]RepoTeamsBulkResult, error) {
+	results := make([]RepoTeamsBulkResult, len(repos))
+	sem := make(chan struct{}, bulkConcurrency)
+	var wg sync.WaitGroup
+	for i, repo := range repos {
+		i, repo := i, repo
+		wg.Add(1)
+		sem <- struct{}{}
+		go func() {
+			defer wg.Done()
+			defer func() { <-sem }()
+			results[i] = RepoTeamsBulkResult{Repo: repo}
+			if ctx.Err() != nil {
+				results[i].Error = ctx.Err().Error()
+				return
+			}
+			teams, err := c.ListRepoTeams(ctx, owner, repo)
+			if err != nil {
+				results[i].Error = err.Error()
+				return
+			}
+			results[i].Teams = teams
+		}()
+	}
+	wg.Wait()
+	if err := ctx.Err(); err != nil {
+		return results, err
+	}
+	return results, nil
 }
 
 var workflowRunURLPattern = regexp.MustCompile(`https://github\.com/([^/]+)/([^/]+)/actions/runs/(\d+)`)
