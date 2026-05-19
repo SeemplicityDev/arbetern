@@ -239,7 +239,7 @@ spec:
               value: "{{ .Values.dashboards.gitops.interval }}"
             {{- end }}
             - name: DASHBOARDS_GITOPS_PRUNE
-              value: {{ .Values.dashboards.gitops.prune | default false | quote }}
+              value: {{ .Values.dashboards.gitops.prune | default true | quote }}
             {{- end }}
             {{- end }}
             {{- if .Values.workflows.enabled }}
@@ -265,7 +265,7 @@ spec:
               value: "{{ .Values.workflows.gitops.interval }}"
             {{- end }}
             - name: WORKFLOWS_GITOPS_PRUNE
-              value: {{ .Values.workflows.gitops.prune | default false | quote }}
+              value: {{ .Values.workflows.gitops.prune | default true | quote }}
             {{- end }}
             {{- end }}
             {{- if and .Values.persistence.enabled .Values.userContext .Values.userContext.enabled }}

@@ -51,7 +51,7 @@ func buildPRBody(userID, supplied, fallback string) string {
 func parseToolArgs[T any](argsJSON string) (T, string) {
 	var args T
 	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
-		return args, fmt.Sprintf("Error parsing arguments: %v", err)
+		return args, preconditionErrf("Error parsing arguments: %v", err)
 	}
 	return args, ""
 }
@@ -60,9 +60,41 @@ func parseToolArgs[T any](argsJSON string) (T, string) {
 // Returns a user-facing error string if the client is not available.
 func requireReady(name string, c OAuthClient) string {
 	if c == nil || !c.Ready() {
-		return fmt.Sprintf("Error: %s integration is not connected. It may still be initializing — please try again shortly.", name)
+		return preconditionErrf("Error: %s integration is not connected. It may still be initializing — please try again shortly.", name)
 	}
 	return ""
+}
+
+// preconditionErrPrefix tags tool-result strings whose error happened
+// BEFORE any mutating side effect was attempted (missing/invalid args,
+// content guards, regex compile failures, "old_content not found", etc.).
+//
+// These rejections are recoverable: the LLM sees the error, fixes its
+// arguments, and retries on the next round. They are NOT counted as
+// mutating-tool failures by the workflow tick loop, because no PR was
+// opened, no Slack message was sent, no dashboard was written — nothing
+// actually happened externally. The prefix uses non-printable bytes so
+// it's invisible if it ever leaks through to the LLM unstripped.
+const preconditionErrPrefix = "\x00\x00ARBETERN_PRECONDITION\x00\x00"
+
+// preconditionErrf wraps a formatted error string with the precondition
+// sentinel so the workflow loop can recognise it as "no side effect was
+// attempted". The sentinel is stripped before the message is handed to
+// the LLM.
+func preconditionErrf(format string, a ...any) string {
+	return preconditionErrPrefix + fmt.Sprintf(format, a...)
+}
+
+// isPreconditionErr reports whether a tool result is a precondition
+// rejection (no side effect attempted).
+func isPreconditionErr(s string) bool {
+	return strings.HasPrefix(s, preconditionErrPrefix)
+}
+
+// stripPreconditionPrefix removes the internal sentinel so the tool
+// result is safe to pass back to the LLM.
+func stripPreconditionPrefix(s string) string {
+	return strings.TrimPrefix(s, preconditionErrPrefix)
 }
 
 // agentPatchBranchRE matches branches produced by github.GenerateBranchName
@@ -80,7 +112,7 @@ var agentPatchBranchRE = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*/patch-[0-9]+$`
 func resolveRepoBranch(ctx context.Context, ghClient *github.Client, repo, branch string) (owner, resolvedBranch string, errMsg string) {
 	owner, err := ghClient.ResolveOwner(ctx)
 	if err != nil {
-		return "", "", fmt.Sprintf("Error resolving owner: %v", err)
+		return "", "", preconditionErrf("Error resolving owner: %v", err)
 	}
 	if branch != "" && agentPatchBranchRE.MatchString(branch) {
 		log.Printf("[helpers] ignoring auto-generated agent branch %q as base for %s/%s; falling back to default branch",
@@ -90,7 +122,7 @@ func resolveRepoBranch(ctx context.Context, ghClient *github.Client, repo, branc
 	if branch == "" {
 		branch, err = ghClient.GetDefaultBranch(ctx, owner, repo)
 		if err != nil {
-			return "", "", fmt.Sprintf("Error getting default branch: %v", err)
+			return "", "", preconditionErrf("Error getting default branch: %v", err)
 		}
 	}
 	return owner, branch, ""

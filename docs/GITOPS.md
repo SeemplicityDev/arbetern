@@ -208,14 +208,14 @@ syncer.
 | `workflows.gitops.branch`                 | `WORKFLOWS_GITOPS_BRANCH`        | repo default branch     | Branch to read.                                                      |
 | `workflows.gitops.basePath`               | `WORKFLOWS_GITOPS_BASE_PATH`     | `arbetern/workflows`    | Top-level path inside the repo.                                      |
 | `workflows.gitops.interval`               | `WORKFLOWS_GITOPS_INTERVAL`      | `5m`                    | Go duration. Minimum 30 s.                                           |
-| `workflows.gitops.prune`                  | `WORKFLOWS_GITOPS_PRUNE`         | `false`                 | Delete locally-managed workflows that disappear from git.            |
+| `workflows.gitops.prune`                  | `WORKFLOWS_GITOPS_PRUNE`         | `true`                  | Delete locally-managed workflows that disappear from git.            |
 | `dashboards.gitops.enabled`               | (implicit)                       | `false`                 | Enables the dashboards syncer when `repo` is also set.               |
 | `dashboards.gitops.owner`                 | `DASHBOARDS_GITOPS_OWNER`        | bot's resolved owner    |                                                                      |
 | `dashboards.gitops.repo`                  | `DASHBOARDS_GITOPS_REPO`         | (required)              |                                                                      |
 | `dashboards.gitops.branch`                | `DASHBOARDS_GITOPS_BRANCH`       | repo default branch     |                                                                      |
 | `dashboards.gitops.basePath`              | `DASHBOARDS_GITOPS_BASE_PATH`    | `arbetern/dashboards`   |                                                                      |
 | `dashboards.gitops.interval`              | `DASHBOARDS_GITOPS_INTERVAL`     | `5m`                    | Go duration. Minimum 30 s.                                           |
-| `dashboards.gitops.prune`                 | `DASHBOARDS_GITOPS_PRUNE`        | `false`                 | Delete locally-managed dashboards that disappear from git.           |
+| `dashboards.gitops.prune`                 | `DASHBOARDS_GITOPS_PRUNE`        | `true`                  | Delete locally-managed dashboards that disappear from git.           |
 
 Both syncers reuse the same `GITHUB_TOKEN` as the rest of the app, so it
 needs `contents:read` on the source repo(s). No extra credentials.
@@ -230,7 +230,7 @@ workflows:
     repo: <your-workflows-repo>
     basePath: arbetern/workflows
     interval: 5m
-    prune: false
+    prune: true
 
 dashboards:
   enabled: true
@@ -239,7 +239,7 @@ dashboards:
     repo: <your-dashboards-repo>      # may be the same repo as workflows
     basePath: arbetern/dashboards
     interval: 5m
-    prune: false
+    prune: true
 ```
 
 ## ConfigMap example (raw kubernetes deploy)
@@ -256,11 +256,11 @@ data:
   WORKFLOWS_GITOPS_REPO: "<your-workflows-repo>"
   WORKFLOWS_GITOPS_BASE_PATH: "arbetern/workflows"
   WORKFLOWS_GITOPS_INTERVAL: "5m"
-  WORKFLOWS_GITOPS_PRUNE: "false"
+  WORKFLOWS_GITOPS_PRUNE: "true"
   DASHBOARDS_GITOPS_REPO: "<your-dashboards-repo>"
   DASHBOARDS_GITOPS_BASE_PATH: "arbetern/dashboards"
   DASHBOARDS_GITOPS_INTERVAL: "5m"
-  DASHBOARDS_GITOPS_PRUNE: "false"
+  DASHBOARDS_GITOPS_PRUNE: "true"
 ---
 apiVersion: apps/v1
 kind: StatefulSet

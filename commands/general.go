@@ -215,6 +215,7 @@ func (h *GeneralHandler) Execute(channelID, userID, text, responseURL, auditTS s
 			log.Printf("[user=%s channel=%s] LLM called tool: %s(%s)", userID, channelID, tc.Function.Name, tc.Function.Arguments)
 			toolCallsMade = true
 			result := h.executeTool(ctx, channelID, userID, auditTS, tc.Function.Name, tc.Function.Arguments)
+			result = stripPreconditionPrefix(result)
 			messages = append(messages, llm.NewToolResultMessage(tc.ID, result))
 			if tc.Function.Name == "reply_in_thread" && !strings.HasPrefix(result, "Error") {
 				repliedInThread = true
@@ -355,6 +356,16 @@ func (h *GeneralHandler) ExecuteHeadless(ctx context.Context, userID, prompt str
 			toolCallsMade++
 			log.Printf("[workflow user=%s agent=%s] tool: %s(%s)", userID, h.agentID, tc.Function.Name, tc.Function.Arguments)
 			result := h.executeTool(ctx, "", userID, "", tc.Function.Name, tc.Function.Arguments)
+			// Precondition errors mean the tool rejected the call BEFORE any
+			// side effect was attempted (missing args, content guards, etc.).
+			// They are recoverable by the LLM's own retry loop and must not
+			// be counted as mutating failures — nothing externally observable
+			// happened. We still log them for operator visibility, then strip
+			// the sentinel before handing the message back to the LLM.
+			precondition := isPreconditionErr(result)
+			if precondition {
+				result = stripPreconditionPrefix(result)
+			}
 			// Surface tool-level errors in the operator log. Without this, a
 			// silent "Error: old_content not found" (or similar) from a
 			// modify_file call is only visible to the LLM and can cause it
@@ -364,9 +375,13 @@ func (h *GeneralHandler) ExecuteHeadless(ctx context.Context, userID, prompt str
 				if len(preview) > 300 {
 					preview = preview[:300] + "…"
 				}
-				log.Printf("[workflow user=%s agent=%s] tool %s returned: %s", userID, h.agentID, tc.Function.Name, preview)
-				if mutatingTools[tc.Function.Name] {
-					mutatingFailures = append(mutatingFailures, fmt.Sprintf("%s: %s", tc.Function.Name, preview))
+				if precondition {
+					log.Printf("[workflow user=%s agent=%s] tool %s precondition rejected (no side effect attempted): %s", userID, h.agentID, tc.Function.Name, preview)
+				} else {
+					log.Printf("[workflow user=%s agent=%s] tool %s returned: %s", userID, h.agentID, tc.Function.Name, preview)
+					if mutatingTools[tc.Function.Name] {
+						mutatingFailures = append(mutatingFailures, fmt.Sprintf("%s: %s", tc.Function.Name, preview))
+					}
 				}
 			}
 			messages = append(messages, llm.NewToolResultMessage(tc.ID, result))
@@ -1730,27 +1745,27 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		readBranch := h.branchMgr.ReadBranch(owner, args.Repo, baseBranch)
 		fullContent, fileSHA, err := h.ghClient.GetFileContent(ctx, owner, args.Repo, args.Path, readBranch)
 		if err != nil {
-			return fmt.Sprintf("Error reading current file: %v", err)
+			return preconditionErrf("Error reading current file: %v", err)
 		}
 		if !strings.Contains(fullContent, args.OldContent) {
-			return "Error: old_content not found in the file. Make sure old_content is an exact substring of the current file (including whitespace and indentation). Re-read the file with get_file_content and try again."
+			return preconditionErrf("Error: old_content not found in the file. Make sure old_content is an exact substring of the current file (including whitespace and indentation). Re-read the file with get_file_content and try again.")
 		}
 		occurrences := strings.Count(fullContent, args.OldContent)
 		if occurrences > 1 {
-			return fmt.Sprintf("Error: old_content matches %d locations in the file. Include more surrounding context lines to make it unique.", occurrences)
+			return preconditionErrf("Error: old_content matches %d locations in the file. Include more surrounding context lines to make it unique.", occurrences)
 		}
 		updatedContent := strings.Replace(fullContent, args.OldContent, args.NewContent, 1)
 		if updatedContent == fullContent {
-			return "Error: old_content and new_content produce identical file content. The replacement is a no-op — double-check that new_content differs from old_content."
+			return preconditionErrf("Error: old_content and new_content produce identical file content. The replacement is a no-op — double-check that new_content differs from old_content.")
 		}
 		// Reject changes whose only effect is whitespace (trailing newline, spaces,
 		// blank lines). A scheduled auto-fix workflow that submits a whitespace-only
 		// PR is almost always the model giving up after its real replacement
 		// failed, and it pollutes the repo with useless PRs.
 		if stripWhitespace(updatedContent) == stripWhitespace(fullContent) {
-			return "Error: the only effective change is whitespace (trailing newline / spaces / blank lines). " +
+			return preconditionErrf("Error: the only effective change is whitespace (trailing newline / spaces / blank lines). " +
 				"This is rejected because it is not a real code change. " +
-				"Re-read the file with get_file_content, then submit a modify_file with a substantive content difference."
+				"Re-read the file with get_file_content, then submit a modify_file with a substantive content difference.")
 		}
 
 		prBody := buildPRBody(userID, args.PRBody, fmt.Sprintf("Automated change requested via Slack by <@%s>.\n\nChange: %s", userID, args.Description))
@@ -1819,7 +1834,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		}
 		re, err := regexp.Compile(args.Pattern)
 		if err != nil {
-			return fmt.Sprintf("Error compiling regex pattern: %v", err)
+			return preconditionErrf("Error compiling regex pattern: %v", err)
 		}
 		owner, baseBranch, errMsg := resolveRepoBranch(ctx, h.ghClient, args.Repo, args.Branch)
 		if errMsg != "" {
@@ -1829,12 +1844,12 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		readBranch := h.branchMgr.ReadBranch(owner, args.Repo, baseBranch)
 		fullContent, fileSHA, err := h.ghClient.GetFileContent(ctx, owner, args.Repo, args.Path, readBranch)
 		if err != nil {
-			return fmt.Sprintf("Error reading current file: %v", err)
+			return preconditionErrf("Error reading current file: %v", err)
 		}
 
 		updatedContent := re.ReplaceAllString(fullContent, args.Replacement)
 		if updatedContent == fullContent {
-			return "Error: regex pattern matched nothing in the file. Double-check the pattern and try again."
+			return preconditionErrf("Error: regex pattern matched nothing in the file. Double-check the pattern and try again.")
 		}
 		matches := len(re.FindAllStringIndex(fullContent, -1))
 		log.Printf("[user=%s channel=%s] regex_replace_file: %d matches of %q in %s/%s",
@@ -2121,7 +2136,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 			return errMsg
 		}
 		if strings.TrimSpace(args.ChannelID) == "" || strings.TrimSpace(args.Text) == "" {
-			return "Error: 'channel_id' and 'text' are required."
+			return preconditionErrf("Error: 'channel_id' and 'text' are required.")
 		}
 		ts, err := h.slackClient.PostMessageInThread(args.ChannelID, args.ThreadTS, args.Text)
 		if err != nil {

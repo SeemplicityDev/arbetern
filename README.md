@@ -148,7 +148,7 @@ See [docs/GITOPS.md](docs/GITOPS.md). All variables reuse `GITHUB_TOKEN`.
 | `WORKFLOWS_GITOPS_BRANCH` | Branch (defaults to repo default) |
 | `WORKFLOWS_GITOPS_BASE_PATH` | Base path inside the repo (default `arbetern/workflows`) |
 | `WORKFLOWS_GITOPS_INTERVAL` | Poll interval (Go duration, default `5m`, minimum `30s`) |
-| `WORKFLOWS_GITOPS_PRUNE` | When `true`, locally-managed workflows that disappear from git are deleted (default `false`) |
+| `WORKFLOWS_GITOPS_PRUNE` | When `true`, locally-managed workflows that disappear from git are deleted (default `true`) |
 | `DASHBOARDS_GITOPS_*` | Same semantics as the `WORKFLOWS_GITOPS_*` knobs above. Default base path `arbetern/dashboards` |
 
 </details>

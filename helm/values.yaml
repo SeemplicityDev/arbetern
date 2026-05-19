@@ -72,7 +72,7 @@ dashboards:
     # branch: ""
     basePath: "arbetern/dashboards"
     interval: "5m"
-    prune: false
+    prune: true
 
 workflows:
   enabled: true
@@ -95,7 +95,7 @@ workflows:
     # branch: ""               # empty == repo default branch
     basePath: "arbetern/workflows"
     interval: "5m"             # Go duration; minimum 30s
-    prune: false               # delete locally-managed workflows that disappear from git
+    prune: true                # delete locally-managed workflows that disappear from git
 
 # Per-user rolling context store. Files at <mountPath>/<subPath>/<agent>/<user>/context.txt
 # accumulate compact (question, summary) turns so the agent can recognise
