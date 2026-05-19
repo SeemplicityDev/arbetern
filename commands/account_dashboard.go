@@ -203,10 +203,22 @@ func buildAccountBlocks(d *dashboards.Dashboard, viewURL string, cacheHit bool) 
 		nil,
 	)
 
-	// Signal breakdown as a dense key: value line.
+	// Signal breakdown — show score plus the reasons that drove it so the
+	// reader can see *why* each signal landed where it did.
 	var sb strings.Builder
 	for _, s := range acct.Signals {
-		fmt.Fprintf(&sb, "• *%s* — `%d / %d`\n", s.Name, s.Score, s.Weight)
+		delta := s.Score - s.Weight
+		var deltaStr string
+		switch {
+		case delta < 0:
+			deltaStr = fmt.Sprintf(" (`%d`)", delta)
+		case delta == 0 && s.Weight > 0:
+			deltaStr = " (full credit)"
+		}
+		fmt.Fprintf(&sb, "• *%s* — `%d / %d`%s\n", s.Name, s.Score, s.Weight, deltaStr)
+		for _, reason := range s.Reasons {
+			fmt.Fprintf(&sb, "        ◦ %s\n", reason)
+		}
 	}
 	breakdown := slacklib.NewSectionBlock(
 		slacklib.NewTextBlockObject("mrkdwn", "*Signal breakdown*\n"+sb.String(), false, false),

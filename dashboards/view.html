@@ -66,6 +66,18 @@
     .list-block li{padding:6px 0;border-bottom:1px solid var(--border);font-size:13px;line-height:1.45}
     .list-block li:last-child{border-bottom:none}
     .signal-chart{margin-top:18px;background:#050505;border:1px solid var(--border);border-radius:10px;padding:14px;grid-column:1 / -1}
+    .score-why{grid-column:1 / -1;background:#050505;border:1px solid var(--border);border-radius:10px;padding:14px}
+    .score-why h3{font-size:12px;text-transform:uppercase;letter-spacing:.5px;color:var(--text-muted);margin:0 0 10px;font-weight:600}
+    .score-why .sig{padding:8px 0;border-bottom:1px solid var(--border)}
+    .score-why .sig:last-child{border-bottom:none}
+    .score-why .sig-head{display:flex;justify-content:space-between;align-items:baseline;gap:10px;font-size:13px}
+    .score-why .sig-name{font-weight:600}
+    .score-why .sig-score{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;color:var(--text-muted)}
+    .score-why .sig-score .delta-bad{color:#e07c7c}
+    .score-why .sig-score .delta-ok{color:#57c97a}
+    .score-why ul{list-style:none;padding:0;margin:6px 0 0}
+    .score-why li{font-size:12px;color:var(--text-muted);padding:2px 0 2px 14px;position:relative;line-height:1.45}
+    .score-why li:before{content:'◦';position:absolute;left:0;color:var(--text-muted)}
     canvas#signal-chart{max-height:220px}
     /* Datadog metrics (datadog_query_metrics source) chart widgets. */
     .metrics-site{margin-bottom:18px}
@@ -617,6 +629,27 @@
     const band = (acct.band || 'yellow').toLowerCase();
     const risks = (acct.risks || []).map(r => '<li>' + escapeHtml(r) + '</li>').join('') || '<li class="empty">No top risks.</li>';
     const actions = (acct.actions || []).map(r => '<li>' + escapeHtml(r) + '</li>').join('') || '<li class="empty">No immediate actions.</li>';
+    const signalsList = acct.signals || [];
+    const whyRows = signalsList.map(s => {
+      const score = s.score ?? 0;
+      const weight = s.weight ?? 0;
+      const delta = score - weight;
+      let deltaHtml = '';
+      if (delta < 0) {
+        deltaHtml = ' <span class="delta-bad">(' + delta + ')</span>';
+      } else if (weight > 0) {
+        deltaHtml = ' <span class="delta-ok">(full credit)</span>';
+      }
+      const reasons = (s.reasons || []).map(r => '<li>' + escapeHtml(r) + '</li>').join('')
+        || '<li>no contributing signals recorded</li>';
+      return '<div class="sig">' +
+        '<div class="sig-head">' +
+          '<span class="sig-name">' + escapeHtml(s.name || '') + '</span>' +
+          '<span class="sig-score">' + score + ' / ' + weight + deltaHtml + '</span>' +
+        '</div>' +
+        '<ul>' + reasons + '</ul>' +
+      '</div>';
+    }).join('') || '<div class="sig"><div class="sig-head"><span class="sig-name">No signals scored yet.</span></div></div>';
     panel.innerHTML =
       '<div class="account">' +
         '<div class="score-box band-' + escapeHtml(band) + '">' +
@@ -628,6 +661,7 @@
           '<div class="list-block"><h3>Top risks</h3><ul>' + risks + '</ul></div>' +
           '<div class="list-block"><h3>Action items</h3><ul>' + actions + '</ul></div>' +
         '</div>' +
+        '<div class="score-why"><h3>Why this score</h3>' + whyRows + '</div>' +
         '<div class="signal-chart"><canvas id="signal-chart"></canvas></div>' +
       '</div>';
     // Signal breakdown bar chart.
