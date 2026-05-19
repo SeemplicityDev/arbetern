@@ -35,6 +35,7 @@ func BuildAccountDashboard(ctx context.Context, clients Clients, agent, createdB
 
 	start := time.Now()
 	snap := AccountSnapshot{Account: acct, Now: start.UTC()}
+	needles := accountNeedles(acct.Name, query)
 	sourceResults := make(map[string]SourceResult, 4)
 	sources := []DataSource{
 		{Type: "salesforce_query", Name: "Opportunities"},
@@ -51,7 +52,7 @@ func BuildAccountDashboard(ctx context.Context, clients Clients, agent, createdB
 	go func() {
 		defer wg.Done()
 		t0 := time.Now()
-		opps, err := fetchOpportunities(clients.SF, acct.ID)
+		opps, err := fetchOpportunities(clients.SF, acct.ID, needles)
 		res := SourceResult{
 			FetchedAt:  time.Now().UTC().Format(time.RFC3339),
 			DurationMS: time.Since(t0).Milliseconds(),
@@ -82,7 +83,7 @@ func BuildAccountDashboard(ctx context.Context, clients Clients, agent, createdB
 			mu.Unlock()
 			return
 		}
-		jql := buildAccountJQL(acct.Name)
+		jql := buildAccountJQL(needles)
 		issues, err := clients.Jira.SearchIssuesJQL(jql, 50)
 		res.DurationMS = time.Since(t0).Milliseconds()
 		if err != nil {
@@ -111,7 +112,7 @@ func BuildAccountDashboard(ctx context.Context, clients Clients, agent, createdB
 			mu.Unlock()
 			return
 		}
-		engs, err := fetchEngagements(clients.Chorus, acct.Name, acct.Website)
+		engs, err := fetchEngagements(clients.Chorus, needles, acct.Website)
 		res.DurationMS = time.Since(t0).Milliseconds()
 		if err != nil {
 			res.Error = err.Error()
@@ -139,7 +140,7 @@ func BuildAccountDashboard(ctx context.Context, clients Clients, agent, createdB
 			mu.Unlock()
 			return
 		}
-		monitors, err := fetchMonitors(ctx, clients.Datadog, acct.Name)
+		monitors, err := fetchMonitors(ctx, clients.Datadog, needles)
 		res.DurationMS = time.Since(t0).Milliseconds()
 		if err != nil {
 			res.Error = err.Error()
@@ -229,55 +230,176 @@ func lengthBonus(n string) int {
 	return 40 - len(n)
 }
 
-// fetchOpportunities pulls open + recently-closed opps for the account.
-func fetchOpportunities(sf *salesforce.Client, accountID string) ([]salesforce.Opportunity, error) {
+// fetchOpportunities pulls open + recently-closed opps for the account, plus
+// any opportunity whose Account.Name matches one of the supplied needles so
+// related accounts (e.g. a parent "Acme Pharmaceuticals" account holding
+// the commercial relationship for the "Acme Ireland" subsidiary) are
+// surfaced too. Results are deduped by opportunity Id.
+func fetchOpportunities(sf *salesforce.Client, accountID string, needles []string) ([]salesforce.Opportunity, error) {
+	clauses := make([]string, 0, len(needles)+1)
+	if accountID != "" {
+		clauses = append(clauses, fmt.Sprintf("AccountId = '%s'", strings.ReplaceAll(accountID, "'", "")))
+	}
+	for _, n := range needles {
+		safe := strings.ReplaceAll(n, "'", "")
+		if safe == "" {
+			continue
+		}
+		clauses = append(clauses, fmt.Sprintf("Account.Name LIKE '%%%s%%'", safe))
+	}
+	if len(clauses) == 0 {
+		return nil, nil
+	}
 	soql := fmt.Sprintf(
-		"SELECT Id, Name, StageName, Amount, CloseDate, Type, IsClosed, IsWon, Account.Name, Owner.Name FROM Opportunity WHERE AccountId = '%s' ORDER BY CloseDate DESC LIMIT 25",
-		accountID,
+		"SELECT Id, Name, StageName, Amount, CloseDate, Type, IsClosed, IsWon, Account.Name, Owner.Name FROM Opportunity WHERE %s ORDER BY CloseDate DESC LIMIT 50",
+		strings.Join(clauses, " OR "),
 	)
 	res, err := sf.Query(soql)
 	if err != nil {
 		return nil, err
 	}
-	return salesforce.ParseOpportunities(res.Records), nil
+	parsed := salesforce.ParseOpportunities(res.Records)
+	seen := make(map[string]bool, len(parsed))
+	out := parsed[:0]
+	for _, o := range parsed {
+		if o.ID == "" || seen[o.ID] {
+			continue
+		}
+		seen[o.ID] = true
+		out = append(out, o)
+	}
+	return out, nil
 }
 
 // buildAccountJQL returns JQL that matches open tickets whose summary or
-// description references the account. Closed/done states are excluded.
-func buildAccountJQL(accountName string) string {
-	escaped := strings.ReplaceAll(accountName, `"`, `\"`)
+// description references any of the supplied needles. Closed/done states are
+// excluded. Multiple needles are OR-joined so "Acme Ireland" also picks
+// up tickets that only mention "Acme".
+func buildAccountJQL(needles []string) string {
+	if len(needles) == 0 {
+		return `statusCategory != Done ORDER BY priority DESC, updated DESC`
+	}
+	clauses := make([]string, 0, len(needles))
+	for _, n := range needles {
+		escaped := strings.ReplaceAll(n, `"`, `\"`)
+		clauses = append(clauses, fmt.Sprintf(`summary ~ "%s" OR description ~ "%s"`, escaped, escaped))
+	}
 	return fmt.Sprintf(
-		`(summary ~ "%s" OR description ~ "%s") AND statusCategory != Done ORDER BY priority DESC, updated DESC`,
-		escaped, escaped,
+		`(%s) AND statusCategory != Done ORDER BY priority DESC, updated DESC`,
+		strings.Join(clauses, " OR "),
 	)
 }
 
-// fetchEngagements queries Chorus for the last 45 days and filters client-side
-// by account name / email domain. The v3 filter API doesn't support substring
-// matching on titles so we do it here.
-func fetchEngagements(ch *chorus.Client, accountName, website string) ([]chorus.Engagement, error) {
-	from := time.Now().AddDate(0, 0, -45).Format("2006-01-02")
-	filter := chorus.EngagementFilter{MinDate: from, WithTrackers: true}
-	if domain := domainFromWebsite(website); domain != "" {
-		filter.ParticipantsEmail = "@" + domain
+// accountNeedles returns a deduped, lowercased list of search terms suited to
+// free-text matching across Jira, Chorus, and Datadog. It always includes the
+// full resolved account name plus the original user query, and additionally
+// derives a "stem" by stripping common corporate and regional suffixes so a
+// dashboard for "Acme Ireland" still surfaces data referencing only
+// "Acme".
+func accountNeedles(accountName, originalQuery string) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0, 3)
+	add := func(s string) {
+		s = strings.ToLower(strings.TrimSpace(s))
+		if s == "" || seen[s] {
+			return
+		}
+		seen[s] = true
+		out = append(out, s)
 	}
-	engs, err := ch.ListEngagements(filter)
+	add(accountName)
+	add(originalQuery)
+	add(stripAccountSuffixes(accountName))
+	return out
+}
+
+// stripAccountSuffixes removes trailing corporate/regional tokens commonly
+// appended to account names in Salesforce (e.g. "Acme Ireland",
+// "Acme Inc.", "Foo Ltd"). Matching is case-insensitive and applied
+// repeatedly so chained suffixes ("Acme Ireland Ltd") fully collapse.
+func stripAccountSuffixes(name string) string {
+	n := strings.TrimSpace(name)
+	suffixes := []string{
+		" Ireland", " UK", " USA", " US", " EMEA", " APAC", " Americas",
+		" EU", " Europe", " Global", " International",
+		" Inc", " Inc.", " Corp", " Corp.", " Corporation",
+		" LLC", " L.L.C.", " Ltd", " Ltd.", " Limited",
+		" GmbH", " AG", " SA", " S.A.", " PLC", " Co.", " Company",
+	}
+	for changed := true; changed; {
+		changed = false
+		lower := strings.ToLower(n)
+		for _, s := range suffixes {
+			ls := strings.ToLower(s)
+			if strings.HasSuffix(lower, ls) {
+				n = strings.TrimSpace(strings.TrimRight(n[:len(n)-len(s)], ","))
+				changed = true
+				break
+			}
+		}
+	}
+	return n
+}
+
+// fetchEngagements queries Chorus for the last 45 days with no participant
+// filter, then filters client-side across every signal we can lay hands on:
+// subject, Chorus-reported account name, participant company name, and
+// participant email (matched against either the account's website domain or
+// any of the provided needles). The v3 filter API only supports a single
+// participant email pattern, which is too narrow when the account has no
+// website on file or when relevant calls include reps from a parent account —
+// so we cast a wider net here and dedupe by engagement_id.
+func fetchEngagements(ch *chorus.Client, needles []string, website string) ([]chorus.Engagement, error) {
+	from := time.Now().AddDate(0, 0, -45).Format("2006-01-02")
+	engs, err := ch.ListEngagements(chorus.EngagementFilter{MinDate: from, WithTrackers: true})
 	if err != nil {
 		return nil, err
 	}
-	if filter.ParticipantsEmail != "" {
-		return engs, nil
-	}
-	// Fall back to a substring match on account name for engagements we couldn't
-	// target by domain.
-	lname := strings.ToLower(accountName)
+	domain := domainFromWebsite(website)
+	seen := make(map[string]bool, len(engs))
 	out := engs[:0]
 	for _, e := range engs {
-		if strings.Contains(strings.ToLower(engagementTitle(e)), lname) {
-			out = append(out, e)
+		if matchesEngagement(e, needles, domain) {
+			id := e.EngagementID
+			if id == "" || !seen[id] {
+				seen[id] = true
+				out = append(out, e)
+			}
 		}
 	}
 	return out, nil
+}
+
+// matchesEngagement returns true when any of the supplied needles (or the
+// account's email domain) appears in a meaningful field on the engagement.
+func matchesEngagement(e chorus.Engagement, needles []string, domain string) bool {
+	subject := strings.ToLower(engagementTitle(e))
+	acctName := strings.ToLower(e.AccountName)
+	for _, n := range needles {
+		if n == "" {
+			continue
+		}
+		if strings.Contains(subject, n) || strings.Contains(acctName, n) {
+			return true
+		}
+		for _, p := range e.Participants {
+			if p.CompanyName != nil && strings.Contains(strings.ToLower(*p.CompanyName), n) {
+				return true
+			}
+			if strings.Contains(strings.ToLower(p.Email), n) {
+				return true
+			}
+		}
+	}
+	if domain != "" {
+		needle := "@" + strings.ToLower(domain)
+		for _, p := range e.Participants {
+			if strings.Contains(strings.ToLower(p.Email), needle) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func engagementTitle(e chorus.Engagement) string {
@@ -301,7 +423,7 @@ func domainFromWebsite(w string) string {
 
 // fetchMonitors pulls monitors from every configured Datadog site and keeps
 // only those that are currently alerting or have a tag matching the account.
-func fetchMonitors(ctx context.Context, mc *datadog.MultiClient, accountName string) ([]datadog.Monitor, error) {
+func fetchMonitors(ctx context.Context, mc *datadog.MultiClient, needles []string) ([]datadog.Monitor, error) {
 	clientList := []*datadog.Client{}
 	if mc.US != nil {
 		clientList = append(clientList, mc.US)
@@ -312,7 +434,6 @@ func fetchMonitors(ctx context.Context, mc *datadog.MultiClient, accountName str
 	if len(clientList) == 0 {
 		return nil, fmt.Errorf("no datadog clients configured")
 	}
-	needle := strings.ToLower(accountName)
 	var out []datadog.Monitor
 	for _, c := range clientList {
 		monitors, err := c.ListMonitors(ctx, "", 100)
@@ -322,21 +443,42 @@ func fetchMonitors(ctx context.Context, mc *datadog.MultiClient, accountName str
 		for _, m := range monitors {
 			state := strings.ToLower(m.OverallState)
 			relevant := state == "alert" || state == "warn" || state == "warning"
+			tag := anyTagMatchesAccount(m.Tags, needles)
+			nameMatch := anyNameMatchesAccount(m.Name, needles)
 			if !relevant {
 				// Keep non-alerting monitors only if they have an explicit
 				// customer/account tag match, so unrelated monitors don't dilute the
 				// list.
-				if !tagMatchesAccount(m.Tags, needle) {
+				if !tag {
 					continue
 				}
 			}
-			if needle != "" && !tagMatchesAccount(m.Tags, needle) && !strings.Contains(strings.ToLower(m.Name), needle) {
+			if len(needles) > 0 && !tag && !nameMatch {
 				continue
 			}
 			out = append(out, m)
 		}
 	}
 	return out, nil
+}
+
+func anyTagMatchesAccount(tags []string, needles []string) bool {
+	for _, n := range needles {
+		if tagMatchesAccount(tags, n) {
+			return true
+		}
+	}
+	return false
+}
+
+func anyNameMatchesAccount(name string, needles []string) bool {
+	ln := strings.ToLower(name)
+	for _, n := range needles {
+		if n != "" && strings.Contains(ln, n) {
+			return true
+		}
+	}
+	return false
 }
 
 func tagMatchesAccount(tags []string, needle string) bool {
