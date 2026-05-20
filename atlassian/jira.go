@@ -135,6 +135,10 @@ type adfAttrs struct {
 	URL      string `json:"url,omitempty"`
 	Href     string `json:"href,omitempty"`
 	Language string `json:"language,omitempty"`
+	// Mention attrs: ADF mention nodes carry the user's accountId in `id`
+	// and the visible @-prefixed display name in `text`.
+	ID   string `json:"id,omitempty"`
+	Text string `json:"text,omitempty"`
 }
 
 type adfInline struct {
@@ -156,6 +160,8 @@ type adfMarkAttrs struct {
 // marshalInlines converts inline elements to json.RawMessage.
 // Empty text nodes are silently dropped — they violate the ADF specification
 // and cause Jira to reject the payload with HTTP 400 INVALID_INPUT.
+// Mention nodes are always retained even when their Text field is empty,
+// since their content lives in the attrs (id/text) instead.
 func marshalInlines(inlines []adfInline) json.RawMessage {
 	var filtered []adfInline
 	for _, n := range inlines {
@@ -374,7 +380,8 @@ func stripOrderedPrefix(s string) string {
 	return strings.TrimSpace(s[loc[1]:])
 }
 
-// parseInlineMarkdown converts simple inline markdown (**bold**, `code`, [text](url)) to ADF inlines.
+// parseInlineMarkdown converts simple inline markdown (**bold**, `code`, [text](url),
+// and @[Display Name](accountId) Jira mentions) to ADF inlines.
 func parseInlineMarkdown(text string) []adfInline {
 	var inlines []adfInline
 	remaining := text
@@ -383,9 +390,10 @@ func parseInlineMarkdown(text string) []adfInline {
 		boldIdx := strings.Index(remaining, "**")
 		codeIdx := strings.Index(remaining, "`")
 		linkIdx := strings.Index(remaining, "[")
+		mentionIdx := strings.Index(remaining, "@[")
 
 		// No more markers.
-		if boldIdx < 0 && codeIdx < 0 && linkIdx < 0 {
+		if boldIdx < 0 && codeIdx < 0 && linkIdx < 0 && mentionIdx < 0 {
 			if remaining != "" {
 				inlines = append(inlines, adfInline{Type: "text", Text: remaining})
 			}
@@ -398,13 +406,18 @@ func parseInlineMarkdown(text string) []adfInline {
 			marker string
 		}
 		candidates := []candidate{}
+		if mentionIdx >= 0 {
+			candidates = append(candidates, candidate{mentionIdx, "@["})
+		}
 		if boldIdx >= 0 {
 			candidates = append(candidates, candidate{boldIdx, "**"})
 		}
 		if codeIdx >= 0 {
 			candidates = append(candidates, candidate{codeIdx, "`"})
 		}
-		if linkIdx >= 0 {
+		// Skip the plain link marker when it is the `[` that belongs to a
+		// `@[...]` mention — the mention candidate handles it.
+		if linkIdx >= 0 && (mentionIdx < 0 || linkIdx != mentionIdx+1) {
 			candidates = append(candidates, candidate{linkIdx, "["})
 		}
 		// Pick the earliest.
@@ -420,6 +433,36 @@ func parseInlineMarkdown(text string) []adfInline {
 		// Add plain text before the marker.
 		if nextIdx > 0 {
 			inlines = append(inlines, adfInline{Type: "text", Text: remaining[:nextIdx]})
+		}
+
+		// Handle Jira mention: @[Display Name](accountId)
+		if marker == "@[" {
+			rest := remaining[nextIdx+2:]
+			closeB := strings.Index(rest, "](")
+			if closeB >= 0 {
+				displayName := rest[:closeB]
+				idStart := rest[closeB+2:]
+				closeP := strings.Index(idStart, ")")
+				if closeP >= 0 {
+					accountID := strings.TrimSpace(idStart[:closeP])
+					if accountID != "" && displayName != "" {
+						inlines = append(inlines, adfInline{
+							Type: "mention",
+							Attrs: &adfAttrs{
+								ID:   accountID,
+								Text: "@" + displayName,
+							},
+						})
+						remaining = idStart[closeP+1:]
+						continue
+					}
+				}
+			}
+			// Not a valid mention — treat `@` as plain text and continue
+			// parsing from the `[` (which may still be a markdown link).
+			inlines = append(inlines, adfInline{Type: "text", Text: "@"})
+			remaining = remaining[nextIdx+1:]
+			continue
 		}
 
 		// Handle markdown link: [text](url)
@@ -1689,14 +1732,21 @@ func adfToPlainText(data json.RawMessage) string {
 // extractText recursively extracts text from ADF nodes.
 func extractText(data json.RawMessage, sb *strings.Builder) {
 	var node struct {
-		Type    string            `json:"type"`
-		Text    string            `json:"text"`
+		Type  string `json:"type"`
+		Text  string `json:"text"`
+		Attrs struct {
+			Text string `json:"text"`
+		} `json:"attrs"`
 		Content []json.RawMessage `json:"content"`
 	}
 	if err := json.Unmarshal(data, &node); err != nil {
 		return
 	}
-	if node.Text != "" {
+	if node.Type == "mention" && node.Attrs.Text != "" {
+		// Render mentions as their @-prefixed display name so downstream
+		// LLM consumers see the same thing a human would in the UI.
+		sb.WriteString(node.Attrs.Text)
+	} else if node.Text != "" {
 		sb.WriteString(node.Text)
 	}
 	for _, child := range node.Content {

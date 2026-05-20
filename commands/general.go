@@ -1082,7 +1082,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 			Type: "function",
 			Function: llm.ToolFunction{
 				Name:        "add_jira_comment",
-				Description: "Post a comment on a Jira issue. The body is rendered from markdown to ADF (Atlassian Document Format) automatically — supports # headers, - bullets, 1) ordered lists, **bold**, and `code`. Use when the user asks to comment on, reply to, or annotate a ticket.",
+				Description: "Post a comment on a Jira issue. The body is rendered from markdown to ADF (Atlassian Document Format) automatically — supports # headers, - bullets, 1) ordered lists, **bold**, `code`, and [text](url) links. To @-mention a Jira user so they get a real notification (not just a plain-text string), use the syntax `@[Display Name](accountId)` — e.g. `@[Iftah Roichman](712020:abc-def-...)`. ALWAYS call resolve_jira_user first to get the accountId; never invent or guess it, and never write a bare `@Name` because it will be posted as inert plain text. Use when the user asks to comment on, reply to, or annotate a ticket.",
 				Parameters: json.RawMessage(`{
 					"type":"object",
 					"properties":{
