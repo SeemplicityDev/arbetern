@@ -2,6 +2,7 @@ package slack
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -235,25 +236,43 @@ func (c *Client) GetBotScopes() ([]string, error) {
 	return scopes, nil
 }
 
-// UploadFileSnippet uploads a text snippet as a Slack file using the V2 API.
+// UploadFileSnippet uploads a text snippet as a Slack file using the
+// files.getUploadURLExternal / files.completeUploadExternal flow.
 // It posts the snippet into the given channel (and optionally a thread).
 func (c *Client) UploadFileSnippet(channelID, threadTS, filename, title, content, filetype string) (string, error) {
-	params := slack.UploadFileV2Parameters{
-		Channel:     channelID,
-		Content:     content,
+	ctx := context.Background()
+	urlResp, err := c.api.GetUploadURLExternalContext(ctx, slack.GetUploadURLExternalParameters{
+		FileName:    filename,
 		FileSize:    len(content),
-		Filename:    filename,
-		Title:       title,
 		SnippetType: filetype,
+	})
+	if err != nil {
+		return "", fmt.Errorf("failed to get upload URL: %w", err)
+	}
+
+	if err := c.api.UploadToURL(ctx, slack.UploadToURLParameters{
+		UploadURL: urlResp.UploadURL,
+		Content:   content,
+		Filename:  filename,
+	}); err != nil {
+		return "", fmt.Errorf("failed to upload file content: %w", err)
+	}
+
+	completeParams := slack.CompleteUploadExternalParameters{
+		Files:   []slack.FileSummary{{ID: urlResp.FileID, Title: title}},
+		Channel: channelID,
 	}
 	if threadTS != "" {
-		params.ThreadTimestamp = threadTS
+		completeParams.ThreadTimestamp = threadTS
 	}
-	summary, err := c.api.UploadFileV2(params)
+	resp, err := c.api.CompleteUploadExternalContext(ctx, completeParams)
 	if err != nil {
-		return "", fmt.Errorf("failed to upload file snippet: %w", err)
+		return "", fmt.Errorf("failed to complete file upload: %w", err)
 	}
-	return summary.ID, nil
+	if len(resp.Files) > 0 {
+		return resp.Files[0].ID, nil
+	}
+	return urlResp.FileID, nil
 }
 
 type webhookPayload struct {
