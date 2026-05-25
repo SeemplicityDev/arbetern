@@ -28,8 +28,8 @@ func (h *GeneralHandler) dashboardTools() []llm.Tool {
 				Parameters: json.RawMessage(`{
 					"type":"object",
 					"properties":{
-						"name":{"type":"string","description":"Human title of the dashboard (e.g. 'PayPal customer 360')."},
-						"short_name":{"type":"string","description":"Short slug shown on the agent card (lowercase, hyphenated, <=24 chars). E.g. 'paypal-360'."},
+						"name":{"type":"string","description":"Human title of the dashboard (e.g. 'Acme customer 360')."},
+						"short_name":{"type":"string","description":"Short slug shown on the agent card (lowercase, hyphenated, <=24 chars). E.g. 'acme-360'."},
 						"description":{"type":"string","description":"One-sentence summary of what the dashboard shows."},
 						"sync_interval":{"type":"string","description":"Go duration between refreshes. Minimum 30s, maximum 24h, default 5m. Examples: '5m', '15m', '1h'."},
 						"sources":{

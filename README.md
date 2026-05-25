@@ -313,7 +313,7 @@ export AGENT_RBAC_DIR=/path/to/rbac
 Agents can create **recurring data dashboards** on demand. Ask the agent in Slack:
 
 ```
-/pulse create dashboard to show me all the details you have from your integrations regarding paypal customer, make it sync every 5 minutes
+/pulse create dashboard to show me all the details you have from your integrations regarding acme customer, make it sync every 5 minutes
 ```
 
 The agent composes a dashboard from its allow-listed read-only integration sources
@@ -405,10 +405,10 @@ the body of a slash command.
 <summary><code>/pulse</code> — Customer Success</summary>
 
 ```
-create dashboard "Paypal 360" short-name paypal-360 that syncs every 10m with:
-- jira_search of JQL `project = ENG AND labels = paypal AND resolution = Unresolved ORDER BY priority DESC`
-- salesforce_query SOQL `SELECT Id, Name, StageName, CloseDate, Amount FROM Opportunity WHERE Account.Name = 'Paypal' AND IsClosed = false`
-- chorus_list_conversations with participants_email = @paypal.com over the last 30 days, with_trackers: true
+create dashboard "Acme 360" short-name acme-360 that syncs every 10m with:
+- jira_search of JQL `project = ENG AND labels = acme AND resolution = Unresolved ORDER BY priority DESC`
+- salesforce_query SOQL `SELECT Id, Name, StageName, CloseDate, Amount FROM Opportunity WHERE Account.Name = 'Acme' AND IsClosed = false`
+- chorus_list_conversations with participants_email = @acme.com over the last 30 days, with_trackers: true
 ```
 
 </details>

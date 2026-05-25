@@ -249,7 +249,7 @@ func buildHelpMessage(agents []prompts.AgentConfig) string {
 	b.WriteString("• `/arbetern list workflows` — every scheduled/triggered workflow, grouped by agent\n")
 
 	b.WriteString("\n*Create a dashboard* (auto-refreshing read-only view)\n")
-	b.WriteString("• `/pulse create dashboard \"Paypal 360\" short-name paypal-360 that syncs every 10m with jira_search, salesforce_query, chorus_list_conversations`\n")
+	b.WriteString("• `/pulse create dashboard \"Acme 360\" short-name acme-360 that syncs every 10m with jira_search, salesforce_query, chorus_list_conversations`\n")
 	b.WriteString("• `/ovad create a dashboard of datadog monitors in US alerting for env:prod refreshing every 5m`\n")
 
 	b.WriteString("\n*Create a workflow* (scheduled action — can write / PR / post)\n")
@@ -269,7 +269,7 @@ func buildDashboardsMessage(reg *dashboards.Registry, agents []prompts.AgentConf
 	if len(all) == 0 {
 		b.WriteString("_No dashboards are currently registered._\n\n")
 		b.WriteString("Ask any agent to build one — e.g.\n")
-		b.WriteString("• `/pulse create dashboard \"Paypal 360\" short-name paypal-360 that syncs every 10m with jira_search, salesforce_query, chorus_list_conversations`\n")
+		b.WriteString("• `/pulse create dashboard \"Acme 360\" short-name acme-360 that syncs every 10m with jira_search, salesforce_query, chorus_list_conversations`\n")
 		b.WriteString("• `/ovad create a dashboard of datadog monitors alerting for env:prod refreshing every 5m`")
 		return b.String()
 	}
