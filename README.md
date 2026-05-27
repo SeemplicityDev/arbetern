@@ -120,7 +120,7 @@ All three live under `persistence.mountPath` in the chart and default to `./data
 </details>
 
 <details>
-<summary><b>Other integrations</b> — NVD, Salesforce, Chorus, Datadog, AWS</summary>
+<summary><b>Other integrations</b> — NVD, Salesforce, Chorus, Datadog, AWS, Azure</summary>
 
 | Variable | Description |
 |---|---|
@@ -133,6 +133,9 @@ All three live under `persistence.mountPath` in the chart and default to `./data
 | `DD_API_KEY_EU` / `DD_APP_KEY_EU` | Datadog EU (datadoghq.eu) API + Application keys |
 | `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | AWS static creds. `AWS_PROFILE` and EKS IRSA (`AWS_WEB_IDENTITY_TOKEN_FILE` + `AWS_ROLE_ARN`) also work. Enables Cost Explorer tools; the IAM principal needs `ce:GetCostAndUsage`, `ce:GetCostForecast`, `ce:GetDimensionValues`. Each CE API call costs $0.01 |
 | `AWS_REGION` | Region used to sign Cost Explorer SigV4 calls (default `us-east-1` — the only region hosting the CE endpoint) |
+| `AZURE_TENANT_ID` / `AZURE_CLIENT_ID` / `AZURE_CLIENT_SECRET` | AAD service-principal credentials for the Azure Cost Management tools. Service principal needs `Cost Management Reader` at the tenant root management group (or a narrower MG) for tenant-wide cost reporting across every subscription. Distinct from `AZURE_OPEN_AI_ENDPOINT` / `AZURE_API_KEY` (Azure OpenAI as LLM backend) |
+| `AZURE_MANAGEMENT_GROUP_ID` | Optional. Management-group scope for cost queries. Defaults to `AZURE_TENANT_ID` (tenant root MG — covers every subscription in the tenant) |
+| `AZURE_AUTHORITY_HOST` / `AZURE_MANAGEMENT_HOST` | Optional sovereign-cloud overrides (Azure Government, China). Default to the public-cloud endpoints |
 
 </details>
 
@@ -774,6 +777,7 @@ Global prompts (e.g. `security`) are defined in `agents/prompts.yaml` and inheri
 | Salesforce | [docs/SALESFORCE.md](docs/SALESFORCE.md) | pulse |
 | Chorus / ZoomInfo | [docs/CHORUS.md](docs/CHORUS.md) | pulse |
 | AWS Cost Explorer | [docs/AWS.md](docs/AWS.md) | ovad (and any agent running AWS cost workflows) |
+| Azure Cost Management | [docs/AZURE.md](docs/AZURE.md) | ovad (and any agent running Azure cost workflows) |
 
 ## Contributing
 

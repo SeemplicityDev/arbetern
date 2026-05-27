@@ -68,8 +68,23 @@ type Config struct {
 	// chain — env vars (AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY), a
 	// shared profile (AWS_PROFILE), or EKS IRSA
 	// (AWS_WEB_IDENTITY_TOKEN_FILE + AWS_ROLE_ARN) all work.
-	AWSRegion     string
-	AWSEnabled    bool   // set true when AWS credentials appear present (enables the cost-explorer tools).
+	AWSRegion  string
+	AWSEnabled bool // set true when AWS credentials appear present (enables the cost-explorer tools).
+
+	// Azure Cost Management — separate from the AzureEndpoint/AzureAPIKey
+	// fields above which configure Azure OpenAI for LLM access. Cost
+	// Management uses a service-principal (client-credentials) flow against
+	// AAD; AZURE_AUTHORITY_HOST / AZURE_MANAGEMENT_HOST allow targeting
+	// sovereign clouds (Azure Government, China) and default to the public
+	// cloud when unset.
+	AzureTenantID          string
+	AzureClientID          string
+	AzureClientSecret      string
+	AzureManagementGroupID string // Optional. Defaults to tenant root MG (= tenant ID) for tenant-wide cost reporting.
+	AzureBillingAccountID  string // Optional. EA enrollment number. When set, queries hit billing-account scope (preferred for EA tenants) and AzureManagementGroupID is ignored.
+	AzureAuthorityHost     string
+	AzureManagementHost    string
+
 	DashboardsDir string // Directory where dashboard JSON snapshots are persisted.
 	WorkflowsDir  string // Directory where workflow JSON snapshots are persisted.
 
@@ -145,38 +160,54 @@ func (c *Config) AWSConfigured() bool {
 	return c.AWSEnabled
 }
 
+// AzureCostConfigured returns true when the Azure service-principal
+// values required for Cost Management calls (tenant, client, secret) are
+// present. AzureManagementGroupID is optional and defaults to the tenant
+// root management group; sovereign-cloud host overrides are also optional.
+func (c *Config) AzureCostConfigured() bool {
+	return c.AzureTenantID != "" && c.AzureClientID != "" &&
+		c.AzureClientSecret != ""
+}
+
 func Load() (*Config, error) {
 	cfg := &Config{
-		SlackBotToken:         os.Getenv("SLACK_BOT_TOKEN"),
-		SlackSigningSecret:    os.Getenv("SLACK_SIGNING_SECRET"),
-		GitHubToken:           os.Getenv("GITHUB_TOKEN"),
-		GeneralModel:          os.Getenv("GENERAL_MODEL"),
-		CodeModel:             os.Getenv("CODE_MODEL"),
-		AzureEndpoint:         os.Getenv("AZURE_OPEN_AI_ENDPOINT"),
-		AzureAPIKey:           os.Getenv("AZURE_API_KEY"),
-		Port:                  os.Getenv("PORT"),
-		UIAllowedCIDRs:        os.Getenv("UI_ALLOWED_CIDRS"),
-		AtlassianURL:          os.Getenv("ATLASSIAN_URL"),
-		AtlassianEmail:        os.Getenv("ATLASSIAN_EMAIL"),
-		AtlassianAPIToken:     os.Getenv("ATLASSIAN_API_TOKEN"),
-		JiraProject:           os.Getenv("JIRA_PROJECT"),
-		AtlassianClientID:     os.Getenv("ATLASSIAN_CLIENT_ID"),
-		AtlassianClientSecret: os.Getenv("ATLASSIAN_CLIENT_SECRET"),
-		AppURL:                os.Getenv("APP_URL"),
-		SlackAppToken:         os.Getenv("SLACK_APP_TOKEN"),
-		NVDAPIKey:             os.Getenv("NVD_API_KEY"),
-		SFConsumerKey:         os.Getenv("SF_CONSUMER_KEY"),
-		SFConsumerSecret:      os.Getenv("SF_CONSUMER_SECRET"),
-		SFLoginURL:            os.Getenv("SF_LOGIN_URL"),
-		ChorusAPIToken:        os.Getenv("CHORUS_API_TOKEN"),
-		ChorusBaseURL:         os.Getenv("CHORUS_BASE_URL"),
-		DDAPIKeyUS:            os.Getenv("DD_API_KEY_US"),
-		DDAppKeyUS:            os.Getenv("DD_APP_KEY_US"),
-		DDAPIKeyEU:            os.Getenv("DD_API_KEY_EU"),
-		DDAppKeyEU:            os.Getenv("DD_APP_KEY_EU"),
-		AWSRegion:             os.Getenv("AWS_REGION"),
-		DashboardsDir:         os.Getenv("DASHBOARDS_DIR"),
-		WorkflowsDir:          os.Getenv("WORKFLOWS_DIR"),
+		SlackBotToken:          os.Getenv("SLACK_BOT_TOKEN"),
+		SlackSigningSecret:     os.Getenv("SLACK_SIGNING_SECRET"),
+		GitHubToken:            os.Getenv("GITHUB_TOKEN"),
+		GeneralModel:           os.Getenv("GENERAL_MODEL"),
+		CodeModel:              os.Getenv("CODE_MODEL"),
+		AzureEndpoint:          os.Getenv("AZURE_OPEN_AI_ENDPOINT"),
+		AzureAPIKey:            os.Getenv("AZURE_API_KEY"),
+		Port:                   os.Getenv("PORT"),
+		UIAllowedCIDRs:         os.Getenv("UI_ALLOWED_CIDRS"),
+		AtlassianURL:           os.Getenv("ATLASSIAN_URL"),
+		AtlassianEmail:         os.Getenv("ATLASSIAN_EMAIL"),
+		AtlassianAPIToken:      os.Getenv("ATLASSIAN_API_TOKEN"),
+		JiraProject:            os.Getenv("JIRA_PROJECT"),
+		AtlassianClientID:      os.Getenv("ATLASSIAN_CLIENT_ID"),
+		AtlassianClientSecret:  os.Getenv("ATLASSIAN_CLIENT_SECRET"),
+		AppURL:                 os.Getenv("APP_URL"),
+		SlackAppToken:          os.Getenv("SLACK_APP_TOKEN"),
+		NVDAPIKey:              os.Getenv("NVD_API_KEY"),
+		SFConsumerKey:          os.Getenv("SF_CONSUMER_KEY"),
+		SFConsumerSecret:       os.Getenv("SF_CONSUMER_SECRET"),
+		SFLoginURL:             os.Getenv("SF_LOGIN_URL"),
+		ChorusAPIToken:         os.Getenv("CHORUS_API_TOKEN"),
+		ChorusBaseURL:          os.Getenv("CHORUS_BASE_URL"),
+		DDAPIKeyUS:             os.Getenv("DD_API_KEY_US"),
+		DDAppKeyUS:             os.Getenv("DD_APP_KEY_US"),
+		DDAPIKeyEU:             os.Getenv("DD_API_KEY_EU"),
+		DDAppKeyEU:             os.Getenv("DD_APP_KEY_EU"),
+		AWSRegion:              os.Getenv("AWS_REGION"),
+		AzureTenantID:          os.Getenv("AZURE_TENANT_ID"),
+		AzureClientID:          os.Getenv("AZURE_CLIENT_ID"),
+		AzureClientSecret:      os.Getenv("AZURE_CLIENT_SECRET"),
+		AzureManagementGroupID: os.Getenv("AZURE_MANAGEMENT_GROUP_ID"),
+		AzureBillingAccountID:  os.Getenv("AZURE_BILLING_ACCOUNT_ID"),
+		AzureAuthorityHost:     os.Getenv("AZURE_AUTHORITY_HOST"),
+		AzureManagementHost:    os.Getenv("AZURE_MANAGEMENT_HOST"),
+		DashboardsDir:          os.Getenv("DASHBOARDS_DIR"),
+		WorkflowsDir:           os.Getenv("WORKFLOWS_DIR"),
 
 		WorkflowsGitOpsOwner:    os.Getenv("WORKFLOWS_GITOPS_OWNER"),
 		WorkflowsGitOpsRepo:     os.Getenv("WORKFLOWS_GITOPS_REPO"),

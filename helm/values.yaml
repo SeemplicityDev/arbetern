@@ -39,6 +39,8 @@ env:
   # THREAD_SESSION_TTL: "3m"  # How long a thread session stays active (Go duration: 3m, 5m30s, etc.)
   # MAX_TOOL_ROUNDS: "200"  # Max LLM tool-call rounds per request. Default 200; raise for very long multi-step workflows.
   # AWS_REGION: "us-east-1"   # Region used to sign Cost Explorer SigV4 calls. CE is global; leave as us-east-1 unless you have a reason not to.
+  # AZURE_AUTHORITY_HOST: "https://login.microsoftonline.com"   # Override only for sovereign clouds (Azure Government, China).
+  # AZURE_MANAGEMENT_HOST: "https://management.azure.com"       # Override only for sovereign clouds.
 
 # Persistent data directory shared by dashboards + workflows JSON snapshots.
 # Both features store their files under `persistence.mountPath/<subdir>/<agent>/...`.
@@ -153,6 +155,19 @@ secretValues:
   # aws-access-key-id: ""       # IAM access key ID
   # aws-secret-access-key: ""   # IAM secret access key
   # aws-session-token: ""       # Optional, for STS temporary credentials
+  # Azure Cost Management (optional — enables azure_get_cost_and_usage / azure_get_cost_forecast /
+  # azure_list_dimension_values). Requires a service principal with EITHER:
+  #   - Enterprise Reader on the EA billing account (set azure-billing-account-id below).
+  #     Best path for Enterprise Agreement tenants — canonical EA endpoint, tenant-wide.
+  #   - Cost Management Reader at the tenant root management group (default — leave
+  #     azure-management-group-id empty for tenant-wide). Best path for PAYG / MCA / CSP.
+  # Tenant, client, secret are required; pick exactly one of the two scope hints.
+  # Sovereign-cloud host overrides go in env.
+  # azure-tenant-id: ""               # AAD tenant the service principal lives in
+  # azure-client-id: ""               # Service principal application (client) ID
+  # azure-client-secret: ""           # Service principal client secret
+  # azure-billing-account-id: ""      # EA enrollment number (e.g. 86462187). Wins over MG when set.
+  # azure-management-group-id: ""     # Optional MG scope. Leave empty for tenant-wide (root MG = tenant ID)
 
 service:
   type: ClusterIP

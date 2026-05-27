@@ -18,6 +18,7 @@ import (
 
 	"github.com/justmike1/arbetern/atlassian"
 	"github.com/justmike1/arbetern/aws"
+	"github.com/justmike1/arbetern/azure"
 	"github.com/justmike1/arbetern/chorus"
 	"github.com/justmike1/arbetern/commands"
 	"github.com/justmike1/arbetern/config"
@@ -441,6 +442,7 @@ func refreshIntegrations(
 	chorusClient *chorus.Client,
 	datadogClients *datadog.MultiClient,
 	awsClient *aws.Client,
+	azureClient *azure.Client,
 	modelsClient *llm.Client,
 	codeModelsClient *llm.Client,
 ) {
@@ -638,57 +640,6 @@ func refreshIntegrations(
 		})
 	}
 
-	// --- Azure OpenAI ---
-	if cfg.UseAzure() && modelsClient != nil {
-		azurePerms := []permission{
-			{Scope: "Cognitive Services OpenAI User", Description: "Azure RBAC role for chat completions inference", Required: true, Granted: boolPtr(true)},
-		}
-
-		generalModel := modelsClient.Model()
-		codeModel := ""
-		if codeModelsClient != nil {
-			codeModel = codeModelsClient.Model()
-		}
-
-		// Build the active models map.
-		activeModels := map[string]string{"General": generalModel}
-		if codeModel != "" && codeModel != generalModel {
-			activeModels["Code"] = codeModel
-		}
-
-		// List all accessible models/deployments.
-		if models, err := modelsClient.ListModels(context.Background()); err == nil {
-			for _, m := range models {
-				isGeneral := m == generalModel
-				isCode := m == codeModel && codeModel != generalModel
-				desc := "Available deployment"
-				if isGeneral && isCode {
-					desc = "Active deployment (general + code)"
-				} else if isGeneral {
-					desc = "Active deployment (general)"
-				} else if isCode {
-					desc = "Active deployment (code)"
-				}
-				azurePerms = append(azurePerms, permission{
-					Scope:       m,
-					Description: desc,
-					Required:    isGeneral || isCode,
-					Granted:     boolPtr(true),
-					Extra:       !isGeneral && !isCode,
-				})
-			}
-		}
-
-		result = append(result, integration{
-			ID:           "azure-openai",
-			Name:         "Azure OpenAI",
-			Configured:   true,
-			AuthMode:     "API Key",
-			ActiveModels: activeModels,
-			Permissions:  azurePerms,
-		})
-	}
-
 	// --- NVD (National Vulnerability Database) ---
 	{
 		nvdConfigured := cfg.NVDAPIKey != ""
@@ -846,6 +797,64 @@ func refreshIntegrations(
 		})
 	}
 
+	// --- Azure (OpenAI + Cost Management) ---
+	{
+		openaiConnected := cfg.UseAzure() && modelsClient != nil
+		costConnected := azureClient != nil
+		azurePerms := []permission{}
+		activeScope := map[string]string{}
+
+		// OpenAI deployments
+		if openaiConnected {
+			azurePerms = append(azurePerms, permission{
+				Scope: "Cognitive Services OpenAI User", Description: "Azure RBAC role for chat completions inference", Required: true, Granted: boolPtr(true),
+			})
+
+			generalModel := modelsClient.Model()
+			codeModel := ""
+			if codeModelsClient != nil {
+				codeModel = codeModelsClient.Model()
+			}
+			activeScope["General model"] = generalModel
+			if codeModel != "" && codeModel != generalModel {
+				activeScope["Code model"] = codeModel
+			}
+		}
+
+		// Cost Management
+		azurePerms = append(azurePerms,
+			permission{Scope: "Microsoft.CostManagement/query/action", Description: "Query daily / monthly cost aggregates with optional group-by (ServiceName, ResourceGroupName, ResourceLocation, …)", Required: true, Granted: boolPtr(costConnected)},
+			permission{Scope: "Microsoft.CostManagement/forecast/action", Description: "Forecast upcoming cost (today through +30 days by default)", Required: true, Granted: boolPtr(costConnected)},
+			permission{Scope: "Microsoft.CostManagement/dimensions/read", Description: "Enumerate dimension values (service names, resource groups, regions) for filtering", Required: false, Granted: boolPtr(costConnected)},
+		)
+		if costConnected {
+			if ba := azureClient.BillingAccountID(); ba != "" {
+				activeScope["Billing Account"] = ba
+			} else {
+				activeScope["Management Group"] = azureClient.ManagementGroupID()
+			}
+			activeScope["Tenant"] = azureClient.TenantID()
+		}
+
+		authModes := []string{}
+		if openaiConnected {
+			authModes = append(authModes, "API Key (OpenAI)")
+		}
+		if cfg.AzureCostConfigured() {
+			authModes = append(authModes, "Service principal (Cost Management)")
+		}
+		authMode := strings.Join(authModes, " + ")
+
+		result = append(result, integration{
+			ID:           "azure",
+			Name:         "Azure",
+			Configured:   openaiConnected || costConnected,
+			AuthMode:     authMode,
+			Permissions:  azurePerms,
+			ActiveModels: activeScope,
+		})
+	}
+
 	integrationsMu.Lock()
 	integrationsCache = result
 	integrationsMu.Unlock()
@@ -863,16 +872,17 @@ func startIntegrationsRefresher(
 	chorusClient *chorus.Client,
 	datadogClients *datadog.MultiClient,
 	awsClient *aws.Client,
+	azureClient *azure.Client,
 	modelsClient *llm.Client,
 	codeModelsClient *llm.Client,
 ) {
-	refreshIntegrations(cfg, slackClient, ghClient, jiraClient, sfClient, chorusClient, datadogClients, awsClient, modelsClient, codeModelsClient)
+	refreshIntegrations(cfg, slackClient, ghClient, jiraClient, sfClient, chorusClient, datadogClients, awsClient, azureClient, modelsClient, codeModelsClient)
 
 	go func() {
 		ticker := time.NewTicker(1 * time.Hour)
 		defer ticker.Stop()
 		for range ticker.C {
-			refreshIntegrations(cfg, slackClient, ghClient, jiraClient, sfClient, chorusClient, datadogClients, awsClient, modelsClient, codeModelsClient)
+			refreshIntegrations(cfg, slackClient, ghClient, jiraClient, sfClient, chorusClient, datadogClients, awsClient, azureClient, modelsClient, codeModelsClient)
 		}
 	}()
 }
@@ -992,6 +1002,27 @@ func main() {
 		}
 	}
 
+	// Azure Cost Management client — OAuth client-credentials against AAD.
+	// Only attempted when all four service-principal env vars are present;
+	// a failed token probe in NewClient leaves the client nil so tools
+	// report a clear "not configured" error.
+	var azureClient *azure.Client
+	if cfg.AzureCostConfigured() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		azureClient, err = azure.NewClient(ctx, cfg.AzureTenantID, cfg.AzureClientID, cfg.AzureClientSecret, cfg.AzureManagementGroupID, cfg.AzureBillingAccountID, cfg.AzureAuthorityHost, cfg.AzureManagementHost)
+		cancel()
+		if err != nil {
+			log.Printf("Azure integration misconfigured (tools will be unavailable): %v", err)
+			azureClient = nil
+		} else {
+			if ba := azureClient.BillingAccountID(); ba != "" {
+				log.Printf("Azure integration enabled (billing account: %s, tenant: %s)", ba, azureClient.TenantID())
+			} else {
+				log.Printf("Azure integration enabled (management group: %s, tenant: %s)", azureClient.ManagementGroupID(), azureClient.TenantID())
+			}
+		}
+	}
+
 	// Discover agents and register per-agent webhook routes (/<agent>/webhook).
 	agents, err := prompts.DiscoverAgents("")
 	if err != nil {
@@ -1002,7 +1033,7 @@ func main() {
 	}
 
 	// Start background integration permission refresher (runs once now, then every hour).
-	startIntegrationsRefresher(cfg, slackClient, ghClient, jiraClient, sfClient, chorusClient, datadogClients, awsClient, modelsClient, codeModelsClient)
+	startIntegrationsRefresher(cfg, slackClient, ghClient, jiraClient, sfClient, chorusClient, datadogClients, awsClient, azureClient, modelsClient, codeModelsClient)
 
 	// Thread session store — enables follow-up replies in threads without /commands.
 	sessions := commands.NewSessionStore(cfg.ThreadSessionTTL)
@@ -1083,7 +1114,7 @@ func main() {
 		}
 
 		agentID := agent.ID // capture for closure
-		router := commands.NewRouter(slackClient, ghClient, modelsClient, codeModelsClient, jiraClient, nvdClient, sfClient, chorusClient, datadogClients, awsClient, dashRegistry, wfRegistry, ap, agent.ID, cfg.AppURL, sessions, cfg.MaxToolRounds, userContextStore)
+		router := commands.NewRouter(slackClient, ghClient, modelsClient, codeModelsClient, jiraClient, nvdClient, sfClient, chorusClient, datadogClients, awsClient, azureClient, dashRegistry, wfRegistry, ap, agent.ID, cfg.AppURL, sessions, cfg.MaxToolRounds, userContextStore)
 		routers[agent.ID] = router
 
 		// Background sweepers for the per-router in-memory caches so

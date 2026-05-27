@@ -11,6 +11,7 @@ import (
 
 	"github.com/justmike1/arbetern/atlassian"
 	"github.com/justmike1/arbetern/aws"
+	"github.com/justmike1/arbetern/azure"
 	"github.com/justmike1/arbetern/chorus"
 	"github.com/justmike1/arbetern/config"
 	"github.com/justmike1/arbetern/dashboards"
@@ -57,6 +58,7 @@ type GeneralHandler struct {
 	chorusClient     *chorus.Client
 	datadogClients   *datadog.MultiClient
 	awsClient        *aws.Client
+	azureClient      *azure.Client
 	dashboards       *dashboards.Registry
 	workflows        *workflows.Registry
 	contextProvider  *ContextProvider
@@ -1414,6 +1416,64 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 						"start":{"type":"string","description":"Start date YYYY-MM-DD, inclusive. Defaults to 30 days ago."},
 						"end":{"type":"string","description":"End date YYYY-MM-DD, exclusive. Defaults to today."},
 						"search":{"type":"string","description":"Optional substring filter applied server-side."}
+					},
+					"required":["dimension"]
+				}`),
+			},
+		})
+	}
+
+	// Azure tools — Cost Management API scoped at the configured
+	// management group (defaults to the tenant root MG, i.e. tenant-wide).
+	// Enabled when AZURE_TENANT_ID / AZURE_CLIENT_ID /
+	// AZURE_CLIENT_SECRET are all present and a service-principal token
+	// resolved at startup. Mirrors the AWS tool surface
+	// (cost-and-usage, forecast, dimension-values) so workflows can be
+	// ported across clouds with minimal prompt changes.
+	if h.azureClient != nil {
+		tools = append(tools, llm.Tool{
+			Type: "function",
+			Function: llm.ToolFunction{
+				Name:        "azure_get_cost_and_usage",
+				Description: "Query Azure Cost Management for cost and usage data across every subscription nested under the configured management group (defaults to the tenant root MG — tenant-wide). Use for daily/weekly/monthly cost reports, cost-by-service breakdowns, cost-by-resource-group, region splits, per-subscription breakdowns (group_by=SubscriptionName / SubscriptionId), and trend analysis. 'start' and 'end' are YYYY-MM-DD and 'end' is treated EXCLUSIVE (mirrors AWS Cost Explorer: to report through 2026-04-21 inclusive, pass end=2026-04-22 — Azure's underlying API is inclusive but arbetern normalises). Default window: last 8 days at Daily granularity, ActualCost. Pass AmortizedCost to spread Reservation / Savings Plan up-front charges across their commitment term. Set group_by to break down by ServiceName (e.g. 'Virtual Machines', 'Storage', 'Azure Kubernetes Service'), ResourceGroupName, ResourceLocation, MeterCategory, ChargeType, SubscriptionName, SubscriptionId, ResourceId. Use service_filter to restrict to one exact ServiceName (find the exact string via azure_list_dimension_values with dimension=ServiceName).",
+				Parameters: json.RawMessage(`{
+					"type":"object",
+					"properties":{
+						"start":{"type":"string","description":"Start date YYYY-MM-DD, inclusive. Defaults to 8 days ago."},
+						"end":{"type":"string","description":"End date YYYY-MM-DD, EXCLUSIVE. Defaults to today."},
+						"granularity":{"type":"string","enum":["Daily","Monthly","None"],"description":"Granularity. Default Daily. 'None' returns one bucket for the whole window."},
+						"metric":{"type":"string","enum":["ActualCost","AmortizedCost"],"description":"Cost type. Default ActualCost (matches Azure portal default). Use AmortizedCost to spread Reservation / Savings Plan up-front charges across their commitment term."},
+						"group_by":{"type":"string","description":"Optional grouping dimension (ServiceName, ResourceGroupName, ResourceLocation, MeterCategory, ChargeType, SubscriptionName, SubscriptionId, ResourceId, ...). Use SubscriptionName / SubscriptionId to break tenant-wide spend down per subscription. Omit for a single total per period."},
+						"service_filter":{"type":"string","description":"Exact Azure ServiceName to restrict to (case-sensitive, e.g. 'Virtual Machines'). Use azure_list_dimension_values with dimension=ServiceName to discover exact strings."}
+					}
+				}`),
+			},
+		}, llm.Tool{
+			Type: "function",
+			Function: llm.ToolFunction{
+				Name:        "azure_get_cost_forecast",
+				Description: "Project future Azure spend across every subscription nested under the configured management group (tenant-wide by default) using Cost Management's forecast endpoint. Use this when the user asks 'how much will we spend next month / this week?'. Default window: today → +30 days at Daily granularity, ActualCost.",
+				Parameters: json.RawMessage(`{
+					"type":"object",
+					"properties":{
+						"start":{"type":"string","description":"Start date YYYY-MM-DD, inclusive. Defaults to today."},
+						"end":{"type":"string","description":"End date YYYY-MM-DD, exclusive. Defaults to 30 days from now."},
+						"granularity":{"type":"string","enum":["Daily","Monthly"],"description":"Forecast granularity. Default Daily."},
+						"metric":{"type":"string","enum":["ActualCost","AmortizedCost"],"description":"Cost type. Default ActualCost."}
+					}
+				}`),
+			},
+		}, llm.Tool{
+			Type: "function",
+			Function: llm.ToolFunction{
+				Name:        "azure_list_dimension_values",
+				Description: "Enumerate possible values for an Azure Cost Management dimension (e.g. list every ServiceName that accrued cost, or every SubscriptionName the SP can see) across the configured management group. Useful to discover the exact service-name strings before passing them as service_filter to azure_get_cost_and_usage — Azure service names are case-sensitive and finicky ('Virtual Machines', not 'VM'; 'Azure Kubernetes Service', not 'AKS').",
+				Parameters: json.RawMessage(`{
+					"type":"object",
+					"properties":{
+						"dimension":{"type":"string","description":"Dimension to list values for. Common: ServiceName, ResourceGroupName, ResourceLocation, MeterCategory, ChargeType, SubscriptionName, SubscriptionId, ResourceId."},
+						"search":{"type":"string","description":"Optional substring filter (case-insensitive, client-side)."},
+						"top":{"type":"integer","description":"Max values to return (default 100, max 1000)."}
 					},
 					"required":["dimension"]
 				}`),
@@ -3474,6 +3534,91 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		log.Printf("[user=%s channel=%s] aws list_dimension_values (%s, %s→%s, %d values)",
 			userID, channelID, res.Dimension, res.Start, res.End, len(res.Values))
 		return aws.FormatDimensionValues(res)
+
+	// ---- Azure Cost Management tools ----
+
+	case "azure_get_cost_and_usage":
+		if h.azureClient == nil {
+			return "Error: Azure integration is not configured. Set AZURE_TENANT_ID / AZURE_CLIENT_ID / AZURE_CLIENT_SECRET (and optionally AZURE_MANAGEMENT_GROUP_ID) to enable Azure Cost Management tools."
+		}
+		args, errMsg := parseToolArgs[struct {
+			Start         string `json:"start"`
+			End           string `json:"end"`
+			Granularity   string `json:"granularity"`
+			Metric        string `json:"metric"`
+			GroupBy       string `json:"group_by"`
+			ServiceFilter string `json:"service_filter"`
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
+		}
+		res, err := h.azureClient.GetCostAndUsage(ctx, azure.CostAndUsageOpts{
+			Start:         args.Start,
+			End:           args.End,
+			Granularity:   args.Granularity,
+			Metric:        args.Metric,
+			GroupBy:       args.GroupBy,
+			ServiceFilter: args.ServiceFilter,
+		})
+		if err != nil {
+			return fmt.Sprintf("Error fetching Azure cost and usage: %v", err)
+		}
+		log.Printf("[user=%s channel=%s] azure cost_and_usage (%s→%s, gran=%s, metric=%s, group_by=%s, filter=%q)",
+			userID, channelID, res.Start, res.End, res.Granularity, res.Metric, res.GroupBy, args.ServiceFilter)
+		return azure.FormatCostAndUsage(res)
+
+	case "azure_get_cost_forecast":
+		if h.azureClient == nil {
+			return "Error: Azure integration is not configured. Set AZURE_TENANT_ID / AZURE_CLIENT_ID / AZURE_CLIENT_SECRET (and optionally AZURE_MANAGEMENT_GROUP_ID) to enable Azure Cost Management tools."
+		}
+		args, errMsg := parseToolArgs[struct {
+			Start       string `json:"start"`
+			End         string `json:"end"`
+			Granularity string `json:"granularity"`
+			Metric      string `json:"metric"`
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
+		}
+		res, err := h.azureClient.GetCostForecast(ctx, azure.ForecastOpts{
+			Start:       args.Start,
+			End:         args.End,
+			Granularity: args.Granularity,
+			Metric:      args.Metric,
+		})
+		if err != nil {
+			return fmt.Sprintf("Error fetching Azure cost forecast: %v", err)
+		}
+		log.Printf("[user=%s channel=%s] azure cost_forecast (%s→%s, gran=%s, metric=%s)",
+			userID, channelID, res.Start, res.End, res.Granularity, res.Metric)
+		return azure.FormatForecast(res)
+
+	case "azure_list_dimension_values":
+		if h.azureClient == nil {
+			return "Error: Azure integration is not configured. Set AZURE_TENANT_ID / AZURE_CLIENT_ID / AZURE_CLIENT_SECRET (and optionally AZURE_MANAGEMENT_GROUP_ID) to enable Azure Cost Management tools."
+		}
+		args, errMsg := parseToolArgs[struct {
+			Dimension string `json:"dimension"`
+			Search    string `json:"search"`
+			Top       int    `json:"top"`
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
+		}
+		if args.Dimension == "" {
+			return "Error: dimension is required (e.g. ServiceName, ResourceGroupName, ResourceLocation)."
+		}
+		res, err := h.azureClient.GetDimensionValues(ctx, azure.DimensionValuesOpts{
+			Dimension: args.Dimension,
+			Search:    args.Search,
+			Top:       args.Top,
+		})
+		if err != nil {
+			return fmt.Sprintf("Error listing Azure dimension values: %v", err)
+		}
+		log.Printf("[user=%s channel=%s] azure list_dimension_values (%s, %d values)",
+			userID, channelID, res.Dimension, len(res.Values))
+		return azure.FormatDimensionValues(res)
 
 	case "http_get":
 		args, errMsg := parseToolArgs[struct {

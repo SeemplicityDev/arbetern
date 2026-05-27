@@ -57,6 +57,14 @@ secretValues:
   # aws-access-key-id: "AKIA..."
   # aws-secret-access-key: "your-aws-secret-access-key"
   # aws-session-token: ""  # only needed for STS temporary credentials
+  # Azure Cost Management (optional — enables azure_get_cost_and_usage / azure_get_cost_forecast / azure_list_dimension_values).
+  # For Enterprise Agreement tenants: grant the SP "Enterprise Reader" on the EA billing account and set azure-billing-account-id.
+  # For PAYG / MCA / CSP: grant the SP "Cost Management Reader" at the tenant root management group (leave azure-management-group-id empty).
+  # azure-tenant-id: "00000000-0000-0000-0000-000000000000"
+  # azure-client-id: "00000000-0000-0000-0000-000000000000"
+  # azure-client-secret: "your-azure-client-secret"
+  # azure-billing-account-id: ""     # EA enrollment number (preferred for EA tenants)
+  # azure-management-group-id: ""    # MG scope (preferred for non-EA tenants); defaults to tenant root MG
 
 # ingress:
 #   enabled: true
