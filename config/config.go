@@ -32,36 +32,65 @@ const (
 	defaultMaxToolRounds = 200
 )
 
+// Credentials holds every value that ships to the app as a Kubernetes
+// Secret entry (and the corresponding env var locally). Each field is
+// tagged with the kebab-case key the Helm chart uses in `secretValues` /
+// `customCredentials`, which is also the single source of truth for the
+// per-agent override system in agent_credentials.go.
+//
+// Splitting these off from the rest of Config keeps the "what can be
+// overridden per agent" surface area obvious — anything in this struct
+// can be overridden, nothing outside it can.
+type Credentials struct {
+	SlackBotToken         string `cred:"slack-bot-token"`
+	SlackSigningSecret    string `cred:"slack-signing-secret"`
+	SlackAppToken         string `cred:"slack-app-token"`
+	GitHubToken           string `cred:"github-token"`
+	AzureEndpoint         string `cred:"azure-openai-endpoint"`
+	AzureAPIKey           string `cred:"azure-api-key"`
+	AtlassianURL          string `cred:"atlassian-url"`
+	AtlassianEmail        string `cred:"atlassian-email"`
+	AtlassianAPIToken     string `cred:"atlassian-api-token"`
+	AtlassianClientID     string `cred:"atlassian-client-id"`
+	AtlassianClientSecret string `cred:"atlassian-client-secret"`
+	JiraProject           string `cred:"jira-project"`
+	NVDAPIKey             string `cred:"nvd-api-key"`
+	SFConsumerKey         string `cred:"sf-consumer-key"`
+	SFConsumerSecret      string `cred:"sf-consumer-secret"`
+	SFLoginURL            string `cred:"sf-login-url"` // defaults to "https://login.salesforce.com"
+	ChorusAPIToken        string `cred:"chorus-api-token"`
+	ChorusBaseURL         string `cred:"chorus-base-url"` // defaults to "https://chorus.ai"
+	DDAPIKeyUS            string `cred:"dd-api-key-us"`   // Datadog US (datadoghq.com)
+	DDAppKeyUS            string `cred:"dd-app-key-us"`
+	DDAPIKeyEU            string `cred:"dd-api-key-eu"` // Datadog EU (datadoghq.eu)
+	DDAppKeyEU            string `cred:"dd-app-key-eu"`
+
+	// Azure Cost Management service-principal — distinct from the
+	// AzureEndpoint/AzureAPIKey fields above which configure Azure OpenAI
+	// for LLM access. Cost Management uses a client-credentials flow
+	// against AAD.
+	AzureTenantID          string `cred:"azure-tenant-id"`
+	AzureClientID          string `cred:"azure-client-id"`
+	AzureClientSecret      string `cred:"azure-client-secret"`
+	AzureManagementGroupID string `cred:"azure-management-group-id"` // Optional. Defaults to tenant root MG (= tenant ID) for tenant-wide cost reporting.
+	AzureBillingAccountID  string `cred:"azure-billing-account-id"`  // Optional. EA enrollment number. When set, queries hit billing-account scope (preferred for EA tenants) and AzureManagementGroupID is ignored.
+}
+
+// Config bundles every runtime setting the app reads on startup. Credential
+// values live on the embedded Credentials struct so they can be promoted
+// (`cfg.SlackBotToken`) while also being addressable as a unit
+// (`cfg.Credentials`) for the per-agent override path.
 type Config struct {
-	SlackBotToken         string
-	SlackSigningSecret    string
-	GitHubToken           string
-	GeneralModel          string // Default model/deployment for general queries.
-	CodeModel             string // Separate model/deployment for code-generation tasks (PRs, modify_file).
-	AzureEndpoint         string
-	AzureAPIKey           string
-	Port                  string
-	UIAllowedCIDRs        string
-	AtlassianURL          string
-	AtlassianEmail        string
-	AtlassianAPIToken     string
-	JiraProject           string
-	AtlassianClientID     string
-	AtlassianClientSecret string
-	AppURL                string
-	SlackAppToken         string
-	ThreadSessionTTL      time.Duration
-	MaxToolRounds         int
-	NVDAPIKey             string
-	SFConsumerKey         string
-	SFConsumerSecret      string
-	SFLoginURL            string // defaults to "https://login.salesforce.com"
-	ChorusAPIToken        string
-	ChorusBaseURL         string // defaults to "https://chorus.ai"
-	DDAPIKeyUS            string // Datadog US (datadoghq.com)
-	DDAppKeyUS            string
-	DDAPIKeyEU            string // Datadog EU (datadoghq.eu)
-	DDAppKeyEU            string
+	Credentials
+
+	GeneralModel     string // Default model/deployment for general queries.
+	CodeModel        string // Separate model/deployment for code-generation tasks (PRs, modify_file).
+	Port             string
+	UIAllowedCIDRs   string
+	AppURL           string
+	ThreadSessionTTL time.Duration
+	MaxToolRounds    int
+
 	// AWSRegion controls where Cost Explorer SigV4 calls are signed. Empty
 	// falls back to the aws package default (us-east-1, where the CE
 	// endpoint lives). Credentials are resolved via the standard AWS SDK
@@ -71,19 +100,11 @@ type Config struct {
 	AWSRegion  string
 	AWSEnabled bool // set true when AWS credentials appear present (enables the cost-explorer tools).
 
-	// Azure Cost Management — separate from the AzureEndpoint/AzureAPIKey
-	// fields above which configure Azure OpenAI for LLM access. Cost
-	// Management uses a service-principal (client-credentials) flow against
-	// AAD; AZURE_AUTHORITY_HOST / AZURE_MANAGEMENT_HOST allow targeting
-	// sovereign clouds (Azure Government, China) and default to the public
-	// cloud when unset.
-	AzureTenantID          string
-	AzureClientID          string
-	AzureClientSecret      string
-	AzureManagementGroupID string // Optional. Defaults to tenant root MG (= tenant ID) for tenant-wide cost reporting.
-	AzureBillingAccountID  string // Optional. EA enrollment number. When set, queries hit billing-account scope (preferred for EA tenants) and AzureManagementGroupID is ignored.
-	AzureAuthorityHost     string
-	AzureManagementHost    string
+	// Sovereign-cloud overrides for Azure Cost Management. Default to the
+	// public-cloud endpoints when unset. Not per-agent overridable — these
+	// are deployment-wide.
+	AzureAuthorityHost  string
+	AzureManagementHost string
 
 	DashboardsDir string // Directory where dashboard JSON snapshots are persisted.
 	WorkflowsDir  string // Directory where workflow JSON snapshots are persisted.
@@ -171,43 +192,46 @@ func (c *Config) AzureCostConfigured() bool {
 
 func Load() (*Config, error) {
 	cfg := &Config{
-		SlackBotToken:          os.Getenv("SLACK_BOT_TOKEN"),
-		SlackSigningSecret:     os.Getenv("SLACK_SIGNING_SECRET"),
-		GitHubToken:            os.Getenv("GITHUB_TOKEN"),
-		GeneralModel:           os.Getenv("GENERAL_MODEL"),
-		CodeModel:              os.Getenv("CODE_MODEL"),
-		AzureEndpoint:          os.Getenv("AZURE_OPEN_AI_ENDPOINT"),
-		AzureAPIKey:            os.Getenv("AZURE_API_KEY"),
-		Port:                   os.Getenv("PORT"),
-		UIAllowedCIDRs:         os.Getenv("UI_ALLOWED_CIDRS"),
-		AtlassianURL:           os.Getenv("ATLASSIAN_URL"),
-		AtlassianEmail:         os.Getenv("ATLASSIAN_EMAIL"),
-		AtlassianAPIToken:      os.Getenv("ATLASSIAN_API_TOKEN"),
-		JiraProject:            os.Getenv("JIRA_PROJECT"),
-		AtlassianClientID:      os.Getenv("ATLASSIAN_CLIENT_ID"),
-		AtlassianClientSecret:  os.Getenv("ATLASSIAN_CLIENT_SECRET"),
-		AppURL:                 os.Getenv("APP_URL"),
-		SlackAppToken:          os.Getenv("SLACK_APP_TOKEN"),
-		NVDAPIKey:              os.Getenv("NVD_API_KEY"),
-		SFConsumerKey:          os.Getenv("SF_CONSUMER_KEY"),
-		SFConsumerSecret:       os.Getenv("SF_CONSUMER_SECRET"),
-		SFLoginURL:             os.Getenv("SF_LOGIN_URL"),
-		ChorusAPIToken:         os.Getenv("CHORUS_API_TOKEN"),
-		ChorusBaseURL:          os.Getenv("CHORUS_BASE_URL"),
-		DDAPIKeyUS:             os.Getenv("DD_API_KEY_US"),
-		DDAppKeyUS:             os.Getenv("DD_APP_KEY_US"),
-		DDAPIKeyEU:             os.Getenv("DD_API_KEY_EU"),
-		DDAppKeyEU:             os.Getenv("DD_APP_KEY_EU"),
-		AWSRegion:              os.Getenv("AWS_REGION"),
-		AzureTenantID:          os.Getenv("AZURE_TENANT_ID"),
-		AzureClientID:          os.Getenv("AZURE_CLIENT_ID"),
-		AzureClientSecret:      os.Getenv("AZURE_CLIENT_SECRET"),
-		AzureManagementGroupID: os.Getenv("AZURE_MANAGEMENT_GROUP_ID"),
-		AzureBillingAccountID:  os.Getenv("AZURE_BILLING_ACCOUNT_ID"),
-		AzureAuthorityHost:     os.Getenv("AZURE_AUTHORITY_HOST"),
-		AzureManagementHost:    os.Getenv("AZURE_MANAGEMENT_HOST"),
-		DashboardsDir:          os.Getenv("DASHBOARDS_DIR"),
-		WorkflowsDir:           os.Getenv("WORKFLOWS_DIR"),
+		Credentials: Credentials{
+			SlackBotToken:          os.Getenv("SLACK_BOT_TOKEN"),
+			SlackSigningSecret:     os.Getenv("SLACK_SIGNING_SECRET"),
+			SlackAppToken:          os.Getenv("SLACK_APP_TOKEN"),
+			GitHubToken:            os.Getenv("GITHUB_TOKEN"),
+			AzureEndpoint:          os.Getenv("AZURE_OPEN_AI_ENDPOINT"),
+			AzureAPIKey:            os.Getenv("AZURE_API_KEY"),
+			AtlassianURL:           os.Getenv("ATLASSIAN_URL"),
+			AtlassianEmail:         os.Getenv("ATLASSIAN_EMAIL"),
+			AtlassianAPIToken:      os.Getenv("ATLASSIAN_API_TOKEN"),
+			AtlassianClientID:      os.Getenv("ATLASSIAN_CLIENT_ID"),
+			AtlassianClientSecret:  os.Getenv("ATLASSIAN_CLIENT_SECRET"),
+			JiraProject:            os.Getenv("JIRA_PROJECT"),
+			NVDAPIKey:              os.Getenv("NVD_API_KEY"),
+			SFConsumerKey:          os.Getenv("SF_CONSUMER_KEY"),
+			SFConsumerSecret:       os.Getenv("SF_CONSUMER_SECRET"),
+			SFLoginURL:             os.Getenv("SF_LOGIN_URL"),
+			ChorusAPIToken:         os.Getenv("CHORUS_API_TOKEN"),
+			ChorusBaseURL:          os.Getenv("CHORUS_BASE_URL"),
+			DDAPIKeyUS:             os.Getenv("DD_API_KEY_US"),
+			DDAppKeyUS:             os.Getenv("DD_APP_KEY_US"),
+			DDAPIKeyEU:             os.Getenv("DD_API_KEY_EU"),
+			DDAppKeyEU:             os.Getenv("DD_APP_KEY_EU"),
+			AzureTenantID:          os.Getenv("AZURE_TENANT_ID"),
+			AzureClientID:          os.Getenv("AZURE_CLIENT_ID"),
+			AzureClientSecret:      os.Getenv("AZURE_CLIENT_SECRET"),
+			AzureManagementGroupID: os.Getenv("AZURE_MANAGEMENT_GROUP_ID"),
+			AzureBillingAccountID:  os.Getenv("AZURE_BILLING_ACCOUNT_ID"),
+		},
+
+		GeneralModel:        os.Getenv("GENERAL_MODEL"),
+		CodeModel:           os.Getenv("CODE_MODEL"),
+		Port:                os.Getenv("PORT"),
+		UIAllowedCIDRs:      os.Getenv("UI_ALLOWED_CIDRS"),
+		AppURL:              os.Getenv("APP_URL"),
+		AWSRegion:           os.Getenv("AWS_REGION"),
+		AzureAuthorityHost:  os.Getenv("AZURE_AUTHORITY_HOST"),
+		AzureManagementHost: os.Getenv("AZURE_MANAGEMENT_HOST"),
+		DashboardsDir:       os.Getenv("DASHBOARDS_DIR"),
+		WorkflowsDir:        os.Getenv("WORKFLOWS_DIR"),
 
 		WorkflowsGitOpsOwner:    os.Getenv("WORKFLOWS_GITOPS_OWNER"),
 		WorkflowsGitOpsRepo:     os.Getenv("WORKFLOWS_GITOPS_REPO"),

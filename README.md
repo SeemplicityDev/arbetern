@@ -104,6 +104,7 @@ All three live under `persistence.mountPath` in the chart and default to `./data
 | `USER_CONTEXT_DIR` | Directory for per-user rolling conversation summaries (`<agent>/<user>/context.txt`). Defaults to a temp dir; the chart points it at the PVC when `userContext.enabled` is true |
 | `CUSTOM_PROMPTS_DIR` | Directory of custom prompt YAML files **appended** to built-in agent prompts. Set automatically by the chart when `customPrompts` is configured |
 | `AGENT_RBAC_DIR` | Directory of per-agent RBAC overrides (`<agent-id>.yaml` with `allowed_teams`). Set automatically by the chart when `agentRBAC` is configured |
+| `AGENT_CREDENTIALS_DIR` | Directory of per-agent credential overrides (`<agent-id>/<secret-key>` files). Set automatically by the chart when `customCredentials` is configured. See [Per-Agent Credentials](#per-agent-credentials-integration-overrides) |
 
 </details>
 
@@ -310,6 +311,56 @@ export AGENT_RBAC_DIR=/path/to/rbac
 5. Deploy overrides (`AGENT_RBAC_DIR`) **replace** (not merge) the `config.yaml` value
 
 > **Slack scope required:** `usergroups:read` — add this to your Slack app's OAuth scopes.
+
+## Per-Agent Credentials (Integration Overrides)
+
+Each agent normally shares the same integration credentials (Salesforce, Atlassian, Chorus, Datadog, NVD, Azure cost). When a single agent needs its own Salesforce app / Atlassian tenant / Datadog account / etc. you can override individual keys *for that agent only* — every key you do not override falls through to the global value.
+
+Overrides use the same kebab-case keys as the chart's `secretValues` map (e.g. `sf-consumer-key`, `atlassian-api-token`, `chorus-api-token`, `dd-api-key-us`, `azure-client-secret`, ...).
+
+### Via Helm (per-agent Secret)
+
+Add a `customCredentials` section to your values file:
+
+```yaml
+customCredentials:
+  ovad:
+    sf-consumer-key: "REPLACE_ME"
+    sf-consumer-secret: "REPLACE_ME"
+  pulse:
+    chorus-api-token: "REPLACE_ME"
+    dd-api-key-us: "REPLACE_ME"
+    dd-app-key-us: "REPLACE_ME"
+```
+
+For every entry the chart provisions a Secret named `arbetern-<agent>-secrets` and mounts it at `/etc/arbetern/agent-credentials/<agent>/` (one file per key). `AGENT_CREDENTIALS_DIR` is set automatically.
+
+When `createSecret: false` (recommended for production) the chart skips creating the Secret resources — provision them yourself with the matching name and the chart will still mount them:
+
+```bash
+kubectl create secret generic arbetern-ovad-secrets \
+  --from-literal=sf-consumer-key=3MVG9... \
+  --from-literal=sf-consumer-secret=...
+```
+
+Leave the corresponding `customCredentials.<agent>` map present (even if empty values) so the chart adds the volume mount.
+
+### Via Environment Variable (local / Docker)
+
+Set `AGENT_CREDENTIALS_DIR` to a directory containing one subdirectory per agent. Each file inside the subdirectory is treated as a single override value whose filename matches a kebab-case secret key:
+
+```bash
+export AGENT_CREDENTIALS_DIR=/path/to/agent-credentials
+# /path/to/agent-credentials/ovad/sf-consumer-key
+# /path/to/agent-credentials/ovad/sf-consumer-secret
+```
+
+### How it Works
+
+1. At startup each agent's router is built with a per-agent copy of the config (`Config.ForAgent(agentID)` in [config/agent_credentials.go](config/agent_credentials.go))
+2. Only integration clients whose credentials actually differ from the global config get rebuilt ([integrations_agent.go](integrations_agent.go)). Everything else reuses the shared global client — no extra connections
+3. Supported keys: every kebab-case key from the chart's `secretValues` schema (Atlassian, Salesforce, Chorus, Datadog US + EU, NVD, Azure Cost service-principal, Azure OpenAI, GitHub, Slack). Unknown keys are ignored
+4. **Limitation:** AWS credentials are resolved via the SDK chain (ambient env / IRSA), so `aws-*` overrides under `customCredentials` are *not* applied to the AWS client — use the global secret or a per-pod service account instead
 
 ## Dashboards
 

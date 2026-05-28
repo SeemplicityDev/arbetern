@@ -247,6 +247,10 @@ spec:
             - name: AGENT_RBAC_DIR
               value: /etc/arbetern/agent-rbac
             {{- end }}
+            {{- if .Values.customCredentials }}
+            - name: AGENT_CREDENTIALS_DIR
+              value: /etc/arbetern/agent-credentials
+            {{- end }}
             {{- if .Values.dashboards.enabled }}
             - name: DASHBOARDS_DIR
               value: "{{ .Values.persistence.mountPath }}/{{ .Values.dashboards.subPath }}"
@@ -335,8 +339,20 @@ spec:
               mountPath: /etc/arbetern/agent-rbac
               readOnly: true
           {{- end }}
-          {{- if .Values.persistence.enabled }}
+          {{- if .Values.customCredentials }}
           {{- if and (not .Values.volumeMounts) (not .Values.customPrompts) (not .Values.agentRBAC) }}
+          volumeMounts:
+          {{- end }}
+          {{- range $agentID, $creds := .Values.customCredentials }}
+          {{- if $creds }}
+            - name: agent-credentials-{{ $agentID }}
+              mountPath: /etc/arbetern/agent-credentials/{{ $agentID }}
+              readOnly: true
+          {{- end }}
+          {{- end }}
+          {{- end }}
+          {{- if .Values.persistence.enabled }}
+          {{- if and (not .Values.volumeMounts) (not .Values.customPrompts) (not .Values.agentRBAC) (not .Values.customCredentials) }}
           volumeMounts:
           {{- end }}
             - name: data
@@ -362,8 +378,21 @@ spec:
           configMap:
             name: {{ include "arbetern.fullname" . }}-agent-rbac
       {{- end }}
-      {{- if and .Values.persistence.enabled (not .Values.persistence.persistentVolumeClaim.enabled) }}
+      {{- if .Values.customCredentials }}
       {{- if and (not .Values.volumes) (not .Values.customPrompts) (not .Values.agentRBAC) }}
+      volumes:
+      {{- end }}
+      {{- range $agentID, $creds := .Values.customCredentials }}
+      {{- if $creds }}
+        - name: agent-credentials-{{ $agentID }}
+          secret:
+            secretName: arbetern-{{ $agentID }}-secrets
+            optional: true
+      {{- end }}
+      {{- end }}
+      {{- end }}
+      {{- if and .Values.persistence.enabled (not .Values.persistence.persistentVolumeClaim.enabled) }}
+      {{- if and (not .Values.volumes) (not .Values.customPrompts) (not .Values.agentRBAC) (not .Values.customCredentials) }}
       volumes:
       {{- end }}
         - name: data

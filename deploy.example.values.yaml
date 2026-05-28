@@ -95,6 +95,18 @@ secretValues:
 #     - S0A6S3KNNLW   # CS team
 #     - S0B7T4LOOLX   # DevOps
 
+# Per-agent credential overrides — keys match the kebab-case names from
+# secretValues. Each entry produces a Secret named `arbetern-<agent>-secrets`
+# (when createSecret=true) mounted at /etc/arbetern/agent-credentials/<agent>/.
+# Any key not overridden falls through to the global secretValues. Use this
+# when a single agent needs its own Salesforce app / Atlassian tenant / etc.
+# customCredentials:
+#   ovad:
+#     sf-consumer-key: "REPLACE_ME"
+#     sf-consumer-secret: "REPLACE_ME"
+#   pulse:
+#     chorus-api-token: "REPLACE_ME"
+
 # Dashboards + workflows share a single persistent data directory.
 # Enable the PVC to keep state across pod restarts; leave disabled for
 # ephemeral/dev environments where emptyDir is fine.

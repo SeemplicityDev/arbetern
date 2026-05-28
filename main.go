@@ -1114,7 +1114,24 @@ func main() {
 		}
 
 		agentID := agent.ID // capture for closure
-		router := commands.NewRouter(slackClient, ghClient, modelsClient, codeModelsClient, jiraClient, nvdClient, sfClient, chorusClient, datadogClients, awsClient, azureClient, dashRegistry, wfRegistry, ap, agent.ID, cfg.AppURL, sessions, cfg.MaxToolRounds, userContextStore)
+
+		// Per-agent credential overrides: when the Helm chart mounts an
+		// arbetern-<agent>-secrets Secret at $AGENT_CREDENTIALS_DIR/<agent>/,
+		// rebuild only the integration clients whose credentials actually
+		// differ from the global config. Everything else falls through to
+		// the shared client (no extra connections, no extra goroutines).
+		agentCfg := cfg.ForAgent(agentID)
+		agentClients := buildAgentScopedClients(cfg, agentCfg, agentID, agentIntegrationClients{
+			jira:    jiraClient,
+			sf:      sfClient,
+			chorus:  chorusClient,
+			datadog: datadogClients,
+			aws:     awsClient,
+			azure:   azureClient,
+			nvd:     nvdClient,
+		})
+
+		router := commands.NewRouter(slackClient, ghClient, modelsClient, codeModelsClient, agentClients.jira, agentClients.nvd, agentClients.sf, agentClients.chorus, agentClients.datadog, agentClients.aws, agentClients.azure, dashRegistry, wfRegistry, ap, agent.ID, cfg.AppURL, sessions, cfg.MaxToolRounds, userContextStore)
 		routers[agent.ID] = router
 
 		// Background sweepers for the per-router in-memory caches so

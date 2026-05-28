@@ -250,6 +250,36 @@ volumesMounts: []
 #       Our container base images are hosted in ECR at 123456789.dkr.ecr.us-east-1.amazonaws.com.
 #       All Python services must use Python >= 3.13.11.
 customPrompts: {}
+
+# Per-agent credential overrides. Each key is an agent ID; values are the same
+# kebab-case keys used in `secretValues` (e.g. sf-consumer-key, atlassian-api-token,
+# chorus-api-token, dd-api-key-us, ...). For every entry the chart provisions a
+# Secret named `arbetern-<agent>-secrets` and mounts it at
+# /etc/arbetern/agent-credentials/<agent>/. At runtime the app starts each agent
+# with the global credentials from `secretName` and overlays only the keys
+# present here — anything you do not override falls through to the global value.
+#
+# Use this when one agent needs its own Salesforce app / Atlassian tenant /
+# Datadog account / etc. while the rest of the fleet keeps using the shared
+# credentials.
+#
+# When `createSecret` is true the chart writes the values below verbatim into
+# each per-agent Secret. When false (recommended for production) create the
+# per-agent secrets yourself, e.g.:
+#   kubectl create secret generic arbetern-ovad-secrets \
+#     --from-literal=sf-consumer-key=3MVG9... \
+#     --from-literal=sf-consumer-secret=...
+# and leave the value below as an empty map (the chart will still mount any
+# Secret that exists with the matching name).
+#
+# Example:
+# customCredentials:
+#   ovad:
+#     sf-consumer-key: "REPLACE_ME"
+#     sf-consumer-secret: "REPLACE_ME"
+#   pulse:
+#     chorus-api-token: "REPLACE_ME"
+customCredentials: {}
 # Agent RBAC — restrict agent access by Slack user group (subteam) IDs.
 # Each key is an agent ID; values are lists of Slack user group IDs.
 # When set, only members of the listed groups can use the agent.
