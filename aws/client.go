@@ -96,6 +96,14 @@ type CostAndUsageOpts struct {
 	// Refund are excluded from cost reporting. Values are matched
 	// case-sensitively against Cost Explorer's RECORD_TYPE dimension.
 	ExcludeChargeTypes []string
+	// ExcludeServices drops any SERVICE whose name CONTAINS one of these
+	// substrings (case-insensitive). Cost Explorer's Dimensions filter only
+	// supports exact EQUALS, so GetCostAndUsage first resolves the matching
+	// exact service names via GetDimensionValues over the same window and
+	// then excludes them server-side. Use this to drop lumpy services (e.g.
+	// "Databricks" Marketplace commitments) from totals, group breakdowns,
+	// and forecasts without post-filtering in the caller.
+	ExcludeServices []string
 }
 
 // CostPeriod is one granule (day, month, etc.) of cost data.
@@ -163,7 +171,14 @@ func (c *Client) GetCostAndUsage(ctx context.Context, opts CostAndUsageOpts) (*C
 			Key:  awsv2.String(groupBy),
 		}}
 	}
-	if filter := buildCostFilter(opts.ServiceFilter, opts.ExcludeChargeTypes); filter != nil {
+	var excludeServiceNames []string
+	if len(opts.ExcludeServices) > 0 {
+		excludeServiceNames, err = c.resolveServicesContaining(ctx, opts.ExcludeServices, start, end)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if filter := buildCostFilter(opts.ServiceFilter, opts.ExcludeChargeTypes, excludeServiceNames); filter != nil {
 		input.Filter = filter
 	}
 
@@ -231,6 +246,12 @@ type ForecastOpts struct {
 	// "Charge type" filter (Credit, Solution Provider Program Discount, Tax,
 	// Refund) when those are passed.
 	ExcludeChargeTypes []string
+	// ExcludeServices mirrors CostAndUsageOpts.ExcludeServices — SERVICE name
+	// substrings (case-insensitive) to drop from the forecast. The matching
+	// exact service names are resolved via GetDimensionValues over a recent
+	// settled window (forecasts run on future dates that have no dimension
+	// values yet) and excluded from the projection server-side.
+	ExcludeServices []string
 }
 
 // ForecastResult is the flattened forecast response.
@@ -284,6 +305,19 @@ func (c *Client) GetCostForecast(ctx context.Context, opts ForecastOpts) (*Forec
 		return nil, err
 	}
 
+	// Forecast windows are in the future, where the SERVICE dimension has
+	// no values yet, so resolve the exact names to exclude over the last
+	// 30 settled days (today exclusive) instead of the forecast window.
+	var excludeServiceNames []string
+	if len(opts.ExcludeServices) > 0 {
+		nameStart := today.AddDate(0, 0, -30).Format("2006-01-02")
+		nameEnd := today.Format("2006-01-02")
+		excludeServiceNames, err = c.resolveServicesContaining(ctx, opts.ExcludeServices, nameStart, nameEnd)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	in := &costexplorer.GetCostForecastInput{
 		TimePeriod: &cetypes.DateInterval{
 			Start: awsv2.String(start),
@@ -292,7 +326,7 @@ func (c *Client) GetCostForecast(ctx context.Context, opts ForecastOpts) (*Forec
 		Granularity: cetypes.Granularity(gran),
 		Metric:      forecastMetric,
 	}
-	if filter := buildCostFilter("", opts.ExcludeChargeTypes); filter != nil {
+	if filter := buildCostFilter("", opts.ExcludeChargeTypes, excludeServiceNames); filter != nil {
 		in.Filter = filter
 	}
 	out, err := c.ce.GetCostForecast(ctx, in)
@@ -429,16 +463,19 @@ func parseAmount(s string) float64 {
 }
 
 // buildCostFilter assembles a Cost Explorer filter Expression that
-// optionally pins to a single SERVICE and/or excludes a set of RECORD_TYPE
-// (charge type) values. Returns nil when neither constraint is set.
+// optionally pins to a single SERVICE, excludes a set of RECORD_TYPE
+// (charge type) values, and/or excludes a set of exact SERVICE names.
+// Returns nil when no constraint is set.
 //
 // Cost Explorer requires Expression.And to contain at least two children;
 // when only one constraint applies it must live at the top level. Charge-type
 // exclusion is expressed as Not { Dimensions { RECORD_TYPE in [...] } } so
 // that any row matching one of the listed types is dropped (mirrors the
 // console's "Charge type" filter where Credit, Refund, Tax, and Solution
-// Provider Program Discount are excluded by default).
-func buildCostFilter(serviceFilter string, excludeChargeTypes []string) *cetypes.Expression {
+// Provider Program Discount are excluded by default). Service exclusion is
+// expressed the same way against the SERVICE dimension using the exact
+// names resolved by resolveServicesContaining.
+func buildCostFilter(serviceFilter string, excludeChargeTypes, excludeServiceNames []string) *cetypes.Expression {
 	var parts []cetypes.Expression
 	if sf := strings.TrimSpace(serviceFilter); sf != "" {
 		parts = append(parts, cetypes.Expression{
@@ -463,6 +500,21 @@ func buildCostFilter(serviceFilter string, excludeChargeTypes []string) *cetypes
 		}
 		parts = append(parts, cetypes.Expression{Not: &inner})
 	}
+	svc := make([]string, 0, len(excludeServiceNames))
+	for _, v := range excludeServiceNames {
+		if t := strings.TrimSpace(v); t != "" {
+			svc = append(svc, t)
+		}
+	}
+	if len(svc) > 0 {
+		inner := cetypes.Expression{
+			Dimensions: &cetypes.DimensionValues{
+				Key:    cetypes.DimensionService,
+				Values: svc,
+			},
+		}
+		parts = append(parts, cetypes.Expression{Not: &inner})
+	}
 	switch len(parts) {
 	case 0:
 		return nil
@@ -471,6 +523,47 @@ func buildCostFilter(serviceFilter string, excludeChargeTypes []string) *cetypes
 	default:
 		return &cetypes.Expression{And: parts}
 	}
+}
+
+// resolveServicesContaining resolves the exact Cost Explorer SERVICE names
+// whose value contains any of the given substrings (case-insensitive),
+// enumerating the SERVICE dimension over [start,end). Cost Explorer's
+// Dimensions filter only matches exact values, so substring exclusion (e.g.
+// "Databricks") must be expanded to the concrete service strings first. A
+// nil/empty substrings slice short-circuits without an API call.
+func (c *Client) resolveServicesContaining(ctx context.Context, substrings []string, start, end string) ([]string, error) {
+	subs := make([]string, 0, len(substrings))
+	for _, s := range substrings {
+		if t := strings.ToLower(strings.TrimSpace(s)); t != "" {
+			subs = append(subs, t)
+		}
+	}
+	if len(subs) == 0 {
+		return nil, nil
+	}
+	dv, err := c.GetDimensionValues(ctx, DimensionValuesOpts{
+		Dimension: "SERVICE",
+		Start:     start,
+		End:       end,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("resolve excluded services: %w", err)
+	}
+	var matched []string
+	seen := make(map[string]bool)
+	for _, v := range dv.Values {
+		lv := strings.ToLower(v)
+		for _, sub := range subs {
+			if strings.Contains(lv, sub) {
+				if !seen[v] {
+					seen[v] = true
+					matched = append(matched, v)
+				}
+				break
+			}
+		}
+	}
+	return matched, nil
 }
 
 // toForecastMetric translates a GetCostAndUsage-style metric
