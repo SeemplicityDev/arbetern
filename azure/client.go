@@ -27,6 +27,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/rand"
 	"net/http"
 	"net/url"
 	"sort"
@@ -642,7 +643,13 @@ func (c *Client) doJSONRaw(ctx context.Context, method, endpoint string, body an
 		}
 	}
 
-	const maxAttempts = 5
+	// Cost Management's per-scope quota window is wide (~30-60s) and is
+	// shared across every caller on the tenant, so a single report can
+	// see 429s on several consecutive attempts even when this client is
+	// the only thing running. Retry generously: ARM almost always clears
+	// the throttle within a couple of windows, and each wait honors the
+	// server's Retry-After hint when present.
+	const maxAttempts = 8
 	var lastErr error
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		var reader io.Reader
@@ -687,8 +694,13 @@ func (c *Client) doJSONRaw(ctx context.Context, method, endpoint string, body an
 // retryAfter computes the sleep duration before the next retry attempt.
 // Azure exposes the remaining quota window in Retry-After (seconds or
 // HTTP-date) plus x-ms-ratelimit-microsoft.*-retry-after; we trust the
-// largest hint we can find and fall back to capped exponential backoff
-// (2s, 4s, 8s, 16s, 32s) when no header is present.
+// largest hint we can find. When no header is present we fall back to
+// capped exponential backoff with a floor that matches ARM's ~30s quota
+// window (10s, 20s, 40s -> capped 60s) instead of starting at 2s, since
+// short waits just burn retry attempts against a window that hasn't
+// reset yet. A full-jitter term is added in both cases so concurrent
+// tenant activity racing the same per-scope budget doesn't resynchronize
+// onto identical retry instants.
 func retryAfter(h http.Header, attempt int) time.Duration {
 	candidates := []string{
 		h.Get("Retry-After"),
@@ -696,6 +708,7 @@ func retryAfter(h http.Header, attempt int) time.Duration {
 		h.Get("x-ms-ratelimit-microsoft.consumption-entity-retry-after"),
 	}
 	var best time.Duration
+	hinted := false
 	for _, v := range candidates {
 		if v == "" {
 			continue
@@ -703,22 +716,34 @@ func retryAfter(h http.Header, attempt int) time.Duration {
 		if secs, err := strconv.Atoi(strings.TrimSpace(v)); err == nil && secs > 0 {
 			if d := time.Duration(secs) * time.Second; d > best {
 				best = d
+				hinted = true
 			}
 			continue
 		}
 		if t, err := http.ParseTime(v); err == nil {
 			if d := time.Until(t); d > best {
 				best = d
+				hinted = true
 			}
 		}
 	}
 	if best <= 0 {
-		best = time.Duration(1<<(attempt+1)) * time.Second
+		// 10s, 20s, 40s, 80s... before the cap below.
+		best = 10 * time.Second * time.Duration(1<<attempt)
 	}
 	if best > 60*time.Second {
 		best = 60 * time.Second
 	}
-	return best
+	// Add jitter: a small fixed band (0-2s) when we have an authoritative
+	// server hint, or up to 25% of the computed delay when backing off
+	// blindly, to spread retries that would otherwise collide.
+	var jitter time.Duration
+	if hinted {
+		jitter = time.Duration(rand.Int63n(int64(2 * time.Second)))
+	} else {
+		jitter = time.Duration(rand.Int63n(int64(best / 4)))
+	}
+	return best + jitter
 }
 
 // --------------------------------------------------------------------------
