@@ -1280,6 +1280,24 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 		}, llm.Tool{
 			Type: "function",
 			Function: llm.ToolFunction{
+				Name:        "datadog_logs_aggregate",
+				Description: "Compute SERVER-SIDE aggregations and accurate percentiles over Datadog logs (no sampling, no row cap — unlike datadog_search_logs). For each value of a group-by facet it returns count + p50/p95/p99 of a numeric measure, sorted by p95 descending. Use this for performance baselines and 'how slow is endpoint X / which customers are slowest' questions. Example: query 'service:api-service \"request end\"', group_by '@endpoint_name', measure '@time_took' → per-endpoint latency percentiles over the whole window. Switch measure to '@infra_extra.mem_delta_mb' for memory, or group_by to '@customer_schema' for per-customer attribution. Requires the measure to be a registered Datadog measure facet. Time range defaults to the last 14 days.",
+				Parameters: json.RawMessage(`{
+					"type":"object",
+					"properties":{
+						"query":{"type":"string","description":"Datadog log search query to aggregate over (e.g. 'service:api-service \"request end\"'). Append exclusions like '-@customer_schema:(seemplicity* OR demo*)' to drop test tenants."},
+						"group_by":{"type":"string","description":"Facet to group by (e.g. '@endpoint_name', '@customer_schema'). Default '@endpoint_name'."},
+						"measure":{"type":"string","description":"Numeric measure facet to compute p50/p95/p99 over (e.g. '@time_took' seconds, '@infra_extra.mem_delta_mb' MB). Default '@time_took'."},
+						"from":{"type":"string","description":"Start of time range: ISO-8601, unix-ms, or date-math ('now-14d'). Defaults to 14 days ago."},
+						"to":{"type":"string","description":"End of time range. Defaults to now."},
+						"site":{"type":"string","enum":["us","eu"],"description":"Datadog site to query: 'us' (datadoghq.com), 'eu' (datadoghq.eu). Omit to query all configured sites (recommended for platform-wide baselines)."}
+					},
+					"required":["query"]
+				}`),
+			},
+		}, llm.Tool{
+			Type: "function",
+			Function: llm.ToolFunction{
 				Name:        "datadog_list_monitors",
 				Description: "List Datadog monitors, optionally filtered by query. Use this to find monitors related to a service, environment, or alert type. Supports Datadog monitor search syntax (e.g. 'tag:service:task-exec', 'tag:env:prod', monitor name substrings). Returns monitor name, status (OK/Alert/Warn/No Data), type, tags, and direct links.",
 				Parameters: json.RawMessage(`{
@@ -3322,6 +3340,31 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 			return fmt.Sprintf("Error searching Datadog logs: %v", err)
 		}
 		log.Printf("[user=%s channel=%s] searched Datadog logs for %q (site=%s)", userID, channelID, args.Query, args.Site)
+		return result
+
+	case "datadog_logs_aggregate":
+		if h.datadogClients == nil {
+			return "Error: Datadog integration is not configured. Set DD_API_KEY_US/DD_APP_KEY_US and/or DD_API_KEY_EU/DD_APP_KEY_EU to enable it."
+		}
+		args, errMsg := parseToolArgs[struct {
+			Query   string `json:"query"`
+			GroupBy string `json:"group_by"`
+			Measure string `json:"measure"`
+			From    string `json:"from"`
+			To      string `json:"to"`
+			Site    string `json:"site"`
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
+		}
+		if args.Query == "" {
+			return "Error: query is required."
+		}
+		result, err := h.datadogClients.AggregatePercentiles(ctx, args.Site, args.Query, args.From, args.To, args.GroupBy, args.Measure)
+		if err != nil {
+			return fmt.Sprintf("Error aggregating Datadog logs: %v", err)
+		}
+		log.Printf("[user=%s channel=%s] aggregated Datadog logs for %q (group_by=%s, measure=%s, site=%s)", userID, channelID, args.Query, args.GroupBy, args.Measure, args.Site)
 		return result
 
 	case "datadog_list_monitors":
