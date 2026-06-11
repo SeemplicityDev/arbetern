@@ -37,6 +37,7 @@ env:
   APP_URL: ""  # Public base URL of this app (e.g. "https://ai.dev.example.io"). Used for UI link in Jira stamps.
   # UI_ALLOWED_CIDRS: "10.0.0.0/8,203.0.113.10/32"  # Comma-separated CIDRs; empty = no restriction.
   # THREAD_SESSION_TTL: "3m"  # How long a thread session stays active (Go duration: 3m, 5m30s, etc.)
+  # CHAT_RETENTION: "168h"  # How long an idle UI chat conversation is kept before auto-deletion (Go duration). Default 168h (1 week).
   # MAX_TOOL_ROUNDS: "200"  # Max LLM tool-call rounds per request. Default 200; raise for very long multi-step workflows.
   # AWS_REGION: "us-east-1"   # Region used to sign Cost Explorer SigV4 calls. CE is global; leave as us-east-1 unless you have a reason not to.
   # AZURE_AUTHORITY_HOST: "https://login.microsoftonline.com"   # Override only for sovereign clouds (Azure Government, China).
@@ -212,6 +213,11 @@ oauth2-proxy:
       reverse_proxy = true
       # Single provider (Google) — skip the interstitial sign-in button page.
       skip_provider_button = true
+      # Pass the authenticated identity to the upstream app as
+      # X-Auth-Request-Email / X-Auth-Request-Groups. arbetern reads these to
+      # enforce per-agent allowed_emails RBAC (see customConfigs below). The
+      # proxy strips any client-supplied copies, so they can't be spoofed.
+      set_xauthrequest = true
       # Paths that bypass auth (RE2 regex). Add entries to expose more.
       skip_auth_routes = [
         "^/healthz",
@@ -310,12 +316,17 @@ customPrompts: {}
 # the override is a full config file, only the keys you set take effect and
 # everything else falls through to the baked-in config.yaml — and any field
 # added to the agent config in the future is overridable here automatically.
-# Supported fields today: name, allowed_teams, chat_enabled.
+# Supported fields today: name, allowed_teams, allowed_emails, chat_enabled.
 #   - chat_enabled: turn on the centralized UI chat for an agent.
 #   - allowed_teams: restrict the agent to the listed Slack user group
 #     (subteam) IDs. This is how you do per-agent RBAC at deploy time; when set,
 #     only members of those groups can use the agent. Omit/empty = no
 #     restriction.
+#   - allowed_emails: restrict the agent's UI chat (/ui/<agent>/chat and the
+#     /api/chat API) to the listed identities, matched against the email that
+#     oauth2-proxy injects. Entries may be exact addresses (alice@acme.com) or
+#     a whole domain (acme.com). Requires oauth2-proxy (set_xauthrequest=true).
+#     Omit/empty = no restriction.
 # Example:
 # customConfigs:
 #   ovad:
@@ -324,6 +335,9 @@ customPrompts: {}
 #     allowed_teams:
 #       - S0A6S3KNNLW   # CS team
 #       - S0B7T4LOOLX   # DevOps team
+#     allowed_emails:
+#       - solutions@acme.com
+#       - acme.com
 customConfigs: {}
 
 # Per-agent credential overrides. Each key is an agent ID; values are the same

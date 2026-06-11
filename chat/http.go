@@ -57,6 +57,10 @@ func (r *Registry) RegisterRoutes(apiMux *http.ServeMux, knownAgents map[string]
 			http.Error(w, "chat is not enabled for this agent", http.StatusForbidden)
 			return
 		}
+		if !r.authorized(req, agent) {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
 		// Expect /api/chat/<agent>/conversations[/<id>].
 		if len(parts) < 2 || parts[1] != "conversations" {
 			http.Error(w, "not found", http.StatusNotFound)

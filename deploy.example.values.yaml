@@ -103,18 +103,25 @@ secretValues:
 # only the keys you set take effect; everything else falls through to the
 # baked-in config.yaml, and any field added to the agent config in the future is
 # overridable here automatically. Supported fields today: name, allowed_teams,
-# chat_enabled.
+# allowed_emails, chat_enabled.
 #   - chat_enabled: turn on the centralized UI chat for an agent.
 #   - allowed_teams: restrict the agent to the listed Slack user group IDs
 #     (deploy-time RBAC); only members of those groups can use the agent.
+#   - allowed_emails: restrict the agent's UI chat to the listed identities,
+#     matched against the email oauth2-proxy injects. Exact addresses
+#     (alice@acme.com) or whole domains (acme.com). Requires oauth2-proxy.
 # Example:
 # customConfigs:
 #   ovad:
 #     chat_enabled: true
 #   pulse:
+#     chat_enabled: true
 #     allowed_teams:
 #       - S0A6S3KNNLW   # CS team
 #       - S0B7T4LOOLX   # DevOps team
+#     allowed_emails:
+#       - solutions@acme.com
+#       - acme.com
 
 # Per-agent credential overrides — keys match the kebab-case names from
 # secretValues. Each entry produces a Secret named `arbetern-<agent>-secrets`

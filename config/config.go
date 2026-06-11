@@ -21,6 +21,10 @@ const (
 	defaultModel            = "openai/gpt-4o"
 	defaultAzureModel       = "gpt-4o"
 	defaultThreadSessionTTL = 3 * time.Minute
+	// defaultChatRetention is how long a UI chat conversation is kept after
+	// its last activity before the background sweeper deletes it. One week by
+	// default; override with CHAT_RETENTION (Go duration).
+	defaultChatRetention = 7 * 24 * time.Hour
 	// defaultMaxToolRounds bounds the LLM tool-loop per request. Multi-step
 	// scheduled workflows (e.g. an auto-fix tick that walks 10 Jira tickets,
 	// fetches several SKILL.md files, opens PRs, and posts comments) can
@@ -109,6 +113,11 @@ type Config struct {
 	DashboardsDir string // Directory where dashboard JSON snapshots are persisted.
 	WorkflowsDir  string // Directory where workflow JSON snapshots are persisted.
 	ChatDir       string // Directory where per-agent chat transcripts are persisted.
+
+	// ChatRetention is how long a UI chat conversation is kept after its last
+	// activity before it is deleted by the background sweeper. Applies to all
+	// agents. Defaults to one week; override with CHAT_RETENTION.
+	ChatRetention time.Duration
 
 	// GitOps sync: when WorkflowsGitOpsRepo is set, arbetern reconciles
 	// workflow JSON descriptors from a remote GitHub repo into the local
@@ -316,6 +325,16 @@ func Load() (*Config, error) {
 		}
 	} else {
 		cfg.ThreadSessionTTL = defaultThreadSessionTTL
+	}
+
+	if retStr := os.Getenv("CHAT_RETENTION"); retStr != "" {
+		if d, err := time.ParseDuration(retStr); err == nil && d > 0 {
+			cfg.ChatRetention = d
+		} else {
+			return nil, fmt.Errorf("invalid CHAT_RETENTION %q: must be a positive Go duration (e.g. 168h, 720h)", retStr)
+		}
+	} else {
+		cfg.ChatRetention = defaultChatRetention
 	}
 
 	return cfg, nil

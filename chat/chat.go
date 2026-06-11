@@ -16,6 +16,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
+	"net/http"
 	"os"
 	"sort"
 	"strings"
@@ -79,8 +81,9 @@ type Registry struct {
 	root    string
 	respond Responder
 
-	mu      sync.Mutex
-	enabled map[string]bool
+	mu        sync.Mutex
+	enabled   map[string]bool
+	authorize func(req *http.Request, agent string) bool
 }
 
 // New constructs a Registry rooted at dir (falling back to DefaultDir when
@@ -104,6 +107,27 @@ func (r *Registry) IsEnabled(agent string) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.enabled[agent]
+}
+
+// SetAuthorizer installs an optional per-request access check. When set, it is
+// consulted after the agent is resolved and chat is confirmed enabled; a false
+// result rejects the request with 403. A nil authorizer (the default) allows
+// every authenticated request.
+func (r *Registry) SetAuthorizer(fn func(req *http.Request, agent string) bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.authorize = fn
+}
+
+// authorized applies the configured authorizer (if any) for the given request.
+func (r *Registry) authorized(req *http.Request, agent string) bool {
+	r.mu.Lock()
+	fn := r.authorize
+	r.mu.Unlock()
+	if fn == nil {
+		return true
+	}
+	return fn(req, agent)
 }
 
 // ListConversations returns summaries of an agent's conversations, most
@@ -195,6 +219,82 @@ func (r *Registry) RenameConversation(agent, id, title string) (*transcript, err
 		return nil, err
 	}
 	return t, nil
+}
+
+// StartRetention launches a background sweeper that deletes conversations whose
+// last activity is older than retention, across all agents. It runs once
+// immediately and then every interval until ctx is cancelled. A non-positive
+// retention disables the sweeper. Safe to call once at startup.
+func (r *Registry) StartRetention(ctx context.Context, retention, interval time.Duration) {
+	if retention <= 0 {
+		return
+	}
+	if interval <= 0 {
+		interval = time.Hour
+	}
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		r.purgeExpired(retention)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				r.purgeExpired(retention)
+			}
+		}
+	}()
+}
+
+// purgeExpired deletes every conversation (for every agent) whose UpdatedAt is
+// older than now-retention. Errors on individual files are logged and skipped
+// so one bad file cannot stall the sweep.
+func (r *Registry) purgeExpired(retention time.Duration) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	cutoff := time.Now().UTC().Add(-retention)
+	agents, err := os.ReadDir(r.root)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			log.Printf("chat retention: read root %q: %v", r.root, err)
+		}
+		return
+	}
+	removed := 0
+	for _, ad := range agents {
+		if !ad.IsDir() {
+			continue
+		}
+		agent := ad.Name()
+		entries, err := os.ReadDir(store.AgentDir(r.root, agent))
+		if err != nil {
+			log.Printf("chat retention: read agent dir %q: %v", agent, err)
+			continue
+		}
+		for _, e := range entries {
+			name := e.Name()
+			if e.IsDir() || !strings.HasSuffix(name, ".json") || strings.HasSuffix(name, ".tmp") {
+				continue
+			}
+			id := strings.TrimSuffix(name, ".json")
+			t, err := r.readLocked(agent, id)
+			if err != nil || t == nil {
+				continue
+			}
+			if t.UpdatedAt.Before(cutoff) {
+				if err := os.Remove(store.PathFor(r.root, agent, id)); err != nil && !os.IsNotExist(err) {
+					log.Printf("chat retention: delete %s/%s: %v", agent, id, err)
+					continue
+				}
+				removed++
+			}
+		}
+	}
+	if removed > 0 {
+		log.Printf("chat retention: removed %d conversation(s) inactive for >%s", removed, retention)
+	}
 }
 
 // readLocked reads one conversation from disk, normalizing any legacy or

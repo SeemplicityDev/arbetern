@@ -17,18 +17,20 @@ const customConfigEnv = "CUSTOM_CONFIG_DIR"
 
 // AgentConfig holds metadata and prompts for a single agent.
 type AgentConfig struct {
-	ID           string            `json:"id"`
-	Name         string            `json:"name"`
-	Prompts      map[string]string `json:"prompts"`
-	AllowedTeams []string          `json:"allowed_teams,omitempty"`
-	ChatEnabled  bool              `json:"chat_enabled"`
+	ID            string            `json:"id"`
+	Name          string            `json:"name"`
+	Prompts       map[string]string `json:"prompts"`
+	AllowedTeams  []string          `json:"allowed_teams,omitempty"`
+	AllowedEmails []string          `json:"allowed_emails,omitempty"`
+	ChatEnabled   bool              `json:"chat_enabled"`
 }
 
 // agentMeta is the on-disk config.yaml structure for an agent.
 type agentMeta struct {
-	Name         string   `yaml:"name"`
-	AllowedTeams []string `yaml:"allowed_teams"`
-	ChatEnabled  bool     `yaml:"chat_enabled"`
+	Name          string   `yaml:"name"`
+	AllowedTeams  []string `yaml:"allowed_teams"`
+	AllowedEmails []string `yaml:"allowed_emails"`
+	ChatEnabled   bool     `yaml:"chat_enabled"`
 }
 
 // AgentPrompts holds a per-agent prompt store with Get/MustGet methods.
@@ -310,11 +312,12 @@ func DiscoverAgents(agentsDir string) ([]AgentConfig, error) {
 		}
 
 		agents = append(agents, AgentConfig{
-			ID:           name,
-			Name:         displayName,
-			Prompts:      merged,
-			AllowedTeams: meta.AllowedTeams,
-			ChatEnabled:  meta.ChatEnabled,
+			ID:            name,
+			Name:          displayName,
+			Prompts:       merged,
+			AllowedTeams:  meta.AllowedTeams,
+			AllowedEmails: meta.AllowedEmails,
+			ChatEnabled:   meta.ChatEnabled,
 		})
 	}
 

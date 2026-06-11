@@ -390,6 +390,27 @@
       margin: auto;
     }
 
+    .chat-denied {
+      max-width: 340px;
+      padding: 24px;
+    }
+    .chat-denied-icon {
+      font-size: 32px;
+      line-height: 1;
+      margin-bottom: 12px;
+    }
+    .chat-denied-title {
+      color: var(--text);
+      font-size: 15px;
+      font-weight: 600;
+      margin-bottom: 6px;
+    }
+    .chat-denied-text {
+      color: var(--text-muted);
+      font-size: 13px;
+      line-height: 1.5;
+    }
+
     .chat-msg {
       display: flex;
       flex-direction: column;
@@ -1713,19 +1734,27 @@
     // ── Conversation REST helpers ──
     function convBase(agent) { return `/api/chat/${encodeURIComponent(agent)}/conversations`; }
 
+    // Builds an Error that carries the HTTP status so callers can branch on it
+    // (e.g. show an access-denied message for 403 vs. a generic failure).
+    function httpError(status) {
+      const e = new Error('HTTP ' + status);
+      e.status = status;
+      return e;
+    }
+
     async function apiListConversations(agent) {
       const r = await fetch(convBase(agent));
-      if (!r.ok) throw new Error('HTTP ' + r.status);
+      if (!r.ok) throw httpError(r.status);
       return r.json();
     }
     async function apiCreateConversation(agent) {
       const r = await fetch(convBase(agent), { method: 'POST' });
-      if (!r.ok) throw new Error('HTTP ' + r.status);
+      if (!r.ok) throw httpError(r.status);
       return r.json();
     }
     async function apiGetConversation(agent, id) {
       const r = await fetch(`${convBase(agent)}/${encodeURIComponent(id)}`);
-      if (!r.ok) throw new Error('HTTP ' + r.status);
+      if (!r.ok) throw httpError(r.status);
       return r.json();
     }
     async function apiDeleteConversation(agent, id) {
@@ -1781,9 +1810,37 @@
       chatConvId = null;
     }
 
+    // Shows or hides the message composer (textarea + Send) for the active
+    // chat view. Used to take the composer away when the user isn't allowed to
+    // chat with the agent, so there's no dead Send button.
+    function setChatInputVisible(visible) {
+      const { input } = chatEls();
+      const bar = input ? input.closest('.chat-input-bar') : null;
+      if (bar) bar.style.display = visible ? '' : 'none';
+    }
+
+    // Renders a friendly access-denied state: hides the composer and shows a
+    // customer-facing message instead of a raw "HTTP 403". Also clears the
+    // full-screen conversation list so no stale data lingers.
+    function showChatAccessDenied() {
+      setChatInputVisible(false);
+      chatEls().box.innerHTML =
+        '<div class="chat-empty chat-denied">' +
+        '<div class="chat-denied-icon">&#x1f512;</div>' +
+        '<div class="chat-denied-title">You don\u2019t have access to this chat</div>' +
+        '<div class="chat-denied-text">Your account isn\u2019t authorized to use this agent. ' +
+        'Contact your administrator if you need access.</div>' +
+        '</div>';
+      if (chatFull) {
+        const list = document.getElementById('fs-conv-list');
+        if (list) list.innerHTML = '';
+      }
+    }
+
     // Picks the agent's most recent conversation, or creates a fresh one when
     // there are none. Used by both the slide-over and full-screen views.
     async function openLatestOrNew(agent) {
+      setChatInputVisible(true);
       try {
         const list = await apiListConversations(agent);
         if (chatAgentId !== agent) return;
@@ -1794,6 +1851,11 @@
           await newChat(agent);
         }
       } catch (err) {
+        if (chatAgentId !== agent) return;
+        if (err && err.status === 403) {
+          showChatAccessDenied();
+          return;
+        }
         chatEls().box.innerHTML =
           `<div class="chat-empty">Failed to load conversations: ${escapeHtml(String(err))}</div>`;
       }
@@ -1856,6 +1918,7 @@
       document.getElementById('fs-chat-messages').innerHTML = '<div class="chat-empty">Loading…</div>';
       document.getElementById('fs-chat-input').value = '';
       document.getElementById('fs-agent-select').value = id;
+      setChatPath('/ui/' + encodeURIComponent(id) + '/chat');
       await openLatestOrNew(id);
       setTimeout(() => document.getElementById('fs-chat-input').focus(), 80);
     }
@@ -1874,6 +1937,7 @@
       chatFull = false;
       chatAgentId = null;
       chatConvId = null;
+      setChatPath('/ui/');
     }
 
     // Switch from the slide-over panel to the full-screen page.
@@ -1886,8 +1950,39 @@
       const id = chatAgentId;
       document.getElementById('chat-fullscreen').classList.remove('active');
       chatFull = false;
+      setChatPath('/ui/');
       if (id) openChat(id);
     }
+
+    // ── Deep-link routing for /ui/<agent>/chat ──────────────────────────────
+    // Keeps the browser URL in sync with the full-screen chat so the page is
+    // shareable and survives reloads. Pushes a history entry only when the path
+    // actually changes, which also makes popstate handling idempotent.
+    function setChatPath(path) {
+      if (location.pathname !== path) history.pushState({}, '', path);
+    }
+
+    // Opens the full-screen chat for the agent named in the current URL, or
+    // closes it if the URL is not a chat deep-link. Called on load and popstate.
+    function applyChatRoute() {
+      const m = location.pathname.match(/^\/ui\/([^/]+)\/chat\/?$/);
+      if (m) {
+        const id = decodeURIComponent(m[1]);
+        const agent = agentsData.find(a => a.id === id);
+        if (agent && agent.chat_enabled) {
+          openFullChat(id);
+          return;
+        }
+      }
+      if (chatFull) {
+        document.getElementById('chat-fullscreen').classList.remove('active');
+        chatFull = false;
+        chatAgentId = null;
+        chatConvId = null;
+      }
+    }
+
+    window.addEventListener('popstate', applyChatRoute);
 
     // Loads and displays a conversation's messages in the active view.
     async function selectConversation(agent, convId) {
@@ -2099,6 +2194,7 @@
         await loadDashboards();
         await loadWorkflows();
         renderAgents(agentsData);
+        applyChatRoute();
       } catch (err) {
         console.error('Failed to load agents:', err);
         document.getElementById('agents-grid').innerHTML = `

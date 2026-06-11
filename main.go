@@ -228,6 +228,61 @@ func checkAgentRBAC(cache *groupMemberCache, slackClient *slack.Client, agentID,
 
 const rbacDenyMessage = ":lock: Access denied — you are not a member of an authorized team for this agent. Contact your administrator if you need access."
 
+// clientEmail extracts the authenticated user's email from the headers an
+// upstream OAuth proxy (oauth2-proxy) injects after a successful login. The
+// proxy strips these headers from inbound client requests before setting its
+// own, so they cannot be spoofed by a browser going through the proxy. Returns
+// "" when no proxy is in front (e.g. local dev) or the user is unauthenticated.
+func clientEmail(r *http.Request) string {
+	for _, h := range []string{"X-Auth-Request-Email", "X-Forwarded-Email"} {
+		if v := strings.TrimSpace(r.Header.Get(h)); v != "" {
+			return strings.ToLower(v)
+		}
+	}
+	return ""
+}
+
+// emailAllowed reports whether email matches the allow-list. Entries are
+// matched case-insensitively and may be either an exact address
+// ("alice@acme.com") or a domain ("acme.com" or "@acme.com") which matches any
+// address in that domain.
+func emailAllowed(email string, allow []string) bool {
+	email = strings.ToLower(strings.TrimSpace(email))
+	if email == "" {
+		return false
+	}
+	domain := ""
+	if at := strings.LastIndex(email, "@"); at != -1 {
+		domain = email[at+1:]
+	}
+	for _, a := range allow {
+		a = strings.ToLower(strings.TrimSpace(strings.TrimPrefix(a, "@")))
+		if a == "" {
+			continue
+		}
+		if a == email || a == domain {
+			return true
+		}
+	}
+	return false
+}
+
+// checkEmailRBAC returns true if the request's authenticated email is allowed
+// to access the agent's UI/chat. An empty allow-list means no restriction.
+// When a restriction is configured the request must carry a verified email
+// (set by the OAuth proxy) that matches it, otherwise access is denied.
+func checkEmailRBAC(r *http.Request, agentID string, allowedEmails []string) bool {
+	if len(allowedEmails) == 0 {
+		return true // no restriction
+	}
+	email := clientEmail(r)
+	if !emailAllowed(email, allowedEmails) {
+		log.Printf("[rbac] DENIED email=%q agent=%s (allowed_emails=%v)", email, agentID, allowedEmails)
+		return false
+	}
+	return true
+}
+
 // Changelog source repository for the /api/changes endpoint.
 const (
 	changelogOwner = "justmike1"
@@ -1203,6 +1258,45 @@ func main() {
 		if agent.ChatEnabled {
 			log.Printf("Chat enabled for agent %q", agent.ID)
 		}
+	}
+
+	// Retention sweeper: delete chat conversations inactive for longer than
+	// CHAT_RETENTION (default one week) across all agents. Runs hourly.
+	chatRegistry.StartRetention(context.Background(), cfg.ChatRetention, time.Hour)
+	log.Printf("Chat retention: conversations inactive for >%s are auto-deleted", cfg.ChatRetention)
+
+	// Per-agent UI/chat RBAC by authenticated email (from the OAuth proxy).
+	// Empty list = no restriction. Used both by the chat API authorizer below
+	// and the /ui/<agent>/chat deep-link route.
+	agentEmailRBAC := make(map[string][]string, len(agents))
+	for _, agent := range agents {
+		agentEmailRBAC[agent.ID] = agent.AllowedEmails
+		if len(agent.AllowedEmails) > 0 {
+			log.Printf("RBAC: agent %q chat restricted to emails %v", agent.ID, agent.AllowedEmails)
+		}
+	}
+	chatRegistry.SetAuthorizer(func(req *http.Request, agentID string) bool {
+		return checkEmailRBAC(req, agentID, agentEmailRBAC[agentID])
+	})
+
+	// Deep-link route for the full-screen chat: /ui/<agent>/chat. Serves the
+	// SPA shell (the front-end router opens the agent's chat from the path).
+	// Access is enforced by the chat API authorizer, not here: unauthorized
+	// users still load the shell but get a friendly "no access" message from
+	// the front-end instead of a raw 403 page. Only the agent's chat data is
+	// gated, and the same shell is already public at /ui/.
+	// More specific than the "/ui/" static handler, so it takes precedence.
+	if indexHTML, err := uiFS.ReadFile("ui/index.html"); err == nil {
+		http.HandleFunc("/ui/{agent}/chat", func(w http.ResponseWriter, r *http.Request) {
+			agent := r.PathValue("agent")
+			if !chatRegistry.IsEnabled(agent) {
+				http.NotFound(w, r)
+				return
+			}
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.Header().Set("Cache-Control", "no-store")
+			_, _ = w.Write(indexHTML)
+		})
 	}
 
 	// /arbetern help command — lists all available agents with a one-line description.

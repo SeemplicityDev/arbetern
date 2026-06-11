@@ -105,8 +105,9 @@ All live under `persistence.mountPath` in the chart and default to `./data/<feat
 | `WORKFLOWS_DIR` | Directory for workflow descriptors + run history (default `./data/workflows`) |
 | `USER_CONTEXT_DIR` | Directory for per-user rolling conversation summaries (`<agent>/<user>/context.txt`). Defaults to a temp dir; the chart points it at the PVC when `userContext.enabled` is true |
 | `CHAT_DIR` | Directory for centralized agent chat. Each agent holds many conversations (ChatGPT/Claude-style threads) stored at `<agent>/<conversation-id>.json`. Conversations are shared — everyone sees the same threads (no per-user auth yet). Chat is enabled per agent via `chat_enabled: true` in the agent's `config.yaml`; defaults to `./data/chat` |
+| `CHAT_RETENTION` | How long a UI chat conversation is kept after its last activity before a background sweeper deletes it (applies to all agents). Go duration; defaults to `168h` (1 week). The sweeper runs hourly |
 | `CUSTOM_PROMPTS_DIR` | Directory of custom prompt YAML files **appended** to built-in agent prompts. Set automatically by the chart when `customPrompts` is configured |
-| `CUSTOM_CONFIG_DIR` | Directory of per-agent config overrides (`<agent-id>.yaml`, a full `config.yaml` overlay — e.g. `chat_enabled`, `allowed_teams`). Set automatically by the chart when `customConfigs` is configured |
+| `CUSTOM_CONFIG_DIR` | Directory of per-agent config overrides (`<agent-id>.yaml`, a full `config.yaml` overlay — e.g. `chat_enabled`, `allowed_teams`, `allowed_emails`). Set automatically by the chart when `customConfigs` is configured |
 | `AGENT_CREDENTIALS_DIR` | Directory of per-agent credential overrides (`<agent-id>/<secret-key>` files). Set automatically by the chart when `customCredentials` is configured. See [Per-Agent Credentials](#per-agent-credentials-integration-overrides) |
 
 </details>
@@ -190,6 +191,7 @@ Visit `/ui/` to see all registered agents. Click an agent card to view its promp
 
 - Drop a `logo.png` into `ui/` to replace the default icon
 - Set `UI_HEADER` env var to customize the navbar title
+- Agents with `chat_enabled` expose a full-screen chat at `/ui/<agent>/chat` — a deep-linkable, reload-safe URL you can bookmark or share
 
 ### Authentication (SSO)
 
@@ -209,6 +211,7 @@ When enabled, the chart automatically rewires the `ingress` backend to the proxy
 - Register `https://<your-host>/oauth2/callback` as an authorized redirect URI in your OAuth provider.
 - With a single provider configured, the interstitial sign-in page is skipped and users go straight to the provider.
 - This is independent of `UI_ALLOWED_CIDRS`; you can use either or both.
+- The proxy passes the verified identity to the app as `X-Auth-Request-Email` (via `set_xauthrequest`). arbetern uses this to enforce per-agent chat access by email — see [Chat access by email](#chat-access-by-email-ui).
 
 ## Adding a New Agent
 
@@ -342,6 +345,33 @@ export CUSTOM_CONFIG_DIR=/path/to/custom-config
 5. Deploy overrides (`customConfigs` / `CUSTOM_CONFIG_DIR`) **replace** (not merge) the `config.yaml` value
 
 > **Slack scope required:** `usergroups:read` — add this to your Slack app's OAuth scopes.
+
+### Chat access by email (UI)
+
+`allowed_teams` gates Slack slash commands by Slack user group. To gate the
+browser **chat** (`/ui/<agent>/chat` and the underlying `/api/chat` endpoints)
+per agent, use `allowed_emails`. This requires the [oauth2-proxy SSO](#authentication-sso)
+in front of the app: the proxy authenticates the user with Google (or another
+provider) and passes the verified address as `X-Auth-Request-Email`, which the
+proxy also strips from inbound requests so it can't be spoofed.
+
+Entries are matched case-insensitively and may be an exact address or a whole
+domain. An empty/unset list means no restriction.
+
+```yaml
+customConfigs:
+  pulse:
+    chat_enabled: true
+    allowed_emails:
+      - solutions@acme.com   # exact address
+      - acme.com             # any address in this domain
+```
+
+When `allowed_emails` is set, the chat API returns `403` for any user whose
+email is not on the list, and the UI shows a friendly "you don't have access"
+message with the message composer hidden (no dead Send button). Without
+oauth2-proxy in front there is no verified email header, so any non-empty
+`allowed_emails` denies everyone — leave it empty if you don't run the proxy.
 
 ## Per-Agent Credentials (Integration Overrides)
 
