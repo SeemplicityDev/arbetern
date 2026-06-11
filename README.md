@@ -191,6 +191,25 @@ Visit `/ui/` to see all registered agents. Click an agent card to view its promp
 - Drop a `logo.png` into `ui/` to replace the default icon
 - Set `UI_HEADER` env var to customize the navbar title
 
+### Authentication (SSO)
+
+The Helm chart bundles the [oauth2-proxy](https://github.com/oauth2-proxy/manifests) subchart (disabled by default) to put Google/GitHub/etc. SSO in front of the browser UI. Enable it in your values:
+
+```yaml
+oauth2-proxy:
+  enabled: true
+  config:
+    clientID: "<oauth-client-id>"
+    clientSecret: "<oauth-client-secret>"
+    cookieSecret: "<openssl rand -base64 32 | tr -- '+/' '-_'>"
+```
+
+When enabled, the chart automatically rewires the `ingress` backend to the proxy, so external traffic is authenticated before reaching the app. Only `/ui/` and `/api/` are gated — Slack webhooks (`/<agent>/webhook`) and `/healthz` stay public via `skip_auth_routes` (Slack can't complete an OAuth login), and Slack Socket Mode needs no inbound rule.
+
+- Register `https://<your-host>/oauth2/callback` as an authorized redirect URI in your OAuth provider.
+- With a single provider configured, the interstitial sign-in page is skipped and users go straight to the provider.
+- This is independent of `UI_ALLOWED_CIDRS`; you can use either or both.
+
 ## Adding a New Agent
 
 1. Create a directory under `agents/`:

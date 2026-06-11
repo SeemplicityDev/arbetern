@@ -76,6 +76,17 @@ secretValues:
 #         - path: /
 #           pathType: Prefix
 
+# OAuth2 SSO in front of the UI (oauth2-proxy subchart, disabled by default).
+# When enabled, the ingress is auto-rewired to the proxy so /ui/ and /api/
+# require login; Slack webhooks and /healthz stay public. Register
+# https://<your-host>/oauth2/callback as a redirect URI in your OAuth provider.
+# oauth2-proxy:
+#   enabled: true
+#   config:
+#     clientID: "your-oauth-client-id"
+#     clientSecret: "your-oauth-client-secret"
+#     cookieSecret: "your-cookie-secret"  # openssl rand -base64 32 | tr -- '+/' '-_'
+
 # Custom prompts — org-specific context appended to agent prompts via ConfigMap.
 # customPrompts:
 #   ovad:
