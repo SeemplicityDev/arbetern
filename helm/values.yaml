@@ -179,6 +179,49 @@ secretValues:
   # azure-billing-account-id: ""      # EA enrollment number (e.g. 86462187). Wins over MG when set.
   # azure-management-group-id: ""     # Optional MG scope. Leave empty for tenant-wide (root MG = tenant ID)
 
+# Optional OAuth2 authentication proxy (oauth2-proxy subchart). Disabled by
+# default; values are passed straight through to the subchart
+# (https://github.com/oauth2-proxy/manifests).
+#
+# When enabled, the arbetern `ingress` below is automatically rewired to
+# backend the oauth2-proxy Service, so traffic hits the proxy first and is
+# forwarded to arbetern via `upstreams`. Only /ui/ and /api/ are gated; Slack
+# webhooks and /healthz stay public via `skip_auth_routes` (Slack can't do an
+# OAuth login). RE2 has no negative lookahead, so we allow-list public paths.
+oauth2-proxy:
+  enabled: false
+  config:
+    # OAuth credentials (override per env in deploy.local.values.yaml). Map to
+    # the keys client-id/client-secret/cookie-secret on "<release>-oauth2-proxy".
+    # Generate cookieSecret: openssl rand -base64 32 | tr -- '+/' '-_'
+    clientID: ""
+    clientSecret: ""
+    cookieSecret: ""
+    # Or reference a pre-existing Secret instead of the inline values above:
+    # existingSecret: ""
+    # Legacy oauth2_proxy.cfg format on purpose — it's the chart's stable
+    # config source and works with the chart's env-var credential injection.
+    # `upstreams` host = arbetern Service name = Helm release name
+    # (e.g. release "foo" -> http://foo-arbetern:80); adjust if yours differs.
+    configFile: |-
+      email_domains = ["*"]
+      upstreams = ["http://arbetern:80"]
+      # Trust the ALB's X-Forwarded-* headers (TLS is terminated upstream).
+      # Required behind an L7 proxy for https callback URLs, the secure cookie,
+      # and real client IP in X-Forwarded-For (arbetern's UI_ALLOWED_CIDRS gate).
+      reverse_proxy = true
+      # Single provider (Google) — skip the interstitial sign-in button page.
+      skip_provider_button = true
+      # Paths that bypass auth (RE2 regex). Add entries to expose more.
+      skip_auth_routes = [
+        "^/healthz",
+        "^/favicon\\.svg$",
+        "^/[^/]+/webhook$"
+      ]
+  # Prometheus metrics endpoint is enabled by default upstream.
+  metrics:
+    enabled: false
+
 service:
   type: ClusterIP
   port: 80

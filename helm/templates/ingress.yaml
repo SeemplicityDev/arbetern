@@ -1,4 +1,12 @@
 {{- if .Values.ingress.enabled -}}
+{{- $oauth2 := index .Values "oauth2-proxy" | default dict -}}
+{{- $backendSvc := include "arbetern.fullname" . -}}
+{{- $backendPort := .Values.service.port -}}
+{{- if $oauth2.enabled -}}
+{{/* When oauth2-proxy is enabled, backend the proxy Service so auth is enforced. */}}
+{{- $backendSvc = printf "%s-oauth2-proxy" .Release.Name -}}
+{{- $backendPort = ((index $oauth2 "service") | default dict).portNumber | default 80 -}}
+{{- end -}}
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -35,9 +43,9 @@ spec:
             {{- end }}
             backend:
               service:
-                name: {{ include "arbetern.fullname" $ }}
+                name: {{ $backendSvc }}
                 port:
-                  number: {{ $.Values.service.port }}
+                  number: {{ $backendPort }}
           {{- end }}
     {{- end }}
 {{- end }}

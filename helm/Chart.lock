@@ -1,0 +1,6 @@
+dependencies:
+- name: oauth2-proxy
+  repository: https://oauth2-proxy.github.io/manifests
+  version: 10.7.0
+digest: sha256:58daf2cb60c2c99b1f7b2e4f545d1b93cfc1efe2e2af27e7134237545368f3bb
+generated: "2026-06-11T16:09:34.168282+03:00"
