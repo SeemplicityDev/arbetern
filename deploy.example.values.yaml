@@ -87,13 +87,23 @@ secretValues:
 #       Our container base images are hosted in ECR at 123456789.dkr.ecr.us-east-1.amazonaws.com.
 #       All Python services must use Python >= 3.13.11.
 
-# Agent RBAC — restrict agent access by Slack user group IDs.
-# agentRBAC:
-#   pulse:
-#     - S0A6S3KNNLW   # CS team
+# Per-agent config overrides — override agent config.yaml settings at deploy
+# time (without rebuilding the image). The override is a full config file, so
+# only the keys you set take effect; everything else falls through to the
+# baked-in config.yaml, and any field added to the agent config in the future is
+# overridable here automatically. Supported fields today: name, allowed_teams,
+# chat_enabled.
+#   - chat_enabled: turn on the centralized UI chat for an agent.
+#   - allowed_teams: restrict the agent to the listed Slack user group IDs
+#     (deploy-time RBAC); only members of those groups can use the agent.
+# Example:
+# customConfigs:
 #   ovad:
-#     - S0A6S3KNNLW   # CS team
-#     - S0B7T4LOOLX   # DevOps
+#     chat_enabled: true
+#   pulse:
+#     allowed_teams:
+#       - S0A6S3KNNLW   # CS team
+#       - S0B7T4LOOLX   # DevOps team
 
 # Per-agent credential overrides — keys match the kebab-case names from
 # secretValues. Each entry produces a Secret named `arbetern-<agent>-secrets`

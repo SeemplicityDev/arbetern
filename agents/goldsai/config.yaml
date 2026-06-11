@@ -1,5 +1,11 @@
 name: Goldsai
 
 # RBAC: Slack user group IDs that can access this agent.
-# Empty list = open to everyone. Override via AGENT_RBAC_DIR in deployment.
+# Empty list = open to everyone. Override via CUSTOM_CONFIG_DIR in deployment.
 allowed_teams: []
+
+# Chat: when true, pressing this agent's card in the management UI opens a
+# shared chat with the agent's LLM persona. The conversation is centralized
+# (no per-user auth yet — everyone sees the same history) and persisted to
+# disk under CHAT_DIR. Disabled by default.
+chat_enabled: false

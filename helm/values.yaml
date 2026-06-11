@@ -107,6 +107,16 @@ userContext:
   enabled: true
   subPath: user-context
 
+# Centralized per-agent chat transcripts. Files at <mountPath>/<subPath>/<agent>/history.json
+# hold a single shared conversation per agent (no per-user auth yet, so every
+# viewer sees the same history). This only controls where transcripts are
+# persisted; chat itself is enabled per agent via `chat_enabled: true` in each
+# agent's config.yaml. Disable to fall back to an in-tmp directory that does
+# not survive pod restarts.
+chat:
+  enabled: true
+  subPath: chat
+
 secretName: arbetern-secrets
 
 # Set to true to have the chart create the Secret resource.
@@ -251,6 +261,28 @@ volumesMounts: []
 #       All Python services must use Python >= 3.13.11.
 customPrompts: {}
 
+# Custom per-agent config overrides — override agent config.yaml settings at
+# deploy time via ConfigMap, without rebuilding the image. Each key is an agent
+# ID; values are a (possibly partial) copy of that agent's config.yaml. Because
+# the override is a full config file, only the keys you set take effect and
+# everything else falls through to the baked-in config.yaml — and any field
+# added to the agent config in the future is overridable here automatically.
+# Supported fields today: name, allowed_teams, chat_enabled.
+#   - chat_enabled: turn on the centralized UI chat for an agent.
+#   - allowed_teams: restrict the agent to the listed Slack user group
+#     (subteam) IDs. This is how you do per-agent RBAC at deploy time; when set,
+#     only members of those groups can use the agent. Omit/empty = no
+#     restriction.
+# Example:
+# customConfigs:
+#   ovad:
+#     chat_enabled: true
+#   pulse:
+#     allowed_teams:
+#       - S0A6S3KNNLW   # CS team
+#       - S0B7T4LOOLX   # DevOps team
+customConfigs: {}
+
 # Per-agent credential overrides. Each key is an agent ID; values are the same
 # kebab-case keys used in `secretValues` (e.g. sf-consumer-key, atlassian-api-token,
 # chorus-api-token, dd-api-key-us, ...). For every entry the chart provisions a
@@ -280,19 +312,6 @@ customPrompts: {}
 #   pulse:
 #     chorus-api-token: "REPLACE_ME"
 customCredentials: {}
-# Agent RBAC — restrict agent access by Slack user group (subteam) IDs.
-# Each key is an agent ID; values are lists of Slack user group IDs.
-# When set, only members of the listed groups can use the agent.
-# REPLACES the config.yaml allowed_teams for that agent at deploy time.
-# Empty map = no restrictions (everyone can use all agents).
-# Example:
-# agentRBAC:
-#   pulse:
-#     - S0A6S3KNNLW   # CS team
-#   ovad:
-#     - S0A6S3KNNLW   # CS team
-#     - S0B7T4LOOLX   # DevOps team
-agentRBAC: {}
 nodeSelector: {}
 tolerations: []
 affinity: {}

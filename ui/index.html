@@ -350,6 +350,347 @@
       height: 14px;
     }
 
+    /* ── Chat ───────────────────────────────────── */
+    .agent-chat-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      font-size: 11px;
+      font-weight: 600;
+      padding: 4px 10px;
+      margin-top: 10px;
+      border-radius: 6px;
+      color: var(--accent);
+      background: rgba(99, 102, 241, 0.08);
+      border: 1px solid rgba(99, 102, 241, 0.25);
+      width: fit-content;
+      font-family: inherit;
+      cursor: pointer;
+      transition: background 0.15s ease, border-color 0.15s ease;
+    }
+
+    .agent-chat-chip:hover {
+      background: rgba(99, 102, 241, 0.16);
+      border-color: rgba(99, 102, 241, 0.45);
+    }
+
+    .chat-messages {
+      flex: 1;
+      overflow-y: auto;
+      padding: 20px 24px;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+
+    .chat-empty {
+      color: var(--text-muted);
+      font-size: 13px;
+      text-align: center;
+      margin: auto;
+    }
+
+    .chat-msg {
+      display: flex;
+      flex-direction: column;
+      max-width: 85%;
+    }
+
+    .chat-msg.user {
+      align-self: flex-end;
+      align-items: flex-end;
+    }
+
+    .chat-msg.assistant {
+      align-self: flex-start;
+      align-items: flex-start;
+    }
+
+    .chat-meta {
+      font-size: 11px;
+      color: var(--text-muted);
+      margin-bottom: 4px;
+      padding: 0 4px;
+    }
+
+    .chat-bubble {
+      font-size: 14px;
+      line-height: 1.6;
+      padding: 10px 14px;
+      border-radius: 14px;
+      white-space: pre-wrap;
+      word-break: break-word;
+      user-select: text;
+    }
+
+    .chat-msg.user .chat-bubble {
+      background: var(--accent);
+      color: #fff;
+      border-bottom-right-radius: 4px;
+    }
+
+    .chat-msg.assistant .chat-bubble {
+      background: var(--card);
+      border: 1px solid var(--border);
+      color: var(--text);
+      border-bottom-left-radius: 4px;
+    }
+
+    .chat-bubble.pending {
+      color: var(--text-muted);
+      font-style: italic;
+    }
+
+    .chat-bubble.chat-error {
+      background: rgba(196, 64, 64, 0.08);
+      border: 1px solid rgba(196, 64, 64, 0.25);
+      color: #c44040;
+    }
+
+    .chat-input-bar {
+      display: flex;
+      gap: 10px;
+      padding: 14px 24px;
+      border-top: 1px solid var(--border);
+      flex-shrink: 0;
+    }
+
+    .chat-input {
+      flex: 1;
+      resize: none;
+      max-height: 140px;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      color: var(--text);
+      padding: 10px 12px;
+      font-size: 14px;
+      font-family: inherit;
+      line-height: 1.5;
+      outline: none;
+    }
+
+    .chat-input:focus {
+      border-color: var(--accent);
+    }
+
+    .chat-input:disabled {
+      opacity: 0.6;
+    }
+
+    .chat-send {
+      align-self: flex-end;
+      background: var(--accent);
+      border: none;
+      border-radius: 10px;
+      color: #fff;
+      font-size: 14px;
+      font-weight: 600;
+      padding: 10px 18px;
+      cursor: pointer;
+      transition: opacity 0.15s ease;
+    }
+
+    .chat-send:hover { opacity: 0.9; }
+    .chat-send:disabled { opacity: 0.5; cursor: default; }
+
+    .chat-disclaimer {
+      padding: 10px 24px 16px;
+      font-size: 11px;
+      color: var(--text-muted);
+      text-align: center;
+      flex-shrink: 0;
+    }
+
+    .chat-header-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .chat-expand {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      color: var(--text-muted);
+      width: 32px;
+      height: 32px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 16px;
+      transition: all 0.15s ease;
+    }
+
+    .chat-expand:hover {
+      color: var(--text);
+      background: var(--card-hover);
+    }
+
+    /* ── Full-screen chat (ChatGPT-style) ───────── */
+    .chat-fullscreen {
+      position: fixed;
+      inset: 0;
+      background: var(--bg);
+      z-index: 300;
+      display: none;
+      flex-direction: row;
+    }
+
+    .chat-fullscreen.active { display: flex; }
+
+    .fs-sidebar {
+      width: 280px;
+      flex-shrink: 0;
+      background: var(--surface);
+      border-right: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+    }
+
+    .fs-sidebar-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 18px 20px;
+      border-bottom: 1px solid var(--border);
+      font-size: 13px;
+      font-weight: 700;
+      letter-spacing: 0.3px;
+      color: var(--text);
+      flex-shrink: 0;
+    }
+
+    .fs-sidebar-list {
+      flex: 1;
+      overflow-y: auto;
+      padding: 8px;
+    }
+
+    .fs-agent-switch {
+      padding: 12px 12px 0;
+    }
+
+    .fs-agent-switch select {
+      width: 100%;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      color: var(--text);
+      padding: 9px 10px;
+      font-size: 13px;
+      font-family: inherit;
+      outline: none;
+      cursor: pointer;
+    }
+
+    .fs-agent-switch select:focus { border-color: var(--accent); }
+
+    .fs-new-chat {
+      margin: 10px 12px;
+      padding: 10px 12px;
+      background: var(--accent);
+      border: none;
+      border-radius: 8px;
+      color: #fff;
+      font-size: 13px;
+      font-weight: 600;
+      font-family: inherit;
+      cursor: pointer;
+      transition: opacity 0.15s ease;
+    }
+
+    .fs-new-chat:hover { opacity: 0.9; }
+
+    .fs-conv {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 12px;
+      border-radius: 8px;
+      cursor: pointer;
+      margin-bottom: 4px;
+      border: 1px solid transparent;
+      transition: background 0.15s ease, border-color 0.15s ease;
+    }
+
+    .fs-conv:hover { background: var(--card-hover); }
+
+    .fs-conv:hover .fs-conv-action { opacity: 1; }
+
+    .fs-conv.active {
+      background: var(--card);
+      border-color: var(--border-accent);
+    }
+
+    .fs-conv-avatar {
+      width: 28px;
+      height: 28px;
+      border-radius: 6px;
+      flex-shrink: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 13px;
+      font-weight: 700;
+      color: #fff;
+    }
+
+    .fs-conv-info { min-width: 0; flex: 1; }
+
+    .fs-conv-name {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .fs-conv-sub {
+      font-size: 11px;
+      color: var(--text-muted);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .fs-conv-action {
+      flex-shrink: 0;
+      background: transparent;
+      border: none;
+      color: var(--text-muted);
+      width: 24px;
+      height: 24px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 13px;
+      opacity: 0;
+      transition: opacity 0.15s ease, color 0.15s ease, background 0.15s ease;
+    }
+
+    .fs-conv-action:hover {
+      color: var(--text);
+      background: rgba(255, 255, 255, 0.06);
+    }
+
+    .fs-main {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      min-width: 0;
+    }
+
+    .fs-main .chat-messages,
+    .fs-main .chat-input-bar,
+    .fs-main .chat-disclaimer {
+      max-width: 820px;
+      width: 100%;
+      margin-left: auto;
+      margin-right: auto;
+    }
+
     /* ── Empty State ────────────────────────────── */
     .empty-state {
       text-align: center;
@@ -1007,6 +1348,67 @@
     </div>
   </div>
 
+  <!-- Chat slide-over panel -->
+  <div class="modal-overlay" id="chat-overlay">
+    <div class="modal-panel" id="chat-panel">
+      <div class="modal-header">
+        <div class="modal-header-left">
+          <div class="modal-agent-avatar" id="chat-avatar"></div>
+          <div>
+            <div class="modal-title" id="chat-title"></div>
+            <div class="modal-subtitle" id="chat-subtitle"></div>
+          </div>
+        </div>
+        <div class="chat-header-actions">
+          <button class="chat-expand" id="chat-new" title="New chat">&#x2b;</button>
+          <button class="chat-expand" id="chat-expand" title="Open full screen">&#x2197;</button>
+          <button class="modal-close" id="chat-close">&times;</button>
+        </div>
+      </div>
+      <div class="chat-messages" id="chat-messages"></div>
+      <div class="chat-input-bar">
+        <textarea id="chat-input" class="chat-input" rows="1" placeholder="Type a message…"></textarea>
+        <button id="chat-send" class="chat-send">Send</button>
+      </div>
+      <div class="chat-disclaimer">Shared conversation — everyone sees this history. No authentication yet.</div>
+    </div>
+  </div>
+
+  <!-- Full-screen chat (ChatGPT-style) -->
+  <div class="chat-fullscreen" id="chat-fullscreen">
+    <aside class="fs-sidebar">
+      <div class="fs-sidebar-header">
+        <span>arbetern chat</span>
+        <button class="modal-close" id="fs-back" title="Close">&times;</button>
+      </div>
+      <div class="fs-agent-switch">
+        <select id="fs-agent-select" title="Switch agent"></select>
+      </div>
+      <button class="fs-new-chat" id="fs-new-chat">&#x2b; New chat</button>
+      <div class="fs-sidebar-list" id="fs-conv-list"></div>
+    </aside>
+    <section class="fs-main">
+      <div class="modal-header">
+        <div class="modal-header-left">
+          <div class="modal-agent-avatar" id="fs-chat-avatar"></div>
+          <div>
+            <div class="modal-title" id="fs-chat-title"></div>
+            <div class="modal-subtitle" id="fs-chat-subtitle"></div>
+          </div>
+        </div>
+        <div class="chat-header-actions">
+          <button class="chat-expand" id="fs-collapse" title="Collapse to side panel">&#x2199;</button>
+        </div>
+      </div>
+      <div class="chat-messages" id="fs-chat-messages"></div>
+      <div class="chat-input-bar">
+        <textarea id="fs-chat-input" class="chat-input" rows="1" placeholder="Type a message…"></textarea>
+        <button id="fs-chat-send" class="chat-send">Send</button>
+      </div>
+      <div class="chat-disclaimer">Shared conversations — everyone sees this history. No authentication yet.</div>
+    </section>
+  </div>
+
   <script>
     const AGENT_COLORS = [
       '#6366f1', '#8b5cf6', '#ec4899', '#f43f5e',
@@ -1112,6 +1514,7 @@
             </div>
             <div class="agent-status"><span class="status-dot"></span> Active</div>
             <div class="agent-prompts-count">${promptCount} prompt${promptCount !== 1 ? 's' : ''}</div>
+            ${agent.chat_enabled ? `<button type="button" class="agent-chat-chip" title="Open chat" onclick="event.stopPropagation(); openChat('${agent.id}')">&#x1f4ac; Open chat</button>` : ''}
             ${renderAgentBadges(agent.id)}
             ${renderAgentDashboards(agent.id)}
             ${renderAgentWorkflows(agent.id)}
@@ -1219,6 +1622,9 @@
       const agent = agentsData.find(a => a.id === id);
       if (!agent) return;
 
+      // The card always opens the read-only prompts panel — even when chat is
+      // enabled — so prompts stay viewable. Chat is opened separately via the
+      // "Open chat" chip on the card.
       const color = hashColor(agent.name);
       const initial = agent.name.charAt(0).toUpperCase();
 
@@ -1280,6 +1686,403 @@
       if (e.target === document.getElementById('modal-overlay')) closeModal();
     });
     document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal(); });
+
+    // ── Centralized agent chat (multi-conversation, ChatGPT/Claude style) ──
+    let chatAgentId = null;     // currently open agent
+    let chatConvId = null;      // currently open conversation id
+    let chatCurrentEmpty = true; // active conversation has no messages yet
+    let chatBusy = false;
+    let chatFull = false;       // true when the full-screen page is active
+
+    // Returns the message box, input and send button for whichever chat view
+    // is currently active (slide-over panel or full-screen page).
+    function chatEls() {
+      return chatFull
+        ? {
+            box: document.getElementById('fs-chat-messages'),
+            input: document.getElementById('fs-chat-input'),
+            send: document.getElementById('fs-chat-send'),
+          }
+        : {
+            box: document.getElementById('chat-messages'),
+            input: document.getElementById('chat-input'),
+            send: document.getElementById('chat-send'),
+          };
+    }
+
+    // ── Conversation REST helpers ──
+    function convBase(agent) { return `/api/chat/${encodeURIComponent(agent)}/conversations`; }
+
+    async function apiListConversations(agent) {
+      const r = await fetch(convBase(agent));
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return r.json();
+    }
+    async function apiCreateConversation(agent) {
+      const r = await fetch(convBase(agent), { method: 'POST' });
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return r.json();
+    }
+    async function apiGetConversation(agent, id) {
+      const r = await fetch(`${convBase(agent)}/${encodeURIComponent(id)}`);
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return r.json();
+    }
+    async function apiDeleteConversation(agent, id) {
+      const r = await fetch(`${convBase(agent)}/${encodeURIComponent(id)}`, { method: 'DELETE' });
+      if (!r.ok && r.status !== 204) throw new Error('HTTP ' + r.status);
+    }
+    async function apiRenameConversation(agent, id, title) {
+      const r = await fetch(`${convBase(agent)}/${encodeURIComponent(id)}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title }),
+      });
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return r.json();
+    }
+
+    function relativeTime(iso) {
+      const t = new Date(iso).getTime();
+      if (!t) return '';
+      const s = Math.max(0, (Date.now() - t) / 1000);
+      if (s < 60) return 'just now';
+      if (s < 3600) return Math.floor(s / 60) + 'm ago';
+      if (s < 86400) return Math.floor(s / 3600) + 'h ago';
+      if (s < 604800) return Math.floor(s / 86400) + 'd ago';
+      return new Date(t).toLocaleDateString();
+    }
+
+    // Opens the slide-over panel for an agent, loading its most recent
+    // conversation (creating one when the agent has none yet).
+    async function openChat(id) {
+      const agent = agentsData.find(a => a.id === id);
+      if (!agent) return;
+      chatAgentId = id;
+      chatConvId = null;
+      chatFull = false;
+
+      const color = hashColor(agent.name);
+      const avatar = document.getElementById('chat-avatar');
+      avatar.style.background = color;
+      avatar.textContent = agent.name.charAt(0).toUpperCase();
+      document.getElementById('chat-title').textContent = agent.name;
+      document.getElementById('chat-subtitle').textContent = getAgentProfession(agent);
+      document.getElementById('chat-messages').innerHTML = '<div class="chat-empty">Loading conversation…</div>';
+      document.getElementById('chat-input').value = '';
+      document.getElementById('chat-overlay').classList.add('active');
+      await openLatestOrNew(id);
+      setTimeout(() => document.getElementById('chat-input').focus(), 120);
+    }
+
+    function closeChat() {
+      document.getElementById('chat-overlay').classList.remove('active');
+      chatAgentId = null;
+      chatConvId = null;
+    }
+
+    // Picks the agent's most recent conversation, or creates a fresh one when
+    // there are none. Used by both the slide-over and full-screen views.
+    async function openLatestOrNew(agent) {
+      try {
+        const list = await apiListConversations(agent);
+        if (chatAgentId !== agent) return;
+        if (chatFull) renderConvList(list);
+        if (list.length > 0) {
+          await selectConversation(agent, list[0].id);
+        } else {
+          await newChat(agent);
+        }
+      } catch (err) {
+        chatEls().box.innerHTML =
+          `<div class="chat-empty">Failed to load conversations: ${escapeHtml(String(err))}</div>`;
+      }
+    }
+
+    // ── Full-screen chat (ChatGPT-style left-bar history) ──
+    function populateAgentSelect() {
+      const sel = document.getElementById('fs-agent-select');
+      const chatAgents = agentsData.filter(a => a.chat_enabled);
+      sel.innerHTML = chatAgents
+        .map(a => `<option value="${a.id}">${escapeHtml(a.name)}</option>`)
+        .join('');
+      if (chatAgentId) sel.value = chatAgentId;
+    }
+
+    function renderConvList(list) {
+      const box = document.getElementById('fs-conv-list');
+      if (!list || list.length === 0) {
+        box.innerHTML = '<div class="chat-empty">No conversations yet.</div>';
+        return;
+      }
+      box.innerHTML = list.map(c => {
+        const active = c.id === chatConvId ? ' active' : '';
+        const title = escapeHtml(c.title || 'New chat');
+        return `
+          <div class="fs-conv${active}" onclick="selectConversation('${chatAgentId}','${c.id}')">
+            <div class="fs-conv-info">
+              <div class="fs-conv-name">${title}</div>
+              <div class="fs-conv-sub">${relativeTime(c.updated_at)} · ${c.message_count} msg${c.message_count !== 1 ? 's' : ''}</div>
+            </div>
+            <button class="fs-conv-action" title="Rename" onclick="event.stopPropagation();renameConversationPrompt('${c.id}', this)">&#x270e;</button>
+            <button class="fs-conv-action" title="Delete" onclick="event.stopPropagation();removeConversation('${c.id}')">&#x1f5d1;</button>          </div>`;
+      }).join('');
+    }
+
+    async function refreshConvList(agent) {
+      if (!chatFull) return;
+      try {
+        const list = await apiListConversations(agent);
+        if (chatAgentId === agent) renderConvList(list);
+      } catch (err) {
+        console.warn('Failed to refresh conversation list:', err);
+      }
+    }
+
+    // Switches the full-screen view to a different agent.
+    async function selectFullChatAgent(id) {
+      const agent = agentsData.find(a => a.id === id);
+      if (!agent) return;
+      chatAgentId = id;
+      chatConvId = null;
+      chatFull = true;
+
+      const color = hashColor(agent.name);
+      const avatar = document.getElementById('fs-chat-avatar');
+      avatar.style.background = color;
+      avatar.textContent = agent.name.charAt(0).toUpperCase();
+      document.getElementById('fs-chat-title').textContent = agent.name;
+      document.getElementById('fs-chat-subtitle').textContent = getAgentProfession(agent);
+      document.getElementById('fs-chat-messages').innerHTML = '<div class="chat-empty">Loading…</div>';
+      document.getElementById('fs-chat-input').value = '';
+      document.getElementById('fs-agent-select').value = id;
+      await openLatestOrNew(id);
+      setTimeout(() => document.getElementById('fs-chat-input').focus(), 80);
+    }
+
+    function openFullChat(id) {
+      if (!agentsData.find(a => a.id === id)) return;
+      chatFull = true;
+      document.getElementById('chat-overlay').classList.remove('active');
+      document.getElementById('chat-fullscreen').classList.add('active');
+      populateAgentSelect();
+      selectFullChatAgent(id);
+    }
+
+    function closeFullChat() {
+      document.getElementById('chat-fullscreen').classList.remove('active');
+      chatFull = false;
+      chatAgentId = null;
+      chatConvId = null;
+    }
+
+    // Switch from the slide-over panel to the full-screen page.
+    function expandChat() {
+      if (chatAgentId) openFullChat(chatAgentId);
+    }
+
+    // Switch from the full-screen page back to the slide-over panel.
+    function collapseChat() {
+      const id = chatAgentId;
+      document.getElementById('chat-fullscreen').classList.remove('active');
+      chatFull = false;
+      if (id) openChat(id);
+    }
+
+    // Loads and displays a conversation's messages in the active view.
+    async function selectConversation(agent, convId) {
+      chatAgentId = agent;
+      chatConvId = convId;
+      try {
+        const conv = await apiGetConversation(agent, convId);
+        if (chatAgentId !== agent || chatConvId !== convId) return;
+        renderChatMessages(conv.messages || []);
+        if (chatFull) {
+          // Re-render the list so the active row highlights without a refetch.
+          const rows = document.querySelectorAll('#fs-conv-list .fs-conv');
+          rows.forEach(el => el.classList.remove('active'));
+        }
+        await refreshConvList(agent);
+      } catch (err) {
+        chatEls().box.innerHTML =
+          `<div class="chat-empty">Failed to load conversation: ${escapeHtml(String(err))}</div>`;
+      }
+      const { input } = chatEls();
+      if (input) setTimeout(() => input.focus(), 40);
+    }
+
+    // Starts a new conversation. Reuses the current one when it is already empty
+    // (so repeatedly pressing "New chat" does not create blank threads).
+    async function newChat(agent) {
+      if (chatConvId && chatCurrentEmpty) {
+        const { input } = chatEls();
+        if (input) input.focus();
+        return;
+      }
+      try {
+        const conv = await apiCreateConversation(agent);
+        chatAgentId = agent;
+        chatConvId = conv.id;
+        chatCurrentEmpty = true;
+        renderChatMessages([]);
+        await refreshConvList(agent);
+        const { input } = chatEls();
+        if (input) input.focus();
+      } catch (err) {
+        chatEls().box.innerHTML =
+          `<div class="chat-empty">Failed to start a new chat: ${escapeHtml(String(err))}</div>`;
+      }
+    }
+
+    async function removeConversation(convId) {
+      if (!confirm('Delete this conversation? This removes its history for everyone.')) return;
+      const agent = chatAgentId;
+      try {
+        await apiDeleteConversation(agent, convId);
+        if (chatConvId === convId) chatConvId = null;
+        await openLatestOrNew(agent);
+      } catch (err) {
+        alert('Failed to delete conversation: ' + err);
+      }
+    }
+
+    async function renameConversationPrompt(convId, btn) {
+      let current = '';
+      const row = btn && btn.closest ? btn.closest('.fs-conv') : null;
+      if (row) {
+        const nameEl = row.querySelector('.fs-conv-name');
+        if (nameEl) current = nameEl.textContent || '';
+      }
+      const title = prompt('Rename conversation', current.trim());
+      if (title == null) return;
+      const trimmed = title.trim();
+      if (!trimmed) return;
+      try {
+        await apiRenameConversation(chatAgentId, convId, trimmed);
+        await refreshConvList(chatAgentId);
+      } catch (err) {
+        alert('Failed to rename conversation: ' + err);
+      }
+    }
+
+    function chatBubbleHtml(m) {
+      const who = m.role === 'assistant' ? 'assistant' : 'user';
+      const name = m.role === 'assistant' ? '' : (m.user ? escapeHtml(m.user) : 'Anonymous');
+      const meta = name ? `<div class="chat-meta">${name}</div>` : '';
+      const cls = m.pending ? ' pending' : (m.error ? ' chat-error' : '');
+      return `<div class="chat-msg ${who}">${meta}<div class="chat-bubble${cls}">${escapeHtml(m.content)}</div></div>`;
+    }
+
+    function renderChatMessages(msgs) {
+      chatCurrentEmpty = !msgs || msgs.length === 0;
+      const box = chatEls().box;
+      if (chatCurrentEmpty) {
+        box.innerHTML = '<div class="chat-empty">No messages yet. Start the conversation.</div>';
+        return;
+      }
+      box.innerHTML = msgs.map(chatBubbleHtml).join('');
+      box.scrollTop = box.scrollHeight;
+    }
+
+    function appendChatBubble(m) {
+      const box = chatEls().box;
+      const empty = box.querySelector('.chat-empty');
+      if (empty) box.innerHTML = '';
+      box.insertAdjacentHTML('beforeend', chatBubbleHtml(m));
+      box.scrollTop = box.scrollHeight;
+    }
+
+    async function sendChat() {
+      if (chatBusy || !chatAgentId) return;
+      const agent = chatAgentId;
+
+      // Lazily create a conversation if none is selected yet.
+      if (!chatConvId) {
+        try {
+          const conv = await apiCreateConversation(agent);
+          chatConvId = conv.id;
+          chatCurrentEmpty = true;
+        } catch (err) {
+          chatEls().box.innerHTML =
+            `<div class="chat-empty">Failed to start a chat: ${escapeHtml(String(err))}</div>`;
+          return;
+        }
+      }
+
+      const convId = chatConvId;
+      const { input, send: sendBtn } = chatEls();
+      const text = input.value.trim();
+      if (!text) return;
+
+      chatBusy = true;
+      sendBtn.disabled = true;
+      input.disabled = true;
+
+      appendChatBubble({ role: 'user', content: text });
+      appendChatBubble({ role: 'assistant', content: 'Thinking…', pending: true });
+      input.value = '';
+      chatCurrentEmpty = false;
+
+      try {
+        const r = await fetch(`${convBase(agent)}/${encodeURIComponent(convId)}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ message: text }),
+        });
+        if (!r.ok) throw new Error((await r.text()) || ('HTTP ' + r.status));
+        if (chatAgentId === agent && chatConvId === convId) {
+          const conv = await apiGetConversation(agent, convId);
+          renderChatMessages(conv.messages || []);
+          await refreshConvList(agent);
+        }
+      } catch (err) {
+        if (chatAgentId === agent && chatConvId === convId) {
+          try {
+            const conv = await apiGetConversation(agent, convId);
+            renderChatMessages(conv.messages || []);
+          } catch (_) { /* ignore */ }
+          appendChatBubble({ role: 'assistant', content: 'Error: ' + String(err).slice(0, 300), error: true });
+        }
+      } finally {
+        chatBusy = false;
+        sendBtn.disabled = false;
+        input.disabled = false;
+        input.focus();
+      }
+    }
+
+    document.getElementById('chat-close').addEventListener('click', closeChat);
+    document.getElementById('chat-new').addEventListener('click', () => { if (chatAgentId) newChat(chatAgentId); });
+    document.getElementById('chat-overlay').addEventListener('click', e => {
+      if (e.target === document.getElementById('chat-overlay')) closeChat();
+    });
+    document.addEventListener('keydown', e => {
+      if (e.key !== 'Escape') return;
+      if (chatFull) { closeFullChat(); return; }
+      closeChat();
+    });
+    document.getElementById('chat-send').addEventListener('click', sendChat);
+    document.getElementById('chat-input').addEventListener('keydown', e => {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        sendChat();
+      }
+    });
+
+    // Full-screen chat controls
+    document.getElementById('chat-expand').addEventListener('click', expandChat);
+    document.getElementById('fs-collapse').addEventListener('click', collapseChat);
+    document.getElementById('fs-back').addEventListener('click', closeFullChat);
+    document.getElementById('fs-new-chat').addEventListener('click', () => { if (chatAgentId) newChat(chatAgentId); });
+    document.getElementById('fs-agent-select').addEventListener('change', e => selectFullChatAgent(e.target.value));
+    document.getElementById('fs-chat-send').addEventListener('click', sendChat);
+    document.getElementById('fs-chat-input').addEventListener('keydown', e => {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        sendChat();
+      }
+    });
+
 
     function escapeHtml(str) {
       const d = document.createElement('div');

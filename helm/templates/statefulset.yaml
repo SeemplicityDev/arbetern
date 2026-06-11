@@ -243,9 +243,9 @@ spec:
             - name: CUSTOM_PROMPTS_DIR
               value: /etc/arbetern/custom-prompts
             {{- end }}
-            {{- if .Values.agentRBAC }}
-            - name: AGENT_RBAC_DIR
-              value: /etc/arbetern/agent-rbac
+            {{- if .Values.customConfigs }}
+            - name: CUSTOM_CONFIG_DIR
+              value: /etc/arbetern/custom-config
             {{- end }}
             {{- if .Values.customCredentials }}
             - name: AGENT_CREDENTIALS_DIR
@@ -307,6 +307,10 @@ spec:
             - name: USER_CONTEXT_DIR
               value: "{{ .Values.persistence.mountPath }}/{{ .Values.userContext.subPath }}"
             {{- end }}
+            {{- if and .Values.persistence.enabled .Values.chat .Values.chat.enabled }}
+            - name: CHAT_DIR
+              value: "{{ .Values.persistence.mountPath }}/{{ .Values.chat.subPath }}"
+            {{- end }}
           {{- with .Values.livenessProbe }}
           livenessProbe:
             {{- toYaml . | nindent 12 }}
@@ -331,16 +335,16 @@ spec:
               mountPath: /etc/arbetern/custom-prompts
               readOnly: true
           {{- end }}
-          {{- if .Values.agentRBAC }}
+          {{- if .Values.customConfigs }}
           {{- if and (not .Values.volumeMounts) (not .Values.customPrompts) }}
           volumeMounts:
           {{- end }}
-            - name: agent-rbac
-              mountPath: /etc/arbetern/agent-rbac
+            - name: custom-config
+              mountPath: /etc/arbetern/custom-config
               readOnly: true
           {{- end }}
           {{- if .Values.customCredentials }}
-          {{- if and (not .Values.volumeMounts) (not .Values.customPrompts) (not .Values.agentRBAC) }}
+          {{- if and (not .Values.volumeMounts) (not .Values.customPrompts) (not .Values.customConfigs) }}
           volumeMounts:
           {{- end }}
           {{- range $agentID, $creds := .Values.customCredentials }}
@@ -352,7 +356,7 @@ spec:
           {{- end }}
           {{- end }}
           {{- if .Values.persistence.enabled }}
-          {{- if and (not .Values.volumeMounts) (not .Values.customPrompts) (not .Values.agentRBAC) (not .Values.customCredentials) }}
+          {{- if and (not .Values.volumeMounts) (not .Values.customPrompts) (not .Values.customConfigs) (not .Values.customCredentials) }}
           volumeMounts:
           {{- end }}
             - name: data
@@ -370,16 +374,16 @@ spec:
           configMap:
             name: {{ include "arbetern.fullname" . }}-custom-prompts
       {{- end }}
-      {{- if .Values.agentRBAC }}
+      {{- if .Values.customConfigs }}
       {{- if and (not .Values.volumes) (not .Values.customPrompts) }}
       volumes:
       {{- end }}
-        - name: agent-rbac
+        - name: custom-config
           configMap:
-            name: {{ include "arbetern.fullname" . }}-agent-rbac
+            name: {{ include "arbetern.fullname" . }}-custom-config
       {{- end }}
       {{- if .Values.customCredentials }}
-      {{- if and (not .Values.volumes) (not .Values.customPrompts) (not .Values.agentRBAC) }}
+      {{- if and (not .Values.volumes) (not .Values.customPrompts) (not .Values.customConfigs) }}
       volumes:
       {{- end }}
       {{- range $agentID, $creds := .Values.customCredentials }}
@@ -392,7 +396,7 @@ spec:
       {{- end }}
       {{- end }}
       {{- if and .Values.persistence.enabled (not .Values.persistence.persistentVolumeClaim.enabled) }}
-      {{- if and (not .Values.volumes) (not .Values.customPrompts) (not .Values.agentRBAC) (not .Values.customCredentials) }}
+      {{- if and (not .Values.volumes) (not .Values.customPrompts) (not .Values.customConfigs) (not .Values.customCredentials) }}
       volumes:
       {{- end }}
         - name: data

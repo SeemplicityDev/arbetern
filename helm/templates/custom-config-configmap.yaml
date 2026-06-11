@@ -1,0 +1,13 @@
+{{- if .Values.customConfigs }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "arbetern.fullname" . }}-custom-config
+  labels:
+    {{- include "arbetern.labels" . | nindent 4 }}
+data:
+  {{- range $agentID, $config := .Values.customConfigs }}
+  {{ $agentID }}.yaml: |
+    {{- $config | toYaml | nindent 4 }}
+  {{- end }}
+{{- end }}

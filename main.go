@@ -19,6 +19,7 @@ import (
 	"github.com/justmike1/arbetern/atlassian"
 	"github.com/justmike1/arbetern/aws"
 	"github.com/justmike1/arbetern/azure"
+	"github.com/justmike1/arbetern/chat"
 	"github.com/justmike1/arbetern/chorus"
 	"github.com/justmike1/arbetern/commands"
 	"github.com/justmike1/arbetern/config"
@@ -1107,6 +1108,11 @@ func main() {
 	}
 	defer wfRegistry.StopAll()
 
+	// chatSystemPrompts maps agentID → the system prompt used for the
+	// centralized UI chat. Captured per agent so the chat responder (built
+	// after this loop) can recover the right persona for each conversation.
+	chatSystemPrompts := make(map[string]string, len(agents))
+
 	for _, agent := range agents {
 		ap, err := prompts.LoadAgent(agent.ID)
 		if err != nil {
@@ -1114,6 +1120,8 @@ func main() {
 		}
 
 		agentID := agent.ID // capture for closure
+
+		chatSystemPrompts[agentID] = ap.SystemPrompt("general")
 
 		// Per-agent credential overrides: when the Helm chart mounts an
 		// arbetern-<agent>-secrets Secret at $AGENT_CREDENTIALS_DIR/<agent>/,
@@ -1155,6 +1163,46 @@ func main() {
 		webhookPath := fmt.Sprintf("/%s/webhook", agent.ID)
 		http.Handle(webhookPath, handler)
 		log.Printf("Registered agent %q at %s", agent.ID, webhookPath)
+	}
+
+	// Centralized per-agent chat (UI-driven). Disabled per agent by default;
+	// enabled via `chat_enabled: true` in the agent's config.yaml. There is no
+	// user auth yet, so each agent has a single shared transcript persisted to
+	// disk that every viewer sees. The responder replays recent history plus
+	// the agent's persona to the shared LLM client.
+	chatRegistry := chat.New(cfg.ChatDir, func(ctx context.Context, agentID string, history []chat.Message, userMessage string) (string, error) {
+		if modelsClient == nil {
+			return "", fmt.Errorf("LLM client is not configured")
+		}
+		messages := make([]llm.ChatMessage, 0, len(history)+2)
+		if sys := chatSystemPrompts[agentID]; sys != "" {
+			messages = append(messages, llm.ChatMessage{Role: "system", Content: sys})
+		}
+		for _, m := range history {
+			role := m.Role
+			if role != "user" && role != "assistant" {
+				role = "user"
+			}
+			messages = append(messages, llm.ChatMessage{Role: role, Content: m.Content})
+		}
+		messages = append(messages, llm.ChatMessage{Role: "user", Content: userMessage})
+		resp, err := modelsClient.CompleteWithTools(ctx, messages, nil)
+		if err != nil {
+			return "", err
+		}
+		if resp.Error != nil {
+			return "", fmt.Errorf("%s", resp.Error.Message)
+		}
+		if len(resp.Choices) == 0 {
+			return "", fmt.Errorf("LLM returned no choices")
+		}
+		return resp.Choices[0].Message.Content, nil
+	})
+	for _, agent := range agents {
+		chatRegistry.SetEnabled(agent.ID, agent.ChatEnabled)
+		if agent.ChatEnabled {
+			log.Printf("Chat enabled for agent %q", agent.ID)
+		}
 	}
 
 	// /arbetern help command — lists all available agents with a one-line description.
@@ -1356,6 +1404,7 @@ func main() {
 	}
 	dashRegistry.RegisterRoutes(http.DefaultServeMux, apiMux, knownAgents)
 	wfRegistry.RegisterRoutes(http.DefaultServeMux, apiMux, knownAgents)
+	chatRegistry.RegisterRoutes(apiMux, knownAgents)
 
 	// Wire the workflow executor now that routers are built, then kick off
 	// tick goroutines for every workflow that was loaded from disk.

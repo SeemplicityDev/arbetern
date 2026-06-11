@@ -13,7 +13,7 @@ const defaultAgentsDir = "agents"
 const globalPromptsFile = "prompts.yaml"
 const agentConfigFile = "config.yaml"
 const customPromptsEnv = "CUSTOM_PROMPTS_DIR"
-const rbacOverrideEnv = "AGENT_RBAC_DIR"
+const customConfigEnv = "CUSTOM_CONFIG_DIR"
 
 // AgentConfig holds metadata and prompts for a single agent.
 type AgentConfig struct {
@@ -21,12 +21,14 @@ type AgentConfig struct {
 	Name         string            `json:"name"`
 	Prompts      map[string]string `json:"prompts"`
 	AllowedTeams []string          `json:"allowed_teams,omitempty"`
+	ChatEnabled  bool              `json:"chat_enabled"`
 }
 
 // agentMeta is the on-disk config.yaml structure for an agent.
 type agentMeta struct {
 	Name         string   `yaml:"name"`
 	AllowedTeams []string `yaml:"allowed_teams"`
+	ChatEnabled  bool     `yaml:"chat_enabled"`
 }
 
 // AgentPrompts holds a per-agent prompt store with Get/MustGet methods.
@@ -71,36 +73,6 @@ func loadGlobalPrompts(agentsDir string) (map[string]string, []string, error) {
 	return parsed, keys, nil
 }
 
-// loadRBACOverride reads optional RBAC overrides for an agent from AGENT_RBAC_DIR.
-// When present, the override REPLACES (not merges) the config.yaml allowed_teams.
-// Supports two layouts:
-//   - Flat file:  AGENT_RBAC_DIR/<agentID>.yaml
-//   - Directory:  AGENT_RBAC_DIR/<agentID>/config.yaml
-func loadRBACOverride(agentID string) []string {
-	rbacDir := os.Getenv(rbacOverrideEnv)
-	if rbacDir == "" {
-		return nil
-	}
-	// Try flat file first (ConfigMap mount: <dir>/<agentID>.yaml).
-	path := filepath.Join(rbacDir, agentID+".yaml")
-	data, err := os.ReadFile(path)
-	if err != nil {
-		// Fall back to directory layout: <dir>/<agentID>/config.yaml.
-		path = filepath.Join(rbacDir, agentID, "config.yaml")
-		data, err = os.ReadFile(path)
-		if err != nil {
-			return nil // no RBAC override for this agent
-		}
-	}
-	var override struct {
-		AllowedTeams []string `yaml:"allowed_teams"`
-	}
-	if err := yaml.Unmarshal(data, &override); err != nil {
-		return nil
-	}
-	return override.AllowedTeams
-}
-
 // loadCustomPrompts reads optional custom prompts for an agent from CUSTOM_PROMPTS_DIR.
 // Supports two layouts:
 //   - Flat file:  CUSTOM_PROMPTS_DIR/<agentID>.yaml  (used by Kubernetes ConfigMap mounts)
@@ -129,6 +101,35 @@ func loadCustomPrompts(agentID string) map[string]string {
 		return nil
 	}
 	return parsed
+}
+
+// loadCustomConfig reads an optional per-agent config override file from
+// CUSTOM_CONFIG_DIR and returns its raw YAML bytes (nil when none exists).
+// Supports two layouts:
+//   - Flat file:  CUSTOM_CONFIG_DIR/<agentID>.yaml  (used by Kubernetes ConfigMap mounts)
+//   - Directory:  CUSTOM_CONFIG_DIR/<agentID>/config.yaml
+//
+// The bytes are overlaid onto the agent's baked-in config.yaml by the caller:
+// because the override is a full config file, only the keys present in it take
+// effect, and any field added to the agent config in the future is overridable
+// automatically — no code change required.
+func loadCustomConfig(agentID string) []byte {
+	customDir := os.Getenv(customConfigEnv)
+	if customDir == "" {
+		return nil
+	}
+	// Try flat file first (ConfigMap mount: <dir>/<agentID>.yaml).
+	path := filepath.Join(customDir, agentID+".yaml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		// Fall back to directory layout: <dir>/<agentID>/config.yaml.
+		path = filepath.Join(customDir, agentID, agentConfigFile)
+		data, err = os.ReadFile(path)
+		if err != nil {
+			return nil // no custom config for this agent
+		}
+	}
+	return data
 }
 
 // appendCustomPrompts merges custom prompts into an existing prompt map.
@@ -288,30 +289,32 @@ func DiscoverAgents(agentsDir string) ([]AgentConfig, error) {
 
 		name := entry.Name()
 		displayName := strings.ToUpper(name[:1]) + name[1:]
-		var allowedTeams []string
+		var meta agentMeta
 
-		// Check for config.yaml with a custom display name and RBAC settings.
+		// Load the baked-in config.yaml, then overlay any deployment override
+		// from CUSTOM_CONFIG_DIR. Both decode into the same struct: YAML only
+		// assigns keys that are present, so a (possibly partial) override file
+		// changes just the fields it sets and leaves everything else at the
+		// baked-in value. Any field added to agentMeta in the future is
+		// overridable automatically — the override is a full config file.
 		configPath := filepath.Join(agentsDir, entry.Name(), agentConfigFile)
 		if cfgData, err := os.ReadFile(configPath); err == nil {
-			var meta agentMeta
-			if err := yaml.Unmarshal(cfgData, &meta); err == nil {
-				if meta.Name != "" {
-					displayName = meta.Name
-				}
-				allowedTeams = meta.AllowedTeams
-			}
+			_ = yaml.Unmarshal(cfgData, &meta)
+		}
+		if override := loadCustomConfig(entry.Name()); override != nil {
+			_ = yaml.Unmarshal(override, &meta)
 		}
 
-		// Apply RBAC override from AGENT_RBAC_DIR if present (replaces config.yaml value).
-		if rbacOverride := loadRBACOverride(entry.Name()); rbacOverride != nil {
-			allowedTeams = rbacOverride
+		if meta.Name != "" {
+			displayName = meta.Name
 		}
 
 		agents = append(agents, AgentConfig{
 			ID:           name,
 			Name:         displayName,
 			Prompts:      merged,
-			AllowedTeams: allowedTeams,
+			AllowedTeams: meta.AllowedTeams,
+			ChatEnabled:  meta.ChatEnabled,
 		})
 	}
 

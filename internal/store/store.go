@@ -58,6 +58,11 @@ func PathFor(root, agent, id string) string {
 	return filepath.Join(root, agent, id+".json")
 }
 
+// AgentDir returns the directory holding an agent's descriptors: <root>/<agent>.
+func AgentDir(root, agent string) string {
+	return filepath.Join(root, agent)
+}
+
 // WriteJSON atomically writes v as indented JSON to <root>/<agent>/<id>.json,
 // creating the agent directory as needed. The write goes to <path>.tmp first
 // and is renamed into place so concurrent readers always see a complete file.

@@ -95,17 +95,18 @@ The core variables you'll set on day one:
 </details>
 
 <details>
-<summary><b>Persistence</b> — dashboards, workflows, user context</summary>
+<summary><b>Persistence</b> — dashboards, workflows, user context, chat</summary>
 
-All three live under `persistence.mountPath` in the chart and default to `./data/<feature>` locally. See [Helm / persistence](#helm--persistence) for the consolidated values block.
+All live under `persistence.mountPath` in the chart and default to `./data/<feature>` locally. See [Helm / persistence](#helm--persistence) for the consolidated values block.
 
 | Variable | Description |
 |---|---|
 | `DASHBOARDS_DIR` | Directory for dashboard JSON snapshots (default `./data/dashboards`) |
 | `WORKFLOWS_DIR` | Directory for workflow descriptors + run history (default `./data/workflows`) |
 | `USER_CONTEXT_DIR` | Directory for per-user rolling conversation summaries (`<agent>/<user>/context.txt`). Defaults to a temp dir; the chart points it at the PVC when `userContext.enabled` is true |
+| `CHAT_DIR` | Directory for centralized agent chat. Each agent holds many conversations (ChatGPT/Claude-style threads) stored at `<agent>/<conversation-id>.json`. Conversations are shared — everyone sees the same threads (no per-user auth yet). Chat is enabled per agent via `chat_enabled: true` in the agent's `config.yaml`; defaults to `./data/chat` |
 | `CUSTOM_PROMPTS_DIR` | Directory of custom prompt YAML files **appended** to built-in agent prompts. Set automatically by the chart when `customPrompts` is configured |
-| `AGENT_RBAC_DIR` | Directory of per-agent RBAC overrides (`<agent-id>.yaml` with `allowed_teams`). Set automatically by the chart when `agentRBAC` is configured |
+| `CUSTOM_CONFIG_DIR` | Directory of per-agent config overrides (`<agent-id>.yaml`, a full `config.yaml` overlay — e.g. `chat_enabled`, `allowed_teams`). Set automatically by the chart when `customConfigs` is configured |
 | `AGENT_CREDENTIALS_DIR` | Directory of per-agent credential overrides (`<agent-id>/<secret-key>` files). Set automatically by the chart when `customCredentials` is configured. See [Per-Agent Credentials](#per-agent-credentials-integration-overrides) |
 
 </details>
@@ -280,26 +281,35 @@ allowed_teams:
 
 ### Override via Helm (Kubernetes ConfigMap)
 
-Add an `agentRBAC` section to your values file to override `config.yaml` at deploy time:
+Use the generic `customConfigs` mechanism to override `config.yaml` at deploy
+time. Each key is an agent ID; the value is a (possibly partial) copy of that
+agent's `config.yaml`. Because the override is a full config file, only the keys
+you set take effect and everything else falls through to the baked-in
+`config.yaml`:
 
 ```yaml
-agentRBAC:
+customConfigs:
   pulse:
-    - S0A6S3KNNLW   # CS team
+    allowed_teams:
+      - S0A6S3KNNLW   # CS team
   ovad:
-    - S0A6S3KNNLW   # CS team
-    - S0B7T4LOOLX   # DevOps team
+    allowed_teams:
+      - S0A6S3KNNLW   # CS team
+      - S0B7T4LOOLX   # DevOps team
 ```
 
-The Helm chart creates a ConfigMap, mounts it, and sets `AGENT_RBAC_DIR` automatically.
+The Helm chart creates a ConfigMap, mounts it, and sets `CUSTOM_CONFIG_DIR`
+automatically. The same block is also how you toggle other per-agent settings
+such as `chat_enabled`.
 
 ### Override via Environment Variable (local / Docker)
 
-Set `AGENT_RBAC_DIR` to a directory containing `<agent-id>.yaml` files:
+Set `CUSTOM_CONFIG_DIR` to a directory containing `<agent-id>.yaml` files (a
+full `config.yaml` overlay):
 
 ```bash
-export AGENT_RBAC_DIR=/path/to/rbac
-# Create /path/to/rbac/pulse.yaml:
+export CUSTOM_CONFIG_DIR=/path/to/custom-config
+# Create /path/to/custom-config/pulse.yaml:
 # allowed_teams:
 #   - S0A6S3KNNLW
 ```
@@ -310,7 +320,7 @@ export AGENT_RBAC_DIR=/path/to/rbac
 2. If yes, it calls the Slack `usergroups.users.list` API to check if the user is a member of any allowed group
 3. Group memberships are cached for 5 minutes to avoid API spam
 4. Denied users see an ephemeral "Access denied" message
-5. Deploy overrides (`AGENT_RBAC_DIR`) **replace** (not merge) the `config.yaml` value
+5. Deploy overrides (`customConfigs` / `CUSTOM_CONFIG_DIR`) **replace** (not merge) the `config.yaml` value
 
 > **Slack scope required:** `usergroups:read` — add this to your Slack app's OAuth scopes.
 

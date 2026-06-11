@@ -108,6 +108,7 @@ type Config struct {
 
 	DashboardsDir string // Directory where dashboard JSON snapshots are persisted.
 	WorkflowsDir  string // Directory where workflow JSON snapshots are persisted.
+	ChatDir       string // Directory where per-agent chat transcripts are persisted.
 
 	// GitOps sync: when WorkflowsGitOpsRepo is set, arbetern reconciles
 	// workflow JSON descriptors from a remote GitHub repo into the local
@@ -232,6 +233,7 @@ func Load() (*Config, error) {
 		AzureManagementHost: os.Getenv("AZURE_MANAGEMENT_HOST"),
 		DashboardsDir:       os.Getenv("DASHBOARDS_DIR"),
 		WorkflowsDir:        os.Getenv("WORKFLOWS_DIR"),
+		ChatDir:             os.Getenv("CHAT_DIR"),
 
 		WorkflowsGitOpsOwner:    os.Getenv("WORKFLOWS_GITOPS_OWNER"),
 		WorkflowsGitOpsRepo:     os.Getenv("WORKFLOWS_GITOPS_REPO"),
