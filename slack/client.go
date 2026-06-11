@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/url"
 	"strings"
@@ -250,11 +251,13 @@ func (c *Client) UploadFileSnippet(channelID, threadTS, filename, title, content
 		return "", fmt.Errorf("failed to get upload URL: %w", err)
 	}
 
-	if err := c.api.UploadToURL(ctx, slack.UploadToURLParameters{
-		UploadURL: urlResp.UploadURL,
-		Content:   content,
-		Filename:  filename,
-	}); err != nil {
+	// Upload the content with an explicit Content-Length. slack-go's
+	// UploadToURL streams the body through an io.Pipe, which sends the request
+	// with chunked transfer-encoding and no Content-Length; Slack's external
+	// upload endpoint frequently stores a 0-byte file in that case ("empty
+	// file" errors). Building the multipart body in a buffer lets net/http set
+	// Content-Length, which makes the upload reliable.
+	if err := c.uploadContentToURL(ctx, urlResp.UploadURL, filename, content); err != nil {
 		return "", fmt.Errorf("failed to upload file content: %w", err)
 	}
 
@@ -273,6 +276,45 @@ func (c *Client) UploadFileSnippet(channelID, threadTS, filename, title, content
 		return resp.Files[0].ID, nil
 	}
 	return urlResp.FileID, nil
+}
+
+// uploadContentToURL POSTs content to a Slack external upload URL as a
+// multipart/form-data body built in memory, so net/http can set an accurate
+// Content-Length header. This avoids the chunked-transfer-encoding upload that
+// slack-go's UploadToURL performs, which Slack's upload endpoint can store as a
+// 0-byte file.
+func (c *Client) uploadContentToURL(ctx context.Context, uploadURL, filename, content string) error {
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	fw, err := mw.CreateFormFile("file", filename)
+	if err != nil {
+		return fmt.Errorf("failed to create multipart field: %w", err)
+	}
+	if _, err := io.Copy(fw, strings.NewReader(content)); err != nil {
+		return fmt.Errorf("failed to write upload body: %w", err)
+	}
+	if err := mw.Close(); err != nil {
+		return fmt.Errorf("failed to finalize upload body: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, uploadURL, &buf)
+	if err != nil {
+		return fmt.Errorf("failed to build upload request: %w", err)
+	}
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	req.Header.Set("Authorization", "Bearer "+c.token)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to upload file content: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorResponseBody))
+		return fmt.Errorf("upload returned status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	return nil
 }
 
 type webhookPayload struct {

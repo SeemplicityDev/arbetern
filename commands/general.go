@@ -2,10 +2,12 @@ package commands
 
 import (
 	"context"
+	"encoding/csv"
 	"encoding/json"
 	"fmt"
 	"log"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -73,16 +75,111 @@ type GeneralHandler struct {
 	branchMgr        *BranchManager
 	session          *ThreadSession
 	userContextStore *UserContextStore
+	// aggregateCache holds the structured results of datadog_logs_aggregate
+	// calls made during this run, keyed by the short ID returned to the LLM
+	// (agg_1, agg_2, …). It lets upload_aggregate_csv assemble a CSV file
+	// server-side so the model never has to re-emit the full dataset inline
+	// (which it does unreliably for large tables). Per-run state: a fresh
+	// handler is created for each command/tick by newGeneralHandler.
+	aggregateCache map[string]cachedAggregate
 	// headless is true when the handler is executing a scheduled workflow
 	// tick rather than a Slack-driven command. Affects tool gating (e.g.
 	// reply_in_thread is suppressed) and suppresses audit messaging.
 	headless bool
 }
 
+// cachedAggregate is one datadog_logs_aggregate result retained for the
+// duration of a run so upload_aggregate_csv can render it to CSV without the
+// model re-emitting the data.
+type cachedAggregate struct {
+	query   string
+	results []datadog.PercentileResult
+}
+
+// resolveUploadChannel picks the Slack channel a file upload should be shared
+// to. It prefers an explicit channel_id from the tool args, then the channel
+// the command is running in, then the handler's current channel. In a headless
+// workflow tick all of those are empty unless the model passes channel_id, so
+// the caller must treat an empty result as a precondition error.
+func (h *GeneralHandler) resolveUploadChannel(channelID, argChannelID string) string {
+	if c := strings.TrimSpace(argChannelID); c != "" {
+		return c
+	}
+	if c := strings.TrimSpace(channelID); c != "" {
+		return c
+	}
+	return strings.TrimSpace(h.currentChannelID)
+}
+
+// resolveUploadThread picks the thread timestamp a file upload should be posted
+// under. It prefers an explicit thread_ts from the tool args, then the current
+// audit thread (Slack-driven commands). Empty means top-level channel post.
+func (h *GeneralHandler) resolveUploadThread(argThreadTS string) string {
+	if t := strings.TrimSpace(argThreadTS); t != "" {
+		return t
+	}
+	return strings.TrimSpace(h.currentAuditTS)
+}
+
+// cacheAggregate stores a structured aggregate result under a fresh per-run ID
+// (agg_1, agg_2, …) and returns that ID.
+func (h *GeneralHandler) cacheAggregate(query string, results []datadog.PercentileResult) string {
+	if h.aggregateCache == nil {
+		h.aggregateCache = make(map[string]cachedAggregate)
+	}
+	id := fmt.Sprintf("agg_%d", len(h.aggregateCache)+1)
+	h.aggregateCache[id] = cachedAggregate{query: query, results: results}
+	return id
+}
+
+// buildAggregateCSV assembles a single CSV from the named cached aggregate
+// results. Columns: site,group_by,key,measure,count,p50,p95,p99 — one row per
+// (site, group key) across every requested aggregate. Returns an error string
+// (empty on success) and the CSV content.
+func (h *GeneralHandler) buildAggregateCSV(ids []string) (string, string) {
+	if len(ids) == 0 {
+		return "Error: no aggregate_ids provided.", ""
+	}
+	var sb strings.Builder
+	w := csv.NewWriter(&sb)
+	_ = w.Write([]string{"site", "group_by", "key", "measure", "count", "p50", "p95", "p99"})
+	rows := 0
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		cached, ok := h.aggregateCache[id]
+		if !ok {
+			return fmt.Sprintf("Error: aggregate_id %q not found. Valid ids are the ones returned by datadog_logs_aggregate calls in this run.", id), ""
+		}
+		for _, res := range cached.results {
+			for _, r := range res.Rows {
+				_ = w.Write([]string{
+					res.Site,
+					res.GroupBy,
+					r.Key,
+					res.Measure,
+					strconv.FormatFloat(r.Count, 'f', 0, 64),
+					strconv.FormatFloat(r.P50, 'f', 3, 64),
+					strconv.FormatFloat(r.P95, 'f', 3, 64),
+					strconv.FormatFloat(r.P99, 'f', 3, 64),
+				})
+				rows++
+			}
+		}
+	}
+	w.Flush()
+	if err := w.Error(); err != nil {
+		return fmt.Sprintf("Error building CSV: %v", err), ""
+	}
+	if rows == 0 {
+		return "Error: the named aggregate result(s) contained no rows.", ""
+	}
+	return "", sb.String()
+}
 func (h *GeneralHandler) Execute(channelID, userID, text, responseURL, auditTS string) {
 	ctx := context.Background()
 	h.currentChannelID = channelID
 	h.currentAuditTS = auditTS
+	h.aggregateCache = nil
 	h.branchMgr = NewBranchManager(h.ghClient, h.agentID, h.session)
 
 	tools := h.buildTools()
@@ -254,6 +351,7 @@ func (h *GeneralHandler) Execute(channelID, userID, text, responseURL, auditTS s
 func (h *GeneralHandler) ExecuteHeadless(ctx context.Context, userID, prompt string) (string, error) {
 	h.currentChannelID = ""
 	h.currentAuditTS = ""
+	h.aggregateCache = nil
 	h.branchMgr = NewBranchManager(h.ghClient, h.agentID, nil)
 
 	tools := h.buildTools()
@@ -804,16 +902,36 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 			Type: "function",
 			Function: llm.ToolFunction{
 				Name:        "upload_snippet",
-				Description: "Upload a text file snippet to Slack. Use this instead of posting a long message when the content is large (e.g., full search results with file paths and code lines, log dumps, CSV data, large code blocks). The snippet appears as a collapsible file attachment in the channel/thread, keeping the conversation clean. PREFER this over reply_in_thread or plain messages whenever the output would exceed ~30 lines or ~2000 characters. Ideal for: org-wide search results, full file listings, detailed tables, log output, code dumps.",
+				Description: "Upload a text file snippet to Slack. Use this instead of posting a long message when the content is large (e.g., full search results with file paths and code lines, log dumps, CSV data, large code blocks). The snippet appears as a collapsible file attachment in the channel/thread, keeping the conversation clean. PREFER this over reply_in_thread or plain messages whenever the output would exceed ~30 lines or ~2000 characters. Ideal for: org-wide search results, full file listings, detailed tables, log output, code dumps. IMPORTANT: you must supply the COMPLETE file body in the 'content' argument of THIS call — it is not generated or filled in for you. Do not call this tool with an empty or omitted 'content'.",
 				Parameters: json.RawMessage(`{
 					"type":"object",
 					"properties":{
-						"content":{"type":"string","description":"The text content of the snippet."},
+						"content":{"type":"string","description":"REQUIRED. The full text body of the file, inline as a string. This is the actual file contents (e.g. the entire CSV including header and every data row). Must be non-empty — never omit it or leave it blank."},
 						"filename":{"type":"string","description":"Filename for the snippet (e.g. 'search-results.txt', 'clickhouse-usages.csv', 'report.md'). Use an appropriate extension."},
 						"title":{"type":"string","description":"Display title for the snippet in Slack (e.g. 'clickhouse_connection usages across org')."},
-						"filetype":{"type":"string","description":"Slack file type for syntax highlighting (e.g. 'text', 'markdown', 'csv', 'python', 'yaml', 'json'). Default: 'text'."}
+						"filetype":{"type":"string","description":"Slack file type for syntax highlighting (e.g. 'text', 'markdown', 'csv', 'python', 'yaml', 'json'). Default: 'text'."},
+						"channel_id":{"type":"string","description":"Slack channel ID to share the file into. REQUIRED in scheduled workflows (there is no current channel) — use the same channel you post the report to. In an interactive thread it defaults to the current channel."},
+						"thread_ts":{"type":"string","description":"OPTIONAL. Parent message ts to attach the file under (e.g. the ts returned by a prior post_slack_message), so the file lands in that thread instead of as a new top-level message."}
 					},
 					"required":["content","filename","title"]
+				}`),
+			},
+		},
+		{
+			Type: "function",
+			Function: llm.ToolFunction{
+				Name:        "upload_aggregate_csv",
+				Description: "Attach the FULL result(s) of one or more datadog_logs_aggregate calls to Slack as a single downloadable CSV file. Use this for performance-baseline / per-endpoint / per-tenant reports instead of pasting big tables into messages or trying to retype the data into upload_snippet. Each datadog_logs_aggregate call returns an aggregate_id (e.g. 'agg_1'); pass those ids here and the complete tables are rendered server-side — you do NOT need to (and must not) re-emit the rows yourself. The CSV columns are: site,group_by,key,measure,count,p50,p95,p99. The file is posted into the current thread/channel.",
+				Parameters: json.RawMessage(`{
+					"type":"object",
+					"properties":{
+						"aggregate_ids":{"type":"array","items":{"type":"string"},"description":"The aggregate_id values returned by prior datadog_logs_aggregate calls in this run (e.g. [\"agg_1\",\"agg_2\",\"agg_3\"]). All listed results are combined into one CSV, one row per (site, group key)."},
+						"filename":{"type":"string","description":"Filename for the CSV (e.g. 'latency-baseline.csv'). Should end in .csv."},
+						"title":{"type":"string","description":"Display title for the file in Slack."},
+						"channel_id":{"type":"string","description":"Slack channel ID to share the CSV into. REQUIRED in scheduled workflows (there is no current channel) — use the same channel you post the report to. In an interactive thread it defaults to the current channel."},
+						"thread_ts":{"type":"string","description":"OPTIONAL. Parent message ts to attach the CSV under (e.g. the ts returned by the summary post_slack_message), so the file lands in that thread."}
+					},
+					"required":["aggregate_ids","filename","title"]
 				}`),
 			},
 		},
@@ -1285,7 +1403,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 				Parameters: json.RawMessage(`{
 					"type":"object",
 					"properties":{
-						"query":{"type":"string","description":"Datadog log search query to aggregate over (e.g. 'service:api-service \"request end\"'). Append exclusions like '-@customer_schema:(seemplicity* OR demo*)' to drop test tenants."},
+						"query":{"type":"string","description":"Datadog log search query to aggregate over (e.g. 'service:api-service \"request end\"'). Append exclusions like '-@customer_schema:(acme* OR demo*)' to drop test tenants."},
 						"group_by":{"type":"string","description":"Facet to group by (e.g. '@endpoint_name', '@customer_schema'). Default '@endpoint_name'."},
 						"measure":{"type":"string","description":"Numeric measure facet to compute p50/p95/p99 over (e.g. '@time_took' seconds, '@infra_extra.mem_delta_mb' MB). Default '@time_took'."},
 						"from":{"type":"string","description":"Start of time range: ISO-8601, unix-ms, or date-math ('now-14d'). Defaults to 14 days ago."},
@@ -2261,28 +2379,73 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 
 	case "upload_snippet":
 		args, errMsg := parseToolArgs[struct {
-			Content  string `json:"content"`
-			Filename string `json:"filename"`
-			Title    string `json:"title"`
-			Filetype string `json:"filetype"`
+			Content   string `json:"content"`
+			Filename  string `json:"filename"`
+			Title     string `json:"title"`
+			Filetype  string `json:"filetype"`
+			ChannelID string `json:"channel_id"`
+			ThreadTS  string `json:"thread_ts"`
 		}](argsJSON)
 		if errMsg != "" {
 			return errMsg
 		}
+		if strings.TrimSpace(args.Content) == "" {
+			return preconditionErrf("Error: the 'content' argument is empty. You must pass the FULL file content as a string in the 'content' field of the same upload_snippet call (it is not generated for you). Re-issue the call with 'content' populated.")
+		}
+		if args.Filename == "" {
+			return preconditionErrf("Error: the 'filename' argument is required (e.g. 'report.csv').")
+		}
 		if args.Filetype == "" {
 			args.Filetype = "text"
 		}
-		// Post snippet in the current thread if we have one, otherwise in the channel.
-		threadTS := ""
-		if h.currentAuditTS != "" {
-			threadTS = h.currentAuditTS
+		targetChannel := h.resolveUploadChannel(channelID, args.ChannelID)
+		if targetChannel == "" {
+			return preconditionErrf("Error: no Slack channel to upload to. In a scheduled workflow there is no current channel — pass an explicit 'channel_id' (the same channel you post the report to).")
 		}
-		fileID, err := h.slackClient.UploadFileSnippet(channelID, threadTS, args.Filename, args.Title, args.Content, args.Filetype)
+		threadTS := h.resolveUploadThread(args.ThreadTS)
+		fileID, err := h.slackClient.UploadFileSnippet(targetChannel, threadTS, args.Filename, args.Title, args.Content, args.Filetype)
 		if err != nil {
 			return fmt.Sprintf("Error uploading snippet: %v", err)
 		}
-		log.Printf("[user=%s channel=%s] uploaded file snippet %s (%s)", userID, channelID, fileID, args.Filename)
-		return fmt.Sprintf("Successfully uploaded snippet '%s' as %s.", args.Title, args.Filename)
+		log.Printf("[user=%s channel=%s] uploaded file snippet %s (%s) to %s", userID, channelID, fileID, args.Filename, targetChannel)
+		return fmt.Sprintf("Successfully uploaded snippet '%s' as %s to channel %s.", args.Title, args.Filename, targetChannel)
+
+	case "upload_aggregate_csv":
+		args, errMsg := parseToolArgs[struct {
+			AggregateIDs []string `json:"aggregate_ids"`
+			Filename     string   `json:"filename"`
+			Title        string   `json:"title"`
+			ChannelID    string   `json:"channel_id"`
+			ThreadTS     string   `json:"thread_ts"`
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
+		}
+		if len(args.AggregateIDs) == 0 {
+			return preconditionErrf("Error: 'aggregate_ids' is required — pass the ids returned by your datadog_logs_aggregate calls (e.g. [\"agg_1\",\"agg_2\"]).")
+		}
+		if args.Filename == "" {
+			return preconditionErrf("Error: 'filename' is required (e.g. 'report.csv').")
+		}
+		targetChannel := h.resolveUploadChannel(channelID, args.ChannelID)
+		if targetChannel == "" {
+			return preconditionErrf("Error: no Slack channel to upload to. In a scheduled workflow there is no current channel — pass an explicit 'channel_id' (the same channel you post the report to).")
+		}
+		buildErr, content := h.buildAggregateCSV(args.AggregateIDs)
+		if buildErr != "" {
+			return preconditionErrf("%s", buildErr)
+		}
+		threadTS := h.resolveUploadThread(args.ThreadTS)
+		title := args.Title
+		if title == "" {
+			title = args.Filename
+		}
+		fileID, err := h.slackClient.UploadFileSnippet(targetChannel, threadTS, args.Filename, title, content, "csv")
+		if err != nil {
+			return fmt.Sprintf("Error uploading aggregate CSV: %v", err)
+		}
+		log.Printf("[user=%s channel=%s] uploaded aggregate CSV %s (%s, ids=%v, %d bytes) to %s", userID, channelID, fileID, args.Filename, args.AggregateIDs, len(content), targetChannel)
+		return fmt.Sprintf("Successfully uploaded '%s' as %s (%d bytes) to channel %s.", title, args.Filename, len(content), targetChannel)
 
 	case "fetch_thread_context":
 		args, errMsg := parseToolArgs[struct {
@@ -3365,6 +3528,12 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 			return fmt.Sprintf("Error aggregating Datadog logs: %v", err)
 		}
 		log.Printf("[user=%s channel=%s] aggregated Datadog logs for %q (group_by=%s, measure=%s, site=%s)", userID, channelID, args.Query, args.GroupBy, args.Measure, args.Site)
+		// Cache the structured result so upload_aggregate_csv can attach the
+		// full dataset as a CSV file without the model re-typing it inline.
+		if data, derr := h.datadogClients.AggregatePercentilesData(ctx, args.Site, args.Query, args.From, args.To, args.GroupBy, args.Measure); derr == nil && len(data) > 0 {
+			id := h.cacheAggregate(args.Query, data)
+			result += fmt.Sprintf("\n\n(Full result cached as aggregate_id=%q. To attach the complete table(s) as a downloadable CSV file in Slack, call upload_aggregate_csv with this id — do NOT retype the rows.)", id)
+		}
 		return result
 
 	case "datadog_list_monitors":
