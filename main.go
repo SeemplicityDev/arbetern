@@ -267,20 +267,93 @@ func emailAllowed(email string, allow []string) bool {
 	return false
 }
 
-// checkEmailRBAC returns true if the request's authenticated email is allowed
-// to access the agent's UI/chat. An empty allow-list means no restriction.
-// When a restriction is configured the request must carry a verified email
-// (set by the OAuth proxy) that matches it, otherwise access is denied.
-func checkEmailRBAC(r *http.Request, agentID string, allowedEmails []string) bool {
-	if len(allowedEmails) == 0 {
+// emailUserIDCache memoises Slack users.lookupByEmail results. The chat-UI
+// authorizer resolves the OAuth-proxy email to a Slack user on every request
+// to evaluate allowed_teams membership, so both positive and negative lookups
+// are cached for a TTL to stay well within Slack's rate limits.
+//
+// Resolving emails to Slack users requires the users:read.email scope on the
+// bot token.
+type emailUserIDCache struct {
+	mu      sync.RWMutex
+	entries map[string]emailUserIDEntry
+	ttl     time.Duration
+}
+
+type emailUserIDEntry struct {
+	userID  string
+	fetched time.Time
+}
+
+func newEmailUserIDCache(ttl time.Duration) *emailUserIDCache {
+	return &emailUserIDCache{entries: make(map[string]emailUserIDEntry), ttl: ttl}
+}
+
+// resolve returns the Slack user ID for an email address, or "" when the email
+// is empty, no Slack client is configured, the user can't be found, or the
+// lookup fails. Results (including misses) are cached for the configured TTL.
+func (c *emailUserIDCache) resolve(slackClient *slack.Client, email string) string {
+	email = strings.ToLower(strings.TrimSpace(email))
+	if email == "" || slackClient == nil {
+		return ""
+	}
+
+	c.mu.RLock()
+	entry, ok := c.entries[email]
+	if ok && time.Since(entry.fetched) < c.ttl {
+		c.mu.RUnlock()
+		return entry.userID
+	}
+	c.mu.RUnlock()
+
+	user, err := slackClient.GetUserByEmail(email)
+	userID := ""
+	if err != nil {
+		log.Printf("[rbac] slack lookup by email %q failed: %v", email, err)
+	} else if user != nil {
+		userID = user.ID
+	}
+
+	c.mu.Lock()
+	c.entries[email] = emailUserIDEntry{userID: userID, fetched: time.Now()}
+	c.mu.Unlock()
+	return userID
+}
+
+// checkChatRBAC authorizes a chat-UI request for an agent using two layers,
+// in priority order:
+//
+//  1. allowed_emails — the email the OAuth proxy verified matches an exact
+//     address or a domain in the list (the primary layer).
+//  2. allowed_teams — as a fallback, that email is resolved to a Slack user
+//     who is then checked for membership in the agent's authorized Slack
+//     teams, reusing the RBAC the Slack bot already enforces.
+//
+// Access is granted if either layer matches and denied only when neither does.
+// When both lists are empty the agent's chat is unrestricted. Team resolution
+// fails closed: if the email can't be mapped to a Slack user (e.g. missing the
+// users:read.email scope) the fallback simply doesn't grant access.
+func checkChatRBAC(r *http.Request, agentID string, allowedEmails, allowedTeams []string, slackClient *slack.Client, emailCache *emailUserIDCache, groupCache *groupMemberCache) bool {
+	if len(allowedEmails) == 0 && len(allowedTeams) == 0 {
 		return true // no restriction
 	}
+
 	email := clientEmail(r)
-	if !emailAllowed(email, allowedEmails) {
-		log.Printf("[rbac] DENIED email=%q agent=%s (allowed_emails=%v)", email, agentID, allowedEmails)
-		return false
+
+	// Layer 1: email / domain allow-list (highest priority).
+	if len(allowedEmails) > 0 && emailAllowed(email, allowedEmails) {
+		return true
 	}
-	return true
+
+	// Layer 2: fall back to Slack team membership resolved from the email.
+	if len(allowedTeams) > 0 && email != "" {
+		if userID := emailCache.resolve(slackClient, email); userID != "" && groupCache.isMember(slackClient, userID, allowedTeams) {
+			return true
+		}
+	}
+
+	log.Printf("[rbac] DENIED email=%q agent=%s (allowed_emails=%v allowed_teams=%v)", email, agentID, allowedEmails, allowedTeams)
+	return false
 }
 
 // Changelog source repository for the /api/changes endpoint.
@@ -510,6 +583,7 @@ func refreshIntegrations(
 		{Scope: "im:history", Description: "Read message history in DMs", Required: true},
 		{Scope: "mpim:history", Description: "Read message history in group DMs", Required: true},
 		{Scope: "users:read", Description: "Read user profile information (name, email)", Required: true},
+		{Scope: "users:read.email", Description: "Resolve a user's email to their Slack ID for chat-UI team RBAC", Required: true},
 		{Scope: "usergroups:read", Description: "Read user group membership for RBAC enforcement", Required: true},
 		{Scope: "commands", Description: "Register and receive slash commands", Required: true},
 		// Event subscriptions (required for Socket Mode thread follow-ups).
@@ -1116,6 +1190,9 @@ func main() {
 		}
 	}
 	rbacCache := newGroupMemberCache(5 * time.Minute)
+	// Cache for resolving OAuth-proxy emails → Slack user IDs, used by the
+	// chat-UI authorizer to fall back to allowed_teams membership.
+	emailUserCache := newEmailUserIDCache(5 * time.Minute)
 
 	// Map of agentID → Router so the events handler can dispatch thread replies.
 	routers := make(map[string]*commands.Router, len(agents))
@@ -1265,18 +1342,22 @@ func main() {
 	chatRegistry.StartRetention(context.Background(), cfg.ChatRetention, time.Hour)
 	log.Printf("Chat retention: conversations inactive for >%s are auto-deleted", cfg.ChatRetention)
 
-	// Per-agent UI/chat RBAC by authenticated email (from the OAuth proxy).
-	// Empty list = no restriction. Used both by the chat API authorizer below
-	// and the /ui/<agent>/chat deep-link route.
+	// Per-agent UI/chat RBAC. allowed_emails (OAuth-proxy-verified email) is the
+	// primary layer; allowed_teams (Slack user-group membership, resolved from
+	// the email) is the fallback. Empty for both = no restriction. Used by the
+	// chat API authorizer below and the /ui/<agent>/chat deep-link route.
 	agentEmailRBAC := make(map[string][]string, len(agents))
 	for _, agent := range agents {
 		agentEmailRBAC[agent.ID] = agent.AllowedEmails
 		if len(agent.AllowedEmails) > 0 {
 			log.Printf("RBAC: agent %q chat restricted to emails %v", agent.ID, agent.AllowedEmails)
 		}
+		if len(agentRBAC[agent.ID]) > 0 {
+			log.Printf("RBAC: agent %q chat falls back to Slack teams %v", agent.ID, agentRBAC[agent.ID])
+		}
 	}
 	chatRegistry.SetAuthorizer(func(req *http.Request, agentID string) bool {
-		return checkEmailRBAC(req, agentID, agentEmailRBAC[agentID])
+		return checkChatRBAC(req, agentID, agentEmailRBAC[agentID], agentRBAC[agentID], slackClient, emailUserCache, rbacCache)
 	})
 
 	// Deep-link route for the full-screen chat: /ui/<agent>/chat. Serves the

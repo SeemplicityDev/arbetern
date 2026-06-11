@@ -182,6 +182,16 @@ func (c *Client) GetUserInfo(userID string) (*slack.User, error) {
 	return user, nil
 }
 
+// GetUserByEmail looks up a Slack user by their email address.
+// Requires the users:read.email scope on the bot token.
+func (c *Client) GetUserByEmail(email string) (*slack.User, error) {
+	user, err := c.api.GetUserByEmail(email)
+	if err != nil {
+		return nil, fmt.Errorf("failed to look up user by email %s: %w", email, err)
+	}
+	return user, nil
+}
+
 // GetTeamURL returns the Slack workspace URL (e.g. "https://myorg.slack.com/").
 func (c *Client) GetTeamURL() (string, error) {
 	resp, err := c.api.AuthTest()

@@ -106,10 +106,15 @@ secretValues:
 # allowed_emails, chat_enabled.
 #   - chat_enabled: turn on the centralized UI chat for an agent.
 #   - allowed_teams: restrict the agent to the listed Slack user group IDs
-#     (deploy-time RBAC); only members of those groups can use the agent.
-#   - allowed_emails: restrict the agent's UI chat to the listed identities,
-#     matched against the email oauth2-proxy injects. Exact addresses
-#     (alice@acme.com) or whole domains (acme.com). Requires oauth2-proxy.
+#     (deploy-time RBAC); only members of those groups can use the agent. Also
+#     the fallback layer for UI chat access (see below).
+#   - allowed_emails: restrict the agent's UI chat. Access is evaluated in two
+#     layers: (1) allowed_emails (primary) matched against the email
+#     oauth2-proxy injects — exact addresses (alice@acme.com) or whole domains
+#     (acme.com); (2) allowed_teams (fallback) — the email is resolved to a
+#     Slack user and checked for team membership; (3) otherwise 403.
+#     Requires oauth2-proxy; the fallback also needs the Slack users:read.email
+#     scope.
 # Example:
 # customConfigs:
 #   ovad:

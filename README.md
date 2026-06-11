@@ -344,19 +344,37 @@ export CUSTOM_CONFIG_DIR=/path/to/custom-config
 4. Denied users see an ephemeral "Access denied" message
 5. Deploy overrides (`customConfigs` / `CUSTOM_CONFIG_DIR`) **replace** (not merge) the `config.yaml` value
 
-> **Slack scope required:** `usergroups:read` — add this to your Slack app's OAuth scopes.
+> **Slack scopes required:** `usergroups:read` for team membership, plus
+> `users:read.email` if you use `allowed_teams` as the chat-UI fallback (to
+> resolve an authenticated email to its Slack user). Add these to your Slack
+> app's OAuth scopes.
 
 ### Chat access by email (UI)
 
-`allowed_teams` gates Slack slash commands by Slack user group. To gate the
-browser **chat** (`/ui/<agent>/chat` and the underlying `/api/chat` endpoints)
-per agent, use `allowed_emails`. This requires the [oauth2-proxy SSO](#authentication-sso)
-in front of the app: the proxy authenticates the user with Google (or another
-provider) and passes the verified address as `X-Auth-Request-Email`, which the
-proxy also strips from inbound requests so it can't be spoofed.
+`allowed_teams` gates Slack slash commands by Slack user group. The browser
+**chat** (`/ui/<agent>/chat` and the underlying `/api/chat` endpoints) is gated
+per agent by **two layers, evaluated in order**:
 
-Entries are matched case-insensitively and may be an exact address or a whole
-domain. An empty/unset list means no restriction.
+1. **`allowed_emails` (primary).** The address oauth2-proxy verified
+   (`X-Auth-Request-Email`) is matched case-insensitively against the list —
+   either an exact address or a whole domain. A match grants access.
+2. **`allowed_teams` (fallback).** If the email is not in `allowed_emails`,
+   arbetern resolves it to a Slack user (`users.lookupByEmail`) and checks
+   membership in the agent's Slack user groups — the same `allowed_teams` used
+   for slash commands. A match grants access.
+3. **Otherwise → `403`.** If neither layer matches the request is denied.
+
+This lets one `allowed_teams` list cover both Slack slash commands and the chat
+UI: a user already in an authorized Slack team gets chat access without being
+listed individually in `allowed_emails`. When **both** lists are empty the
+agent's chat is unrestricted.
+
+Layer 1 requires the [oauth2-proxy SSO](#authentication-sso) in front of the
+app: the proxy authenticates the user with Google (or another provider) and
+passes the verified address as `X-Auth-Request-Email`, which it also strips from
+inbound requests so it can't be spoofed. Layer 2 additionally requires the
+`users:read.email` and `usergroups:read` Slack scopes; it fails closed (no
+access granted) if the email can't be resolved to a Slack user.
 
 ```yaml
 customConfigs:
@@ -365,13 +383,14 @@ customConfigs:
     allowed_emails:
       - solutions@acme.com   # exact address
       - acme.com             # any address in this domain
+    allowed_teams:
+      - S0A6S3KNNLW          # fallback: members of this Slack team also get in
 ```
 
-When `allowed_emails` is set, the chat API returns `403` for any user whose
-email is not on the list, and the UI shows a friendly "you don't have access"
-message with the message composer hidden (no dead Send button). Without
-oauth2-proxy in front there is no verified email header, so any non-empty
-`allowed_emails` denies everyone — leave it empty if you don't run the proxy.
+When access is denied the chat API returns `403` and the UI shows a friendly
+"you don't have access" message with the message composer hidden (no dead Send
+button). Lookups (email→Slack-ID and team membership) are cached for 5 minutes
+to stay within Slack's rate limits.
 
 ## Per-Agent Credentials (Integration Overrides)
 

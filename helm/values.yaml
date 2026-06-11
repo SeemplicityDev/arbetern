@@ -214,9 +214,10 @@ oauth2-proxy:
       # Single provider (Google) — skip the interstitial sign-in button page.
       skip_provider_button = true
       # Pass the authenticated identity to the upstream app as
-      # X-Auth-Request-Email / X-Auth-Request-Groups. arbetern reads these to
-      # enforce per-agent allowed_emails RBAC (see customConfigs below). The
-      # proxy strips any client-supplied copies, so they can't be spoofed.
+      # X-Auth-Request-Email / X-Auth-Request-Groups. arbetern reads the email
+      # to enforce per-agent chat RBAC (allowed_emails, falling back to
+      # allowed_teams; see customConfigs below). The proxy strips any
+      # client-supplied copies, so they can't be spoofed.
       set_xauthrequest = true
       # Paths that bypass auth (RE2 regex). Add entries to expose more.
       skip_auth_routes = [
@@ -321,12 +322,17 @@ customPrompts: {}
 #   - allowed_teams: restrict the agent to the listed Slack user group
 #     (subteam) IDs. This is how you do per-agent RBAC at deploy time; when set,
 #     only members of those groups can use the agent. Omit/empty = no
-#     restriction.
+#     restriction. Also acts as the fallback layer for the UI chat (see below).
 #   - allowed_emails: restrict the agent's UI chat (/ui/<agent>/chat and the
-#     /api/chat API) to the listed identities, matched against the email that
-#     oauth2-proxy injects. Entries may be exact addresses (alice@acme.com) or
-#     a whole domain (acme.com). Requires oauth2-proxy (set_xauthrequest=true).
-#     Omit/empty = no restriction.
+#     /api/chat API). Chat access is evaluated in two layers, in order:
+#       1. allowed_emails (primary): the email oauth2-proxy injects is matched
+#          against this list — exact addresses (alice@acme.com) or whole
+#          domains (acme.com). Requires oauth2-proxy (set_xauthrequest=true).
+#       2. allowed_teams (fallback): if not in allowed_emails, the email is
+#          resolved to a Slack user (needs users:read.email + usergroups:read)
+#          and checked against allowed_teams above.
+#       3. neither matches -> 403.
+#     Both lists empty = no restriction.
 # Example:
 # customConfigs:
 #   ovad:
