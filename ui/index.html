@@ -661,6 +661,27 @@
       color: var(--red);
     }
 
+    /* Rendered Slack mrkdwn inside assistant bubbles. */
+    .chat-bubble a {
+      color: var(--accent);
+      text-decoration: none;
+      border-bottom: 1px solid rgba(127, 162, 196, 0.4);
+    }
+    .chat-bubble a:hover { border-bottom-color: var(--accent); }
+    .chat-bubble strong { font-weight: 600; color: var(--text-bright); }
+    .chat-bubble em { font-style: italic; }
+    .chat-bubble del { opacity: 0.7; }
+    .chat-bubble code {
+      font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+      font-size: 0.86em;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 5px;
+      padding: 1px 5px;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
     .chat-input-bar {
       display: flex;
       gap: 10px;
@@ -2283,7 +2304,10 @@
       const name = m.role === 'assistant' ? '' : (m.user ? escapeHtml(m.user) : 'Anonymous');
       const meta = name ? `<div class="chat-meta">${name}</div>` : '';
       const cls = m.pending ? ' pending' : (m.error ? ' chat-error' : '');
-      return `<div class="chat-msg ${who}">${meta}<div class="chat-bubble${cls}">${escapeHtml(m.content)}</div></div>`;
+      const body = (who === 'assistant' && !m.pending && !m.error)
+        ? renderSlackMarkdown(m.content)
+        : escapeHtml(m.content);
+      return `<div class="chat-msg ${who}">${meta}<div class="chat-bubble${cls}">${body}</div></div>`;
     }
 
     function renderChatMessages(msgs) {
@@ -2401,6 +2425,35 @@
       const d = document.createElement('div');
       d.textContent = str;
       return d.innerHTML;
+    }
+
+    // Render Slack mrkdwn (the same flavour agents post to Slack) to safe HTML.
+    // Links and inline code are stashed as placeholders and HTML-escaped before
+    // the surrounding text is escaped, so user content can never inject markup.
+    function renderSlackMarkdown(text) {
+      if (text == null) return '';
+      const tokens = [];
+      const stash = (html) => `\u0000${tokens.push(html) - 1}\u0000`;
+      const escAttr = (s) => String(s).replace(/&/g, '&amp;').replace(/"/g, '&quot;');
+      let s = String(text);
+
+      // Slack links: <url|label> and bare <url>.
+      s = s.replace(/<(https?:\/\/[^|>\s]+)\|([^>]+)>/g, (_, url, label) =>
+        stash(`<a href="${escAttr(url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(label)}</a>`));
+      s = s.replace(/<(https?:\/\/[^|>\s]+)>/g, (_, url) =>
+        stash(`<a href="${escAttr(url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(url)}</a>`));
+
+      // Inline code.
+      s = s.replace(/`([^`]+)`/g, (_, code) => stash(`<code>${escapeHtml(code)}</code>`));
+
+      // Escape everything else, then apply inline emphasis on the safe text.
+      s = escapeHtml(s);
+      s = s.replace(/\*([^*\n]+)\*/g, '<strong>$1</strong>');
+      s = s.replace(/(^|[\s(])_([^_\n]+)_(?=[\s).,!?:;]|$)/g, '$1<em>$2</em>');
+      s = s.replace(/~([^~\n]+)~/g, '<del>$1</del>');
+
+      // Restore the stashed link/code HTML.
+      return s.replace(/\u0000(\d+)\u0000/g, (_, i) => tokens[Number(i)]);
     }
 
     // Fetch agents from API
