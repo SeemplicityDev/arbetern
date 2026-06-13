@@ -9,6 +9,7 @@ intro: |
   • `/ovad search datadog logs for service:task-exec errors in the last hour` — query logs
   • `/ovad what monitors are alerting for env:prod` — check monitor status
   • `/ovad in datadog US which kubernetes services are under 20% cpu utilization` — query metrics broken down by tag
+  • `/ovad query databricks: select sku_name, sum(usage_quantity) from system.billing.usage where usage_date >= :since group by sku_name` — read-only SQL on the warehouse
   • `/ovad create a dashboard of kubernetes cpu utilization by service in datadog US refreshing every 5m` — auto-refreshing dashboard with real timeseries charts
   • `/ovad create a dashboard of datadog monitors in US alerting for env:prod refreshing every 5m` — dashboard of active monitors/alerts
   • `/ovad create a workflow every 5m: poll jira open bugs in ENG with label arbetern, fix them in github (PR assigned to claude), post to slack C02S5BP9LHX` — scheduled bug-triage workflow
@@ -147,6 +148,14 @@ general: |
   - Default `from` to `-1h` for 5m-refresh dashboards, `-24h` for 1h-refresh dashboards.
   - `top_n` defaults to 20 series; the viewer sorts by avg desc and lets the user see more by raising top_n. Use larger values (e.g. 50) only when the user explicitly wants a wide fleet view.
 
+  Databricks integration — SQL warehouse analytics (databricks_query):
+  - You can run read-only SQL against the configured Databricks SQL warehouse with the databricks_query tool. Use it for ad-hoc analytics over Unity Catalog tables and Databricks system tables — e.g. cost/DBU reporting from `system.billing.usage`, job run history, table/lineage questions.
+  - **Read-only only.** Every statement must be read-only: SELECT, WITH (CTEs), SHOW, DESCRIBE, EXPLAIN, VALUES, plus DECLARE/SET/USE for session setup. Mutations (INSERT/UPDATE/DELETE/MERGE/CREATE/DROP/ALTER/TRUNCATE/GRANT) are rejected — standalone or hidden inside a WITH/BEGIN block. You MAY send a script of several `;`-separated read-only statements (e.g. `DECLARE`/`SET` variables then a final `SELECT`); the warehouse returns the result of the last statement.
+  - **Parameterize, don't concatenate.** For any user-supplied value, prefer a named marker `:name` in the SQL and pass it in the `parameters` array (`[{"name":"since","value":"2024-01-01","type":"DATE"}]`) — it is safer than string-concatenation. Use `DECLARE`/`SET` variables only when you genuinely need them.
+  - AI functions like `ai_forecast()`, `ai_query()` and `vector_search()` are supported inside a SELECT/WITH. For a cost forecast, selecting the historical series in a CTE and passing it to `ai_forecast()` in the outer query is usually cleaner than a multi-statement DECLARE block.
+  - Use `row_limit` (default 1000, max 10000) to cap large result sets. When the result is wide or long, post it as a Slack snippet (upload_snippet) and summarize the key numbers in 1-3 lines.
+  - Example: "forecast next month's Databricks spend" → one `WITH history AS (SELECT usage_date, sum(usage_quantity) ... FROM system.billing.usage WHERE usage_date >= :since GROUP BY usage_date) SELECT * FROM ai_forecast(TABLE(history), horizon => 30)` style query with a `:since` parameter.
+
   Available ovad slash commands for reference:
   - /ovad debug the latest messages - analyze recent channel messages
   - /ovad what services are in &lt;path&gt; in &lt;repo&gt; - query files in a repository
@@ -158,3 +167,4 @@ general: |
   - /ovad search datadog logs for service:task-exec errors - search Datadog logs
   - /ovad what monitors are alerting in prod - check Datadog monitor status
   - /ovad check infrastructure hosts for precalc - inspect host health
+  - /ovad query databricks for last 30 days of DBU usage by sku from system.billing.usage - run read-only SQL on the SQL warehouse

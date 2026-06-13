@@ -65,6 +65,14 @@ secretValues:
   # azure-client-secret: "your-azure-client-secret"
   # azure-billing-account-id: ""     # EA enrollment number (preferred for EA tenants)
   # azure-management-group-id: ""    # MG scope (preferred for non-EA tenants); defaults to tenant root MG
+  # Databricks SQL warehouse (optional — enables the read-only databricks_query tool for the ovad agent only).
+  # OAuth M2M: create a workspace service principal + OAuth secret, grant it CAN USE on the warehouse and
+  # SELECT on the catalogs/schemas you want queryable. All four keys are required. See docs/DATABRICKS.md.
+  # Tip: prefer mounting these under customCredentials.ovad below so only ovad gets them.
+  # databricks-host: "https://dbc-1234abcd-5678.cloud.databricks.com"
+  # databricks-client-id: "00000000-0000-0000-0000-000000000000"
+  # databricks-client-secret: "your-databricks-oauth-secret"
+  # databricks-warehouse-id: "1234567890abcdef"
 
 # ingress:
 #   enabled: true
@@ -137,6 +145,12 @@ secretValues:
 #   ovad:
 #     sf-consumer-key: "REPLACE_ME"
 #     sf-consumer-secret: "REPLACE_ME"
+#     # Databricks is gated to ovad in code, so mounting it here keeps the
+#     # credentials off every other agent. See docs/DATABRICKS.md.
+#     databricks-host: "https://dbc-1234abcd-5678.cloud.databricks.com"
+#     databricks-client-id: "00000000-0000-0000-0000-000000000000"
+#     databricks-client-secret: "REPLACE_ME"
+#     databricks-warehouse-id: "1234567890abcdef"
 #   pulse:
 #     chorus-api-token: "REPLACE_ME"
 

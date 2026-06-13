@@ -16,9 +16,12 @@ import (
 // on-disk transcript a sane size.
 const maxMessageBytes = 8 << 10 // 8 KiB
 
-// chatRequestTimeout bounds a single LLM round so a slow upstream cannot pin a
-// request handler indefinitely.
-const chatRequestTimeout = 2 * time.Minute
+// chatRequestTimeout bounds a single chat turn end to end. A turn now runs the
+// agent's full multi-round tool loop (the same one a Slack command uses), so it
+// must allow for several LLM rounds plus tool calls — including a long-running
+// Databricks AI_FORECAST query, which alone can poll for up to a few minutes —
+// before a slow upstream is allowed to pin a request handler.
+const chatRequestTimeout = 5 * time.Minute
 
 // postRequest is the JSON body accepted when sending a message.
 type postRequest struct {

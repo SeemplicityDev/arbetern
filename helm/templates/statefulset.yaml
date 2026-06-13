@@ -235,6 +235,28 @@ spec:
                   key: azure-billing-account-id
             {{- end }}
             {{- end }}
+            {{- if index .Values.secretValues "databricks-host" }}
+            - name: DATABRICKS_HOST
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: databricks-host
+            - name: DATABRICKS_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: databricks-client-id
+            - name: DATABRICKS_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: databricks-client-secret
+            - name: DATABRICKS_WAREHOUSE_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: databricks-warehouse-id
+            {{- end }}
             - name: GOMEMLIMIT
               value: {{ .Values.goRuntime.goMemLimit | quote }}
             - name: GOGC

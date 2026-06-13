@@ -78,6 +78,14 @@ type Credentials struct {
 	AzureClientSecret      string `cred:"azure-client-secret"`
 	AzureManagementGroupID string `cred:"azure-management-group-id"` // Optional. Defaults to tenant root MG (= tenant ID) for tenant-wide cost reporting.
 	AzureBillingAccountID  string `cred:"azure-billing-account-id"`  // Optional. EA enrollment number. When set, queries hit billing-account scope (preferred for EA tenants) and AzureManagementGroupID is ignored.
+
+	// Databricks SQL warehouse — OAuth 2.0 machine-to-machine (service
+	// principal) against the workspace token endpoint. The host is the
+	// workspace URL; the warehouse ID selects the compute that runs queries.
+	DatabricksHost         string `cred:"databricks-host"`          // Workspace URL, e.g. "https://dbc-1234.cloud.databricks.com".
+	DatabricksClientID     string `cred:"databricks-client-id"`     // Service-principal OAuth client ID.
+	DatabricksClientSecret string `cred:"databricks-client-secret"` // Service-principal OAuth client secret.
+	DatabricksWarehouseID  string `cred:"databricks-warehouse-id"`  // SQL warehouse ID that executes statements.
 }
 
 // Config bundles every runtime setting the app reads on startup. Credential
@@ -200,6 +208,14 @@ func (c *Config) AzureCostConfigured() bool {
 		c.AzureClientSecret != ""
 }
 
+// DatabricksConfigured returns true when the Databricks workspace host plus
+// the service-principal OAuth credentials and a SQL warehouse ID are all
+// present. The first real query is still the authoritative health check.
+func (c *Config) DatabricksConfigured() bool {
+	return c.DatabricksHost != "" && c.DatabricksClientID != "" &&
+		c.DatabricksClientSecret != "" && c.DatabricksWarehouseID != ""
+}
+
 func Load() (*Config, error) {
 	cfg := &Config{
 		Credentials: Credentials{
@@ -230,6 +246,10 @@ func Load() (*Config, error) {
 			AzureClientSecret:      os.Getenv("AZURE_CLIENT_SECRET"),
 			AzureManagementGroupID: os.Getenv("AZURE_MANAGEMENT_GROUP_ID"),
 			AzureBillingAccountID:  os.Getenv("AZURE_BILLING_ACCOUNT_ID"),
+			DatabricksHost:         os.Getenv("DATABRICKS_HOST"),
+			DatabricksClientID:     os.Getenv("DATABRICKS_CLIENT_ID"),
+			DatabricksClientSecret: os.Getenv("DATABRICKS_CLIENT_SECRET"),
+			DatabricksWarehouseID:  os.Getenv("DATABRICKS_WAREHOUSE_ID"),
 		},
 
 		GeneralModel:        os.Getenv("GENERAL_MODEL"),

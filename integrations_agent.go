@@ -10,6 +10,7 @@ import (
 	"github.com/justmike1/arbetern/azure"
 	"github.com/justmike1/arbetern/chorus"
 	"github.com/justmike1/arbetern/config"
+	"github.com/justmike1/arbetern/databricks"
 	"github.com/justmike1/arbetern/datadog"
 	"github.com/justmike1/arbetern/nvd"
 	"github.com/justmike1/arbetern/salesforce"
@@ -20,13 +21,14 @@ import (
 // Helm chart the app rebuilds only the clients whose credentials actually
 // changed for that agent and reuses the shared globals for everything else.
 type agentIntegrationClients struct {
-	jira    *atlassian.Client
-	sf      *salesforce.Client
-	chorus  *chorus.Client
-	datadog *datadog.MultiClient
-	aws     *aws.Client
-	azure   *azure.Client
-	nvd     *nvd.Client
+	jira       *atlassian.Client
+	sf         *salesforce.Client
+	chorus     *chorus.Client
+	datadog    *datadog.MultiClient
+	aws        *aws.Client
+	azure      *azure.Client
+	nvd        *nvd.Client
+	databricks *databricks.Client
 }
 
 // buildAgentScopedClients returns a set of integration clients tailored for a
@@ -133,6 +135,18 @@ func buildAgentScopedClients(
 	// `aws-secret-access-key` does NOT currently propagate to the AWS client
 	// here — the SDK reads the process-level env vars instead. Document the
 	// limitation in the chart values so deployers don't expect it to work.
+
+	if agentCfg.DatabricksHost != globalCfg.DatabricksHost ||
+		agentCfg.DatabricksClientID != globalCfg.DatabricksClientID ||
+		agentCfg.DatabricksClientSecret != globalCfg.DatabricksClientSecret ||
+		agentCfg.DatabricksWarehouseID != globalCfg.DatabricksWarehouseID {
+		if agentCfg.DatabricksConfigured() {
+			out.databricks = databricks.NewClient(agentCfg.DatabricksHost, agentCfg.DatabricksClientID, agentCfg.DatabricksClientSecret, agentCfg.DatabricksWarehouseID)
+			log.Printf("Databricks override for agent %q (host: %s, warehouse: %s)", agentID, out.databricks.Host(), out.databricks.WarehouseID())
+		} else {
+			out.databricks = nil
+		}
+	}
 
 	return out
 }

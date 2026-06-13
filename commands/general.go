@@ -17,6 +17,7 @@ import (
 	"github.com/justmike1/arbetern/chorus"
 	"github.com/justmike1/arbetern/config"
 	"github.com/justmike1/arbetern/dashboards"
+	"github.com/justmike1/arbetern/databricks"
 	"github.com/justmike1/arbetern/datadog"
 	"github.com/justmike1/arbetern/github"
 	"github.com/justmike1/arbetern/llm"
@@ -61,6 +62,7 @@ type GeneralHandler struct {
 	datadogClients   *datadog.MultiClient
 	awsClient        *aws.Client
 	azureClient      *azure.Client
+	databricksClient *databricks.Client
 	dashboards       *dashboards.Registry
 	workflows        *workflows.Registry
 	contextProvider  *ContextProvider
@@ -500,6 +502,105 @@ func (h *GeneralHandler) ExecuteHeadless(ctx context.Context, userID, prompt str
 	log.Printf("[workflow user=%s agent=%s] exceeded max tool rounds (%d); %d tool calls made",
 		userID, h.agentID, rounds, toolCallsMade)
 	return "", fmt.Errorf("workflow tick exceeded max tool rounds (%d)", rounds)
+}
+
+// ExecuteChat runs the agent's LLM tool-loop for an interactive UI chat turn
+// and returns the final assistant message. It seeds the conversation with the
+// prior transcript (history, oldest first) followed by the new user message,
+// then runs the same tool loop — and therefore the same integrations (GitHub,
+// Jira, Datadog, Databricks, …) — that a Slack command gets. Like a headless
+// run there is no Slack audit thread, response URL, or channel, so Slack-only
+// tools (reply_in_thread, …) are suppressed via h.headless and the reply is
+// returned to the caller (the chat registry) to persist and display rather
+// than posted to Slack.
+//
+// It uses the general (conversational) model, upgrading to the code model only
+// after a code-related tool is invoked — mirroring the interactive Execute
+// path. Returns the reply text or the first tool-loop error.
+func (h *GeneralHandler) ExecuteChat(ctx context.Context, userID string, history []llm.ChatMessage, userMessage string) (string, error) {
+	h.currentChannelID = ""
+	h.currentAuditTS = ""
+	h.aggregateCache = nil
+	h.branchMgr = NewBranchManager(h.ghClient, h.agentID, nil)
+
+	tools := h.buildTools()
+
+	activeClient := h.modelsClient
+	if activeClient == nil {
+		return "", fmt.Errorf("LLM client is not configured")
+	}
+
+	systemMsg := h.systemPrompt()
+	systemMsg = strings.Replace(systemMsg, "{{MODEL}}", activeClient.Model(), 1)
+	systemMsg = strings.Replace(systemMsg, "{{USER_ID}}", userID, 1)
+	systemMsg = strings.Replace(systemMsg, "{{USER_CONTEXT}}", h.userContext, 1)
+
+	messages := make([]llm.ChatMessage, 0, len(history)+2)
+	messages = append(messages, llm.NewChatMessage("system", systemMsg))
+	messages = append(messages, history...)
+	messages = append(messages, llm.NewChatMessage("user", userMessage))
+
+	rounds := h.maxToolRounds
+	if rounds <= 0 {
+		rounds = 50
+	}
+	emptyResponseRetries := 0
+	for i := 0; i < rounds; i++ {
+		resp, err := activeClient.CompleteWithTools(ctx, messages, tools)
+		if err != nil {
+			log.Printf("[chat user=%s agent=%s] LLM completion failed after %d rounds: %v", userID, h.agentID, i, err)
+			return "", fmt.Errorf("LLM completion failed: %w", err)
+		}
+		if resp.Error != nil {
+			return "", fmt.Errorf("%s", resp.Error.Message)
+		}
+		if len(resp.Choices) == 0 {
+			return "", fmt.Errorf("LLM returned no choices")
+		}
+		choice := resp.Choices[0]
+
+		if len(choice.Message.ToolCalls) == 0 {
+			final := strings.TrimSpace(choice.Message.Content)
+			// Retry once or twice on an empty final response — the Responses
+			// API occasionally returns no output_text items.
+			if final == "" && emptyResponseRetries < 2 {
+				emptyResponseRetries++
+				log.Printf("[chat user=%s agent=%s] empty response (retry %d); nudging for content", userID, h.agentID, emptyResponseRetries)
+				messages = append(messages,
+					llm.NewChatMessage("assistant", ""),
+					llm.NewChatMessage("user", "Your previous response was empty. Please provide a complete answer to my request, using the available tools if needed."),
+				)
+				continue
+			}
+			log.Printf("[chat user=%s agent=%s] completed after %d rounds", userID, h.agentID, i+1)
+			return final, nil
+		}
+
+		messages = append(messages, llm.ChatMessage{
+			Role:      "assistant",
+			ToolCalls: choice.Message.ToolCalls,
+		})
+		for _, tc := range choice.Message.ToolCalls {
+			log.Printf("[chat user=%s agent=%s] tool: %s(%s)", userID, h.agentID, tc.Function.Name, tc.Function.Arguments)
+			result := h.executeTool(ctx, "", userID, "", tc.Function.Name, tc.Function.Arguments)
+			result = stripPreconditionPrefix(result)
+			messages = append(messages, llm.NewToolResultMessage(tc.ID, result))
+			codeTools := map[string]bool{
+				"modify_file": true, "create_file": true, "regex_replace_file": true,
+				"get_file_content": true,
+				"search_code":      true, "search_code_org": true, "search_files": true,
+				"list_directory": true, "get_pull_request": true,
+				"create_dashboard": true, "create_workflow": true, "update_workflow": true, "call_workflow": true,
+			}
+			if codeTools[tc.Function.Name] && h.codeModelsClient != nil && activeClient != h.codeModelsClient {
+				activeClient = h.codeModelsClient
+				log.Printf("[chat user=%s agent=%s] switched to code model (%s) after %s call",
+					userID, h.agentID, h.codeModelsClient.Model(), tc.Function.Name)
+			}
+		}
+	}
+	log.Printf("[chat user=%s agent=%s] exceeded max tool rounds (%d)", userID, h.agentID, rounds)
+	return "", fmt.Errorf("chat exceeded max tool rounds (%d)", rounds)
 }
 
 func (h *GeneralHandler) systemPrompt() string {
@@ -951,8 +1052,8 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 		},
 	}
 
-	// NVD CVE lookup tools are always available (NVD client is always created).
-	if h.nvdClient != nil {
+	// NVD CVE lookup tools — gated to agents whose UI card includes NVD.
+	if h.canUseIntegration(integrationNVD) && h.nvdClient != nil {
 		tools = append(tools, llm.Tool{
 			Type: "function",
 			Function: llm.ToolFunction{
@@ -983,8 +1084,8 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 		})
 	}
 
-	// Salesforce tools are only available when Salesforce is connected.
-	if h.sfClient != nil && h.sfClient.Ready() {
+	// Salesforce tools — gated to agents whose UI card includes Salesforce.
+	if h.canUseIntegration(integrationSalesforce) && h.sfClient != nil && h.sfClient.Ready() {
 		tools = append(tools, llm.Tool{
 			Type: "function",
 			Function: llm.ToolFunction{
@@ -1014,8 +1115,8 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 		})
 	}
 
-	// Chorus tools are only available when Chorus is connected.
-	if h.chorusClient != nil && h.chorusClient.Ready() {
+	// Chorus tools — gated to agents whose UI card includes Chorus.
+	if h.canUseIntegration(integrationChorus) && h.chorusClient != nil && h.chorusClient.Ready() {
 		tools = append(tools, llm.Tool{
 			Type: "function",
 			Function: llm.ToolFunction{
@@ -1098,8 +1199,8 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 		})
 	}
 
-	// Jira tools are only available when Jira is connected.
-	if h.jiraClient != nil && h.jiraClient.Ready() {
+	// Jira tools — gated to agents whose UI card includes Jira/Confluence.
+	if h.canUseIntegration(integrationAtlassian) && h.jiraClient != nil && h.jiraClient.Ready() {
 		tools = append(tools, llm.Tool{
 			Type: "function",
 			Function: llm.ToolFunction{
@@ -1261,7 +1362,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 	})
 
 	// Jira user resolution tool — resolves a person's name/email to their Jira account ID.
-	if h.jiraClient != nil && h.jiraClient.Ready() {
+	if h.canUseIntegration(integrationAtlassian) && h.jiraClient != nil && h.jiraClient.Ready() {
 		tools = append(tools, llm.Tool{
 			Type: "function",
 			Function: llm.ToolFunction{
@@ -1376,8 +1477,8 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 		})
 	}
 
-	// Datadog tools — available when Datadog is configured. Agent-level gating is handled via prompts.
-	if h.datadogClients != nil {
+	// Datadog tools — gated to agents whose UI card includes Datadog.
+	if h.canUseIntegration(integrationDatadog) && h.datadogClients != nil {
 		tools = append(tools, llm.Tool{
 			Type: "function",
 			Function: llm.ToolFunction{
@@ -1504,8 +1605,9 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 
 	// AWS tools — only Cost Explorer for now. Enabled when AWS credentials
 	// resolved at startup. All three tools share the single us-east-1-signed
-	// Cost Explorer client; cost data returned is account-global.
-	if h.awsClient != nil {
+	// Cost Explorer client; cost data returned is account-global. Gated to
+	// agents whose UI card includes AWS.
+	if h.canUseIntegration(integrationAWS) && h.awsClient != nil {
 		tools = append(tools, llm.Tool{
 			Type: "function",
 			Function: llm.ToolFunction{
@@ -1619,6 +1721,42 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 		})
 	}
 
+	// databricks_query: read-only SQL against a Databricks SQL warehouse.
+	// Access is gated by the per-agent integration allowlist in helpers.go
+	// (restrictedIntegrations) — currently ovad only — AND by the client
+	// having completed its first OAuth token exchange, so the tool never
+	// advertises itself when the warehouse is unreachable.
+	if h.canUseIntegration(integrationDatabricks) && h.databricksClient != nil && h.databricksClient.Ready() {
+		tools = append(tools, llm.Tool{
+			Type: "function",
+			Function: llm.ToolFunction{
+				Name:        "databricks_query",
+				Description: "Run read-only SQL against the configured Databricks SQL warehouse and return the result rows as a table. Use for ad-hoc analytics over Unity Catalog tables and Databricks system tables (e.g. system.billing.usage for cost/DBU analysis), including SELECT, WITH (CTEs), SHOW, DESCRIBE, EXPLAIN and VALUES. You may send a script of several read-only statements separated by semicolons — e.g. one or more DECLARE/SET session variables followed by a final SELECT — and the warehouse returns the result of the LAST statement. EVERY statement must be read-only: INSERT/UPDATE/DELETE/MERGE/CREATE/DROP/ALTER/TRUNCATE/GRANT and other writes are rejected, whether standalone or hidden inside a WITH/BEGIN block. AI/ML SQL functions such as ai_forecast(), ai_query() and vector_search() are supported inside a SELECT/WITH. Still prefer named parameter markers (:name) supplied via the 'parameters' array for user-supplied values — e.g. SELECT * FROM t WHERE day >= :since with parameters [{\"name\":\"since\",\"value\":\"2024-01-01\",\"type\":\"DATE\"}] — since it avoids quoting/injection bugs; use DECLARE/SET only when you genuinely need session variables.",
+				Parameters: json.RawMessage(`{
+					"type":"object",
+					"properties":{
+						"sql":{"type":"string","description":"Read-only SQL: a single statement, or a script of several read-only statements separated by semicolons (e.g. DECLARE/SET … ; WITH … SELECT …). Only SELECT / WITH / SHOW / DESCRIBE / EXPLAIN / VALUES plus DECLARE / SET / USE for session setup are allowed; mutations are rejected. Prefer :name markers for any user-supplied values and pass them via 'parameters'."},
+						"parameters":{
+							"type":"array",
+							"description":"Named query parameters bound to :name markers in the SQL. Prefer this over string-concatenating values into the SQL (prevents injection and quoting bugs).",
+							"items":{
+								"type":"object",
+								"properties":{
+									"name":{"type":"string","description":"Marker name WITHOUT the leading colon (e.g. 'since' binds to :since)."},
+									"value":{"type":"string","description":"Parameter value as a string. Databricks casts it per 'type'. Use null only via omission."},
+									"type":{"type":"string","description":"Optional SQL type for the bind, e.g. STRING, INT, BIGINT, DOUBLE, DECIMAL(10,2), BOOLEAN, DATE, TIMESTAMP. Defaults to STRING when omitted."}
+								},
+								"required":["name","value"]
+							}
+						},
+						"row_limit":{"type":"integer","description":"Maximum rows to return (1..10000). Defaults to 1000. Large result sets are truncated with a marker."}
+					},
+					"required":["sql"]
+				}`),
+			},
+		})
+	}
+
 	// http_get: read-only outbound HTTP for workflows that need upstream
 	// metadata (release JSON, raw Chart.yaml on GitHub, version files, etc.).
 	// See commands/helpers.go for SSRF guards.
@@ -1651,6 +1789,12 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 	}
 	if out, handled := h.executeWorkflowTool(ctx, userID, channelID, name, argsJSON); handled {
 		return out
+	}
+	// Defense in depth: integration-specific tools are only advertised to the
+	// agents allowed by restrictedIntegrations, but reject the call outright if
+	// another agent's model fabricates one it was never offered.
+	if h.toolDenied(name) {
+		return preconditionErrf("Error: %s is not available to the %s agent.", name, h.agentID)
 	}
 	switch name {
 	case "list_org_repos":
@@ -3837,6 +3981,42 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		log.Printf("[user=%s channel=%s] azure list_dimension_values (%s, %d values)",
 			userID, channelID, res.Dimension, len(res.Values))
 		return azure.FormatDimensionValues(res)
+
+	// ---- Databricks SQL (ovad only) ----
+
+	case "databricks_query":
+		if errMsg := requireReady("Databricks", h.databricksClient); errMsg != "" {
+			return errMsg
+		}
+		args, errMsg := parseToolArgs[struct {
+			SQL        string `json:"sql"`
+			Parameters []struct {
+				Name  string `json:"name"`
+				Value string `json:"value"`
+				Type  string `json:"type"`
+			} `json:"parameters"`
+			RowLimit int `json:"row_limit"`
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
+		}
+		if strings.TrimSpace(args.SQL) == "" {
+			return preconditionErrf("Error: sql is required (one or more read-only statements).")
+		}
+		params := make([]databricks.QueryParam, 0, len(args.Parameters))
+		for _, p := range args.Parameters {
+			if strings.TrimSpace(p.Name) == "" {
+				return preconditionErrf("Error: each parameter needs a non-empty name matching a :marker in the SQL.")
+			}
+			params = append(params, databricks.QueryParam{Name: p.Name, Value: p.Value, Type: p.Type})
+		}
+		res, err := h.databricksClient.Query(ctx, args.SQL, params, args.RowLimit)
+		if err != nil {
+			return fmt.Sprintf("Error running Databricks query: %v", err)
+		}
+		log.Printf("[user=%s channel=%s] databricks_query (warehouse=%s, statement=%s, rows=%d, truncated=%t)",
+			userID, channelID, res.WarehouseID, res.StatementID, res.RowCount, res.Truncated)
+		return databricks.FormatQueryResult(res)
 
 	case "http_get":
 		args, errMsg := parseToolArgs[struct {

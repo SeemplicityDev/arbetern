@@ -25,6 +25,7 @@ import (
 	"github.com/justmike1/arbetern/config"
 	"github.com/justmike1/arbetern/dashboards"
 	dashgitops "github.com/justmike1/arbetern/dashboards/gitopssync"
+	"github.com/justmike1/arbetern/databricks"
 	"github.com/justmike1/arbetern/datadog"
 	"github.com/justmike1/arbetern/github"
 	"github.com/justmike1/arbetern/llm"
@@ -572,6 +573,7 @@ func refreshIntegrations(
 	datadogClients *datadog.MultiClient,
 	awsClient *aws.Client,
 	azureClient *azure.Client,
+	databricksClient *databricks.Client,
 	modelsClient *llm.Client,
 	codeModelsClient *llm.Client,
 ) {
@@ -985,6 +987,28 @@ func refreshIntegrations(
 		})
 	}
 
+	// --- Databricks (SQL Statement Execution) ---
+	{
+		dbConnected := databricksClient != nil && databricksClient.Ready()
+		dbPerms := []permission{
+			{Scope: "sql.statement-execution", Description: "Run read-only SQL statements against a SQL warehouse (POST /api/2.0/sql/statements)", Required: true, Granted: boolPtr(dbConnected)},
+			{Scope: "sql.warehouse.canuse", Description: "CAN USE on the target SQL warehouse that executes statements", Required: true, Granted: boolPtr(dbConnected)},
+		}
+		activeDB := map[string]string{}
+		if databricksClient != nil {
+			activeDB["Host"] = databricksClient.Host()
+			activeDB["Warehouse"] = databricksClient.WarehouseID()
+		}
+		result = append(result, integration{
+			ID:           "databricks",
+			Name:         "Databricks",
+			Configured:   cfg.DatabricksConfigured(),
+			AuthMode:     "OAuth M2M (service principal)",
+			Permissions:  dbPerms,
+			ActiveModels: activeDB,
+		})
+	}
+
 	integrationsMu.Lock()
 	integrationsCache = result
 	integrationsMu.Unlock()
@@ -1003,16 +1027,17 @@ func startIntegrationsRefresher(
 	datadogClients *datadog.MultiClient,
 	awsClient *aws.Client,
 	azureClient *azure.Client,
+	databricksClient *databricks.Client,
 	modelsClient *llm.Client,
 	codeModelsClient *llm.Client,
 ) {
-	refreshIntegrations(cfg, slackClient, ghClient, jiraClient, sfClient, chorusClient, datadogClients, awsClient, azureClient, modelsClient, codeModelsClient)
+	refreshIntegrations(cfg, slackClient, ghClient, jiraClient, sfClient, chorusClient, datadogClients, awsClient, azureClient, databricksClient, modelsClient, codeModelsClient)
 
 	go func() {
 		ticker := time.NewTicker(1 * time.Hour)
 		defer ticker.Stop()
 		for range ticker.C {
-			refreshIntegrations(cfg, slackClient, ghClient, jiraClient, sfClient, chorusClient, datadogClients, awsClient, azureClient, modelsClient, codeModelsClient)
+			refreshIntegrations(cfg, slackClient, ghClient, jiraClient, sfClient, chorusClient, datadogClients, awsClient, azureClient, databricksClient, modelsClient, codeModelsClient)
 		}
 	}()
 }
@@ -1153,6 +1178,17 @@ func main() {
 		}
 	}
 
+	// Databricks SQL warehouse client — OAuth 2.0 M2M (service principal)
+	// against the workspace token endpoint. NewClient probes connectivity in
+	// the background and retries, so the query tool becomes available once the
+	// first token exchange succeeds. Only attempted when host, credentials and
+	// warehouse ID are all present.
+	var databricksClient *databricks.Client
+	if cfg.DatabricksConfigured() {
+		databricksClient = databricks.NewClient(cfg.DatabricksHost, cfg.DatabricksClientID, cfg.DatabricksClientSecret, cfg.DatabricksWarehouseID)
+		log.Printf("Databricks integration enabled (host: %s, warehouse: %s)", databricksClient.Host(), databricksClient.WarehouseID())
+	}
+
 	// Discover agents and register per-agent webhook routes (/<agent>/webhook).
 	agents, err := prompts.DiscoverAgents("")
 	if err != nil {
@@ -1163,7 +1199,7 @@ func main() {
 	}
 
 	// Start background integration permission refresher (runs once now, then every hour).
-	startIntegrationsRefresher(cfg, slackClient, ghClient, jiraClient, sfClient, chorusClient, datadogClients, awsClient, azureClient, modelsClient, codeModelsClient)
+	startIntegrationsRefresher(cfg, slackClient, ghClient, jiraClient, sfClient, chorusClient, datadogClients, awsClient, azureClient, databricksClient, modelsClient, codeModelsClient)
 
 	// Thread session store — enables follow-up replies in threads without /commands.
 	sessions := commands.NewSessionStore(cfg.ThreadSessionTTL)
@@ -1240,11 +1276,6 @@ func main() {
 	}
 	defer wfRegistry.StopAll()
 
-	// chatSystemPrompts maps agentID → the system prompt used for the
-	// centralized UI chat. Captured per agent so the chat responder (built
-	// after this loop) can recover the right persona for each conversation.
-	chatSystemPrompts := make(map[string]string, len(agents))
-
 	for _, agent := range agents {
 		ap, err := prompts.LoadAgent(agent.ID)
 		if err != nil {
@@ -1253,8 +1284,6 @@ func main() {
 
 		agentID := agent.ID // capture for closure
 
-		chatSystemPrompts[agentID] = ap.SystemPrompt("general")
-
 		// Per-agent credential overrides: when the Helm chart mounts an
 		// arbetern-<agent>-secrets Secret at $AGENT_CREDENTIALS_DIR/<agent>/,
 		// rebuild only the integration clients whose credentials actually
@@ -1262,16 +1291,17 @@ func main() {
 		// the shared client (no extra connections, no extra goroutines).
 		agentCfg := cfg.ForAgent(agentID)
 		agentClients := buildAgentScopedClients(cfg, agentCfg, agentID, agentIntegrationClients{
-			jira:    jiraClient,
-			sf:      sfClient,
-			chorus:  chorusClient,
-			datadog: datadogClients,
-			aws:     awsClient,
-			azure:   azureClient,
-			nvd:     nvdClient,
+			jira:       jiraClient,
+			sf:         sfClient,
+			chorus:     chorusClient,
+			datadog:    datadogClients,
+			aws:        awsClient,
+			azure:      azureClient,
+			nvd:        nvdClient,
+			databricks: databricksClient,
 		})
 
-		router := commands.NewRouter(slackClient, ghClient, modelsClient, codeModelsClient, agentClients.jira, agentClients.nvd, agentClients.sf, agentClients.chorus, agentClients.datadog, agentClients.aws, agentClients.azure, dashRegistry, wfRegistry, ap, agent.ID, cfg.AppURL, sessions, cfg.MaxToolRounds, userContextStore)
+		router := commands.NewRouter(slackClient, ghClient, modelsClient, codeModelsClient, agentClients.jira, agentClients.nvd, agentClients.sf, agentClients.chorus, agentClients.datadog, agentClients.aws, agentClients.azure, agentClients.databricks, dashRegistry, wfRegistry, ap, agent.ID, cfg.AppURL, sessions, cfg.MaxToolRounds, userContextStore)
 		routers[agent.ID] = router
 
 		// Background sweepers for the per-router in-memory caches so
@@ -1300,35 +1330,27 @@ func main() {
 	// Centralized per-agent chat (UI-driven). Disabled per agent by default;
 	// enabled via `chat_enabled: true` in the agent's config.yaml. There is no
 	// user auth yet, so each agent has a single shared transcript persisted to
-	// disk that every viewer sees. The responder replays recent history plus
-	// the agent's persona to the shared LLM client.
+	// disk that every viewer sees. The responder replays recent history and
+	// runs the agent's full tool loop (RunChat) so the chat can use the same
+	// integrations as a Slack command.
 	chatRegistry := chat.New(cfg.ChatDir, func(ctx context.Context, agentID string, history []chat.Message, userMessage string) (string, error) {
-		if modelsClient == nil {
-			return "", fmt.Errorf("LLM client is not configured")
+		router := routers[agentID]
+		if router == nil {
+			return "", fmt.Errorf("no router configured for agent %q", agentID)
 		}
-		messages := make([]llm.ChatMessage, 0, len(history)+2)
-		if sys := chatSystemPrompts[agentID]; sys != "" {
-			messages = append(messages, llm.ChatMessage{Role: "system", Content: sys})
-		}
+		msgs := make([]llm.ChatMessage, 0, len(history))
 		for _, m := range history {
 			role := m.Role
 			if role != "user" && role != "assistant" {
 				role = "user"
 			}
-			messages = append(messages, llm.ChatMessage{Role: role, Content: m.Content})
+			msgs = append(msgs, llm.NewChatMessage(role, m.Content))
 		}
-		messages = append(messages, llm.ChatMessage{Role: "user", Content: userMessage})
-		resp, err := modelsClient.CompleteWithTools(ctx, messages, nil)
-		if err != nil {
-			return "", err
-		}
-		if resp.Error != nil {
-			return "", fmt.Errorf("%s", resp.Error.Message)
-		}
-		if len(resp.Choices) == 0 {
-			return "", fmt.Errorf("LLM returned no choices")
-		}
-		return resp.Choices[0].Message.Content, nil
+		// RunChat gives the UI chat the same tool access (GitHub, Jira,
+		// Datadog, Databricks, …) and multi-round agentic loop as a Slack
+		// command — replacing the old single-shot, tool-less completion that
+		// could only role-play "running the query" without executing anything.
+		return router.RunChat(ctx, msgs, userMessage)
 	})
 	for _, agent := range agents {
 		chatRegistry.SetEnabled(agent.ID, agent.ChatEnabled)

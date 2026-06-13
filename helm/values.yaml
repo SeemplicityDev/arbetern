@@ -179,6 +179,14 @@ secretValues:
   # azure-client-secret: ""           # Service principal client secret
   # azure-billing-account-id: ""      # EA enrollment number (e.g. 86462187). Wins over MG when set.
   # azure-management-group-id: ""     # Optional MG scope. Leave empty for tenant-wide (root MG = tenant ID)
+  # Databricks SQL warehouse (optional — enables the databricks_query tool for the ovad agent only).
+  # Auth is OAuth 2.0 machine-to-machine: create a workspace service principal, grant it CAN USE on the
+  # target SQL warehouse plus SELECT on the catalogs/schemas you want queryable, then generate an OAuth
+  # secret for it. All four keys are required to enable the integration.
+  # databricks-host: ""             # Workspace URL, e.g. "https://dbc-1234abcd-5678.cloud.databricks.com"
+  # databricks-client-id: ""        # Service principal OAuth client ID (application ID)
+  # databricks-client-secret: ""    # Service principal OAuth secret
+  # databricks-warehouse-id: ""     # SQL warehouse ID that runs statements (from the warehouse's "Connection details")
 
 # Optional OAuth2 authentication proxy (oauth2-proxy subchart). Disabled by
 # default; values are passed straight through to the subchart

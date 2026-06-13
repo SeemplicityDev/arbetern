@@ -65,6 +65,138 @@ func requireReady(name string, c OAuthClient) string {
 	return ""
 }
 
+// Integration names used as keys in restrictedIntegrations / toolIntegration
+// and at the tool registration / dispatch sites. Declared as constants so the
+// allowlist and the call sites can never drift via a typo.
+const (
+	integrationNVD        = "nvd"
+	integrationSalesforce = "salesforce"
+	integrationChorus     = "chorus"
+	integrationAtlassian  = "atlassian" // Jira + Confluence (shared client).
+	integrationDatadog    = "datadog"
+	integrationAWS        = "aws"
+	integrationDatabricks = "databricks"
+)
+
+// restrictedIntegrations is the single source of truth for hard per-agent
+// integration gating. Each key is an integration name and the value is the
+// set of agent IDs allowed to use it. It mirrors the per-agent integration
+// cards rendered in the dashboard UI (AGENT_INTEGRATIONS in ui/index.html): an
+// agent only gets a connector's tools — at both registration and dispatch —
+// when its ID appears in that connector's list here.
+//
+// Integrations absent from this map are open to every agent whose client is
+// configured. Slack, Azure, and GitHub are intentionally omitted because the
+// UI grants all three to every agent: GitHub acts as shared infrastructure and
+// its tools are interleaved with the universal Slack/utility tools in the core
+// tool set, so every agent keeps repo access.
+//
+// Keeping the mapping in one place lets tool registration (buildTools) and
+// tool dispatch (executeTool) share the exact same rule, so an agent can never
+// be advertised a tool it is then refused at call time, or vice versa.
+var restrictedIntegrations = map[string][]string{
+	// Security agent: CVE / vulnerability lookups via NVD.
+	integrationNVD: {"goldsai"},
+	// Customer-success agent: CRM + conversation intelligence.
+	integrationSalesforce: {"pulse"},
+	integrationChorus:     {"pulse"},
+	// Jira + Confluence (shared Atlassian client) — every agent except security.
+	integrationAtlassian: {"ovad", "seihin", "agent-q", "pulse"},
+	// Observability: DevOps/SRE and customer-success agents.
+	integrationDatadog: {"ovad", "pulse"},
+	// AWS cost tooling is exposed to the DevOps/SRE agent only.
+	integrationAWS: {"ovad"},
+	// Databricks SQL is exposed to the DevOps/SRE agent only.
+	integrationDatabricks: {"ovad"},
+}
+
+// toolIntegration maps a tool name to the integration that gates it. Tools
+// absent from this map are universal (GitHub, Slack, Azure, dashboards,
+// workflows, http_get, …) and are never refused on a per-agent basis. It backs
+// the dispatch-side guard so a fabricated call to a tool the agent was never
+// advertised is rejected before it reaches a connector.
+var toolIntegration = map[string]string{
+	// NVD.
+	"lookup_cve": integrationNVD,
+	"search_cve": integrationNVD,
+	// Salesforce.
+	"salesforce_query":    integrationSalesforce,
+	"salesforce_describe": integrationSalesforce,
+	// Chorus.
+	"chorus_list_conversations":         integrationChorus,
+	"chorus_get_conversation":           integrationChorus,
+	"chorus_create_sales_qualification": integrationChorus,
+	"chorus_get_sales_qualification":    integrationChorus,
+	"chorus_writeback_crm":              integrationChorus,
+	// Atlassian (Jira + Confluence).
+	"create_jira_ticket":        integrationAtlassian,
+	"list_jira_projects":        integrationAtlassian,
+	"search_jira_issues":        integrationAtlassian,
+	"get_jira_issue":            integrationAtlassian,
+	"update_jira_issue":         integrationAtlassian,
+	"assign_jira_active_sprint": integrationAtlassian,
+	"assign_jira_team":          integrationAtlassian,
+	"add_jira_comment":          integrationAtlassian,
+	"list_jira_comments":        integrationAtlassian,
+	"link_jira_issues":          integrationAtlassian,
+	"resolve_jira_user":         integrationAtlassian,
+	"resolve_jira_team":         integrationAtlassian,
+	"get_jira_dashboard":        integrationAtlassian,
+	"get_jira_filter":           integrationAtlassian,
+	"search_confluence_pages":   integrationAtlassian,
+	"get_confluence_page":       integrationAtlassian,
+	"list_confluence_spaces":    integrationAtlassian,
+	"create_confluence_page":    integrationAtlassian,
+	// Datadog.
+	"datadog_search_logs":     integrationDatadog,
+	"datadog_logs_aggregate":  integrationDatadog,
+	"datadog_list_monitors":   integrationDatadog,
+	"datadog_get_monitor":     integrationDatadog,
+	"datadog_list_hosts":      integrationDatadog,
+	"datadog_get_dashboard":   integrationDatadog,
+	"datadog_list_dashboards": integrationDatadog,
+	"datadog_query_metrics":   integrationDatadog,
+	// AWS.
+	"aws_get_cost_and_usage":    integrationAWS,
+	"aws_get_cost_forecast":     integrationAWS,
+	"aws_list_dimension_values": integrationAWS,
+	// Databricks.
+	"databricks_query": integrationDatabricks,
+}
+
+// agentCanUseIntegration reports whether agentID may use the named
+// integration. Integrations absent from restrictedIntegrations are open to
+// every agent, so this returns true for them.
+func agentCanUseIntegration(agentID, integration string) bool {
+	allowed, restricted := restrictedIntegrations[integration]
+	if !restricted {
+		return true
+	}
+	for _, id := range allowed {
+		if id == agentID {
+			return true
+		}
+	}
+	return false
+}
+
+// canUseIntegration reports whether this handler's agent is permitted to use
+// the named integration. Thin wrapper over agentCanUseIntegration bound to the
+// handler's agent ID, used to gate both tool registration and tool dispatch.
+func (h *GeneralHandler) canUseIntegration(integration string) bool {
+	return agentCanUseIntegration(h.agentID, integration)
+}
+
+// toolDenied reports whether the named tool must be refused for this handler's
+// agent because the tool's integration is not in the agent's allowlist. Used
+// as a defense-in-depth guard at dispatch so a fabricated tool call can't reach
+// a connector the agent was never advertised. Tools absent from toolIntegration
+// are universal and never denied.
+func (h *GeneralHandler) toolDenied(name string) bool {
+	integration, gated := toolIntegration[name]
+	return gated && !h.canUseIntegration(integration)
+}
+
 // preconditionErrPrefix tags tool-result strings whose error happened
 // BEFORE any mutating side effect was attempted (missing/invalid args,
 // content guards, regex compile failures, "old_content not found", etc.).

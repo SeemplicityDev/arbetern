@@ -12,6 +12,7 @@ import (
 	"github.com/justmike1/arbetern/azure"
 	"github.com/justmike1/arbetern/chorus"
 	"github.com/justmike1/arbetern/dashboards"
+	"github.com/justmike1/arbetern/databricks"
 	"github.com/justmike1/arbetern/datadog"
 	"github.com/justmike1/arbetern/github"
 	"github.com/justmike1/arbetern/llm"
@@ -33,6 +34,7 @@ type Router struct {
 	datadogClients   *datadog.MultiClient
 	awsClient        *aws.Client
 	azureClient      *azure.Client
+	databricksClient *databricks.Client
 	dashboards       *dashboards.Registry
 	workflows        *workflows.Registry
 	contextProvider  *ContextProvider
@@ -45,7 +47,7 @@ type Router struct {
 	userContextStore *UserContextStore
 }
 
-func NewRouter(slackClient SlackClient, ghClient *github.Client, modelsClient *llm.Client, codeModelsClient *llm.Client, jiraClient *atlassian.Client, nvdClient *nvd.Client, sfClient *salesforce.Client, chorusClient *chorus.Client, datadogClients *datadog.MultiClient, awsClient *aws.Client, azureClient *azure.Client, dashboardRegistry *dashboards.Registry, workflowRegistry *workflows.Registry, pp PromptProvider, agentID, appURL string, sessions *SessionStore, maxToolRounds int, userContextStore *UserContextStore) *Router {
+func NewRouter(slackClient SlackClient, ghClient *github.Client, modelsClient *llm.Client, codeModelsClient *llm.Client, jiraClient *atlassian.Client, nvdClient *nvd.Client, sfClient *salesforce.Client, chorusClient *chorus.Client, datadogClients *datadog.MultiClient, awsClient *aws.Client, azureClient *azure.Client, databricksClient *databricks.Client, dashboardRegistry *dashboards.Registry, workflowRegistry *workflows.Registry, pp PromptProvider, agentID, appURL string, sessions *SessionStore, maxToolRounds int, userContextStore *UserContextStore) *Router {
 	// Channel-context cache reuses the thread session window so that an
 	// active in-thread conversation does not re-fetch Slack history on
 	// every turn. Falls back to the package default when sessions is nil.
@@ -67,6 +69,7 @@ func NewRouter(slackClient SlackClient, ghClient *github.Client, modelsClient *l
 		datadogClients:   datadogClients,
 		awsClient:        awsClient,
 		azureClient:      azureClient,
+		databricksClient: databricksClient,
 		dashboards:       dashboardRegistry,
 		workflows:        workflowRegistry,
 		contextProvider:  NewContextProvider(slackClient, cacheTTL),
@@ -249,6 +252,7 @@ func (r *Router) newGeneralHandler(userContext string, session *ThreadSession) *
 		datadogClients:   r.datadogClients,
 		awsClient:        r.awsClient,
 		azureClient:      r.azureClient,
+		databricksClient: r.databricksClient,
 		dashboards:       r.dashboards,
 		workflows:        r.workflows,
 		contextProvider:  r.contextProvider,
@@ -344,4 +348,22 @@ func (r *Router) RunWorkflow(ctx context.Context, userID, prompt string) (string
 	h := r.newGeneralHandler(userContext, nil)
 	h.headless = true
 	return h.ExecuteHeadless(ctx, userID, prompt)
+}
+
+// RunChat runs an interactive UI chat turn through this agent's LLM tool-loop,
+// giving the centralized web chat the same tool access (GitHub, Jira, Datadog,
+// Databricks, …) as a Slack command. history is the prior transcript (oldest
+// first) and userMessage is the new turn. There is no Slack channel or thread,
+// so Slack-only tools are suppressed (headless) and the final assistant text is
+// returned to the caller (the chat registry) to persist and display.
+//
+// Returns the reply text or the first tool-loop error.
+func (r *Router) RunChat(ctx context.Context, history []llm.ChatMessage, userMessage string) (string, error) {
+	if strings.TrimSpace(userMessage) == "" {
+		return "", fmt.Errorf("chat message is empty")
+	}
+	userContext := fmt.Sprintf("Interactive chat with the %s agent through the web UI (no Slack thread). Answer directly and use tools to fetch real data before responding.", r.agentID)
+	h := r.newGeneralHandler(userContext, nil)
+	h.headless = true
+	return h.ExecuteChat(ctx, "ui-chat", history, userMessage)
 }
