@@ -7,7 +7,9 @@ A visual tour of the Arbetern UI.
 The landing page opens on the **integrations** section — every configured
 integration with its live permission / auth state.
 
-![Home — integrations](home_integrations.png)
+![Home — integrations](home_integrations_light.png)
+
+![Home — integrations](home_integrations_dark.png)
 
 Scrolling down reveals the **agents** roster alongside the changelog feed.
 
