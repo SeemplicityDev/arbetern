@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"path"
 	"sort"
 	"strings"
@@ -348,6 +349,25 @@ func humanSize(n int64) string {
 // --------------------------------------------------------------------------
 // Slack formatting
 // --------------------------------------------------------------------------
+
+// S3URI returns the canonical s3://bucket/key reference for an object.
+func S3URI(bucket, key string) string {
+	return fmt.Sprintf("s3://%s/%s", bucket, key)
+}
+
+// S3ConsoleURL builds a deep link to an object in the AWS S3 web console. A
+// signed-in operator can click it to open the object's detail page. This is
+// NOT a public/REST object URL (https://bucket.s3.region.amazonaws.com/key),
+// which returns AccessDenied in a browser — it is the console UI link.
+func S3ConsoleURL(bucket, key, region string) string {
+	if region == "" {
+		region = "us-east-1"
+	}
+	return fmt.Sprintf(
+		"https://%s.console.aws.amazon.com/s3/object/%s?region=%s&bucketType=general&prefix=%s",
+		url.QueryEscape(region), url.PathEscape(bucket), url.QueryEscape(region), url.QueryEscape(key),
+	)
+}
 
 // FormatS3Put renders a PutObject confirmation for Slack.
 func FormatS3Put(r *S3PutResult) string {

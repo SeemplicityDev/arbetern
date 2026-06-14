@@ -1033,7 +1033,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 			Type: "function",
 			Function: llm.ToolFunction{
 				Name:        "upload_aggregate_csv",
-				Description: "Attach the FULL result(s) of one or more datadog_logs_aggregate calls to Slack as a single downloadable CSV file. Use this for performance-baseline / per-endpoint / per-tenant reports instead of pasting big tables into messages or trying to retype the data into upload_snippet. Each datadog_logs_aggregate call returns an aggregate_id (e.g. 'agg_1'); pass those ids here and the complete tables are rendered server-side — you do NOT need to (and must not) re-emit the rows yourself. The CSV columns are: site,group_by,key,measure,count,p50,p95,p99. The file is posted into the current thread/channel.",
+				Description: "Attach the FULL result(s) of one or more datadog_logs_aggregate calls to Slack as a single downloadable CSV file. Use this for performance-baseline / per-endpoint / per-tenant reports instead of pasting big tables into messages or trying to retype the data into upload_snippet. Each datadog_logs_aggregate call returns an aggregate_id (e.g. 'agg_1'); pass those ids here and the complete tables are rendered server-side — you do NOT need to (and must not) re-emit the rows yourself. The CSV columns are: site,group_by,key,measure,count,p50,p95,p99. The file is posted into the current thread/channel. Optionally pass 's3_bucket' + 's3_key' to ALSO archive the exact same CSV bytes to S3 (durable storage outside Slack's ~retention); on success the tool result includes the s3:// URI and a clickable AWS-console link you can post into the thread.",
 				Parameters: json.RawMessage(`{
 					"type":"object",
 					"properties":{
@@ -1041,7 +1041,9 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 						"filename":{"type":"string","description":"Filename for the CSV (e.g. 'latency-baseline.csv'). Should end in .csv."},
 						"title":{"type":"string","description":"Display title for the file in Slack."},
 						"channel_id":{"type":"string","description":"Slack channel ID to share the CSV into. REQUIRED in scheduled workflows (there is no current channel) — use the same channel you post the report to. In an interactive thread it defaults to the current channel."},
-						"thread_ts":{"type":"string","description":"OPTIONAL. Parent message ts to attach the CSV under (e.g. the ts returned by the summary post_slack_message), so the file lands in that thread."}
+						"thread_ts":{"type":"string","description":"OPTIONAL. Parent message ts to attach the CSV under (e.g. the ts returned by the summary post_slack_message), so the file lands in that thread."},
+						"s3_bucket":{"type":"string","description":"OPTIONAL. When set, the identical file content is also written to this S3 bucket (in addition to the Slack upload). Requires the AWS integration. Pass 's3_key' too. May be a bare bucket name or a full s3://bucket/key URI / arn:aws:s3:::bucket/key ARN."},
+						"s3_key":{"type":"string","description":"OPTIONAL. Object key for the S3 archive, e.g. 'reports/2026-06-14/data.csv'. Use whatever folder prefix, filename and extension fit the content. Required when 's3_bucket' is a bare bucket name (omit only if the full key is already embedded in 's3_bucket')."}
 					},
 					"required":["aggregate_ids","filename","title"]
 				}`),
@@ -2640,6 +2642,8 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 			Title        string   `json:"title"`
 			ChannelID    string   `json:"channel_id"`
 			ThreadTS     string   `json:"thread_ts"`
+			S3Bucket     string   `json:"s3_bucket"`
+			S3Key        string   `json:"s3_key"`
 		}](argsJSON)
 		if errMsg != "" {
 			return errMsg
@@ -2668,7 +2672,29 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 			return fmt.Sprintf("Error uploading aggregate CSV: %v", err)
 		}
 		log.Printf("[user=%s channel=%s] uploaded aggregate CSV %s (%s, ids=%v, %d bytes) to %s", userID, channelID, fileID, args.Filename, args.AggregateIDs, len(content), targetChannel)
-		return fmt.Sprintf("Successfully uploaded '%s' as %s (%d bytes) to channel %s.", title, args.Filename, len(content), targetChannel)
+		result := fmt.Sprintf("Successfully uploaded '%s' as %s (%d bytes) to channel %s.", title, args.Filename, len(content), targetChannel)
+		// Optional: archive the identical CSV bytes to S3 for durable storage
+		// outside Slack's retention. The Slack upload above is the primary
+		// deliverable — an S3 failure annotates the result but never fails the
+		// tool, since the file is already in Slack by this point.
+		if s3Bucket := strings.TrimSpace(args.S3Bucket); s3Bucket != "" {
+			switch {
+			case !h.canUseIntegration(integrationAWS) || h.awsClient == nil:
+				result += " (S3 archive skipped: the AWS integration is not available to this agent.)"
+			default:
+				putRes, putErr := h.awsClient.S3PutObject(ctx, s3Bucket, args.S3Key, []byte(content), "text/csv")
+				if putErr != nil {
+					log.Printf("[user=%s channel=%s] aggregate CSV S3 archive failed (bucket=%s key=%s): %v", userID, channelID, s3Bucket, args.S3Key, putErr)
+					result += fmt.Sprintf(" (S3 archive FAILED: %v — the Slack upload still succeeded.)", putErr)
+				} else {
+					uri := aws.S3URI(putRes.Bucket, putRes.Key)
+					console := aws.S3ConsoleURL(putRes.Bucket, putRes.Key, putRes.Region)
+					log.Printf("[user=%s channel=%s] archived aggregate CSV to %s (region=%s, %d bytes)", userID, channelID, uri, putRes.Region, putRes.Size)
+					result += fmt.Sprintf(" Also archived to %s (region %s). Console link: %s", uri, putRes.Region, console)
+				}
+			}
+		}
+		return result
 
 	case "fetch_thread_context":
 		args, errMsg := parseToolArgs[struct {
