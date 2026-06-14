@@ -8,8 +8,10 @@
 // chat" action. There is no per-user authentication in arbetern yet, so the
 // conversations are deliberately *centralized* — every viewer shares the same
 // list of threads, and they are persisted to disk so they survive restarts.
-// Each turn records an optional free-text display name purely for context — it
-// is not an identity and grants no access.
+// Each turn records a display name for context: when an upstream OAuth proxy is
+// in front, the proxy-verified email of the sender is recorded; otherwise it is
+// an optional free-text name. Either way it grants no access — access is
+// enforced separately by the authorizer.
 package chat
 
 import (
@@ -81,9 +83,10 @@ type Registry struct {
 	root    string
 	respond Responder
 
-	mu        sync.Mutex
-	enabled   map[string]bool
-	authorize func(req *http.Request, agent string) bool
+	mu          sync.Mutex
+	enabled     map[string]bool
+	authorize   func(req *http.Request, agent string) bool
+	resolveUser func(req *http.Request) string
 }
 
 // New constructs a Registry rooted at dir (falling back to DefaultDir when
@@ -128,6 +131,30 @@ func (r *Registry) authorized(req *http.Request, agent string) bool {
 		return true
 	}
 	return fn(req, agent)
+}
+
+// SetUserResolver installs an optional function that derives the sender's
+// display identity from the request — typically the email an upstream OAuth
+// proxy injects after a successful login. When it returns a non-empty value,
+// that identity is recorded as the message author in place of any
+// client-supplied name. A nil resolver (the default) falls back to the optional
+// free-text name in the request body.
+func (r *Registry) SetUserResolver(fn func(req *http.Request) string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.resolveUser = fn
+}
+
+// userFor returns the resolved sender identity for a request, or "" when no
+// resolver is configured or it yields nothing (e.g. local dev with no proxy).
+func (r *Registry) userFor(req *http.Request) string {
+	r.mu.Lock()
+	fn := r.resolveUser
+	r.mu.Unlock()
+	if fn == nil {
+		return ""
+	}
+	return fn(req)
 }
 
 // ListConversations returns summaries of an agent's conversations, most

@@ -1800,6 +1800,42 @@
       });
     }
 
+    // ── Client-side TTL cache for the per-agent extras (dashboards + workflows) ──
+    // The agents list is served from a shared server-side cache, but the
+    // dashboard/workflow chips are separate fetches that resolve AFTER the cards
+    // first paint — and a hard refresh clears all JS state — so without a cache
+    // they visibly pop into every card on each refresh. Persist the two
+    // responses in sessionStorage with a short TTL so a refresh renders the
+    // chips immediately from cache, then revalidates in the background and
+    // re-patches only if the data changed. sessionStorage survives reloads
+    // (including hard reloads) but is cleared when the tab closes.
+    const EXTRAS_CACHE_TTL_MS = 5 * 60 * 1000;
+    function readExtrasCache(key) {
+      try {
+        const raw = sessionStorage.getItem(key);
+        if (!raw) return null;
+        const { t, v } = JSON.parse(raw);
+        if (!t || (Date.now() - t) > EXTRAS_CACHE_TTL_MS) return null;
+        return v;
+      } catch (_) { return null; }
+    }
+    function writeExtrasCache(key, value) {
+      try {
+        sessionStorage.setItem(key, JSON.stringify({ t: Date.now(), v: value }));
+      } catch (_) { /* storage disabled or over quota — caching is best-effort */ }
+    }
+    // Populates the in-memory chip maps from whatever is cached. Returns true
+    // when at least one section was hydrated, so the caller knows to patch the
+    // cards before the network revalidation completes.
+    function hydrateExtrasFromCache() {
+      let hydrated = false;
+      const d = readExtrasCache('extras.dashboards');
+      if (d) { populateDashboards(d); hydrated = true; }
+      const w = readExtrasCache('extras.workflows');
+      if (w) { populateWorkflows(w); hydrated = true; }
+      return hydrated;
+    }
+
     const AGENT_DASHBOARDS = {};
 
     function renderAgentDashboards(agentId) {
@@ -1819,14 +1855,19 @@
         const r = await fetch('/api/dashboards');
         if (!r.ok) return;
         const list = await r.json();
-        for (const k of Object.keys(AGENT_DASHBOARDS)) delete AGENT_DASHBOARDS[k];
-        (list || []).forEach(d => {
-          if (!AGENT_DASHBOARDS[d.agent]) AGENT_DASHBOARDS[d.agent] = [];
-          AGENT_DASHBOARDS[d.agent].push(d);
-        });
+        populateDashboards(list);
+        writeExtrasCache('extras.dashboards', list);
       } catch (err) {
         console.warn('Failed to load dashboards:', err);
       }
+    }
+
+    function populateDashboards(list) {
+      for (const k of Object.keys(AGENT_DASHBOARDS)) delete AGENT_DASHBOARDS[k];
+      (list || []).forEach(d => {
+        if (!AGENT_DASHBOARDS[d.agent]) AGENT_DASHBOARDS[d.agent] = [];
+        AGENT_DASHBOARDS[d.agent].push(d);
+      });
     }
 
     async function deleteDashboard(agentId, id) {
@@ -1861,14 +1902,19 @@
         const r = await fetch('/api/workflows');
         if (!r.ok) return;
         const list = await r.json();
-        for (const k of Object.keys(AGENT_WORKFLOWS)) delete AGENT_WORKFLOWS[k];
-        (list || []).forEach(w => {
-          if (!AGENT_WORKFLOWS[w.agent]) AGENT_WORKFLOWS[w.agent] = [];
-          AGENT_WORKFLOWS[w.agent].push(w);
-        });
+        populateWorkflows(list);
+        writeExtrasCache('extras.workflows', list);
       } catch (err) {
         console.warn('Failed to load workflows:', err);
       }
+    }
+
+    function populateWorkflows(list) {
+      for (const k of Object.keys(AGENT_WORKFLOWS)) delete AGENT_WORKFLOWS[k];
+      (list || []).forEach(w => {
+        if (!AGENT_WORKFLOWS[w.agent]) AGENT_WORKFLOWS[w.agent] = [];
+        AGENT_WORKFLOWS[w.agent].push(w);
+      });
     }
 
     async function deleteWorkflow(agentId, id) {
@@ -2488,6 +2534,11 @@
         agentsData = await resp.json();
         renderAgents(agentsData);
         applyChatRoute();
+        // Render the dashboard/workflow chips immediately from the cached
+        // extras (if still fresh) so they don't pop into the cards on every
+        // refresh, then revalidate in the background and re-patch if anything
+        // changed.
+        if (hydrateExtrasFromCache()) applyAgentExtras();
         Promise.all([loadDashboards(), loadWorkflows()])
           .then(applyAgentExtras)
           .catch(err => console.warn('Failed to load agent extras:', err));

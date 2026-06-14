@@ -137,7 +137,14 @@ func (r *Registry) handleConversation(w http.ResponseWriter, req *http.Request, 
 		if len(msg) > maxMessageBytes {
 			msg = msg[:maxMessageBytes]
 		}
+		// Prefer the OAuth-proxy-verified email (when a proxy is in front) over
+		// any client-supplied name, so an authenticated sender is attributed by
+		// their real identity instead of "Anonymous". Falls back to the free-text
+		// body name for local/unauthenticated use.
 		user := strings.TrimSpace(body.User)
+		if email := r.userFor(req); email != "" {
+			user = email
+		}
 		if len(user) > 80 {
 			user = user[:80]
 		}

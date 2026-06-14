@@ -1420,6 +1420,11 @@ func main() {
 		return checkChatRBAC(req, agentID, agentEmailRBAC[agentID], agentRBAC[agentID], slackClient, emailUserCache, rbacCache)
 	})
 
+	// Attribute chat messages to the OAuth-proxy-verified sender. When a proxy is
+	// in front, clientEmail returns the authenticated email; with no proxy (local
+	// dev) it returns "" and the UI shows "Anonymous".
+	chatRegistry.SetUserResolver(clientEmail)
+
 	// Deep-link route for the full-screen chat: /ui/<agent>/chat. Serves the
 	// SPA shell (the front-end router opens the agent's chat from the path).
 	// Access is enforced by the chat API authorizer, not here: unauthorized
