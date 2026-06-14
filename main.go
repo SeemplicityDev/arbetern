@@ -66,6 +66,44 @@ var (
 
 func boolPtr(v bool) *bool { return &v }
 
+// agentsCacheTTL is how long the discovered agents list is served from memory
+// before the next request rebuilds it. Agent discovery walks the agents/
+// directory and parses several YAML files per agent, so caching avoids redoing
+// that work on every landing-page load.
+const agentsCacheTTL = 5 * time.Minute
+
+// agentsCache is a process-wide, thread-safe TTL cache for the /api/agents
+// payload. Every viewer shares the same snapshot, so a page refresh just
+// re-serves the cached list until the TTL elapses, at which point the next
+// request rebuilds it. Concurrent requests during a miss are single-flighted by
+// the mutex, and a failed rebuild falls back to the last good snapshot.
+type agentsCache struct {
+	mu        sync.Mutex
+	data      []prompts.AgentConfig
+	expiresAt time.Time
+}
+
+// get returns the cached agents list, rebuilding it when empty or expired. The
+// returned slice is only ever replaced wholesale (never mutated in place), so
+// callers may read it after the lock is released.
+func (c *agentsCache) get() ([]prompts.AgentConfig, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.data != nil && time.Now().Before(c.expiresAt) {
+		return c.data, nil
+	}
+	agents, err := prompts.DiscoverAgents("")
+	if err != nil {
+		if c.data != nil {
+			return c.data, nil // serve the last good snapshot on transient errors
+		}
+		return nil, err
+	}
+	c.data = agents
+	c.expiresAt = time.Now().Add(agentsCacheTTL)
+	return agents, nil
+}
+
 // errGitOpsDisabled is returned by the gitops sync HTTP handler when no
 // syncer is configured for that kind (e.g. WORKFLOWS_GITOPS_REPO unset).
 var errGitOpsDisabled = errors.New("gitops sync is not enabled for this kind")
@@ -1526,10 +1564,14 @@ func main() {
 		http.NotFound(w, r)
 	})
 
-	// API: list agents with their prompts (read-only, discovered from agents/ directory).
+	// API: list agents with their prompts (read-only, discovered from agents/
+	// directory). The result is cached in memory with a short TTL and shared by
+	// all viewers, so repeated landing-page loads re-render from the cache
+	// instead of re-walking the agents/ directory on every request.
 	apiMux := http.NewServeMux()
+	agentList := &agentsCache{}
 	apiMux.HandleFunc("/api/agents", func(w http.ResponseWriter, r *http.Request) {
-		agents, err := prompts.DiscoverAgents("")
+		agents, err := agentList.get()
 		if err != nil {
 			http.Error(w, fmt.Sprintf("failed to discover agents: %v", err), http.StatusInternalServerError)
 			return

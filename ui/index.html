@@ -1786,6 +1786,20 @@
       }).join('');
     }
 
+    // Patches the dashboard/workflow chips into the already-rendered agent
+    // cards in place. Rebuilding the whole grid (renderAgents) would recreate
+    // every card element and replay the staggered card-rise entry animation,
+    // which looks like a flicker; this only swaps the secondary chip sections
+    // so the cards stay put while the extras fill in.
+    function applyAgentExtras() {
+      document.querySelectorAll('#agents-grid .agent-card').forEach(card => {
+        const id = card.getAttribute('data-agent-id');
+        if (!id) return;
+        card.querySelectorAll('.agent-dashboards, .agent-workflows').forEach(el => el.remove());
+        card.insertAdjacentHTML('beforeend', renderAgentDashboards(id) + renderAgentWorkflows(id));
+      });
+    }
+
     const AGENT_DASHBOARDS = {};
 
     function renderAgentDashboards(agentId) {
@@ -2460,16 +2474,23 @@
       return s.replace(/\u0000(\d+)\u0000/g, (_, i) => tokens[Number(i)]);
     }
 
-    // Fetch agents from API
+    // Fetch agents from API. The agents payload is served from a short-lived
+    // server-side cache, so render the cards as soon as it arrives — the
+    // section then appears instantly on every refresh. Dashboard and workflow
+    // chips are secondary metadata: fetch them in parallel (not in a
+    // sequential waterfall) and patch them into the existing cards once they
+    // arrive, instead of blocking the initial render behind two more
+    // round-trips.
     async function loadAgents() {
       try {
         const resp = await fetch('/api/agents');
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         agentsData = await resp.json();
-        await loadDashboards();
-        await loadWorkflows();
         renderAgents(agentsData);
         applyChatRoute();
+        Promise.all([loadDashboards(), loadWorkflows()])
+          .then(applyAgentExtras)
+          .catch(err => console.warn('Failed to load agent extras:', err));
       } catch (err) {
         console.error('Failed to load agents:', err);
         document.getElementById('agents-grid').innerHTML = `
