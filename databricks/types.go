@@ -38,7 +38,7 @@ type QueryResult struct {
 // Wire types (Statement Execution API)
 // --------------------------------------------------------------------------
 
-// statementResponse is returned by POST /api/2.0/sql/statements/ and
+// statementResponse is returned by POST /api/2.0/sql/statements and
 // GET /api/2.0/sql/statements/{id}. Fields beyond statement_id + status may
 // be absent depending on the execution state.
 type statementResponse struct {

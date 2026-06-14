@@ -194,7 +194,8 @@ func (c *Client) Query(ctx context.Context, sqlText string, params []QueryParam,
 	}
 
 	var resp statementResponse
-	if err := c.doJSON(ctx, http.MethodPost, "/api/2.0/sql/statements/", reqBody, &resp); err != nil {
+	// POST path must not have a trailing slash (a trailing slash returns 404).
+	if err := c.doJSON(ctx, http.MethodPost, "/api/2.0/sql/statements", reqBody, &resp); err != nil {
 		return nil, err
 	}
 
@@ -334,7 +335,7 @@ func (c *Client) doJSON(ctx context.Context, method, path string, body any, out 
 		return fmt.Errorf("read databricks response: %w", err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("databricks HTTP %d: %s", resp.StatusCode, truncate(string(data), 500))
+		return fmt.Errorf("databricks HTTP %d for %s %s: %s", resp.StatusCode, method, path, truncate(string(data), 500))
 	}
 	if out == nil || len(data) == 0 {
 		return nil
