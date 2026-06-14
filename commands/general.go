@@ -84,6 +84,15 @@ type GeneralHandler struct {
 	// (which it does unreliably for large tables). Per-run state: a fresh
 	// handler is created for each command/tick by newGeneralHandler.
 	aggregateCache map[string]cachedAggregate
+	// postedSlackSigs deduplicates post_slack_message calls within a single
+	// headless run, keyed by a (channel, thread_ts, text) signature → the ts
+	// of the message that was actually posted. A scheduled tick's LLM loop
+	// occasionally calls post_slack_message twice for the same report, which
+	// produces duplicate top-level messages in the channel. The guard performs
+	// the real post once and returns the original ts for any exact repeat, so
+	// the model still has a valid thread parent for its threaded reply. Per-run
+	// state: a fresh handler is created for each tick by newGeneralHandler.
+	postedSlackSigs map[string]string
 	// headless is true when the handler is executing a scheduled workflow
 	// tick rather than a Slack-driven command. Affects tool gating (e.g.
 	// reply_in_thread is suppressed) and suppresses audit messaging.
@@ -354,6 +363,7 @@ func (h *GeneralHandler) ExecuteHeadless(ctx context.Context, userID, prompt str
 	h.currentChannelID = ""
 	h.currentAuditTS = ""
 	h.aggregateCache = nil
+	h.postedSlackSigs = nil
 	h.branchMgr = NewBranchManager(h.ghClient, h.agentID, nil)
 
 	tools := h.buildTools()
@@ -521,6 +531,7 @@ func (h *GeneralHandler) ExecuteChat(ctx context.Context, userID string, history
 	h.currentChannelID = ""
 	h.currentAuditTS = ""
 	h.aggregateCache = nil
+	h.postedSlackSigs = nil
 	h.branchMgr = NewBranchManager(h.ghClient, h.agentID, nil)
 
 	tools := h.buildTools()
@@ -2480,9 +2491,32 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		if strings.TrimSpace(args.ChannelID) == "" || strings.TrimSpace(args.Text) == "" {
 			return preconditionErrf("Error: 'channel_id' and 'text' are required.")
 		}
+		// In a headless workflow tick, guard against the LLM posting the exact
+		// same message twice in one run — a known tool-loop slip that produces
+		// duplicate top-level reports in the channel. Identical (channel,
+		// thread_ts, text) posts are deduplicated: the first does the real
+		// Slack post; any repeat returns the original message's ts WITHOUT
+		// posting again, so the model still gets a valid thread parent for its
+		// follow-up reply.
+		sig := args.ChannelID + "\x00" + strings.TrimSpace(args.ThreadTS) + "\x00" + args.Text
+		if h.headless {
+			if prevTS, ok := h.postedSlackSigs[sig]; ok {
+				log.Printf("[user=%s channel=%s] post_slack_message dedup: identical message already posted to %s (ts=%s); skipping duplicate", userID, channelID, args.ChannelID, prevTS)
+				if strings.TrimSpace(args.ThreadTS) != "" {
+					return fmt.Sprintf("Already posted this exact threaded reply to channel %s under thread_ts=%s (ts=%s). Did not post a duplicate.", args.ChannelID, args.ThreadTS, prevTS)
+				}
+				return fmt.Sprintf("Already posted this exact message to channel %s (ts=%s). Did not post a duplicate — use ts=%s as the thread parent for any follow-up reply.", args.ChannelID, prevTS, prevTS)
+			}
+		}
 		ts, err := h.slackClient.PostMessageInThread(args.ChannelID, args.ThreadTS, args.Text)
 		if err != nil {
 			return fmt.Sprintf("Error posting to channel %s: %v", args.ChannelID, err)
+		}
+		if h.headless {
+			if h.postedSlackSigs == nil {
+				h.postedSlackSigs = make(map[string]string)
+			}
+			h.postedSlackSigs[sig] = ts
 		}
 		if strings.TrimSpace(args.ThreadTS) != "" {
 			log.Printf("[user=%s channel=%s] posted threaded reply to %s (thread_ts=%s, ts=%s)", userID, channelID, args.ChannelID, args.ThreadTS, ts)
