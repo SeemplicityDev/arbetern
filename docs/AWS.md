@@ -1,12 +1,15 @@
 # AWS Integration
 
-Arbetern integrates with the AWS Cost Explorer API so agents and scheduled
-workflows can report on spend, project forward, and break costs down by
-service / account / region without leaving Slack.
+Arbetern integrates with two AWS services so agents and scheduled workflows
+can work with them without leaving Slack:
 
-Only Cost Explorer is wired up today. The AWS client uses the standard SDK
-credential chain, so adding more services later (CloudWatch, S3, EC2, …)
-reuses the same auth plumbing.
+- **Cost Explorer** — report on spend, project forward, and break costs down
+  by service / account / region.
+- **S3** — read, write, and list objects (for example persisting a daily
+  CSV report, or reading back a manifest).
+
+Both services reuse the standard SDK credential chain, so adding more
+services later (CloudWatch, EC2, …) reuses the same auth plumbing.
 
 ## Required Credentials
 
@@ -32,8 +35,8 @@ section below.
 | `AWS_WEB_IDENTITY_TOKEN_FILE`, `AWS_ROLE_ARN` | no | Set automatically on EKS when IRSA is configured on the service account |
 | `AWS_REGION` | no | Region used to sign Cost Explorer SigV4 calls. Default `us-east-1` (the only region that hosts the CE endpoint). Cost data returned is account-global regardless of this value |
 
-Arbetern only enables the Cost Explorer tools when at least one of these
-looks present (`AWS_ACCESS_KEY_ID`, `AWS_PROFILE`,
+Arbetern only enables the AWS tools (Cost Explorer **and** S3) when at least
+one of these looks present (`AWS_ACCESS_KEY_ID`, `AWS_PROFILE`,
 `AWS_WEB_IDENTITY_TOKEN_FILE`, `AWS_ROLE_ARN`,
 `AWS_SHARED_CREDENTIALS_FILE`). On startup the server calls
 `Credentials.Retrieve()` so misconfiguration fails loudly with a log line
@@ -59,6 +62,21 @@ Attach the following IAM policy to the user / role arbetern runs as:
         "ce:GetDimensionValues"
       ],
       "Resource": "*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject",
+        "s3:PutObject"
+      ],
+      "Resource": "arn:aws:s3:::your-bucket/*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "s3:ListBucket"
+      ],
+      "Resource": "arn:aws:s3:::your-bucket"
     }
   ]
 }
@@ -68,6 +86,13 @@ Attach the following IAM policy to the user / role arbetern runs as:
 > workflows that grouped- or filter-pivot aggressively can rack up real
 > dollars — prefer one grouped call over N filtered calls, and avoid
 > looping over services.
+
+> **S3 scope:** the `s3:*` statements above are only needed if you use the
+> S3 tools. Replace `your-bucket` with the bucket(s) arbetern should
+> read/write — `s3:ListBucket` is granted on the bucket ARN, while
+> `s3:GetObject` / `s3:PutObject` are granted on the objects ARN (`/*`).
+> Grant only the buckets you actually need; drop the block entirely to run
+> Cost Explorer only.
 
 ## Helm Deployment
 
@@ -153,10 +178,16 @@ tools disabled; any agent call trying `aws_*` tools returns a clear
 | **aws_get_cost_and_usage** | Query Cost Explorer for cost and usage over a date range. Supports DAILY / MONTHLY / HOURLY granularity, all standard metrics (`UnblendedCost`, `BlendedCost`, `AmortizedCost`, `NetUnblendedCost`, `NetAmortizedCost`, `UsageQuantity`), optional `group_by` dimension (`SERVICE`, `LINKED_ACCOUNT`, `REGION`, `USAGE_TYPE`, `INSTANCE_TYPE`, `OPERATION`, `PURCHASE_TYPE`, `RECORD_TYPE`, `AVAILABILITY_ZONE`, `PLATFORM`, `TENANCY`, `DATABASE_ENGINE`), and optional exact-match `service_filter`. Default window: last 8 days, DAILY, `AmortizedCost` (spreads Reserved Instance / Savings Plan up-front charges across their commitment term for accurate daily trend analysis) |
 | **aws_get_cost_forecast** | Project future spend using Cost Explorer's forecast model. `start` must be >= today; `end` within 12 months. Default window: tomorrow → +30 days, DAILY |
 | **aws_list_dimension_values** | Enumerate values for a dimension (e.g. list every SERVICE that accrued cost in the last 30 days). Useful for discovering the exact service strings AWS expects as `service_filter` — e.g. `"Amazon Elastic Compute Cloud - Compute"`, not `"EC2"` |
+| **aws_s3_put_object** | Write (upload) text content to an S3 object, creating or overwriting it at the given key — e.g. persist a daily CSV report. Accepts a bucket name, an `s3://bucket/key` URI, or an `arn:aws:s3:::bucket/key` ARN. S3 objects are immutable, so "append" means get + concatenate + put |
+| **aws_s3_get_object** | Read (download) the text content of an S3 object. Returns the body plus size and last-modified time; bodies over 1 MiB are truncated. A `NoSuchKey` error is the normal signal the object doesn't exist yet |
+| **aws_s3_list_objects** | List objects in a bucket, optionally under a key prefix, sorted by key (so date-stamped filenames come back chronologically). Single page, capped at 1000 keys |
 
-All three tools cap time windows at 90 days per call and validate date
-format (`YYYY-MM-DD`; `end` is exclusive, matching Cost Explorer's
-convention).
+The three Cost Explorer tools cap time windows at 90 days per call and
+validate date format (`YYYY-MM-DD`; `end` is exclusive, matching Cost
+Explorer's convention). The S3 tools auto-detect each bucket's region — so a
+bucket in `eu-central-1` works even though Cost Explorer signs in
+`us-east-1` — and cap a single `get` / `list` response at 1 MiB / 1000 keys
+respectively.
 
 ## Date Handling
 
@@ -224,6 +255,12 @@ web UI (the pencil button on `/<agent>/workflow/<id>`).
 **`AccessDeniedException: ... is not authorized to perform: ce:GetCostAndUsage`**
 - The IAM policy is missing one of the three required actions. Verify with
   `aws iam simulate-principal-policy`.
+
+**`AccessDenied` from an `aws_s3_*` tool**
+- The IAM policy is missing `s3:GetObject` / `s3:PutObject` (objects ARN
+  `arn:aws:s3:::your-bucket/*`) or `s3:ListBucket` (bucket ARN
+  `arn:aws:s3:::your-bucket`), or the bucket name in the policy doesn't
+  match the bucket you're addressing.
 
 **`Rate exceeded` from Cost Explorer**
 - Cost Explorer is rate-limited per account (default 1 request / sec). If

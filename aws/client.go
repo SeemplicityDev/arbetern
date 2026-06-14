@@ -15,12 +15,14 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	awsv2 "github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/costexplorer"
 	cetypes "github.com/aws/aws-sdk-go-v2/service/costexplorer/types"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
 )
 
 const (
@@ -44,10 +46,21 @@ const (
 	MaxDays = 90
 )
 
-// Client wraps the Cost Explorer SDK client.
+// Client wraps the AWS SDK clients arbetern uses (Cost Explorer and S3).
+// The Cost Explorer client is signed for a single region (us-east-1 by
+// default); S3 is genuinely regional, so per-bucket S3 clients are built
+// lazily in each bucket's own region (see s3.go).
 type Client struct {
 	ce     *costexplorer.Client
+	cfg    awsv2.Config
 	region string
+
+	// s3mu guards the lazily-populated S3 maps. S3 is regional: an object
+	// must be addressed through a client signed for the bucket's region, so
+	// we cache one client per region and remember each bucket's region.
+	s3mu          sync.Mutex
+	s3Clients     map[string]*s3.Client // region -> S3 client
+	bucketRegions map[string]string     // bucket -> region
 }
 
 // NewClient creates an AWS client using the default credential chain. region
@@ -69,8 +82,11 @@ func NewClient(ctx context.Context, region string) (*Client, error) {
 		return nil, fmt.Errorf("resolve AWS credentials: %w", err)
 	}
 	return &Client{
-		ce:     costexplorer.NewFromConfig(cfg),
-		region: region,
+		ce:            costexplorer.NewFromConfig(cfg),
+		cfg:           cfg,
+		region:        region,
+		s3Clients:     make(map[string]*s3.Client),
+		bucketRegions: make(map[string]string),
 	}, nil
 }
 

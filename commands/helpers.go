@@ -160,6 +160,9 @@ var toolIntegration = map[string]string{
 	"aws_get_cost_and_usage":    integrationAWS,
 	"aws_get_cost_forecast":     integrationAWS,
 	"aws_list_dimension_values": integrationAWS,
+	"aws_s3_put_object":         integrationAWS,
+	"aws_s3_get_object":         integrationAWS,
+	"aws_s3_list_objects":       integrationAWS,
 	// Databricks.
 	"databricks_query": integrationDatabricks,
 }

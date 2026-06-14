@@ -1671,6 +1671,51 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 					"required":["dimension"]
 				}`),
 			},
+		}, llm.Tool{
+			Type: "function",
+			Function: llm.ToolFunction{
+				Name:        "aws_s3_put_object",
+				Description: "Write (upload) text content to an object in an S3 bucket. The object is created or overwritten at the exact key you give (S3 objects are immutable: every write replaces the whole object, so to APPEND you must first read the object with aws_s3_get_object, concatenate your new content, and write the combined text back). 'bucket' is the bucket name — you may instead paste a full 's3://bucket/key' URI or an 'arn:aws:s3:::bucket/key' ARN and leave 'key' empty; the bucket and key are split for you. 'key' is the full object path including any folder prefixes and the filename (e.g. 'reports/2026-06-11.csv'). 'content' is the literal text stored as the object body. The bucket's region is detected automatically.",
+				Parameters: json.RawMessage(`{
+					"type":"object",
+					"properties":{
+						"bucket":{"type":"string","description":"S3 bucket name, or a full s3://bucket/key URI or arn:aws:s3:::bucket/key ARN (the key is split out automatically when embedded here)."},
+						"key":{"type":"string","description":"Full object key/path including prefixes and filename, e.g. 'reports/2026-06-11.csv'. May be omitted only when the full path is already embedded in 'bucket'."},
+						"content":{"type":"string","description":"The literal text to store as the object body (e.g. CSV or JSON text). Replaces the object entirely."},
+						"content_type":{"type":"string","description":"Optional MIME type. Inferred from the key extension (.csv/.json/.txt/.md) when omitted."}
+					},
+					"required":["bucket","content"]
+				}`),
+			},
+		}, llm.Tool{
+			Type: "function",
+			Function: llm.ToolFunction{
+				Name:        "aws_s3_get_object",
+				Description: "Read (download) the text content of an S3 object — for example to read back an object before rewriting it with appended content. Returns the object body plus its size and last-modified time. Bodies larger than 1 MiB are truncated. 'bucket' may be a bare name, an 's3://bucket/key' URI, or an 'arn:aws:s3:::bucket/key' ARN; 'key' is the full object path. An error that the object does not exist (NoSuchKey) is the normal signal that the file has not been created yet — handle it by creating the object with aws_s3_put_object.",
+				Parameters: json.RawMessage(`{
+					"type":"object",
+					"properties":{
+						"bucket":{"type":"string","description":"S3 bucket name, or a full s3://bucket/key URI or arn:aws:s3:::bucket/key ARN."},
+						"key":{"type":"string","description":"Full object key/path, e.g. 'reports/2026-06-11.csv'. May be omitted only when embedded in 'bucket'."}
+					},
+					"required":["bucket"]
+				}`),
+			},
+		}, llm.Tool{
+			Type: "function",
+			Function: llm.ToolFunction{
+				Name:        "aws_s3_list_objects",
+				Description: "List objects in an S3 bucket, optionally under a key prefix — for example to enumerate which dated files already exist under a folder. Returns each object's key, size and last-modified time, sorted by key so date-stamped filenames come back in chronological order. One page only, capped at 1000 keys. 'bucket' may be a bare name, an 's3://' URI, or an ARN; 'prefix' narrows the listing.",
+				Parameters: json.RawMessage(`{
+					"type":"object",
+					"properties":{
+						"bucket":{"type":"string","description":"S3 bucket name, or a full s3://bucket/prefix URI or arn:aws:s3:::bucket/prefix ARN."},
+						"prefix":{"type":"string","description":"Optional key prefix to narrow the listing, e.g. 'reports/'. Omit to list from the bucket root."},
+						"max_keys":{"type":"integer","description":"Optional maximum number of keys to return (1-1000). Defaults to 1000."}
+					},
+					"required":["bucket"]
+				}`),
+			},
 		})
 	}
 
@@ -3930,6 +3975,66 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		log.Printf("[user=%s channel=%s] aws list_dimension_values (%s, %s→%s, %d values)",
 			userID, channelID, res.Dimension, res.Start, res.End, len(res.Values))
 		return aws.FormatDimensionValues(res)
+
+	case "aws_s3_put_object":
+		if h.awsClient == nil {
+			return "Error: AWS integration is not configured. Set AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY (or AWS_PROFILE, or EKS IRSA via AWS_WEB_IDENTITY_TOKEN_FILE + AWS_ROLE_ARN) to enable AWS S3 tools."
+		}
+		args, errMsg := parseToolArgs[struct {
+			Bucket      string `json:"bucket"`
+			Key         string `json:"key"`
+			Content     string `json:"content"`
+			ContentType string `json:"content_type"`
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
+		}
+		res, err := h.awsClient.S3PutObject(ctx, args.Bucket, args.Key, []byte(args.Content), args.ContentType)
+		if err != nil {
+			return fmt.Sprintf("Error writing S3 object: %v", err)
+		}
+		log.Printf("[user=%s channel=%s] aws s3_put_object (s3://%s/%s, region=%s, %d bytes)",
+			userID, channelID, res.Bucket, res.Key, res.Region, res.Size)
+		return aws.FormatS3Put(res)
+
+	case "aws_s3_get_object":
+		if h.awsClient == nil {
+			return "Error: AWS integration is not configured. Set AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY (or AWS_PROFILE, or EKS IRSA via AWS_WEB_IDENTITY_TOKEN_FILE + AWS_ROLE_ARN) to enable AWS S3 tools."
+		}
+		args, errMsg := parseToolArgs[struct {
+			Bucket string `json:"bucket"`
+			Key    string `json:"key"`
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
+		}
+		res, err := h.awsClient.S3GetObject(ctx, args.Bucket, args.Key)
+		if err != nil {
+			return fmt.Sprintf("Error reading S3 object: %v", err)
+		}
+		log.Printf("[user=%s channel=%s] aws s3_get_object (s3://%s/%s, region=%s, %d bytes, truncated=%t)",
+			userID, channelID, res.Bucket, res.Key, res.Region, res.Size, res.Truncated)
+		return aws.FormatS3Get(res)
+
+	case "aws_s3_list_objects":
+		if h.awsClient == nil {
+			return "Error: AWS integration is not configured. Set AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY (or AWS_PROFILE, or EKS IRSA via AWS_WEB_IDENTITY_TOKEN_FILE + AWS_ROLE_ARN) to enable AWS S3 tools."
+		}
+		args, errMsg := parseToolArgs[struct {
+			Bucket  string `json:"bucket"`
+			Prefix  string `json:"prefix"`
+			MaxKeys int    `json:"max_keys"`
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
+		}
+		res, err := h.awsClient.S3ListObjects(ctx, args.Bucket, args.Prefix, args.MaxKeys)
+		if err != nil {
+			return fmt.Sprintf("Error listing S3 objects: %v", err)
+		}
+		log.Printf("[user=%s channel=%s] aws s3_list_objects (s3://%s/%s, region=%s, %d objects)",
+			userID, channelID, res.Bucket, res.Prefix, res.Region, len(res.Objects))
+		return aws.FormatS3List(res)
 
 	// ---- Azure Cost Management tools ----
 
