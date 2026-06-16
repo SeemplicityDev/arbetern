@@ -281,6 +281,24 @@ func clientEmail(r *http.Request) string {
 	return ""
 }
 
+// redactEmail masks the local part of an email address so RBAC logs keep the
+// domain (the useful part for allow-list debugging) without recording the full
+// address in clear text (CWE-312). Returns "<none>" for an empty value and
+// "***" for anything not shaped like an address. The "redact" name is also
+// recognised by CodeQL's clear-text-logging query as a sanitizer barrier, so
+// routing a request-derived email through it before logging clears the alert.
+func redactEmail(email string) string {
+	email = strings.TrimSpace(email)
+	if email == "" {
+		return "<none>"
+	}
+	at := strings.LastIndex(email, "@")
+	if at <= 0 || at == len(email)-1 {
+		return "***"
+	}
+	return email[:1] + "***@" + email[at+1:]
+}
+
 // emailAllowed reports whether email matches the allow-list. Entries are
 // matched case-insensitively and may be either an exact address
 // ("alice@acme.com") or a domain ("acme.com" or "@acme.com") which matches any
@@ -348,7 +366,7 @@ func (c *emailUserIDCache) resolve(slackClient *slack.Client, email string) stri
 	user, err := slackClient.GetUserByEmail(email)
 	userID := ""
 	if err != nil {
-		log.Printf("[rbac] slack lookup by email %q failed: %v", email, err)
+		log.Printf("[rbac] slack lookup by email %q failed: %v", redactEmail(email), err)
 	} else if user != nil {
 		userID = user.ID
 	}
@@ -391,7 +409,7 @@ func checkChatRBAC(r *http.Request, agentID string, allowedEmails, allowedTeams 
 		}
 	}
 
-	log.Printf("[rbac] DENIED email=%q agent=%s (allowed_emails=%v allowed_teams=%v)", email, agentID, allowedEmails, allowedTeams)
+	log.Printf("[rbac] DENIED email=%q agent=%s (allowed_emails=%v allowed_teams=%v)", redactEmail(email), agentID, allowedEmails, allowedTeams)
 	return false
 }
 

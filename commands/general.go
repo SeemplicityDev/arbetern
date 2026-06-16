@@ -386,7 +386,12 @@ func (h *GeneralHandler) ExecuteHeadless(ctx context.Context, userID, prompt str
 
 	systemMsg := h.systemPrompt()
 	systemMsg = strings.Replace(systemMsg, "{{MODEL}}", activeClient.Model(), 1)
-	systemMsg = strings.Replace(systemMsg, "{{USER_ID}}", userID, 1)
+	// A scheduled tick has no requesting Slack user. Blank out {{USER_ID}} rather
+	// than substituting the workflow creator's ID: agent prompts that reference
+	// {{USER_ID}} treat it as "the current user", and leaking the creator there
+	// makes the model use that ID as a fallback @-mention / assignee. The creator
+	// ID is retained in `userID` purely for the operator logs below.
+	systemMsg = strings.Replace(systemMsg, "{{USER_ID}}", "", 1)
 	systemMsg = strings.Replace(systemMsg, "{{USER_CONTEXT}}", h.userContext, 1)
 	systemMsg += "\n\n[SCHEDULED WORKFLOW CONTEXT]\n" +
 		"You are executing a scheduled workflow tick. There is NO interactive Slack thread for this run. " +

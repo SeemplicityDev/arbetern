@@ -344,7 +344,19 @@ func (r *Router) RunWorkflow(ctx context.Context, userID, prompt string) (string
 	if strings.TrimSpace(prompt) == "" {
 		return "", fmt.Errorf("workflow prompt is empty")
 	}
-	userContext := fmt.Sprintf("Scheduled workflow run (agent=%s, creator=%s). No interactive user is present — execute the instruction autonomously using tools.", r.agentID, userID)
+	// Deliberately do NOT embed the creator's Slack ID in this string. It is
+	// injected into the system prompt's "REQUESTING USER IDENTITY" block
+	// ({{USER_CONTEXT}}). A scheduled tick has no requesting user, and any Slack
+	// ID placed here gets latched onto by the model as a fallback @-mention /
+	// assignee / originator whenever it cannot confidently resolve a person from
+	// the work item — which surfaced as the workflow creator being rendered as
+	// the ticket originator in auto-fix summaries. The creator ID is still passed
+	// to ExecuteHeadless below (for operator logging only), never into the model.
+	userContext := fmt.Sprintf("Scheduled workflow run (agent=%s). There is NO interactive or requesting user — this tick was triggered by a cron schedule, not a person. "+
+		"The words \"me\", \"my\", \"I\", and \"mine\" have no referent here; do NOT attribute anything to a current or session user. "+
+		"Every person named in output (ticket originators, assignees, reviewers, Slack @-mentions) MUST be resolved from the specific work item's own data (e.g. Jira changelog, reporter, comments) — NEVER from the run, session, or workflow-creator identity. "+
+		"If a person cannot be resolved from the work item, omit them rather than substituting any ambient identity. "+
+		"Execute the instruction autonomously using tools.", r.agentID)
 	h := r.newGeneralHandler(userContext, nil)
 	h.headless = true
 	return h.ExecuteHeadless(ctx, userID, prompt)
