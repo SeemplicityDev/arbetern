@@ -1018,6 +1018,22 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 		{
 			Type: "function",
 			Function: llm.ToolFunction{
+				Name:        "slack_conversations_replies",
+				Description: "Read the replies in a Slack thread by channel ID and the parent message's ts. Use this in scheduled workflows to inspect a thread before acting on it — e.g. to dedupe (check whether a prior tick already replied to an alert with a tracking link or an ack) or to read follow-up context. Returns the parent message followed by its replies, oldest-first, each annotated with ts, thread_ts, sender, and whether it was posted by a bot. The 'thread_ts' is the ts of the parent (top-level) message; for a reply's ts use its 'thread_ts' field to address the parent thread.",
+				Parameters: json.RawMessage(`{
+					"type":"object",
+					"properties":{
+						"channel_id":{"type":"string","description":"Slack channel ID (e.g. 'C09NN1E439D'). NOT a channel name."},
+						"thread_ts":{"type":"string","description":"The ts of the thread's PARENT message (e.g. '1776940344.123456'). This is the top-level message whose replies you want."},
+						"limit":{"type":"integer","description":"Maximum number of messages to return, including the parent (default 50, max 200)."}
+					},
+					"required":["channel_id","thread_ts"]
+				}`),
+			},
+		},
+		{
+			Type: "function",
+			Function: llm.ToolFunction{
 				Name:        "upload_snippet",
 				Description: "Upload a text file snippet to Slack. Use this instead of posting a long message when the content is large (e.g., full search results with file paths and code lines, log dumps, CSV data, large code blocks). The snippet appears as a collapsible file attachment in the channel/thread, keeping the conversation clean. PREFER this over reply_in_thread or plain messages whenever the output would exceed ~30 lines or ~2000 characters. Ideal for: org-wide search results, full file listings, detailed tables, log output, code dumps. IMPORTANT: you must supply the COMPLETE file body in the 'content' argument of THIS call — it is not generated or filled in for you. Do not call this tool with an empty or omitted 'content'.",
 				Parameters: json.RawMessage(`{
@@ -2606,6 +2622,36 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		formatted := formatMessages(msgs)
 		log.Printf("[user=%s channel=%s] fetched %d messages from %s (oldest=%q)", userID, channelID, len(msgs), args.ChannelID, args.Oldest)
 		return fmt.Sprintf("Channel history (channel_id=%s, count=%d, oldest_requested=%q):\n\n%s", args.ChannelID, len(msgs), args.Oldest, formatted)
+
+	case "slack_conversations_replies":
+		args, errMsg := parseToolArgs[struct {
+			ChannelID string `json:"channel_id"`
+			ThreadTS  string `json:"thread_ts"`
+			Limit     int    `json:"limit"`
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
+		}
+		if strings.TrimSpace(args.ChannelID) == "" || strings.TrimSpace(args.ThreadTS) == "" {
+			return "Error: 'channel_id' and 'thread_ts' are required."
+		}
+		limit := args.Limit
+		if limit <= 0 {
+			limit = 50
+		}
+		if limit > 200 {
+			limit = 200
+		}
+		msgs, err := h.slackClient.FetchThreadReplies(args.ChannelID, strings.TrimSpace(args.ThreadTS), limit)
+		if err != nil {
+			return fmt.Sprintf("Error fetching thread replies for %s (thread_ts=%s): %v", args.ChannelID, args.ThreadTS, err)
+		}
+		if len(msgs) == 0 {
+			return fmt.Sprintf("No messages found in thread %s/%s (the parent ts may be wrong or the thread has no replies).", args.ChannelID, args.ThreadTS)
+		}
+		formatted := formatMessages(msgs)
+		log.Printf("[user=%s channel=%s] fetched %d thread messages from %s (thread_ts=%s)", userID, channelID, len(msgs), args.ChannelID, args.ThreadTS)
+		return fmt.Sprintf("Thread replies (channel_id=%s, thread_ts=%s, count=%d, includes parent):\n\n%s", args.ChannelID, args.ThreadTS, len(msgs), formatted)
 
 	case "upload_snippet":
 		args, errMsg := parseToolArgs[struct {

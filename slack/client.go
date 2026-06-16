@@ -187,7 +187,11 @@ func (c *Client) GetUserInfo(userID string) (*slack.User, error) {
 func (c *Client) GetUserByEmail(email string) (*slack.User, error) {
 	user, err := c.api.GetUserByEmail(email)
 	if err != nil {
-		return nil, fmt.Errorf("failed to look up user by email %s: %w", email, err)
+		// Do not embed the raw email in the wrapped error: it is sensitive
+		// (CWE-312) and propagates into caller logs. The underlying Slack API
+		// reason (e.g. "users_not_found") is preserved via %w, and callers
+		// already hold the email for redacted logging.
+		return nil, fmt.Errorf("failed to look up user by email: %w", err)
 	}
 	return user, nil
 }
