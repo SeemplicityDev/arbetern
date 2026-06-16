@@ -1293,6 +1293,20 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 		}, llm.Tool{
 			Type: "function",
 			Function: llm.ToolFunction{
+				Name:        "get_jira_label_author",
+				Description: "Determine WHO added (or removed) a label on a Jira issue, read deterministically from the issue changelog/history. This is the ONLY reliable way to attribute a label to a person — the issue's reporter and assignee do NOT reveal who applied a label. Returns each label change in chronological order with the Jira user who made it (display name, account ID, email), and identifies the most recent person who added the label. Use this before stating 'label added by <person>' in any summary.",
+				Parameters: json.RawMessage(`{
+					"type":"object",
+					"properties":{
+						"issue_key":{"type":"string","description":"Jira issue key (e.g. 'ENG-123', 'PROJ-456')"},
+						"label":{"type":"string","description":"The exact label to attribute (e.g. 'arbetern'). Omit to list changes for all labels."}
+					},
+					"required":["issue_key"]
+				}`),
+			},
+		}, llm.Tool{
+			Type: "function",
+			Function: llm.ToolFunction{
 				Name:        "update_jira_issue",
 				Description: "Update a Jira issue's description or summary. Use this to rewrite, refine, or improve ticket descriptions. IMPORTANT: Format the new description using markdown — use # for headers, - for bullet lists, 1) for numbered lists, **bold** for emphasis. Structure it professionally with clear sections.",
 				Parameters: json.RawMessage(`{
@@ -1391,6 +1405,24 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 					"user_id":{"type":"string","description":"Slack user ID (e.g. 'U01ABC123'). Use the current user's ID from the command context."}
 				},
 				"required":["user_id"]
+			}`),
+		},
+	})
+
+	// Reverse Slack lookup: resolve a person to their Slack user ID so the model
+	// can build a real <@ID> mention. The canonical key is email (Slack
+	// users.lookupByEmail); name is a conservative exact-match fallback.
+	tools = append(tools, llm.Tool{
+		Type: "function",
+		Function: llm.ToolFunction{
+			Name:        "lookup_slack_user",
+			Description: "Resolve a person to their Slack user ID so you can @-mention them. This is the ONLY way to turn a Jira user (e.g. the label author from get_jira_label_author) into a real Slack ping. Pass their email (MOST reliable — uses Slack users.lookupByEmail) and/or their display name. Returns the Slack user ID and the ready-to-paste mention token `<@USERID>`. A bare `@Display Name` in a Slack message is inert text that pings nobody — you MUST use the `<@USERID>` form from this tool to actually notify someone. If the person cannot be uniquely resolved, the tool says so; in that case fall back to plain `@Display Name` rather than guessing an ID.",
+			Parameters: json.RawMessage(`{
+				"type":"object",
+				"properties":{
+					"email":{"type":"string","description":"The person's email address (most reliable). Use the email returned by get_jira_label_author / resolve_jira_user when available."},
+					"name":{"type":"string","description":"The person's display/real name (e.g. 'Noa Barron'). Used only as a fallback when email is missing or does not match; resolves ONLY when exactly one Slack user has that name."}
+				}
 			}`),
 		},
 	})
@@ -2559,6 +2591,20 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		if strings.TrimSpace(args.ChannelID) == "" || strings.TrimSpace(args.Text) == "" {
 			return preconditionErrf("Error: 'channel_id' and 'text' are required.")
 		}
+		// Headless safety net: a scheduled tick has no interactive/requesting
+		// user. When the model cannot resolve the real person behind a piece of
+		// output it sometimes falls back to the workflow creator's identity
+		// (injected only for operator logging) and emits an active <@creator>
+		// ping — e.g. mis-attributing a Jira label to the creator. Strip the
+		// creator's own self-mention so a scheduled summary can never ping the
+		// creator merely because attribution failed. Correct attribution
+		// (get_jira_label_author) is the real fix; this is the backstop.
+		if h.headless {
+			if cleaned, changed := neutralizeUserPing(args.Text, userID); changed {
+				log.Printf("[user=%s channel=%s] post_slack_message: stripped creator self-mention <@%s> from headless output (likely failed-attribution fallback)", userID, channelID, userID)
+				args.Text = cleaned
+			}
+		}
 		// In a headless workflow tick, guard against the LLM posting the exact
 		// same message twice in one run — a known tool-loop slip that produces
 		// duplicate top-level reports in the channel. Identical (channel,
@@ -2977,6 +3023,60 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		log.Printf("[user=%s channel=%s] fetched Jira issue %s", userID, channelID, args.IssueKey)
 		return sb.String()
 
+	case "get_jira_label_author":
+		if errMsg := requireReady("Jira", h.jiraClient); errMsg != "" {
+			return errMsg
+		}
+		args, errMsg := parseToolArgs[struct {
+			IssueKey string `json:"issue_key"`
+			Label    string `json:"label"`
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
+		}
+		changes, err := h.jiraClient.GetLabelChangeHistory(args.IssueKey, args.Label)
+		if err != nil {
+			return fmt.Sprintf("Error getting Jira label history: %v", err)
+		}
+		label := strings.TrimSpace(args.Label)
+		if len(changes) == 0 {
+			if label != "" {
+				return fmt.Sprintf("No changelog entry adds or removes label %q on %s. The label may predate the available history, or it was set at creation without a recorded change. Do NOT attribute it to the workflow creator or the issue reporter/assignee — leave the author unresolved.", label, args.IssueKey)
+			}
+			return fmt.Sprintf("No label changes are recorded in the changelog of %s. Do NOT guess an author from the reporter, assignee, or workflow creator — leave it unresolved.", args.IssueKey)
+		}
+		var sb strings.Builder
+		if label != "" {
+			fmt.Fprintf(&sb, "Label-change history for %q on %s (oldest first):\n", label, args.IssueKey)
+		} else {
+			fmt.Fprintf(&sb, "Label-change history for %s (oldest first):\n", args.IssueKey)
+		}
+		var lastAdd *atlassian.LabelChange
+		for i := range changes {
+			ch := changes[i]
+			emailPart := ""
+			if ch.Email != "" {
+				emailPart = ", email=" + ch.Email
+			}
+			fmt.Fprintf(&sb, "- %s %q by %s (accountId=%s%s) at %s\n",
+				ch.Action, ch.Label, ch.Author, ch.AccountID, emailPart, ch.Created)
+			if ch.Action == "added" {
+				lastAdd = &changes[i]
+			}
+		}
+		if lastAdd != nil {
+			emailPart := ""
+			if lastAdd.Email != "" {
+				emailPart = ", email=" + lastAdd.Email
+			}
+			fmt.Fprintf(&sb, "\nMost recent ADD: %s (accountId=%s%s) at %s. Attribute the label to THIS person. If this person is the arbetern automation/bot account, fall back to the most recent ADD by a human instead.\n",
+				lastAdd.Author, lastAdd.AccountID, emailPart, lastAdd.Created)
+		} else {
+			fmt.Fprintf(&sb, "\nNo ADD entry found (only removals). Leave the author unresolved rather than guessing.\n")
+		}
+		log.Printf("[user=%s channel=%s] fetched Jira label history for %s (%d changes)", userID, channelID, args.IssueKey, len(changes))
+		return sb.String()
+
 	case "update_jira_issue":
 		if errMsg := requireReady("Jira", h.jiraClient); errMsg != "" {
 			return errMsg
@@ -3161,6 +3261,47 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		}
 		return fmt.Sprintf("Slack User Info:\n  User ID: %s\n  Real Name: %s\n  Display Name: %s\n  Email: %s\n  Title: %s",
 			user.ID, user.RealName, user.Profile.DisplayName, user.Profile.Email, user.Profile.Title)
+
+	case "lookup_slack_user":
+		args, errMsg := parseToolArgs[struct {
+			Email string `json:"email"`
+			Name  string `json:"name"`
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
+		}
+		email := strings.TrimSpace(args.Email)
+		name := strings.TrimSpace(args.Name)
+		if email == "" && name == "" {
+			return "Error: provide at least one of 'email' or 'name'."
+		}
+		// Email is the reliable key — try it first.
+		if email != "" {
+			if user, err := h.slackClient.GetUserByEmail(email); err == nil && user != nil {
+				log.Printf("[user=%s channel=%s] resolved Slack user by email → %s", userID, channelID, user.ID)
+				return fmt.Sprintf("Resolved Slack user by email.\n  User ID: %s\n  Mention: <@%s>\n  Real Name: %s\n  Display Name: %s\n\nUse the Mention token <@%s> verbatim in a Slack message to actually ping this person.",
+					user.ID, user.ID, user.RealName, user.Profile.DisplayName, user.ID)
+			} else if err != nil {
+				log.Printf("[user=%s channel=%s] Slack lookup by email failed: %v", userID, channelID, err)
+			}
+		}
+		// Fallback: conservative exact name match.
+		if name != "" {
+			user, matched, err := h.slackClient.GetUserByName(name)
+			if err != nil {
+				return fmt.Sprintf("Error looking up Slack user by name: %v", err)
+			}
+			if matched && user != nil {
+				log.Printf("[user=%s channel=%s] resolved Slack user by name %q → %s", userID, channelID, name, user.ID)
+				return fmt.Sprintf("Resolved Slack user by name (unique match).\n  User ID: %s\n  Mention: <@%s>\n  Real Name: %s\n  Display Name: %s\n\nUse the Mention token <@%s> verbatim in a Slack message to actually ping this person.",
+					user.ID, user.ID, user.RealName, user.Profile.DisplayName, user.ID)
+			}
+		}
+		hint := ""
+		if email == "" {
+			hint = " No email was provided — the source system may hide it; a name-only match is only possible when exactly one Slack user has that name."
+		}
+		return fmt.Sprintf("Could not uniquely resolve a Slack user from the given email/name.%s Do NOT invent a Slack ID. Fall back to plain text \"@%s\" (which does not ping) for attribution.", hint, name)
 
 	case "resolve_jira_team":
 		if errMsg := requireReady("Jira", h.jiraClient); errMsg != "" {

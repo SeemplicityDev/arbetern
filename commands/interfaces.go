@@ -13,6 +13,8 @@ type SlackClient interface {
 	PostThreadBlocks(channelID, threadTS, fallback string, blocks []slacklib.Block) error
 	GetPermalink(channelID, messageTS string) (string, error)
 	GetUserInfo(userID string) (*slacklib.User, error)
+	GetUserByEmail(email string) (*slacklib.User, error)
+	GetUserByName(name string) (*slacklib.User, bool, error)
 	UploadFileSnippet(channelID, threadTS, filename, title, content, filetype string) (string, error)
 }
 

@@ -1657,6 +1657,138 @@ func (c *Client) GetIssue(issueKey string) (*IssueSummary, error) {
 	}, nil
 }
 
+// LabelChange is a single add/remove of one label, attributed to the Jira user
+// who made the change, as recorded in the issue changelog.
+type LabelChange struct {
+	Action    string `json:"action"` // "added" or "removed"
+	Label     string `json:"label"`
+	Author    string `json:"author"`     // display name
+	AccountID string `json:"account_id"` // Jira account ID
+	Email     string `json:"email,omitempty"`
+	Created   string `json:"created"` // raw Jira timestamp
+}
+
+// GetLabelChangeHistory reads the full changelog of an issue and returns every
+// add/remove of the given label, in chronological order (oldest first). It is
+// the authoritative way to determine WHO added a label — the issue fields alone
+// (reporter/assignee) do not reveal label authorship. If label is empty, all
+// label changes are returned. The changelog endpoint is paginated; this walks
+// every page.
+func (c *Client) GetLabelChangeHistory(issueKey, label string) ([]LabelChange, error) {
+	const pageSize = 100
+	target := strings.TrimSpace(label)
+
+	var changes []LabelChange
+	startAt := 0
+	for page := 0; page < 100; page++ { // hard cap to avoid unbounded looping
+		reqURL := fmt.Sprintf("%s/rest/api/3/issue/%s/changelog?startAt=%d&maxResults=%d",
+			c.baseURL, url.PathEscape(issueKey), startAt, pageSize)
+
+		req, err := http.NewRequest(http.MethodGet, reqURL, nil)
+		if err != nil {
+			return nil, fmt.Errorf("create request: %w", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		if err := c.authRequest(req); err != nil {
+			return nil, fmt.Errorf("auth request: %w", err)
+		}
+
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("send request: %w", err)
+		}
+		respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
+		_ = resp.Body.Close()
+		if err != nil {
+			return nil, fmt.Errorf("read response: %w", err)
+		}
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			return nil, fmt.Errorf("jira API error (HTTP %d): %s", resp.StatusCode, string(respBody))
+		}
+
+		var pageResp struct {
+			MaxResults int  `json:"maxResults"`
+			Total      int  `json:"total"`
+			IsLast     bool `json:"isLast"`
+			Values     []struct {
+				Created string `json:"created"`
+				Author  struct {
+					DisplayName  string `json:"displayName"`
+					AccountID    string `json:"accountId"`
+					EmailAddress string `json:"emailAddress"`
+				} `json:"author"`
+				Items []struct {
+					Field      string `json:"field"`
+					FieldID    string `json:"fieldId"`
+					FromString string `json:"fromString"`
+					ToString   string `json:"toString"`
+				} `json:"items"`
+			} `json:"values"`
+		}
+		if err := json.Unmarshal(respBody, &pageResp); err != nil {
+			return nil, fmt.Errorf("unmarshal response: %w", err)
+		}
+
+		for _, h := range pageResp.Values {
+			for _, it := range h.Items {
+				if it.Field != "labels" && it.FieldID != "labels" {
+					continue
+				}
+				added, removed := diffLabelTokens(it.FromString, it.ToString)
+				record := func(action string, labels []string) {
+					for _, lbl := range labels {
+						if target != "" && lbl != target {
+							continue
+						}
+						changes = append(changes, LabelChange{
+							Action:    action,
+							Label:     lbl,
+							Author:    h.Author.DisplayName,
+							AccountID: h.Author.AccountID,
+							Email:     h.Author.EmailAddress,
+							Created:   h.Created,
+						})
+					}
+				}
+				record("added", added)
+				record("removed", removed)
+			}
+		}
+
+		startAt += pageSize
+		if pageResp.IsLast || len(pageResp.Values) == 0 ||
+			(pageResp.Total > 0 && startAt >= pageResp.Total) {
+			break
+		}
+	}
+
+	return changes, nil
+}
+
+// diffLabelTokens returns the labels added (in to but not from) and removed
+// (in from but not to) between two space-separated Jira label strings.
+func diffLabelTokens(from, to string) (added, removed []string) {
+	fromSet := map[string]bool{}
+	for _, t := range strings.Fields(from) {
+		fromSet[t] = true
+	}
+	toSet := map[string]bool{}
+	for _, t := range strings.Fields(to) {
+		toSet[t] = true
+	}
+	for t := range toSet {
+		if !fromSet[t] {
+			added = append(added, t)
+		}
+	}
+	for t := range fromSet {
+		if !toSet[t] {
+			removed = append(removed, t)
+		}
+	}
+	return added, removed
+}
+
 // UpdateIssueDescription updates only the description of a Jira issue using ADF format.
 func (c *Client) UpdateIssueDescription(issueKey, description string) error {
 	adf := textToADF(description)

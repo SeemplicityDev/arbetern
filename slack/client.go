@@ -196,6 +196,53 @@ func (c *Client) GetUserByEmail(email string) (*slack.User, error) {
 	return user, nil
 }
 
+// GetUserByName resolves a Slack user from a display/real name by scanning the
+// workspace directory (users.list). It returns a match ONLY when exactly one
+// non-deleted, non-bot user matches the name (case-insensitive) on their real
+// name, profile real name, or display name — so an ambiguous or absent name
+// never resolves to the wrong person. matched reports whether a unique match
+// was found; err is reserved for transport/API failures. This is a fallback
+// for when a more reliable key (email) is unavailable, e.g. because the source
+// system hides the user's email for privacy.
+func (c *Client) GetUserByName(name string) (user *slack.User, matched bool, err error) {
+	target := strings.TrimSpace(strings.ToLower(name))
+	if target == "" {
+		return nil, false, nil
+	}
+	users, err := c.api.GetUsers()
+	if err != nil {
+		return nil, false, fmt.Errorf("failed to list users: %w", err)
+	}
+	var found *slack.User
+	for i := range users {
+		u := &users[i]
+		if u.Deleted || u.IsBot {
+			continue
+		}
+		candidates := []string{u.RealName, u.Profile.RealName, u.Profile.RealNameNormalized, u.Profile.DisplayName, u.Profile.DisplayNameNormalized}
+		isMatch := false
+		for _, cand := range candidates {
+			if strings.TrimSpace(strings.ToLower(cand)) == target {
+				isMatch = true
+				break
+			}
+		}
+		if !isMatch {
+			continue
+		}
+		if found != nil && found.ID != u.ID {
+			// Ambiguous: more than one distinct user shares this name. Refuse
+			// to guess rather than risk pinging the wrong person.
+			return nil, false, nil
+		}
+		found = u
+	}
+	if found == nil {
+		return nil, false, nil
+	}
+	return found, true, nil
+}
+
 // GetTeamURL returns the Slack workspace URL (e.g. "https://myorg.slack.com/").
 func (c *Client) GetTeamURL() (string, error) {
 	resp, err := c.api.AuthTest()

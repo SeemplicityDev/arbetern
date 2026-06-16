@@ -33,6 +33,24 @@ func stripWhitespace(s string) string {
 	return b.String()
 }
 
+// neutralizeUserPing replaces an active Slack mention of userID (the form
+// <@U123> or <@U123|label>) with a non-pinging marker so the message no longer
+// notifies that user. It returns the rewritten text and whether any mention was
+// changed. Used as a headless backstop: a scheduled tick has no requesting
+// user, so an active ping of the workflow creator almost always means the model
+// fell back to the creator's identity after failing to resolve the real person.
+func neutralizeUserPing(text, userID string) (string, bool) {
+	userID = strings.TrimSpace(userID)
+	if userID == "" || text == "" {
+		return text, false
+	}
+	re := regexp.MustCompile(`<@` + regexp.QuoteMeta(userID) + `(?:\|[^>]*)?>`)
+	if !re.MatchString(text) {
+		return text, false
+	}
+	return re.ReplaceAllString(text, "an unresolved user"), true
+}
+
 // buildPRBody returns the PR body for a write-tool call. When the caller
 // supplied pr_body (trimmed non-empty) we use it verbatim and append a
 // one-line Slack attribution footer so reviewers still know which user /
