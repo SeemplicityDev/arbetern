@@ -97,6 +97,11 @@ type GeneralHandler struct {
 	// tick rather than a Slack-driven command. Affects tool gating (e.g.
 	// reply_in_thread is suppressed) and suppresses audit messaging.
 	headless bool
+	// requesterEmail is the OAuth-proxy-verified email of the web-chat user,
+	// set only for interactive chat turns (which are also headless). Empty for
+	// Slack commands and scheduled workflows. Used to attribute a created Jira
+	// ticket's Reporter to the requester when there is no Slack identity.
+	requesterEmail string
 }
 
 // cachedAggregate is one datadog_logs_aggregate result retained for the
@@ -1894,6 +1899,65 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 	return tools
 }
 
+// resolveJiraReporterByEmail resolves an email address to a Jira accountId for
+// the Reporter field via the Jira user search (email is the exact, reliable
+// key). It returns empty strings when no Jira account matches. The email is
+// never logged (CWE-312).
+func (h *GeneralHandler) resolveJiraReporterByEmail(email string) (accountID, displayName string) {
+	email = strings.TrimSpace(email)
+	if email == "" || h.jiraClient == nil {
+		return "", ""
+	}
+	users, err := h.jiraClient.SearchUsersGeneral(email)
+	if err != nil {
+		log.Printf("reporter resolution: Jira user search by email failed: %v", err)
+		return "", ""
+	}
+	if len(users) > 0 {
+		return users[0].AccountID, users[0].DisplayName
+	}
+	return "", ""
+}
+
+// resolveRequesterReporter maps the originating human Slack requester to their
+// Jira accountId so a created ticket can record Reporter = the real person who
+// asked for it (auditability/compliance). It reuses the Slack email resolver
+// chain: Slack user_id → email (users.info) → Jira accountId (email-first, then
+// a confident display-name match).
+//
+// It returns empty strings when the requester cannot be confidently resolved —
+// no Slack user id (e.g. a scheduled workflow tick), a profile with no email
+// and no unique name match, or no matching Jira account — in which case callers
+// leave the reporter unset so Jira defaults it to the bot/service account. The
+// requester's email is never logged (CWE-312); only non-sensitive identifiers
+// appear in logs.
+func (h *GeneralHandler) resolveRequesterReporter(userID string) (accountID, displayName string) {
+	userID = strings.TrimSpace(userID)
+	if userID == "" || h.slackClient == nil || h.jiraClient == nil {
+		return "", ""
+	}
+	user, err := h.slackClient.GetUserInfo(userID)
+	if err != nil {
+		log.Printf("[user=%s] reporter resolution: Slack users.info lookup failed: %v", userID, err)
+		return "", ""
+	}
+	// Email is the most reliable key.
+	if id, name := h.resolveJiraReporterByEmail(user.Profile.Email); id != "" {
+		return id, name
+	}
+	// Fallback: resolve by display name, but only accept a confident match so a
+	// compliance-sensitive field is never attributed to the wrong person.
+	realName := strings.TrimSpace(user.RealName)
+	if realName != "" {
+		if users, err := h.jiraClient.SearchUsersGeneral(realName); err != nil {
+			log.Printf("[user=%s] reporter resolution: Jira user search by name %q failed: %v", userID, realName, err)
+		} else if best, ok := atlassian.BestUserMatch(users, realName); ok {
+			return best.AccountID, best.DisplayName
+		}
+	}
+	return "", ""
+}
+
 func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, auditTS, name, argsJSON string) string {
 	if out, handled := h.executeDashboardTool(ctx, userID, channelID, name, argsJSON); handled {
 		return out
@@ -2886,15 +2950,49 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 			}
 		}
 
-		issue, err := h.jiraClient.CreateIssue(atlassian.CreateIssueInput{
+		// Attribute the Reporter to the human who made the request: an
+		// interactive Slack command resolves via the Slack user id; a web-chat
+		// turn behind the OAuth proxy resolves via the verified email. Headless
+		// automation (scheduled workflows) has no requester, so the reporter is
+		// left unset and Jira defaults it to the Arbetern service account.
+		var reporterID, reporterName string
+		switch {
+		case !h.headless:
+			reporterID, reporterName = h.resolveRequesterReporter(userID)
+		case h.requesterEmail != "":
+			reporterID, reporterName = h.resolveJiraReporterByEmail(h.requesterEmail)
+		}
+		if !h.headless || h.requesterEmail != "" {
+			if reporterID != "" {
+				log.Printf("[user=%s channel=%s] setting Jira reporter to requester %s (%s)", userID, channelID, reporterName, reporterID)
+			} else {
+				log.Printf("[user=%s channel=%s] could not resolve requester to a Jira account; reporter defaults to the Arbetern service account", userID, channelID)
+			}
+		}
+
+		createInput := atlassian.CreateIssueInput{
 			Project:     args.Project,
 			Summary:     args.Summary,
 			Description: args.Description,
 			IssueType:   args.IssueType,
 			Labels:      args.Labels,
 			AssigneeID:  assigneeID,
+			ReporterID:  reporterID,
 			Fields:      args.Fields,
-		})
+		}
+		issue, err := h.jiraClient.CreateIssue(createInput)
+		if err != nil && reporterID != "" && strings.Contains(strings.ToLower(err.Error()), "reporter") {
+			// The service account likely lacks the "Modify Reporter" permission
+			// (a separate Jira permission from Create Issues), so Jira rejected
+			// the reporter field. Retry without it rather than failing the whole
+			// request: the ticket is still created (reporter defaults to the
+			// service account) and the gap is logged so an operator can grant
+			// the permission to restore human attribution.
+			log.Printf("[user=%s channel=%s] Jira rejected reporter on create (%v); retrying without reporter — grant the service account 'Modify Reporter' to attribute tickets to the requester", userID, channelID, err)
+			createInput.ReporterID = ""
+			reporterName = ""
+			issue, err = h.jiraClient.CreateIssue(createInput)
+		}
 		if err != nil {
 			return fmt.Sprintf("Error creating Jira ticket: %v", err)
 		}
@@ -2929,7 +3027,11 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		}
 
 		log.Printf("[user=%s channel=%s] created Jira ticket %s: %s", userID, channelID, issue.Key, issue.Browse)
-		return fmt.Sprintf("Jira ticket created: *%s* — %s\nSummary: %s", issue.Key, issue.Browse, args.Summary)
+		result := fmt.Sprintf("Jira ticket created: *%s* — %s\nSummary: %s", issue.Key, issue.Browse, args.Summary)
+		if reporterName != "" {
+			result += fmt.Sprintf("\nReporter: %s (the requesting user)", reporterName)
+		}
+		return result
 
 	case "list_jira_projects":
 		if errMsg := requireReady("Jira", h.jiraClient); errMsg != "" {

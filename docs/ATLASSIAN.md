@@ -166,6 +166,7 @@ Classic API tokens inherit **all** permissions of the account, so using a person
    | `BROWSE_PROJECTS` | Browse Projects | List projects and view project metadata |
    | `CREATE_ISSUES` | Create Issues | Create new tickets via the API |
    | `EDIT_ISSUES` | Edit Issues | Update ticket descriptions and summaries (used by Seihin agent) |
+   | `MODIFY_REPORTER` | Modify Reporter | Set the Reporter to the originating human on create (see [Reporter attribution](#reporter-attribution)) |
 
 3. **Generate the API token** from the service account:
    - Log in as the service account at [id.atlassian.com](https://id.atlassian.com/manage-profile/security/api-tokens).
@@ -173,6 +174,34 @@ Classic API tokens inherit **all** permissions of the account, so using a person
    - Use this token as `ATLASSIAN_API_TOKEN` and the service account email as `ATLASSIAN_EMAIL`.
 
 > **Note:** If your Jira instance uses a custom permission scheme, verify that the *Member* role includes `BROWSE_PROJECTS` and `CREATE_ISSUES`. Check under **Jira Administration → Permission Schemes**.
+
+## Reporter attribution
+
+When Arbetern creates a Jira ticket it sets the **Reporter** to the human who actually
+requested it, so every ticket is traceable back to a real person rather than the bot
+service account. The requester is resolved to a Jira account ID and passed as
+`reporter.accountId` on issue creation. How the requester is identified depends on the
+surface:
+
+| Surface | Reporter resolved from | Result |
+|---|---|---|
+| **Slack** (slash command, DM) | Slack user → email (`users.info`) → Jira account | Reporter = the Slack user who ran the command |
+| **Web chat UI** (with SSO) | OAuth-proxy-verified email (`X-Auth-Request-Email`) → Jira account | Reporter = the signed-in chat user |
+| **Scheduled workflow / automation** | — (no human requester) | Reporter defaults to the service account (Arbetern) |
+
+Notes:
+
+- The web-chat path requires the [oauth2-proxy SSO](../README.md#authentication-sso) in
+  front of the app so the verified email is available; without a proxy (local dev) the
+  reporter falls back to the service account.
+- Resolution is **email-first** (the reliable key); the Slack path falls back to a
+  confident display-name match. If the requester cannot be matched to a Jira account, the
+  ticket is still created with the service account as reporter.
+- Setting Reporter on create requires the service account to hold the **Modify Reporter**
+  project permission (separate from Create Issues). Without it, Jira rejects the reporter
+  field — Arbetern then retries and creates the ticket with the default (service-account)
+  reporter, logging that the permission is missing.
+
 
 ## Usage
 

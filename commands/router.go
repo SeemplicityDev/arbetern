@@ -365,17 +365,20 @@ func (r *Router) RunWorkflow(ctx context.Context, userID, prompt string) (string
 // RunChat runs an interactive UI chat turn through this agent's LLM tool-loop,
 // giving the centralized web chat the same tool access (GitHub, Jira, Datadog,
 // Databricks, …) as a Slack command. history is the prior transcript (oldest
-// first) and userMessage is the new turn. There is no Slack channel or thread,
-// so Slack-only tools are suppressed (headless) and the final assistant text is
+// first) and userMessage is the new turn. userEmail is the OAuth-proxy-verified
+// sender (or "" when no proxy is in front); it lets a created Jira ticket record
+// Reporter = the requesting human. There is no Slack channel or thread, so
+// Slack-only tools are suppressed (headless) and the final assistant text is
 // returned to the caller (the chat registry) to persist and display.
 //
 // Returns the reply text or the first tool-loop error.
-func (r *Router) RunChat(ctx context.Context, history []llm.ChatMessage, userMessage string) (string, error) {
+func (r *Router) RunChat(ctx context.Context, userEmail string, history []llm.ChatMessage, userMessage string) (string, error) {
 	if strings.TrimSpace(userMessage) == "" {
 		return "", fmt.Errorf("chat message is empty")
 	}
 	userContext := fmt.Sprintf("Interactive chat with the %s agent through the web UI (no Slack thread). Answer directly and use tools to fetch real data before responding.", r.agentID)
 	h := r.newGeneralHandler(userContext, nil)
 	h.headless = true
+	h.requesterEmail = userEmail
 	return h.ExecuteChat(ctx, "ui-chat", history, userMessage)
 }

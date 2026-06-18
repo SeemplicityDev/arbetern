@@ -393,6 +393,11 @@ When access is denied the chat API returns `403` and the UI shows a friendly
 button). Lookups (email→Slack-ID and team membership) are cached for 5 minutes
 to stay within Slack's rate limits.
 
+The same oauth2-proxy-verified email is used to attribute **Jira tickets created
+from the chat UI**: the Reporter is set to that user's Jira account, matching the
+behavior of Slack commands. See
+[Reporter attribution](docs/ATLASSIAN.md#reporter-attribution).
+
 ## Per-Agent Credentials (Integration Overrides)
 
 Each agent normally shares the same integration credentials (Salesforce, Atlassian, Chorus, Datadog, NVD, Azure cost). When a single agent needs its own Salesforce app / Atlassian tenant / Datadog account / etc. you can override individual keys *for that agent only* — every key you do not override falls through to the global value.

@@ -1389,7 +1389,7 @@ func main() {
 	// disk that every viewer sees. The responder replays recent history and
 	// runs the agent's full tool loop (RunChat) so the chat can use the same
 	// integrations as a Slack command.
-	chatRegistry := chat.New(cfg.ChatDir, func(ctx context.Context, agentID string, history []chat.Message, userMessage string) (string, error) {
+	chatRegistry := chat.New(cfg.ChatDir, func(ctx context.Context, agentID, user string, history []chat.Message, userMessage string) (string, error) {
 		router := routers[agentID]
 		if router == nil {
 			return "", fmt.Errorf("no router configured for agent %q", agentID)
@@ -1406,7 +1406,9 @@ func main() {
 		// Datadog, Databricks, …) and multi-round agentic loop as a Slack
 		// command — replacing the old single-shot, tool-less completion that
 		// could only role-play "running the query" without executing anything.
-		return router.RunChat(ctx, msgs, userMessage)
+		// user is the OAuth-proxy-verified email (when present) used to
+		// attribute a created Jira ticket's reporter to the requester.
+		return router.RunChat(ctx, user, msgs, userMessage)
 	})
 	for _, agent := range agents {
 		chatRegistry.SetEnabled(agent.ID, agent.ChatEnabled)

@@ -52,9 +52,11 @@ type Message struct {
 }
 
 // Responder produces an assistant reply for an agent given the prior
-// transcript (most recent last) and the new user message. It is implemented in
-// main using the shared LLM client and the agent's system prompt.
-type Responder func(ctx context.Context, agent string, history []Message, userMessage string) (string, error)
+// transcript (most recent last) and the new user message. user is the
+// resolved sender identity (the OAuth-proxy-verified email when a proxy is in
+// front, else any client-supplied name), or "" when unknown. It is implemented
+// in main using the shared LLM client and the agent's system prompt.
+type Responder func(ctx context.Context, agent, user string, history []Message, userMessage string) (string, error)
 
 // transcript is the on-disk shape of a single conversation. Each agent may
 // have many, stored at <root>/<agent>/<id>.json.
@@ -402,7 +404,7 @@ func (r *Registry) Post(ctx context.Context, agent, id, user, message string) (M
 	}
 	r.mu.Unlock()
 
-	reply, err := r.respond(ctx, agent, contextMsgs, message)
+	reply, err := r.respond(ctx, agent, user, contextMsgs, message)
 	if err != nil {
 		return Message{}, err
 	}

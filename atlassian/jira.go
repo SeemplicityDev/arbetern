@@ -79,6 +79,12 @@ type CreateIssueInput struct {
 	IssueType   string // e.g. "Task", "Bug", "Story"
 	Labels      []string
 	AssigneeID  string // Jira account ID of the assignee (optional)
+	// ReporterID is the Jira account ID of the human who originated the
+	// request (optional). When set, the created issue records Reporter =
+	// that person for auditability/compliance instead of the service account
+	// that authenticates against the API. Leave empty for headless/automation
+	// runs so Jira defaults the reporter to the bot/service account.
+	ReporterID string
 	// Fields is an escape hatch for arbitrary Jira create-issue fields
 	// (e.g. "priority": {"name":"High"}, "components": [{"name":"API"}],
 	// or any "customfield_XXXXX"). Values are merged into the request
@@ -101,6 +107,7 @@ type createIssueFields struct {
 	Description *adfDoc     `json:"description,omitempty"`
 	Labels      []string    `json:"labels,omitempty"`
 	Assignee    *accountRef `json:"assignee,omitempty"`
+	Reporter    *accountRef `json:"reporter,omitempty"`
 }
 
 type accountRef struct {
@@ -544,6 +551,9 @@ func (c *Client) CreateIssue(input CreateIssueInput) (*Issue, error) {
 	}
 	if input.AssigneeID != "" {
 		payload.Fields.Assignee = &accountRef{AccountID: input.AssigneeID}
+	}
+	if input.ReporterID != "" {
+		payload.Fields.Reporter = &accountRef{AccountID: input.ReporterID}
 	}
 
 	body, err := marshalCreateIssueBody(payload, input.Fields)
