@@ -251,6 +251,43 @@ func FormatMonitorDetail(m *Monitor, site string) string {
 	return sb.String()
 }
 
+// maxLogAttrLeaves caps how many flattened attribute leaves render per log
+// entry so a deeply nested event can't blow up the output.
+const maxLogAttrLeaves = 100
+
+// flattenLogAttrs walks a nested log attribute value into sorted
+// "dotted.path:value" leaves appended to out, so nested fields are readable in
+// results, not only matchable in queries.
+func flattenLogAttrs(prefix string, v interface{}, out *[]string) {
+	switch t := v.(type) {
+	case map[string]interface{}:
+		keys := make([]string, 0, len(t))
+		for k := range t {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			child := k
+			if prefix != "" {
+				child = prefix + "." + k
+			}
+			flattenLogAttrs(child, t[k], out)
+		}
+	case []interface{}:
+		for i, item := range t {
+			flattenLogAttrs(fmt.Sprintf("%s.%d", prefix, i), item, out)
+		}
+	case nil:
+		return
+	default:
+		s := fmt.Sprintf("%v", t)
+		if len(s) > 200 {
+			s = s[:200] + "…"
+		}
+		*out = append(*out, prefix+":"+s)
+	}
+}
+
 // FormatLogSearch returns a Slack-friendly summary of log search results.
 func FormatLogSearch(resp *LogSearchResponse, site string) string {
 	if len(resp.Data) == 0 {
@@ -291,20 +328,13 @@ func FormatLogSearch(resp *LogSearchResponse, site string) string {
 			fmt.Fprintf(&sb, "  %s\n", strings.Join(attrs.Tags, " "))
 		}
 		if len(attrs.Attributes) > 0 {
-			keys := make([]string, 0, len(attrs.Attributes))
-			for k, v := range attrs.Attributes {
-				switch v.(type) {
-				case map[string]interface{}, []interface{}:
-					continue
-				}
-				keys = append(keys, k)
+			parts := make([]string, 0, len(attrs.Attributes))
+			flattenLogAttrs("", attrs.Attributes, &parts)
+			if len(parts) > maxLogAttrLeaves {
+				extra := len(parts) - maxLogAttrLeaves
+				parts = append(parts[:maxLogAttrLeaves], fmt.Sprintf("(+%d more)", extra))
 			}
-			if len(keys) > 0 {
-				sort.Strings(keys)
-				parts := make([]string, 0, len(keys))
-				for _, k := range keys {
-					parts = append(parts, fmt.Sprintf("%s:%v", k, attrs.Attributes[k]))
-				}
+			if len(parts) > 0 {
 				fmt.Fprintf(&sb, "  attrs: %s\n", strings.Join(parts, " "))
 			}
 		}
