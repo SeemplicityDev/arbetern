@@ -187,6 +187,12 @@ secretValues:
   # databricks-client-id: ""        # Service principal OAuth client ID (application ID)
   # databricks-client-secret: ""    # Service principal OAuth secret
   # databricks-warehouse-id: ""     # SQL warehouse ID that runs statements (from the warehouse's "Connection details")
+  # ClickHouse Cloud (optional — enables the read-only clickhouse_usage_cost tool for the ovad agent only).
+  # Auth is HTTP Basic: create an API key (key ID + secret) in the ClickHouse Cloud console and note your
+  # organization ID. All three keys are required to enable the integration. See docs/CLICKHOUSE.md.
+  # clickhouse-key-id: ""             # Cloud API key ID (HTTP Basic username)
+  # clickhouse-key-secret: ""         # Cloud API key secret (HTTP Basic password)
+  # clickhouse-organization-id: ""    # Organization ID the usage-cost report covers
 
 # Optional OAuth2 authentication proxy (oauth2-proxy subchart). Disabled by
 # default; values are passed straight through to the subchart

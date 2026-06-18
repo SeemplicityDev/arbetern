@@ -15,6 +15,7 @@ import (
 	"github.com/justmike1/arbetern/aws"
 	"github.com/justmike1/arbetern/azure"
 	"github.com/justmike1/arbetern/chorus"
+	"github.com/justmike1/arbetern/clickhouse"
 	"github.com/justmike1/arbetern/config"
 	"github.com/justmike1/arbetern/dashboards"
 	"github.com/justmike1/arbetern/databricks"
@@ -63,6 +64,7 @@ type GeneralHandler struct {
 	awsClient        *aws.Client
 	azureClient      *azure.Client
 	databricksClient *databricks.Client
+	clickhouseClient *clickhouse.Client
 	dashboards       *dashboards.Registry
 	workflows        *workflows.Registry
 	contextProvider  *ContextProvider
@@ -1868,6 +1870,30 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 						"row_limit":{"type":"integer","description":"Maximum rows to return (1..10000). Defaults to 1000. Large result sets are truncated with a marker."}
 					},
 					"required":["sql"]
+				}`),
+			},
+		})
+	}
+
+	// clickhouse_usage_cost: ClickHouse Cloud organization billing report.
+	// Gated by the per-agent integration allowlist in helpers.go
+	// (restrictedIntegrations) — currently ovad only — AND by the client having
+	// authenticated at least once, so the tool never advertises itself when the
+	// credentials are unusable.
+	if h.canUseIntegration(integrationClickHouse) && h.clickhouseClient != nil && h.clickhouseClient.Ready() {
+		tools = append(tools, llm.Tool{
+			Type: "function",
+			Function: llm.ToolFunction{
+				Name:        "clickhouse_usage_cost",
+				Description: "Retrieve the ClickHouse Cloud organization usage-cost report for a date range. Returns the grand total plus a per-day, per-entity breakdown of spend in ClickHouse Credits (CHC), where each entity is a service, data warehouse or ClickPipe, plus a cost-by-category split (compute, storage, backup, data transfer). Use for questions like 'what did we spend on ClickHouse last week / this month' or 'which service is driving ClickHouse cost'. The window is capped at 31 days: to_date may be at most 30 days after from_date. Dates are ISO-8601 (YYYY-MM-DD) and evaluated in UTC. Optionally narrow by resource tag via 'filters' (e.g. \"tag:Environment=Production\").",
+				Parameters: json.RawMessage(`{
+					"type":"object",
+					"properties":{
+						"from_date":{"type":"string","description":"Start date of the report window, inclusive. ISO-8601 date YYYY-MM-DD (UTC), e.g. 2024-12-01."},
+						"to_date":{"type":"string","description":"End date of the report window, inclusive. ISO-8601 date YYYY-MM-DD (UTC). Must be on or after from_date and at most 30 days after it (max 31-day window)."},
+						"filters":{"type":"array","items":{"type":"string"},"description":"Optional resource-tag filters, e.g. [\"tag:Environment=Production\"]. Only tag filters are supported. Omit for the whole organization."}
+					},
+					"required":["from_date","to_date"]
 				}`),
 			},
 		})
@@ -4476,6 +4502,31 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		log.Printf("[user=%s channel=%s] databricks_query (warehouse=%s, statement=%s, rows=%d, truncated=%t)",
 			userID, channelID, res.WarehouseID, res.StatementID, res.RowCount, res.Truncated)
 		return databricks.FormatQueryResult(res)
+
+	// ---- ClickHouse Cloud billing (ovad only) ----
+
+	case "clickhouse_usage_cost":
+		if errMsg := requireReady("ClickHouse", h.clickhouseClient); errMsg != "" {
+			return errMsg
+		}
+		args, errMsg := parseToolArgs[struct {
+			FromDate string   `json:"from_date"`
+			ToDate   string   `json:"to_date"`
+			Filters  []string `json:"filters"`
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
+		}
+		if strings.TrimSpace(args.FromDate) == "" || strings.TrimSpace(args.ToDate) == "" {
+			return preconditionErrf("Error: from_date and to_date are required (YYYY-MM-DD).")
+		}
+		res, err := h.clickhouseClient.GetUsageCost(ctx, args.FromDate, args.ToDate, args.Filters)
+		if err != nil {
+			return fmt.Sprintf("Error fetching ClickHouse usage cost: %v", err)
+		}
+		log.Printf("[user=%s channel=%s] clickhouse_usage_cost (org=%s, window=%s..%s, records=%d, grandTotalCHC=%.2f)",
+			userID, channelID, res.OrganizationID, res.FromDate, res.ToDate, len(res.Records), res.GrandTotalCHC)
+		return clickhouse.FormatUsageCost(res)
 
 	case "http_get":
 		args, errMsg := parseToolArgs[struct {

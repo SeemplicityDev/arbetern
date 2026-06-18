@@ -94,6 +94,7 @@ const (
 	integrationDatadog    = "datadog"
 	integrationAWS        = "aws"
 	integrationDatabricks = "databricks"
+	integrationClickHouse = "clickhouse"
 )
 
 // restrictedIntegrations is the single source of truth for hard per-agent
@@ -126,6 +127,8 @@ var restrictedIntegrations = map[string][]string{
 	integrationAWS: {"ovad"},
 	// Databricks SQL is exposed to the DevOps/SRE agent only.
 	integrationDatabricks: {"ovad"},
+	// ClickHouse Cloud billing is exposed to the DevOps/SRE agent only.
+	integrationClickHouse: {"ovad"},
 }
 
 // toolIntegration maps a tool name to the integration that gates it. Tools
@@ -183,6 +186,8 @@ var toolIntegration = map[string]string{
 	"aws_s3_list_objects":       integrationAWS,
 	// Databricks.
 	"databricks_query": integrationDatabricks,
+	// ClickHouse Cloud billing.
+	"clickhouse_usage_cost": integrationClickHouse,
 }
 
 // agentCanUseIntegration reports whether agentID may use the named

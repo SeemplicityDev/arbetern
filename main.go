@@ -21,6 +21,7 @@ import (
 	"github.com/justmike1/arbetern/azure"
 	"github.com/justmike1/arbetern/chat"
 	"github.com/justmike1/arbetern/chorus"
+	"github.com/justmike1/arbetern/clickhouse"
 	"github.com/justmike1/arbetern/commands"
 	"github.com/justmike1/arbetern/config"
 	"github.com/justmike1/arbetern/dashboards"
@@ -630,6 +631,7 @@ func refreshIntegrations(
 	awsClient *aws.Client,
 	azureClient *azure.Client,
 	databricksClient *databricks.Client,
+	clickhouseClient *clickhouse.Client,
 	modelsClient *llm.Client,
 	codeModelsClient *llm.Client,
 ) {
@@ -1065,6 +1067,26 @@ func refreshIntegrations(
 		})
 	}
 
+	// --- ClickHouse Cloud (Billing usage cost) ---
+	{
+		chConnected := clickhouseClient != nil && clickhouseClient.Ready()
+		chPerms := []permission{
+			{Scope: "billing.usageCost.read", Description: "Read organization usage-cost reports (GET /v1/organizations/{org}/usageCost)", Required: true, Granted: boolPtr(chConnected)},
+		}
+		activeCH := map[string]string{}
+		if clickhouseClient != nil {
+			activeCH["Organization"] = clickhouseClient.OrganizationID()
+		}
+		result = append(result, integration{
+			ID:           "clickhouse",
+			Name:         "ClickHouse Cloud",
+			Configured:   cfg.ClickHouseConfigured(),
+			AuthMode:     "API key (HTTP Basic)",
+			Permissions:  chPerms,
+			ActiveModels: activeCH,
+		})
+	}
+
 	integrationsMu.Lock()
 	integrationsCache = result
 	integrationsMu.Unlock()
@@ -1084,16 +1106,17 @@ func startIntegrationsRefresher(
 	awsClient *aws.Client,
 	azureClient *azure.Client,
 	databricksClient *databricks.Client,
+	clickhouseClient *clickhouse.Client,
 	modelsClient *llm.Client,
 	codeModelsClient *llm.Client,
 ) {
-	refreshIntegrations(cfg, slackClient, ghClient, jiraClient, sfClient, chorusClient, datadogClients, awsClient, azureClient, databricksClient, modelsClient, codeModelsClient)
+	refreshIntegrations(cfg, slackClient, ghClient, jiraClient, sfClient, chorusClient, datadogClients, awsClient, azureClient, databricksClient, clickhouseClient, modelsClient, codeModelsClient)
 
 	go func() {
 		ticker := time.NewTicker(1 * time.Hour)
 		defer ticker.Stop()
 		for range ticker.C {
-			refreshIntegrations(cfg, slackClient, ghClient, jiraClient, sfClient, chorusClient, datadogClients, awsClient, azureClient, databricksClient, modelsClient, codeModelsClient)
+			refreshIntegrations(cfg, slackClient, ghClient, jiraClient, sfClient, chorusClient, datadogClients, awsClient, azureClient, databricksClient, clickhouseClient, modelsClient, codeModelsClient)
 		}
 	}()
 }
@@ -1245,6 +1268,17 @@ func main() {
 		log.Printf("Databricks integration enabled (host: %s, warehouse: %s)", databricksClient.Host(), databricksClient.WarehouseID())
 	}
 
+	// ClickHouse Cloud billing client — HTTP Basic auth (key ID + secret)
+	// against the Cloud API. NewClient probes connectivity in the background
+	// and retries, so the usage-cost tool becomes available once the first
+	// authenticated call succeeds. Only attempted when the key ID, key secret
+	// and organization ID are all present.
+	var clickhouseClient *clickhouse.Client
+	if cfg.ClickHouseConfigured() {
+		clickhouseClient = clickhouse.NewClient(cfg.ClickHouseKeyID, cfg.ClickHouseKeySecret, cfg.ClickHouseOrganizationID)
+		log.Printf("ClickHouse integration enabled (organization: %s)", clickhouseClient.OrganizationID())
+	}
+
 	// Discover agents and register per-agent webhook routes (/<agent>/webhook).
 	agents, err := prompts.DiscoverAgents("")
 	if err != nil {
@@ -1255,7 +1289,7 @@ func main() {
 	}
 
 	// Start background integration permission refresher (runs once now, then every hour).
-	startIntegrationsRefresher(cfg, slackClient, ghClient, jiraClient, sfClient, chorusClient, datadogClients, awsClient, azureClient, databricksClient, modelsClient, codeModelsClient)
+	startIntegrationsRefresher(cfg, slackClient, ghClient, jiraClient, sfClient, chorusClient, datadogClients, awsClient, azureClient, databricksClient, clickhouseClient, modelsClient, codeModelsClient)
 
 	// Thread session store — enables follow-up replies in threads without /commands.
 	sessions := commands.NewSessionStore(cfg.ThreadSessionTTL)
@@ -1355,9 +1389,10 @@ func main() {
 			azure:      azureClient,
 			nvd:        nvdClient,
 			databricks: databricksClient,
+			clickhouse: clickhouseClient,
 		})
 
-		router := commands.NewRouter(slackClient, ghClient, modelsClient, codeModelsClient, agentClients.jira, agentClients.nvd, agentClients.sf, agentClients.chorus, agentClients.datadog, agentClients.aws, agentClients.azure, agentClients.databricks, dashRegistry, wfRegistry, ap, agent.ID, cfg.AppURL, sessions, cfg.MaxToolRounds, userContextStore)
+		router := commands.NewRouter(slackClient, ghClient, modelsClient, codeModelsClient, agentClients.jira, agentClients.nvd, agentClients.sf, agentClients.chorus, agentClients.datadog, agentClients.aws, agentClients.azure, agentClients.databricks, agentClients.clickhouse, dashRegistry, wfRegistry, ap, agent.ID, cfg.AppURL, sessions, cfg.MaxToolRounds, userContextStore)
 		routers[agent.ID] = router
 
 		// Background sweepers for the per-router in-memory caches so

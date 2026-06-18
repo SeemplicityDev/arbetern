@@ -257,6 +257,23 @@ spec:
                   name: {{ .Values.secretName }}
                   key: databricks-warehouse-id
             {{- end }}
+            {{- if index .Values.secretValues "clickhouse-key-id" }}
+            - name: CLICKHOUSE_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: clickhouse-key-id
+            - name: CLICKHOUSE_KEY_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: clickhouse-key-secret
+            - name: CLICKHOUSE_ORGANIZATION_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: clickhouse-organization-id
+            {{- end }}
             - name: GOMEMLIMIT
               value: {{ .Values.goRuntime.goMemLimit | quote }}
             - name: GOGC

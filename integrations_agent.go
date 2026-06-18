@@ -9,6 +9,7 @@ import (
 	"github.com/justmike1/arbetern/aws"
 	"github.com/justmike1/arbetern/azure"
 	"github.com/justmike1/arbetern/chorus"
+	"github.com/justmike1/arbetern/clickhouse"
 	"github.com/justmike1/arbetern/config"
 	"github.com/justmike1/arbetern/databricks"
 	"github.com/justmike1/arbetern/datadog"
@@ -29,6 +30,7 @@ type agentIntegrationClients struct {
 	azure      *azure.Client
 	nvd        *nvd.Client
 	databricks *databricks.Client
+	clickhouse *clickhouse.Client
 }
 
 // buildAgentScopedClients returns a set of integration clients tailored for a
@@ -145,6 +147,17 @@ func buildAgentScopedClients(
 			log.Printf("Databricks override for agent %q (host: %s, warehouse: %s)", agentID, out.databricks.Host(), out.databricks.WarehouseID())
 		} else {
 			out.databricks = nil
+		}
+	}
+
+	if agentCfg.ClickHouseKeyID != globalCfg.ClickHouseKeyID ||
+		agentCfg.ClickHouseKeySecret != globalCfg.ClickHouseKeySecret ||
+		agentCfg.ClickHouseOrganizationID != globalCfg.ClickHouseOrganizationID {
+		if agentCfg.ClickHouseConfigured() {
+			out.clickhouse = clickhouse.NewClient(agentCfg.ClickHouseKeyID, agentCfg.ClickHouseKeySecret, agentCfg.ClickHouseOrganizationID)
+			log.Printf("ClickHouse override for agent %q (organization: %s)", agentID, out.clickhouse.OrganizationID())
+		} else {
+			out.clickhouse = nil
 		}
 	}
 

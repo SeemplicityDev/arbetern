@@ -73,6 +73,13 @@ secretValues:
   # databricks-client-id: "00000000-0000-0000-0000-000000000000"
   # databricks-client-secret: "your-databricks-oauth-secret"
   # databricks-warehouse-id: "1234567890abcdef"
+  # ClickHouse Cloud (optional — enables the read-only clickhouse_usage_cost tool for the ovad agent only).
+  # HTTP Basic auth: create an API key (key ID + secret) in the ClickHouse Cloud console and note your
+  # organization ID. All three keys are required. See docs/CLICKHOUSE.md.
+  # Tip: prefer mounting these under customCredentials.ovad below so only ovad gets them.
+  # clickhouse-key-id: "your-clickhouse-key-id"
+  # clickhouse-key-secret: "your-clickhouse-key-secret"
+  # clickhouse-organization-id: "00000000-0000-0000-0000-000000000000"
 
 # ingress:
 #   enabled: true
@@ -151,6 +158,11 @@ secretValues:
 #     databricks-client-id: "00000000-0000-0000-0000-000000000000"
 #     databricks-client-secret: "REPLACE_ME"
 #     databricks-warehouse-id: "1234567890abcdef"
+#     # ClickHouse Cloud is also gated to ovad in code; mounting it here keeps
+#     # the credentials off every other agent. See docs/CLICKHOUSE.md.
+#     clickhouse-key-id: "REPLACE_ME"
+#     clickhouse-key-secret: "REPLACE_ME"
+#     clickhouse-organization-id: "00000000-0000-0000-0000-000000000000"
 #   pulse:
 #     chorus-api-token: "REPLACE_ME"
 

@@ -11,6 +11,7 @@ import (
 	"github.com/justmike1/arbetern/aws"
 	"github.com/justmike1/arbetern/azure"
 	"github.com/justmike1/arbetern/chorus"
+	"github.com/justmike1/arbetern/clickhouse"
 	"github.com/justmike1/arbetern/dashboards"
 	"github.com/justmike1/arbetern/databricks"
 	"github.com/justmike1/arbetern/datadog"
@@ -35,6 +36,7 @@ type Router struct {
 	awsClient        *aws.Client
 	azureClient      *azure.Client
 	databricksClient *databricks.Client
+	clickhouseClient *clickhouse.Client
 	dashboards       *dashboards.Registry
 	workflows        *workflows.Registry
 	contextProvider  *ContextProvider
@@ -47,7 +49,7 @@ type Router struct {
 	userContextStore *UserContextStore
 }
 
-func NewRouter(slackClient SlackClient, ghClient *github.Client, modelsClient *llm.Client, codeModelsClient *llm.Client, jiraClient *atlassian.Client, nvdClient *nvd.Client, sfClient *salesforce.Client, chorusClient *chorus.Client, datadogClients *datadog.MultiClient, awsClient *aws.Client, azureClient *azure.Client, databricksClient *databricks.Client, dashboardRegistry *dashboards.Registry, workflowRegistry *workflows.Registry, pp PromptProvider, agentID, appURL string, sessions *SessionStore, maxToolRounds int, userContextStore *UserContextStore) *Router {
+func NewRouter(slackClient SlackClient, ghClient *github.Client, modelsClient *llm.Client, codeModelsClient *llm.Client, jiraClient *atlassian.Client, nvdClient *nvd.Client, sfClient *salesforce.Client, chorusClient *chorus.Client, datadogClients *datadog.MultiClient, awsClient *aws.Client, azureClient *azure.Client, databricksClient *databricks.Client, clickhouseClient *clickhouse.Client, dashboardRegistry *dashboards.Registry, workflowRegistry *workflows.Registry, pp PromptProvider, agentID, appURL string, sessions *SessionStore, maxToolRounds int, userContextStore *UserContextStore) *Router {
 	// Channel-context cache reuses the thread session window so that an
 	// active in-thread conversation does not re-fetch Slack history on
 	// every turn. Falls back to the package default when sessions is nil.
@@ -70,6 +72,7 @@ func NewRouter(slackClient SlackClient, ghClient *github.Client, modelsClient *l
 		awsClient:        awsClient,
 		azureClient:      azureClient,
 		databricksClient: databricksClient,
+		clickhouseClient: clickhouseClient,
 		dashboards:       dashboardRegistry,
 		workflows:        workflowRegistry,
 		contextProvider:  NewContextProvider(slackClient, cacheTTL),
@@ -253,6 +256,7 @@ func (r *Router) newGeneralHandler(userContext string, session *ThreadSession) *
 		awsClient:        r.awsClient,
 		azureClient:      r.azureClient,
 		databricksClient: r.databricksClient,
+		clickhouseClient: r.clickhouseClient,
 		dashboards:       r.dashboards,
 		workflows:        r.workflows,
 		contextProvider:  r.contextProvider,

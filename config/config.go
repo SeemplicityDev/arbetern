@@ -86,6 +86,14 @@ type Credentials struct {
 	DatabricksClientID     string `cred:"databricks-client-id"`     // Service-principal OAuth client ID.
 	DatabricksClientSecret string `cred:"databricks-client-secret"` // Service-principal OAuth client secret.
 	DatabricksWarehouseID  string `cred:"databricks-warehouse-id"`  // SQL warehouse ID that executes statements.
+
+	// ClickHouse Cloud billing — HTTP Basic auth against the Cloud API
+	// (https://api.clickhouse.cloud). The key ID/secret are generated in the
+	// ClickHouse Cloud console; the organization ID selects which org the
+	// usage-cost report covers.
+	ClickHouseKeyID          string `cred:"clickhouse-key-id"`          // Cloud API key ID (HTTP Basic username).
+	ClickHouseKeySecret      string `cred:"clickhouse-key-secret"`      // Cloud API key secret (HTTP Basic password).
+	ClickHouseOrganizationID string `cred:"clickhouse-organization-id"` // Organization ID the report covers.
 }
 
 // Config bundles every runtime setting the app reads on startup. Credential
@@ -216,6 +224,14 @@ func (c *Config) DatabricksConfigured() bool {
 		c.DatabricksClientSecret != "" && c.DatabricksWarehouseID != ""
 }
 
+// ClickHouseConfigured returns true when the ClickHouse Cloud API key ID, key
+// secret and organization ID are all present. The first real request is the
+// authoritative health check.
+func (c *Config) ClickHouseConfigured() bool {
+	return c.ClickHouseKeyID != "" && c.ClickHouseKeySecret != "" &&
+		c.ClickHouseOrganizationID != ""
+}
+
 func Load() (*Config, error) {
 	cfg := &Config{
 		Credentials: Credentials{
@@ -250,6 +266,10 @@ func Load() (*Config, error) {
 			DatabricksClientID:     os.Getenv("DATABRICKS_CLIENT_ID"),
 			DatabricksClientSecret: os.Getenv("DATABRICKS_CLIENT_SECRET"),
 			DatabricksWarehouseID:  os.Getenv("DATABRICKS_WAREHOUSE_ID"),
+
+			ClickHouseKeyID:          os.Getenv("CLICKHOUSE_KEY_ID"),
+			ClickHouseKeySecret:      os.Getenv("CLICKHOUSE_KEY_SECRET"),
+			ClickHouseOrganizationID: os.Getenv("CLICKHOUSE_ORGANIZATION_ID"),
 		},
 
 		GeneralModel:        os.Getenv("GENERAL_MODEL"),
