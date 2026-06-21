@@ -76,6 +76,7 @@ type CommitResult struct {
 func (bm *BranchManager) CommitAndPR(
 	ctx context.Context,
 	owner, repo, baseBranch, userID, description, prBody, branchOverride, prTitleOverride string,
+	changedFiles []string,
 	commitFn func(branch string) error,
 ) (*CommitResult, error) {
 	repoKey := owner + "/" + repo
@@ -92,6 +93,24 @@ func (bm *BranchManager) CommitAndPR(
 		return &CommitResult{PrURL: active.PrURL, IsNew: false, Message: active.PrURL}, nil
 	}
 
+	prTitle := prTitleOverride
+	if prTitle == "" {
+		prTitle = fmt.Sprintf("%s: %s", bm.agentID, description)
+	}
+	if existing, err := bm.ghClient.FindSimilarOpenPullRequest(ctx, owner, repo, baseBranch, github.PRDuplicateCandidate{
+		Title:        prTitle,
+		Body:         prBody,
+		ChangedFiles: changedFiles,
+	}); err != nil {
+		return nil, fmt.Errorf("checking for similar open pull requests: %w", err)
+	} else if existing != nil {
+		return nil, fmt.Errorf(
+			"duplicate guard: a similar open PR already exists (%s, title %q). Reuse that PR instead of opening a new one",
+			existing.URL,
+			existing.Title,
+		)
+	}
+
 	// Create a new branch, commit, and open a PR.
 	branchName := branchOverride
 	if branchName == "" {
@@ -103,11 +122,6 @@ func (bm *BranchManager) CommitAndPR(
 
 	if err := commitFn(branchName); err != nil {
 		return nil, fmt.Errorf("committing file: %w", err)
-	}
-
-	prTitle := prTitleOverride
-	if prTitle == "" {
-		prTitle = fmt.Sprintf("%s: %s", bm.agentID, description)
 	}
 	prURL, err := bm.ghClient.CreatePullRequest(ctx, owner, repo, baseBranch, branchName, prTitle, prBody)
 	if err != nil {

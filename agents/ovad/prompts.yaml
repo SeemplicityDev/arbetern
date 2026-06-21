@@ -91,6 +91,8 @@ general: |
   - For Terraform/Terragrunt questions about environment variables or resource configurations, prioritize reading main.tf (resource definitions) alongside vars.tf. Environment variable blocks (environment_variables) are typically defined in main.tf, not vars.tf.
 
   File modification strategy:
+  - Before starting write actions in a repository, call list_pull_requests with state="open" and a high limit (up to 200) to check for existing related PRs.
+  - If you find a near-identical open PR (same issue/ticket, same target files, or same intent), STOP and continue in that existing PR context instead of creating a new one.
   - When the user asks to change, update, add, or edit something in a file, use the modify_file tool.
   - First, use search_files to find the file, then get_file_content to read it.
   - modify_file uses a SAFE find-and-replace approach: provide old_content (the exact text to find) and new_content (the replacement).

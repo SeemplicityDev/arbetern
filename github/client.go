@@ -588,6 +588,9 @@ var workflowRunURLPattern = regexp.MustCompile(`https://github\.com/([^/]+)/([^/
 // prURLPattern matches GitHub PR URLs like https://github.com/owner/repo/pull/123
 var prURLPattern = regexp.MustCompile(`https://github\.com/([^/]+)/([^/]+)/pull/(\d+)`)
 
+// jiraKeyPattern matches Jira issue keys like ABC-123.
+var jiraKeyPattern = regexp.MustCompile(`(?i)\b([A-Z][A-Z0-9]+-\d+)\b`)
+
 // ExtractPRURLs returns all GitHub PR URLs found in the given text.
 func ExtractPRURLs(text string) []string {
 	return prURLPattern.FindAllString(text, -1)
@@ -613,6 +616,8 @@ type PRSummary struct {
 	State     string
 	Author    string
 	URL       string
+	BaseRef   string
+	HeadRef   string
 	Body      string
 	Diff      string
 	FileNames []string
@@ -626,12 +631,14 @@ func (c *Client) GetPullRequest(ctx context.Context, owner, repo string, number 
 	}
 
 	summary := &PRSummary{
-		Number: number,
-		Title:  pr.GetTitle(),
-		State:  pr.GetState(),
-		Author: pr.GetUser().GetLogin(),
-		URL:    pr.GetHTMLURL(),
-		Body:   pr.GetBody(),
+		Number:  number,
+		Title:   pr.GetTitle(),
+		State:   pr.GetState(),
+		Author:  pr.GetUser().GetLogin(),
+		URL:     pr.GetHTMLURL(),
+		BaseRef: pr.GetBase().GetRef(),
+		HeadRef: pr.GetHead().GetRef(),
+		Body:    pr.GetBody(),
 	}
 
 	// Get changed files with pagination.
@@ -766,31 +773,213 @@ func (c *Client) ListPullRequests(ctx context.Context, owner, repo, state string
 	if state == "" {
 		state = "all"
 	}
-	if limit <= 0 || limit > 30 {
+	if limit <= 0 {
 		limit = 10
 	}
+	if limit > 200 {
+		limit = 200
+	}
+	perPage := limit
+	if perPage > 100 {
+		perPage = 100
+	}
 
-	prs, _, err := c.api.PullRequests.List(ctx, owner, repo, &gh.PullRequestListOptions{
+	opts := &gh.PullRequestListOptions{
 		State:       state,
 		Sort:        "updated",
 		Direction:   "desc",
-		ListOptions: gh.ListOptions{PerPage: limit},
-	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to list PRs: %w", err)
+		ListOptions: gh.ListOptions{PerPage: perPage},
 	}
 
 	var summaries []PRSummary
-	for _, pr := range prs {
-		summaries = append(summaries, PRSummary{
-			Number: pr.GetNumber(),
-			Title:  pr.GetTitle(),
-			State:  pr.GetState(),
-			Author: pr.GetUser().GetLogin(),
-			URL:    pr.GetHTMLURL(),
-		})
+	for {
+		prs, resp, err := c.api.PullRequests.List(ctx, owner, repo, opts)
+		if err != nil {
+			return nil, fmt.Errorf("failed to list PRs: %w", err)
+		}
+		for _, pr := range prs {
+			summaries = append(summaries, PRSummary{
+				Number:  pr.GetNumber(),
+				Title:   pr.GetTitle(),
+				State:   pr.GetState(),
+				Author:  pr.GetUser().GetLogin(),
+				URL:     pr.GetHTMLURL(),
+				BaseRef: pr.GetBase().GetRef(),
+				HeadRef: pr.GetHead().GetRef(),
+			})
+			if len(summaries) >= limit {
+				return summaries, nil
+			}
+		}
+		if resp == nil || resp.NextPage == 0 {
+			break
+		}
+		opts.Page = resp.NextPage
 	}
 	return summaries, nil
+}
+
+const maxDuplicateGuardPRScan = 500
+
+// PRDuplicateCandidate describes the intent of a new pull request that is
+// about to be created. It is used to detect semantically similar open PRs.
+type PRDuplicateCandidate struct {
+	Title        string
+	Body         string
+	ChangedFiles []string
+}
+
+// FindSimilarOpenPullRequest scans open PRs (paginated) and returns a matching
+// PR if one already exists on the same base branch. A match is one of:
+//  1. normalized-equal title
+//  2. overlapping Jira issue key(s) AND overlapping changed file path(s)
+//
+// This protects against duplicate PRs created with slightly different titles.
+func (c *Client) FindSimilarOpenPullRequest(ctx context.Context, owner, repo, baseBranch string, candidate PRDuplicateCandidate) (*PRSummary, error) {
+	needleTitle := normalizePRTitle(candidate.Title)
+	candidateJiraKeys := extractJiraKeys(candidate.Title + "\n" + candidate.Body)
+	candidateFiles := makeSet(candidate.ChangedFiles)
+
+	opts := &gh.PullRequestListOptions{
+		State:       "open",
+		Sort:        "updated",
+		Direction:   "desc",
+		ListOptions: gh.ListOptions{PerPage: 100},
+	}
+
+	seen := 0
+	for {
+		prs, resp, err := c.api.PullRequests.List(ctx, owner, repo, opts)
+		if err != nil {
+			return nil, fmt.Errorf("failed to list open PRs for duplicate guard: %w", err)
+		}
+		for _, pr := range prs {
+			seen++
+			if seen > maxDuplicateGuardPRScan {
+				return nil, nil
+			}
+			if baseBranch != "" && pr.GetBase().GetRef() != baseBranch {
+				continue
+			}
+
+			if needleTitle != "" && normalizePRTitle(pr.GetTitle()) == needleTitle {
+				return &PRSummary{
+					Number:  pr.GetNumber(),
+					Title:   pr.GetTitle(),
+					State:   pr.GetState(),
+					Author:  pr.GetUser().GetLogin(),
+					URL:     pr.GetHTMLURL(),
+					BaseRef: pr.GetBase().GetRef(),
+					HeadRef: pr.GetHead().GetRef(),
+					Body:    pr.GetBody(),
+				}, nil
+			}
+
+			if len(candidateJiraKeys) == 0 || len(candidateFiles) == 0 {
+				continue
+			}
+
+			prJiraKeys := extractJiraKeys(pr.GetTitle() + "\n" + pr.GetBody())
+			if !setsIntersect(candidateJiraKeys, prJiraKeys) {
+				continue
+			}
+
+			prFiles, err := c.listPullRequestFiles(ctx, owner, repo, pr.GetNumber())
+			if err != nil {
+				return nil, fmt.Errorf("failed to list files for PR #%d during duplicate guard: %w", pr.GetNumber(), err)
+			}
+			if !setsIntersect(candidateFiles, makeSet(prFiles)) {
+				continue
+			}
+
+			return &PRSummary{
+				Number:  pr.GetNumber(),
+				Title:   pr.GetTitle(),
+				State:   pr.GetState(),
+				Author:  pr.GetUser().GetLogin(),
+				URL:     pr.GetHTMLURL(),
+				BaseRef: pr.GetBase().GetRef(),
+				HeadRef: pr.GetHead().GetRef(),
+				Body:    pr.GetBody(),
+			}, nil
+		}
+		if resp == nil || resp.NextPage == 0 {
+			break
+		}
+		opts.Page = resp.NextPage
+	}
+
+	return nil, nil
+}
+
+// FindOpenPullRequestByTitle scans open PRs (paginated) and returns a matching
+// PR if one already exists on the same base branch with a normalized-equal
+// title. This is used as a duplicate guard before creating a new PR.
+func (c *Client) FindOpenPullRequestByTitle(ctx context.Context, owner, repo, baseBranch, title string) (*PRSummary, error) {
+	return c.FindSimilarOpenPullRequest(ctx, owner, repo, baseBranch, PRDuplicateCandidate{Title: title})
+}
+
+func (c *Client) listPullRequestFiles(ctx context.Context, owner, repo string, number int) ([]string, error) {
+	var files []string
+	opts := &gh.ListOptions{PerPage: 100}
+	for {
+		page, resp, err := c.api.PullRequests.ListFiles(ctx, owner, repo, number, opts)
+		if err != nil {
+			return nil, err
+		}
+		for _, f := range page {
+			if name := strings.TrimSpace(f.GetFilename()); name != "" {
+				files = append(files, name)
+			}
+		}
+		if resp == nil || resp.NextPage == 0 {
+			break
+		}
+		opts.Page = resp.NextPage
+	}
+	return files, nil
+}
+
+func extractJiraKeys(s string) map[string]struct{} {
+	out := make(map[string]struct{})
+	for _, m := range jiraKeyPattern.FindAllStringSubmatch(strings.ToUpper(s), -1) {
+		if len(m) < 2 {
+			continue
+		}
+		out[m[1]] = struct{}{}
+	}
+	return out
+}
+
+func makeSet(items []string) map[string]struct{} {
+	out := make(map[string]struct{}, len(items))
+	for _, item := range items {
+		normalized := strings.TrimSpace(item)
+		if normalized == "" {
+			continue
+		}
+		out[normalized] = struct{}{}
+	}
+	return out
+}
+
+func setsIntersect(a, b map[string]struct{}) bool {
+	if len(a) == 0 || len(b) == 0 {
+		return false
+	}
+	if len(a) > len(b) {
+		a, b = b, a
+	}
+	for k := range a {
+		if _, ok := b[k]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizePRTitle(s string) string {
+	return strings.Join(strings.Fields(strings.ToLower(strings.TrimSpace(s))), " ")
 }
 
 // SearchCode searches for code content in a repository using the GitHub code search API.

@@ -879,7 +879,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 					"properties":{
 						"repo":{"type":"string","description":"Repository name (without owner)"},
 						"state":{"type":"string","description":"Filter by state: 'open', 'closed', or 'all' (default: 'all')"},
-						"limit":{"type":"integer","description":"Maximum number of PRs to return (default: 10, max: 30)"}
+						"limit":{"type":"integer","description":"Maximum number of PRs to return (default: 10, max: 200)"}
 					},
 					"required":["repo"]
 				}`),
@@ -2312,7 +2312,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		}
 
 		prBody := buildPRBody(userID, args.PRBody, fmt.Sprintf("Automated change requested via Slack by <@%s>.\n\nChange: %s", userID, args.Description))
-		result, err := h.branchMgr.CommitAndPR(ctx, owner, args.Repo, baseBranch, userID, args.Description, prBody, args.BranchName, args.PRTitle,
+		result, err := h.branchMgr.CommitAndPR(ctx, owner, args.Repo, baseBranch, userID, args.Description, prBody, args.BranchName, args.PRTitle, []string{args.Path},
 			func(branch string) error {
 				commitMsg := fmt.Sprintf("%s: %s", h.agentID, args.Description)
 				return h.ghClient.UpdateFile(ctx, owner, args.Repo, args.Path, branch, commitMsg, []byte(updatedContent), fileSHA)
@@ -2346,7 +2346,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		}
 
 		prBody := buildPRBody(userID, args.PRBody, fmt.Sprintf("Automated file creation requested via Slack by <@%s>.\n\nChange: %s\nNew file: `%s`", userID, args.Description, args.Path))
-		result, err := h.branchMgr.CommitAndPR(ctx, owner, args.Repo, baseBranch, userID, args.Description, prBody, args.BranchName, args.PRTitle,
+		result, err := h.branchMgr.CommitAndPR(ctx, owner, args.Repo, baseBranch, userID, args.Description, prBody, args.BranchName, args.PRTitle, []string{args.Path},
 			func(branch string) error {
 				commitMsg := fmt.Sprintf("%s: %s", h.agentID, args.Description)
 				return h.ghClient.CreateFile(ctx, owner, args.Repo, args.Path, branch, commitMsg, []byte(args.Content))
@@ -2399,7 +2399,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 			userID, channelID, matches, args.Pattern, args.Repo, args.Path)
 
 		prBody := buildPRBody(userID, args.PRBody, fmt.Sprintf("Automated regex replacement requested via Slack by <@%s>.\n\nChange: %s\nPattern: `%s` → `%s`\nMatches replaced: %d", userID, args.Description, args.Pattern, args.Replacement, matches))
-		result, err := h.branchMgr.CommitAndPR(ctx, owner, args.Repo, baseBranch, userID, args.Description, prBody, args.BranchName, args.PRTitle,
+		result, err := h.branchMgr.CommitAndPR(ctx, owner, args.Repo, baseBranch, userID, args.Description, prBody, args.BranchName, args.PRTitle, []string{args.Path},
 			func(branch string) error {
 				commitMsg := fmt.Sprintf("%s: %s", h.agentID, args.Description)
 				return h.ghClient.UpdateFile(ctx, owner, args.Repo, args.Path, branch, commitMsg, []byte(updatedContent), fileSHA)
