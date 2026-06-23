@@ -121,8 +121,8 @@ var restrictedIntegrations = map[string][]string{
 	integrationChorus:     {"pulse"},
 	// Jira + Confluence (shared Atlassian client) — every agent except security.
 	integrationAtlassian: {"ovad", "seihin", "agent-q", "pulse"},
-	// Observability: DevOps/SRE and customer-success agents.
-	integrationDatadog: {"ovad", "pulse"},
+	// Observability: DevOps/SRE, customer-success, and incident-triage agents.
+	integrationDatadog: {"ovad", "pulse", "seihin"},
 	// AWS cost tooling is exposed to the DevOps/SRE agent only.
 	integrationAWS: {"ovad"},
 	// Databricks SQL is exposed to the DevOps/SRE agent only.

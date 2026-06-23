@@ -17,9 +17,9 @@ import (
 // row cap. This is what makes per-endpoint p95/p99 trustworthy on
 // high-traffic endpoints.
 //
-// Requires the measured attribute (e.g. @time_took) to be registered as a
+// Requires the measured attribute (e.g. @duration) to be registered as a
 // "measure" facet in Datadog Logs config, and any group_by attribute
-// (e.g. @endpoint_name, @customer_schema) to be a facet.
+// (e.g. @http.method, @http.status_code) to be a facet.
 // --------------------------------------------------------------------------
 
 // AggregateCompute is one server-side computation. Aggregation is one of
