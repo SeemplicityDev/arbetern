@@ -275,7 +275,8 @@ func (c *Client) compressMessages(ctx context.Context, messages []ChatMessage) [
 		return messages
 	}
 	if cr.TokensSaved > 0 {
-		log.Printf("[llm] headroom compressed %d->%d tokens (saved %d)", cr.TokensBefore, cr.TokensAfter, cr.TokensSaved)
+		pct := float64(cr.TokensSaved) / float64(cr.TokensBefore) * 100
+		log.Printf("[llm] headroom compressed %d->%d tokens (saved %d, %.1f%%)", cr.TokensBefore, cr.TokensAfter, cr.TokensSaved, pct)
 	}
 	return cr.Messages
 }
