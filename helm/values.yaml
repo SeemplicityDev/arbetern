@@ -43,6 +43,49 @@ env:
   # AZURE_AUTHORITY_HOST: "https://login.microsoftonline.com"   # Override only for sovereign clouds (Azure Government, China).
   # AZURE_MANAGEMENT_HOST: "https://management.azure.com"       # Override only for sovereign clouds.
 
+# Headroom context-compression proxy (https://github.com/headroomlabs-ai/headroom).
+# When enabled, a "headroom" sidecar runs alongside arbetern. Before each LLM
+# call the app POSTs the conversation to the sidecar's /v1/compress endpoint,
+# which shrinks bloated tool outputs (JSON, logs, search results) and returns
+# the compressed messages. The app then calls its normal model provider with the
+# smaller payload — so compression works for EVERY backend (GitHub Models,
+# Azure OpenAI, and Azure Foundry / Claude) with no change to prompts or auth.
+#
+# Data flow when enabled:
+#   arbetern --(HEADROOM_PROXY_URL=http://localhost:<port>)--> headroom /v1/compress
+#   arbetern --(compressed messages)-------------------------> model provider (unchanged)
+#
+# The sidecar is compression-only: it never calls the LLM and needs no provider
+# keys or upstream config. See docs/HEADROOM.md.
+headroom:
+  enabled: false
+  image:
+    repository: ghcr.io/chopratejas/headroom
+    tag: latest
+    pullPolicy: IfNotPresent
+  # Loopback port the sidecar binds; the app reaches it at http://localhost:<port>.
+  port: 8787
+  # Anonymous telemetry is off by default (passes --no-telemetry). Set true to allow it.
+  telemetry: false
+  # Extra CLI args appended to `headroom proxy`.
+  extraArgs: []
+  # Extra environment variables for the sidecar.
+  env: {}
+  # Resource requests/limits for the sidecar. Compression models add memory;
+  # tune for your workload, e.g.:
+  #   requests: { cpu: 100m, memory: 512Mi }
+  #   limits:   { cpu: "1",  memory: 1Gi }
+  resources: {}
+  # Must satisfy the pod-level runAsNonRoot policy (uid 65532).
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop:
+        - ALL
+
 # Persistent data directory shared by dashboards + workflows JSON snapshots.
 # Both features store their files under `persistence.mountPath/<subdir>/<agent>/...`.
 # When `persistentVolumeClaim.enabled` is true, a PVC is provisioned per replica

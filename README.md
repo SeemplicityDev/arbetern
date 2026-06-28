@@ -91,6 +91,7 @@ The core variables you'll set on day one:
 | `SHOW_USAGE_STAMP` | Append model/token usage metadata to Slack replies. Default `true` |
 | `UI_ALLOWED_CIDRS` | Comma-separated CIDRs allowed to access the UI |
 | `UI_HEADER` | Custom header text for the web UI (default `arbetern`) |
+| `HEADROOM_PROXY_URL` | Base URL of a [Headroom](docs/HEADROOM.md) compression sidecar (e.g. `http://localhost:8787`). When set, each conversation is compressed via its `/v1/compress` endpoint before every LLM call — cutting tokens across **all** backends (GitHub Models, Azure OpenAI, Azure Foundry/Claude). Set automatically by Helm when `headroom.enabled: true` |
 
 </details>
 
@@ -918,6 +919,7 @@ Global prompts (e.g. `security`) are defined in `agents/prompts.yaml` and inheri
 | Azure Cost Management | [docs/AZURE.md](docs/AZURE.md) | ovad (and any agent running Azure cost workflows) |
 | Databricks SQL | [docs/DATABRICKS.md](docs/DATABRICKS.md) | ovad only |
 | ClickHouse Cloud | [docs/CLICKHOUSE.md](docs/CLICKHOUSE.md) | ovad only |
+| Headroom (LLM compression) | [docs/HEADROOM.md](docs/HEADROOM.md) | Optional infra — all backends |
 
 ## Contributing
 

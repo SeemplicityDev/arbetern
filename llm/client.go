@@ -79,6 +79,11 @@ type Client struct {
 	model      string
 	httpClient *http.Client
 
+	// compressURL is the base URL of a Headroom compression proxy (empty =
+	// disabled); messages pass through its /v1/compress endpoint before each
+	// backend call. Applies to all backends.
+	compressURL string
+
 	// Azure OpenAI fields (empty when using GitHub Models).
 	azureEndpoint string
 	azureAPIKey   string
@@ -97,6 +102,12 @@ func NewClient(token, model string) *Client {
 		model:      model,
 		httpClient: &http.Client{Timeout: 120 * time.Second},
 	}
+}
+
+// SetCompressionURL enables Headroom compression via the given proxy base URL
+// (empty disables it). See compressMessages for behaviour.
+func (c *Client) SetCompressionURL(u string) {
+	c.compressURL = strings.TrimRight(u, "/")
 }
 
 // NewAzureClient creates an LLM client backed by Azure OpenAI.
@@ -180,6 +191,7 @@ func (c *Client) Complete(ctx context.Context, systemPrompt, userPrompt string) 
 // CompleteWithTools sends messages and tool definitions, returning the LLM's
 // response which may include tool calls to execute.
 func (c *Client) CompleteWithTools(ctx context.Context, messages []ChatMessage, tools []Tool) (*ChatResponse, error) {
+	messages = c.compressMessages(ctx, messages)
 	if c.isResponsesModel() {
 		return c.doResponses(ctx, messages, tools)
 	}
@@ -187,6 +199,85 @@ func (c *Client) CompleteWithTools(ctx context.Context, messages []ChatMessage, 
 		return c.doAnthropic(ctx, messages, tools)
 	}
 	return c.doChat(ctx, messages, tools)
+}
+
+// compressRequest is the body for Headroom's POST /v1/compress endpoint.
+type compressRequest struct {
+	Model    string        `json:"model"`
+	Messages []ChatMessage `json:"messages"`
+}
+
+// compressResponse is the subset of the /v1/compress reply we consume.
+type compressResponse struct {
+	Messages     []ChatMessage `json:"messages"`
+	TokensBefore int           `json:"tokens_before"`
+	TokensAfter  int           `json:"tokens_after"`
+	TokensSaved  int           `json:"tokens_saved"`
+}
+
+// compressModel qualifies the model name with its provider before sending it to
+// Headroom's /v1/compress endpoint. Headroom token-counts (and prices) via
+// LiteLLM, which logs a noisy "Provider List" hint for every request whose
+// model it can't map to a provider — e.g. a bare Azure Foundry Claude
+// deployment name. An explicit provider prefix keeps that lookup unambiguous.
+func (c *Client) compressModel() string {
+	switch {
+	case isAnthropicModel(c.model):
+		return "anthropic/" + c.model
+	case c.useAzure():
+		return "azure/" + c.model
+	default:
+		return c.model
+	}
+}
+
+// compressMessages returns the conversation compressed via Headroom's
+// /v1/compress endpoint, or the messages unchanged when no proxy is configured
+// or on any error (fail-open: compression never breaks an LLM call).
+func (c *Client) compressMessages(ctx context.Context, messages []ChatMessage) []ChatMessage {
+	if c.compressURL == "" || len(messages) == 0 {
+		return messages
+	}
+
+	payload, err := json.Marshal(compressRequest{Model: c.compressModel(), Messages: messages})
+	if err != nil {
+		return messages
+	}
+
+	// Bound the compression round-trip independently of the 120s LLM timeout.
+	cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(cctx, http.MethodPost, c.compressURL+"/v1/compress", bytes.NewReader(payload))
+	if err != nil {
+		return messages
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		log.Printf("[llm] headroom compress unavailable, sending uncompressed: %v", err)
+		return messages
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
+	if err != nil {
+		return messages
+	}
+	if resp.StatusCode != http.StatusOK {
+		log.Printf("[llm] headroom compress returned %d, sending uncompressed", resp.StatusCode)
+		return messages
+	}
+
+	var cr compressResponse
+	if err := json.Unmarshal(body, &cr); err != nil || len(cr.Messages) == 0 {
+		return messages
+	}
+	if cr.TokensSaved > 0 {
+		log.Printf("[llm] headroom compressed %d->%d tokens (saved %d)", cr.TokensBefore, cr.TokensAfter, cr.TokensSaved)
+	}
+	return cr.Messages
 }
 
 func (c *Client) doChat(ctx context.Context, messages []ChatMessage, tools []Tool) (*ChatResponse, error) {

@@ -1151,6 +1151,11 @@ func main() {
 			log.Printf("Code model (GitHub): %s", cfg.CodeModel)
 		}
 	}
+	if cfg.HeadroomURL != "" {
+		modelsClient.SetCompressionURL(cfg.HeadroomURL)
+		codeModelsClient.SetCompressionURL(cfg.HeadroomURL)
+		log.Printf("Headroom compression enabled via %s (applies to all backends)", cfg.HeadroomURL)
+	}
 
 	var jiraClient *atlassian.Client
 

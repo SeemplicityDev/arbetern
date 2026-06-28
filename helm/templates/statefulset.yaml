@@ -51,6 +51,10 @@ spec:
             - name: {{ $key }}
               value: {{ $value | quote }}
             {{- end }}
+            {{- if .Values.headroom.enabled }}
+            - name: HEADROOM_PROXY_URL
+              value: "http://localhost:{{ .Values.headroom.port }}"
+            {{- end }}
             - name: SLACK_BOT_TOKEN
               valueFrom:
                 secretKeyRef:
@@ -401,6 +405,61 @@ spec:
             - name: data
               mountPath: {{ .Values.persistence.mountPath | quote }}
           {{- end }}
+        {{- if .Values.headroom.enabled }}
+        # Headroom compression sidecar — the app POSTs conversations to its
+        # /v1/compress endpoint (via HEADROOM_PROXY_URL) before each LLM call.
+        - name: headroom
+          image: "{{ .Values.headroom.image.repository }}:{{ .Values.headroom.image.tag }}"
+          imagePullPolicy: {{ .Values.headroom.image.pullPolicy }}
+          # Image ENTRYPOINT is already `headroom proxy`; override it so the
+          # `proxy` arg below isn't doubled into `headroom proxy proxy` (crash).
+          command:
+            - "headroom"
+          args:
+            - "proxy"
+            - "--host"
+            - "0.0.0.0"
+            - "--port"
+            - {{ .Values.headroom.port | quote }}
+            {{- if not .Values.headroom.telemetry }}
+            - "--no-telemetry"
+            {{- end }}
+            {{- with .Values.headroom.extraArgs }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          ports:
+            - name: headroom
+              containerPort: {{ .Values.headroom.port }}
+              protocol: TCP
+          env:
+            # Writable HOME for the non-root user (Headroom caches under ~/.headroom).
+            - name: HOME
+              value: /tmp
+            {{- range $key, $value := .Values.headroom.env }}
+            - name: {{ $key }}
+              value: {{ $value | quote }}
+            {{- end }}
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: headroom
+            initialDelaySeconds: 15
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: headroom
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          {{- with .Values.headroom.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.headroom.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+        {{- end }}
       {{- with .Values.volumes }}
       volumes:
         {{- toYaml . | nindent 8 }}

@@ -16,6 +16,16 @@ env:
   # UI_ALLOWED_CIDRS: "0.0.0.0/0"
   # AWS_REGION: "us-east-1"   # Cost Explorer SigV4 signing region. CE is global; us-east-1 is the canonical choice.
 
+# Headroom context-compression sidecar (optional — cuts LLM token usage).
+# When enabled, arbetern compresses each conversation via the in-pod headroom
+# /v1/compress endpoint before calling the model — works with any backend
+# (GitHub Models, Azure OpenAI, Azure Foundry/Claude). See docs/HEADROOM.md.
+# headroom:
+#   enabled: true
+#   # resources:
+#   #   requests: { cpu: 100m, memory: 512Mi }
+#   #   limits:   { cpu: "1",  memory: 1Gi }
+
 secretValues:
   github-token: "ghp_your_github_token"
   slack-bot-token: "xoxb-your-slack-bot-token"

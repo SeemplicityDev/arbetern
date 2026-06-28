@@ -111,6 +111,10 @@ type Config struct {
 	ThreadSessionTTL time.Duration
 	MaxToolRounds    int
 
+	// HeadroomURL is the base URL of a Headroom compression proxy (empty =
+	// disabled); set from HEADROOM_PROXY_URL. See llm.Client.compressMessages.
+	HeadroomURL string
+
 	// AWSRegion controls where Cost Explorer SigV4 calls are signed. Empty
 	// falls back to the aws package default (us-east-1, where the CE
 	// endpoint lives). Credentials are resolved via the standard AWS SDK
@@ -277,6 +281,7 @@ func Load() (*Config, error) {
 		Port:                os.Getenv("PORT"),
 		UIAllowedCIDRs:      os.Getenv("UI_ALLOWED_CIDRS"),
 		AppURL:              os.Getenv("APP_URL"),
+		HeadroomURL:         strings.TrimRight(strings.TrimSpace(os.Getenv("HEADROOM_PROXY_URL")), "/"),
 		AWSRegion:           os.Getenv("AWS_REGION"),
 		AzureAuthorityHost:  os.Getenv("AZURE_AUTHORITY_HOST"),
 		AzureManagementHost: os.Getenv("AZURE_MANAGEMENT_HOST"),
