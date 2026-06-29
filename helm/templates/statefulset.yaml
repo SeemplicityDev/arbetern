@@ -354,6 +354,10 @@ spec:
             - name: CHAT_DIR
               value: "{{ .Values.persistence.mountPath }}/{{ .Values.chat.subPath }}"
             {{- end }}
+            {{- if and .Values.persistence.enabled .Values.billing .Values.billing.enabled }}
+            - name: BILLING_DIR
+              value: "{{ .Values.persistence.mountPath }}/{{ .Values.billing.subPath }}"
+            {{- end }}
           {{- with .Values.livenessProbe }}
           livenessProbe:
             {{- toYaml . | nindent 12 }}

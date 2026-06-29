@@ -19,6 +19,7 @@ import (
 	"github.com/justmike1/arbetern/atlassian"
 	"github.com/justmike1/arbetern/aws"
 	"github.com/justmike1/arbetern/azure"
+	"github.com/justmike1/arbetern/billing"
 	"github.com/justmike1/arbetern/chat"
 	"github.com/justmike1/arbetern/chorus"
 	"github.com/justmike1/arbetern/clickhouse"
@@ -562,7 +563,11 @@ func (e *workflowExecutor) Run(ctx context.Context, w *workflows.Workflow, promp
 	if !ok {
 		return "", fmt.Errorf("no router for agent %q", w.Agent)
 	}
-	return r.RunWorkflow(ctx, w.CreatedBy, prompt)
+	name := w.ShortName
+	if name == "" {
+		name = w.Name
+	}
+	return r.RunWorkflow(ctx, w.CreatedBy, w.ID, name, prompt)
 }
 
 // extractIntroLine returns the second non-empty line from an intro prompt,
@@ -1371,6 +1376,18 @@ func main() {
 	}
 	defer wfRegistry.StopAll()
 
+	// Usage & Billing store: aggregates LLM token cost of every Slack,
+	// workflow, and chat turn on the persistent volume. Flushed periodically.
+	billingStore, err := billing.New(cfg.BillingDir)
+	if err != nil {
+		log.Fatalf("failed to init billing store: %v", err)
+	}
+	log.Printf("Usage & billing store: %s", billingStore.Dir())
+	billingStop := make(chan struct{})
+	billingStore.StartFlusher(billingStop)
+	billing.StartPriceSync(billingStop)
+	defer close(billingStop)
+
 	for _, agent := range agents {
 		ap, err := prompts.LoadAgent(agent.ID)
 		if err != nil {
@@ -1397,7 +1414,7 @@ func main() {
 			clickhouse: clickhouseClient,
 		})
 
-		router := commands.NewRouter(slackClient, ghClient, modelsClient, codeModelsClient, agentClients.jira, agentClients.nvd, agentClients.sf, agentClients.chorus, agentClients.datadog, agentClients.aws, agentClients.azure, agentClients.databricks, agentClients.clickhouse, dashRegistry, wfRegistry, ap, agent.ID, cfg.AppURL, sessions, cfg.MaxToolRounds, userContextStore)
+		router := commands.NewRouter(slackClient, ghClient, modelsClient, codeModelsClient, agentClients.jira, agentClients.nvd, agentClients.sf, agentClients.chorus, agentClients.datadog, agentClients.aws, agentClients.azure, agentClients.databricks, agentClients.clickhouse, dashRegistry, wfRegistry, ap, agent.ID, cfg.AppURL, sessions, cfg.MaxToolRounds, userContextStore, billingStore)
 		routers[agent.ID] = router
 
 		// Background sweepers for the per-router in-memory caches so
@@ -1709,6 +1726,7 @@ func main() {
 	dashRegistry.RegisterRoutes(http.DefaultServeMux, apiMux, knownAgents)
 	wfRegistry.RegisterRoutes(http.DefaultServeMux, apiMux, knownAgents)
 	chatRegistry.RegisterRoutes(apiMux, knownAgents)
+	billingStore.RegisterRoutes(http.DefaultServeMux, apiMux)
 
 	// Wire the workflow executor now that routers are built, then kick off
 	// tick goroutines for every workflow that was loaded from disk.

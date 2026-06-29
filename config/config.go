@@ -133,6 +133,7 @@ type Config struct {
 	DashboardsDir string // Directory where dashboard JSON snapshots are persisted.
 	WorkflowsDir  string // Directory where workflow JSON snapshots are persisted.
 	ChatDir       string // Directory where per-agent chat transcripts are persisted.
+	BillingDir    string // Directory where LLM usage/cost aggregates are persisted.
 
 	// ChatRetention is how long a UI chat conversation is kept after its last
 	// activity before it is deleted by the background sweeper. Applies to all
@@ -288,6 +289,7 @@ func Load() (*Config, error) {
 		DashboardsDir:       os.Getenv("DASHBOARDS_DIR"),
 		WorkflowsDir:        os.Getenv("WORKFLOWS_DIR"),
 		ChatDir:             os.Getenv("CHAT_DIR"),
+		BillingDir:          os.Getenv("BILLING_DIR"),
 
 		WorkflowsGitOpsOwner:    os.Getenv("WORKFLOWS_GITOPS_OWNER"),
 		WorkflowsGitOpsRepo:     os.Getenv("WORKFLOWS_GITOPS_REPO"),

@@ -10,6 +10,7 @@ import (
 	"github.com/justmike1/arbetern/atlassian"
 	"github.com/justmike1/arbetern/aws"
 	"github.com/justmike1/arbetern/azure"
+	"github.com/justmike1/arbetern/billing"
 	"github.com/justmike1/arbetern/chorus"
 	"github.com/justmike1/arbetern/clickhouse"
 	"github.com/justmike1/arbetern/dashboards"
@@ -47,9 +48,10 @@ type Router struct {
 	sessions         *SessionStore
 	maxToolRounds    int
 	userContextStore *UserContextStore
+	billing          UsageRecorder
 }
 
-func NewRouter(slackClient SlackClient, ghClient *github.Client, modelsClient *llm.Client, codeModelsClient *llm.Client, jiraClient *atlassian.Client, nvdClient *nvd.Client, sfClient *salesforce.Client, chorusClient *chorus.Client, datadogClients *datadog.MultiClient, awsClient *aws.Client, azureClient *azure.Client, databricksClient *databricks.Client, clickhouseClient *clickhouse.Client, dashboardRegistry *dashboards.Registry, workflowRegistry *workflows.Registry, pp PromptProvider, agentID, appURL string, sessions *SessionStore, maxToolRounds int, userContextStore *UserContextStore) *Router {
+func NewRouter(slackClient SlackClient, ghClient *github.Client, modelsClient *llm.Client, codeModelsClient *llm.Client, jiraClient *atlassian.Client, nvdClient *nvd.Client, sfClient *salesforce.Client, chorusClient *chorus.Client, datadogClients *datadog.MultiClient, awsClient *aws.Client, azureClient *azure.Client, databricksClient *databricks.Client, clickhouseClient *clickhouse.Client, dashboardRegistry *dashboards.Registry, workflowRegistry *workflows.Registry, pp PromptProvider, agentID, appURL string, sessions *SessionStore, maxToolRounds int, userContextStore *UserContextStore, usage UsageRecorder) *Router {
 	// Channel-context cache reuses the thread session window so that an
 	// active in-thread conversation does not re-fetch Slack history on
 	// every turn. Falls back to the package default when sessions is nil.
@@ -83,6 +85,7 @@ func NewRouter(slackClient SlackClient, ghClient *github.Client, modelsClient *l
 		sessions:         sessions,
 		maxToolRounds:    maxToolRounds,
 		userContextStore: userContextStore,
+		billing:          usage,
 	}
 }
 
@@ -268,6 +271,8 @@ func (r *Router) newGeneralHandler(userContext string, session *ThreadSession) *
 		userContext:      userContext,
 		session:          session,
 		userContextStore: r.userContextStore,
+		billing:          r.billing,
+		billingSource:    billing.SourceSlack,
 	}
 }
 
@@ -344,7 +349,7 @@ func (r *Router) HandleThreadReply(channelID, threadTS, userID, text string) {
 // GitHub, etc.) to produce any user-visible side effects.
 //
 // Returns the final assistant message content or the first tool-loop error.
-func (r *Router) RunWorkflow(ctx context.Context, userID, prompt string) (string, error) {
+func (r *Router) RunWorkflow(ctx context.Context, userID, workflowID, workflowName, prompt string) (string, error) {
 	if strings.TrimSpace(prompt) == "" {
 		return "", fmt.Errorf("workflow prompt is empty")
 	}
@@ -363,6 +368,9 @@ func (r *Router) RunWorkflow(ctx context.Context, userID, prompt string) (string
 		"Execute the instruction autonomously using tools.", r.agentID)
 	h := r.newGeneralHandler(userContext, nil)
 	h.headless = true
+	h.billingSource = billing.SourceWorkflow
+	h.billingWorkflowID = workflowID
+	h.billingWorkflowName = workflowName
 	return h.ExecuteHeadless(ctx, userID, prompt)
 }
 
@@ -384,5 +392,6 @@ func (r *Router) RunChat(ctx context.Context, userEmail string, history []llm.Ch
 	h := r.newGeneralHandler(userContext, nil)
 	h.headless = true
 	h.requesterEmail = userEmail
+	h.billingSource = billing.SourceChat
 	return h.ExecuteChat(ctx, "ui-chat", history, userMessage)
 }

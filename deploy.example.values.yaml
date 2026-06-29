@@ -181,6 +181,8 @@ secretValues:
 # ephemeral/dev environments where emptyDir is fine.
 # dashboards:
 #   enabled: true
+# billing:
+#   enabled: true                     # BILLING_DIR = $mountPath/billing
 # workflows:
 #   enabled: true
 #   # GitOps: poll a remote GitHub repo and reconcile workflow JSON

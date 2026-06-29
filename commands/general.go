@@ -14,6 +14,7 @@ import (
 	"github.com/justmike1/arbetern/atlassian"
 	"github.com/justmike1/arbetern/aws"
 	"github.com/justmike1/arbetern/azure"
+	"github.com/justmike1/arbetern/billing"
 	"github.com/justmike1/arbetern/chorus"
 	"github.com/justmike1/arbetern/clickhouse"
 	"github.com/justmike1/arbetern/config"
@@ -79,6 +80,13 @@ type GeneralHandler struct {
 	branchMgr        *BranchManager
 	session          *ThreadSession
 	userContextStore *UserContextStore
+	// billing records the token cost of each turn for the Usage & Billing
+	// tab. Optional — nil disables tracking. billingSource and the workflow
+	// fields tag the recorded event with its entry path.
+	billing             UsageRecorder
+	billingSource       string
+	billingWorkflowID   string
+	billingWorkflowName string
 	// aggregateCache holds the structured results of datadog_logs_aggregate
 	// calls made during this run, keyed by the short ID returned to the LLM
 	// (agg_1, agg_2, …). It lets upload_aggregate_csv assemble a CSV file
@@ -193,6 +201,30 @@ func (h *GeneralHandler) buildAggregateCSV(ids []string) (string, string) {
 	}
 	return "", sb.String()
 }
+
+// recordUsage tags the cumulative token usage of a finished turn with the
+// handler's agent and entry-path metadata and hands it to the billing store.
+// No-op when billing is disabled or no tokens were consumed.
+func (h *GeneralHandler) recordUsage(model string, u llm.Usage) {
+	if h.billing == nil || u.TotalTokens == 0 {
+		return
+	}
+	src := h.billingSource
+	if src == "" {
+		src = billing.SourceSlack
+	}
+	h.billing.Record(billing.Event{
+		Agent:            h.agentID,
+		Source:           src,
+		WorkflowID:       h.billingWorkflowID,
+		WorkflowName:     h.billingWorkflowName,
+		Model:            model,
+		PromptTokens:     u.PromptTokens,
+		CompletionTokens: u.CompletionTokens,
+		TotalTokens:      u.TotalTokens,
+	})
+}
+
 func (h *GeneralHandler) Execute(channelID, userID, text, responseURL, auditTS string) {
 	ctx := context.Background()
 	h.currentChannelID = channelID
@@ -249,6 +281,7 @@ func (h *GeneralHandler) Execute(channelID, userID, text, responseURL, auditTS s
 
 	// Track cumulative token usage across all LLM rounds.
 	var totalUsage llm.Usage
+	defer func() { h.recordUsage(activeClient.Model(), totalUsage) }()
 
 	rounds := h.maxToolRounds
 	if rounds <= 0 {
@@ -436,12 +469,19 @@ func (h *GeneralHandler) ExecuteHeadless(ctx context.Context, userID, prompt str
 		"call_workflow":      true,
 	}
 	var mutatingFailures []string
+	var totalUsage llm.Usage
+	defer func() { h.recordUsage(activeClient.Model(), totalUsage) }()
 	for i := 0; i < rounds; i++ {
 		resp, err := activeClient.CompleteWithTools(ctx, messages, tools)
 		if err != nil {
 			log.Printf("[workflow user=%s agent=%s] LLM completion failed after %d rounds / %d tool calls: %v",
 				userID, h.agentID, i, toolCallsMade, err)
 			return "", fmt.Errorf("LLM completion failed: %w", err)
+		}
+		if resp.Usage != nil {
+			totalUsage.PromptTokens += resp.Usage.PromptTokens
+			totalUsage.CompletionTokens += resp.Usage.CompletionTokens
+			totalUsage.TotalTokens += resp.Usage.TotalTokens
 		}
 		if len(resp.Choices) == 0 {
 			return "", fmt.Errorf("LLM returned no choices")
@@ -568,11 +608,18 @@ func (h *GeneralHandler) ExecuteChat(ctx context.Context, userID string, history
 		rounds = 50
 	}
 	emptyResponseRetries := 0
+	var totalUsage llm.Usage
+	defer func() { h.recordUsage(activeClient.Model(), totalUsage) }()
 	for i := 0; i < rounds; i++ {
 		resp, err := activeClient.CompleteWithTools(ctx, messages, tools)
 		if err != nil {
 			log.Printf("[chat user=%s agent=%s] LLM completion failed after %d rounds: %v", userID, h.agentID, i, err)
 			return "", fmt.Errorf("LLM completion failed: %w", err)
+		}
+		if resp.Usage != nil {
+			totalUsage.PromptTokens += resp.Usage.PromptTokens
+			totalUsage.CompletionTokens += resp.Usage.CompletionTokens
+			totalUsage.TotalTokens += resp.Usage.TotalTokens
 		}
 		if resp.Error != nil {
 			return "", fmt.Errorf("%s", resp.Error.Message)

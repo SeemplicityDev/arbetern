@@ -1,6 +1,15 @@
 package commands
 
-import slacklib "github.com/slack-go/slack"
+import (
+	"github.com/justmike1/arbetern/billing"
+	slacklib "github.com/slack-go/slack"
+)
+
+// UsageRecorder receives the cumulative LLM token cost of a finished turn so it
+// can be aggregated for the Usage & Billing tab. Implemented by *billing.Store.
+type UsageRecorder interface {
+	Record(billing.Event)
+}
 
 type SlackClient interface {
 	FetchChannelHistory(channelID string, limit int) ([]slacklib.Message, error)

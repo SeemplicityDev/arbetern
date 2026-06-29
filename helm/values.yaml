@@ -161,6 +161,13 @@ chat:
   enabled: true
   subPath: chat
 
+# Usage & billing aggregates (LLM token cost per agent / workflow / source).
+# Files at <mountPath>/<subPath>/usage-YYYY-MM.json + recent.json. Disable to
+# fall back to an in-tmp directory that does not survive pod restarts.
+billing:
+  enabled: true
+  subPath: billing
+
 secretName: arbetern-secrets
 
 # Set to true to have the chart create the Secret resource.

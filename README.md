@@ -107,6 +107,9 @@ All live under `persistence.mountPath` in the chart and default to `./data/<feat
 | `USER_CONTEXT_DIR` | Directory for per-user rolling conversation summaries (`<agent>/<user>/context.txt`). Defaults to a temp dir; the chart points it at the PVC when `userContext.enabled` is true |
 | `CHAT_DIR` | Directory for centralized agent chat. Each agent holds many conversations (ChatGPT/Claude-style threads) stored at `<agent>/<conversation-id>.json`. Conversations are shared — everyone sees the same threads (no per-user auth yet). Chat is enabled per agent via `chat_enabled: true` in the agent's `config.yaml`; defaults to `./data/chat` |
 | `CHAT_RETENTION` | How long a UI chat conversation is kept after its last activity before a background sweeper deletes it (applies to all agents). Go duration; defaults to `168h` (1 week). The sweeper runs hourly |
+| `BILLING_DIR` | Directory for the usage & billing ledger. LLM token spend is aggregated per agent / workflow / source into monthly JSON files (`usage-YYYY-MM.json` + `recent.json`). Defaults to `./data/billing`; the chart points it at the PVC when `billing.enabled` is true |
+| `PRICE_SOURCE_URL` | Single source of truth for per-token prices, synced on boot and every 24h (default: LiteLLM's public price file, ~2900 models). The billing tab shows the live source, model count, and last-sync time. Set empty to rely solely on `LLM_PRICE_OVERRIDES`. Price changes only affect future turns — recorded costs are frozen at record time |
+| `LLM_PRICE_OVERRIDES` | Optional JSON map of model → `{"in":<usd_per_1M>,"out":<usd_per_1M>}` layered on top of the synced feed (wins over it) for negotiated/Azure rates. A model matched by neither is recorded at $0 and flagged `unpriced` |
 | `CUSTOM_PROMPTS_DIR` | Directory of custom prompt YAML files **appended** to built-in agent prompts. Set automatically by the chart when `customPrompts` is configured |
 | `CUSTOM_CONFIG_DIR` | Directory of per-agent config overrides (`<agent-id>.yaml`, a full `config.yaml` overlay — e.g. `chat_enabled`, `allowed_teams`, `allowed_emails`). Set automatically by the chart when `customConfigs` is configured |
 | `AGENT_CREDENTIALS_DIR` | Directory of per-agent credential overrides (`<agent-id>/<secret-key>` files). Set automatically by the chart when `customCredentials` is configured. See [Per-Agent Credentials](#per-agent-credentials-integration-overrides) |
@@ -827,6 +830,8 @@ dashboards:
   enabled: true                        # DASHBOARDS_DIR  = $mountPath/dashboards
 workflows:
   enabled: true                        # WORKFLOWS_DIR   = $mountPath/workflows
+billing:
+  enabled: true                        # BILLING_DIR     = $mountPath/billing
 userContext:
   enabled: true                        # USER_CONTEXT_DIR = $mountPath/user-context
 
