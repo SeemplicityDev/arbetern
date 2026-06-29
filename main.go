@@ -442,7 +442,7 @@ func buildHelpMessage(agents []prompts.AgentConfig) string {
 	b.WriteString("• `/ovad create a dashboard of datadog monitors in US alerting for env:prod refreshing every 5m`\n")
 
 	b.WriteString("\n*Create a workflow* (scheduled action — can write / PR / post)\n")
-	b.WriteString("• `/ovad create a workflow that every 5m polls jira open bugs in ENG with label arbetern, fixes them in github (PR assigned to claude), and posts to slack channel C02S5BP9LHX`\n")
+	b.WriteString("• `/ovad create a workflow that every 5m polls jira open bugs in ENG with label arbetern, fixes them in github (PR assigned to claude), and posts to slack channel C0123456789`\n")
 	b.WriteString("• `/pulse create a workflow every 30m to check datadog monitors alerting for service:payments and DM me the list`\n")
 	b.WriteString("• Multi-step (subflows): `/seihin create a workflow every 1h with tasks: 1) list my in-progress tickets, 2) rewrite each description, 3) post a summary to #pm-intake`\n")
 	b.WriteString("• Event-triggered: `/agent-q create a workflow that runs on_failure of ovad/<workflow-id> and opens a Jira bug with the error`\n")
@@ -511,7 +511,7 @@ func buildWorkflowsMessage(reg *workflows.Registry, agents []prompts.AgentConfig
 	if len(all) == 0 {
 		b.WriteString("_No workflows are currently registered._\n\n")
 		b.WriteString("Ask any agent to create one — e.g.\n")
-		b.WriteString("• `/ovad create a workflow every 5m: poll jira open bugs in ENG with label arbetern, fix them in github (PR assigned to claude), post to slack C02S5BP9LHX`\n")
+		b.WriteString("• `/ovad create a workflow every 5m: poll jira open bugs in ENG with label arbetern, fix them in github (PR assigned to claude), post to slack C0123456789`\n")
 		b.WriteString("• Multi-step: `/seihin create a workflow every 1h with tasks: 1) list my in-progress tickets 2) rewrite each description 3) post a summary to #pm-intake`\n")
 		b.WriteString("• Event-triggered: `/agent-q create a workflow that runs on_failure of ovad/<id> and opens a Jira bug with the error`")
 		return b.String()

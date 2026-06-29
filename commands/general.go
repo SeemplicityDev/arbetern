@@ -214,14 +214,15 @@ func (h *GeneralHandler) recordUsage(model string, u llm.Usage) {
 		src = billing.SourceSlack
 	}
 	h.billing.Record(billing.Event{
-		Agent:            h.agentID,
-		Source:           src,
-		WorkflowID:       h.billingWorkflowID,
-		WorkflowName:     h.billingWorkflowName,
-		Model:            model,
-		PromptTokens:     u.PromptTokens,
-		CompletionTokens: u.CompletionTokens,
-		TotalTokens:      u.TotalTokens,
+		Agent:              h.agentID,
+		Source:             src,
+		WorkflowID:         h.billingWorkflowID,
+		WorkflowName:       h.billingWorkflowName,
+		Model:              model,
+		PromptTokens:       u.PromptTokens,
+		CachedPromptTokens: u.CachedPromptTokens,
+		CompletionTokens:   u.CompletionTokens,
+		TotalTokens:        u.TotalTokens,
 	})
 }
 
@@ -298,6 +299,7 @@ func (h *GeneralHandler) Execute(channelID, userID, text, responseURL, auditTS s
 
 		if resp.Usage != nil {
 			totalUsage.PromptTokens += resp.Usage.PromptTokens
+			totalUsage.CachedPromptTokens += resp.Usage.CachedPromptTokens
 			totalUsage.CompletionTokens += resp.Usage.CompletionTokens
 			totalUsage.TotalTokens += resp.Usage.TotalTokens
 		}
@@ -480,6 +482,7 @@ func (h *GeneralHandler) ExecuteHeadless(ctx context.Context, userID, prompt str
 		}
 		if resp.Usage != nil {
 			totalUsage.PromptTokens += resp.Usage.PromptTokens
+			totalUsage.CachedPromptTokens += resp.Usage.CachedPromptTokens
 			totalUsage.CompletionTokens += resp.Usage.CompletionTokens
 			totalUsage.TotalTokens += resp.Usage.TotalTokens
 		}
@@ -618,6 +621,7 @@ func (h *GeneralHandler) ExecuteChat(ctx context.Context, userID string, history
 		}
 		if resp.Usage != nil {
 			totalUsage.PromptTokens += resp.Usage.PromptTokens
+			totalUsage.CachedPromptTokens += resp.Usage.CachedPromptTokens
 			totalUsage.CompletionTokens += resp.Usage.CompletionTokens
 			totalUsage.TotalTokens += resp.Usage.TotalTokens
 		}
@@ -1026,7 +1030,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 			Type: "function",
 			Function: llm.ToolFunction{
 				Name:        "reply_in_thread",
-				Description: "Post a message as a threaded reply to a specific Slack message. Use this when the user asks you to reply inside someone's thread or respond to a particular message. You need the thread_ts of the target message from the channel context. IMPORTANT: Messages marked [BOT] are this bot's own messages — never reply to those. Always use the thread_ts of the HUMAN user's message (e.g. the person mentioned by name like 'Shahar', 'John', etc.).",
+				Description: "Post a message as a threaded reply to a specific Slack message. Use this when the user asks you to reply inside someone's thread or respond to a particular message. You need the thread_ts of the target message from the channel context. IMPORTANT: Messages marked [BOT] are this bot's own messages — never reply to those. Always use the thread_ts of the HUMAN user's message (e.g. the person mentioned by name like 'Alex', 'Sam', etc.).",
 				Parameters: json.RawMessage(`{
 					"type":"object",
 					"properties":{
@@ -1041,11 +1045,11 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 			Type: "function",
 			Function: llm.ToolFunction{
 				Name:        "post_slack_message",
-				Description: "Post a message to a specific Slack channel by channel ID. Use this when the user gives you an explicit channel ID (e.g. 'C02S5BP9LHX') and asks you to send a message there, OR inside a scheduled workflow tick where no interactive thread is available. If 'thread_ts' is set, the message is posted as a threaded reply under that parent message (use this to keep multi-part reports on the same thread — capture the ts returned by the first call and pass it as thread_ts on subsequent calls). Supports Slack markdown. Returns the posted message ts on success.",
+				Description: "Post a message to a specific Slack channel by channel ID. Use this when the user gives you an explicit channel ID (e.g. 'C0123456789') and asks you to send a message there, OR inside a scheduled workflow tick where no interactive thread is available. If 'thread_ts' is set, the message is posted as a threaded reply under that parent message (use this to keep multi-part reports on the same thread — capture the ts returned by the first call and pass it as thread_ts on subsequent calls). Supports Slack markdown. Returns the posted message ts on success.",
 				Parameters: json.RawMessage(`{
 					"type":"object",
 					"properties":{
-						"channel_id":{"type":"string","description":"Slack channel ID (e.g. 'C02S5BP9LHX'). NOT a channel name."},
+						"channel_id":{"type":"string","description":"Slack channel ID (e.g. 'C0123456789'). NOT a channel name."},
 						"text":{"type":"string","description":"Message body. Supports Slack markdown formatting."},
 						"thread_ts":{"type":"string","description":"OPTIONAL. Parent message ts to reply under. Omit or leave empty to post as a new top-level channel message. Use the ts returned by a prior post_slack_message call to keep a multi-part report threaded together."}
 					},
@@ -1061,7 +1065,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 				Parameters: json.RawMessage(`{
 					"type":"object",
 					"properties":{
-						"channel_id":{"type":"string","description":"Slack channel ID (e.g. 'C09NN1E439D'). NOT a channel name."},
+						"channel_id":{"type":"string","description":"Slack channel ID (e.g. 'C0123456789'). NOT a channel name."},
 						"oldest":{"type":"string","description":"Slack ts (e.g. '1776940344.123456') — only return messages strictly newer than this. Leave empty or omit to return the most recent 'limit' messages regardless of age."},
 						"limit":{"type":"integer","description":"Maximum number of messages to return (default 20, max 100)."}
 					},
@@ -1077,7 +1081,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 				Parameters: json.RawMessage(`{
 					"type":"object",
 					"properties":{
-						"channel_id":{"type":"string","description":"Slack channel ID (e.g. 'C09NN1E439D'). NOT a channel name."},
+						"channel_id":{"type":"string","description":"Slack channel ID (e.g. 'C0123456789'). NOT a channel name."},
 						"thread_ts":{"type":"string","description":"The ts of the thread's PARENT message (e.g. '1776940344.123456'). This is the top-level message whose replies you want."},
 						"limit":{"type":"integer","description":"Maximum number of messages to return, including the parent (default 50, max 200)."}
 					},
@@ -1132,7 +1136,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 				Parameters: json.RawMessage(`{
 					"type":"object",
 					"properties":{
-						"url":{"type":"string","description":"Slack thread or message URL (e.g. 'https://yourorg.slack.com/archives/C01BS13KFL7/p1771847194296799')"}
+						"url":{"type":"string","description":"Slack thread or message URL (e.g. 'https://yourorg.slack.com/archives/C0123456789/p1771847194296799')"}
 					},
 					"required":["url"]
 				}`),
@@ -1405,7 +1409,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 			Type: "function",
 			Function: llm.ToolFunction{
 				Name:        "add_jira_comment",
-				Description: "Post a comment on a Jira issue. The body is rendered from markdown to ADF (Atlassian Document Format) automatically — supports # headers, - bullets, 1) ordered lists, **bold**, `code`, and [text](url) links. To @-mention a Jira user so they get a real notification (not just a plain-text string), use the syntax `@[Display Name](accountId)` — e.g. `@[Iftah Roichman](712020:abc-def-...)`. ALWAYS call resolve_jira_user first to get the accountId; never invent or guess it, and never write a bare `@Name` because it will be posted as inert plain text. Use when the user asks to comment on, reply to, or annotate a ticket.",
+				Description: "Post a comment on a Jira issue. The body is rendered from markdown to ADF (Atlassian Document Format) automatically — supports # headers, - bullets, 1) ordered lists, **bold**, `code`, and [text](url) links. To @-mention a Jira user so they get a real notification (not just a plain-text string), use the syntax `@[Display Name](accountId)` — e.g. `@[Jane Doe](712020:abc-def-...)`. ALWAYS call resolve_jira_user first to get the accountId; never invent or guess it, and never write a bare `@Name` because it will be posted as inert plain text. Use when the user asks to comment on, reply to, or annotate a ticket.",
 				Parameters: json.RawMessage(`{
 					"type":"object",
 					"properties":{
@@ -1487,11 +1491,11 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 			Type: "function",
 			Function: llm.ToolFunction{
 				Name:        "resolve_jira_user",
-				Description: "Search for a Jira user by name and/or email and return their account ID. IMPORTANT: Jira Cloud JQL does NOT reliably support searching by display name (e.g. assignee = 'Mike Joseph' may return zero results). You MUST call this tool first to get the user's Jira account ID, then use that account ID in JQL queries (e.g. assignee = 'accountId'). This is the ONLY reliable way to find issues by assignee in Jira Cloud. ALWAYS pass both name AND email (from get_slack_user_info) for best results — email-based search is the most reliable.",
+				Description: "Search for a Jira user by name and/or email and return their account ID. IMPORTANT: Jira Cloud JQL does NOT reliably support searching by display name (e.g. assignee = 'Jane Doe' may return zero results). You MUST call this tool first to get the user's Jira account ID, then use that account ID in JQL queries (e.g. assignee = 'accountId'). This is the ONLY reliable way to find issues by assignee in Jira Cloud. ALWAYS pass both name AND email (from get_slack_user_info) for best results — email-based search is the most reliable.",
 				Parameters: json.RawMessage(`{
 					"type":"object",
 					"properties":{
-						"name":{"type":"string","description":"The person's display name (e.g. 'Mike Joseph', 'John Smith')"},
+						"name":{"type":"string","description":"The person's display name (e.g. 'Jane Doe', 'John Smith')"},
 						"email":{"type":"string","description":"The person's email address (most reliable for Jira lookup). Get this from get_slack_user_info."}
 					},
 					"required":["name"]
@@ -3526,8 +3530,8 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		if args.Name != "" {
 			attempts = append(attempts, attempt{"full name", args.Name})
 			// Also try individual name parts (first name, last name) since Jira's
-			// /user/search often matches prefixes, and "Mike Joseph" as a single
-			// query may fail while "Mike" succeeds.
+			// /user/search often matches prefixes, and "Jane Doe" as a single
+			// query may fail while "Jane" succeeds.
 			parts := strings.Fields(args.Name)
 			if len(parts) > 1 {
 				for _, p := range parts {

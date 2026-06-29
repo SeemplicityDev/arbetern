@@ -41,32 +41,35 @@ const (
 // record time, so callers only supply tokens and metadata. PromptTokens and
 // CompletionTokens are the cumulative counts across all tool-loop rounds.
 type Event struct {
-	At               time.Time `json:"at"`
-	Agent            string    `json:"agent"`
-	Source           string    `json:"source"`
-	WorkflowID       string    `json:"workflow_id,omitempty"`
-	WorkflowName     string    `json:"workflow_name,omitempty"`
-	Model            string    `json:"model"`
-	PromptTokens     int       `json:"prompt_tokens"`
-	CompletionTokens int       `json:"completion_tokens"`
-	TotalTokens      int       `json:"total_tokens"`
-	CostUSD          float64   `json:"cost_usd"`
-	Unpriced         bool      `json:"unpriced,omitempty"`
+	At                 time.Time `json:"at"`
+	Agent              string    `json:"agent"`
+	Source             string    `json:"source"`
+	WorkflowID         string    `json:"workflow_id,omitempty"`
+	WorkflowName       string    `json:"workflow_name,omitempty"`
+	Model              string    `json:"model"`
+	PromptTokens       int       `json:"prompt_tokens"`
+	CachedPromptTokens int       `json:"cached_prompt_tokens,omitempty"`
+	CompletionTokens   int       `json:"completion_tokens"`
+	TotalTokens        int       `json:"total_tokens"`
+	CostUSD            float64   `json:"cost_usd"`
+	Unpriced           bool      `json:"unpriced,omitempty"`
 }
 
 // Counts is a rolled-up tally shared by every aggregation dimension.
 type Counts struct {
-	Requests         int     `json:"requests"`
-	PromptTokens     int64   `json:"prompt_tokens"`
-	CompletionTokens int64   `json:"completion_tokens"`
-	TotalTokens      int64   `json:"total_tokens"`
-	CostUSD          float64 `json:"cost_usd"`
-	Unpriced         int     `json:"unpriced"`
+	Requests           int     `json:"requests"`
+	PromptTokens       int64   `json:"prompt_tokens"`
+	CachedPromptTokens int64   `json:"cached_prompt_tokens"`
+	CompletionTokens   int64   `json:"completion_tokens"`
+	TotalTokens        int64   `json:"total_tokens"`
+	CostUSD            float64 `json:"cost_usd"`
+	Unpriced           int     `json:"unpriced"`
 }
 
 func (c *Counts) add(e Event) {
 	c.Requests++
 	c.PromptTokens += int64(e.PromptTokens)
+	c.CachedPromptTokens += int64(e.CachedPromptTokens)
 	c.CompletionTokens += int64(e.CompletionTokens)
 	c.TotalTokens += int64(e.TotalTokens)
 	c.CostUSD += e.CostUSD
@@ -161,7 +164,7 @@ func (s *Store) Record(e Event) {
 		e.Source = SourceSlack
 	}
 	if e.CostUSD == 0 {
-		cost, ok := Cost(e.Model, e.PromptTokens, e.CompletionTokens)
+		cost, ok := Cost(e.Model, e.PromptTokens, e.CachedPromptTokens, e.CompletionTokens)
 		e.CostUSD = cost
 		e.Unpriced = !ok
 	}
@@ -355,6 +358,7 @@ func (s *Store) Summarize(days int) Summary {
 func (c *Counts) addCounts(o *Counts) {
 	c.Requests += o.Requests
 	c.PromptTokens += o.PromptTokens
+	c.CachedPromptTokens += o.CachedPromptTokens
 	c.CompletionTokens += o.CompletionTokens
 	c.TotalTokens += o.TotalTokens
 	c.CostUSD += o.CostUSD

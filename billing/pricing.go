@@ -180,11 +180,21 @@ func PriceFor(model string) (Price, bool) {
 	return Price{}, false
 }
 
+// cacheReadFactor is the fraction of the input rate charged for prompt tokens
+// served from the provider's cache. Anthropic bills cache reads at ~0.1x; this
+// conservative single factor is applied to any CachedPromptTokens we observe.
+const cacheReadFactor = 0.1
+
 // Cost returns the dollar cost of a turn and whether the model was priced.
-func Cost(model string, promptTokens, completionTokens int) (float64, bool) {
+// cachedTokens are prompt tokens served from cache and billed at the discounted
+// cacheReadFactor of the input rate.
+func Cost(model string, promptTokens, cachedTokens, completionTokens int) (float64, bool) {
 	p, ok := PriceFor(model)
 	if !ok {
 		return 0, false
 	}
-	return p.In*float64(promptTokens)/1e6 + p.Out*float64(completionTokens)/1e6, true
+	c := p.In*float64(promptTokens)/1e6 +
+		p.In*cacheReadFactor*float64(cachedTokens)/1e6 +
+		p.Out*float64(completionTokens)/1e6
+	return c, true
 }

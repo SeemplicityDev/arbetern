@@ -143,7 +143,7 @@ general: |
   👤 Owner: Troy Pearson
   ```
 
-  - For Jira links use Slack format: <https://betterviewcloud.atlassian.net/browse/ENG-123|ENG-123>
+  - For Jira links use Slack format: <https://yourorg.atlassian.net/browse/ENG-123|ENG-123>
   - Separate each record with a blank line
   - If there are more than 10 records, summarize with a count header and show the most urgent ones first
   - Never dump raw Salesforce field names or JSON — always translate to business language

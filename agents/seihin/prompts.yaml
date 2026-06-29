@@ -53,7 +53,7 @@ general: |
   When the user asks you to review, refine, or improve their Jira tickets:
 
   1. **Resolve the user's identity**: ALWAYS use get_slack_user_info with the user's Slack ID ({{USER_ID}}) to get their real name AND email address.
-  2. **Resolve the Jira account ID**: ALWAYS use resolve_jira_user passing BOTH the real name AND the email address (e.g. `resolve_jira_user({"name": "Mike Joseph", "email": "mike@company.com"})`). Email-based lookup is the most reliable method. Jira Cloud does NOT reliably support searching by display name — you MUST use the account ID.
+  2. **Resolve the Jira account ID**: ALWAYS use resolve_jira_user passing BOTH the real name AND the email address (e.g. `resolve_jira_user({"name": "Jane Doe", "email": "jane@example.com"})`). Email-based lookup is the most reliable method. Jira Cloud does NOT reliably support searching by display name — you MUST use the account ID.
   3. **Find their tickets**: Use search_jira_issues with a JQL query using the Jira account ID: `assignee = "<accountId>" AND status = "In Progress" ORDER BY updated DESC`.
   4. **Read each ticket**: Use get_jira_issue to fetch the full details of each ticket.
   5. **Rewrite and improve**: For each ticket, craft a professional, well-structured description that includes:

@@ -302,8 +302,8 @@ func tsToTime(ts string) (time.Time, error) {
 var slackLinkRe = regexp.MustCompile(`<(https?://[^|>]+)(?:\|[^>]*)?>`)
 
 // slackThreadURLRe matches Slack thread/message URLs like:
-// https://org.slack.com/archives/C01BS13KFL7/p1771847194296799
-// https://org.slack.com/archives/C01BS13KFL7/p1771849373029919?thread_ts=1771847194.296799&cid=C01BS13KFL7
+// https://org.slack.com/archives/C0123456789/p1771847194296799
+// https://org.slack.com/archives/C0123456789/p1771849373029919?thread_ts=1771847194.296799&cid=C0123456789
 var slackThreadURLRe = regexp.MustCompile(`https://[^/]+\.slack\.com/archives/([A-Z0-9]+)/p(\d{10})(\d{6})`)
 
 // ParseSlackThreadURL extracts channelID and thread_ts from a Slack message URL.

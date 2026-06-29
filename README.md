@@ -88,6 +88,7 @@ The core variables you'll set on day one:
 | `SLACK_APP_TOKEN` | Slack app-level token (`xapp-...`) for Socket Mode — enables thread follow-ups without slash commands (see [docs/SLACK_BOT.md](docs/SLACK_BOT.md#socket-mode-thread-follow-ups)) |
 | `THREAD_SESSION_TTL` | Duration a thread session stays active (default `3m`, Go duration). Also controls the channel-context cache TTL |
 | `MAX_TOOL_ROUNDS` | Max LLM tool-call rounds per request (default `200`) |
+| `LLM_PROMPT_CACHE` | Enable Anthropic prompt caching of the static prefix (tool schemas + system prompt) and the rolling conversation tail, so long tool-loops re-read shared context at the provider's ~0.1x cache rate instead of full price. Quality-neutral. Default `true`; set `false` as a kill-switch |
 | `SHOW_USAGE_STAMP` | Append model/token usage metadata to Slack replies. Default `true` |
 | `UI_ALLOWED_CIDRS` | Comma-separated CIDRs allowed to access the UI |
 | `UI_HEADER` | Custom header text for the web UI (default `arbetern`) |
@@ -620,7 +621,7 @@ Example prompt (the one that kicked off this feature):
 ```
 /ovad create for me a workflow which polls every 5 minutes from jira open bug
 tickets from the engineering project with the label "arbetern", reads and executes
-upon the bug in github, and sends a slack message to channel C02S5BP9LHX that
+upon the bug in github, and sends a slack message to channel C0123456789 that
 a PR is created — when you create the PR, set claude as the assignee too so it
 will review.
 ```
@@ -659,7 +660,7 @@ arbetern/
 ├── workflows/
 │   ├── ovad/
 │   │   ├── aws-daily-cost.json
-│   │   └── arbetern-autofix.json
+│   │   └── jira-bug-autofix.json
 │   └── seihin/
 │       └── seihin-application-triage.json
 └── dashboards/

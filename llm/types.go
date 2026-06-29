@@ -49,6 +49,11 @@ type Usage struct {
 	PromptTokens     int `json:"prompt_tokens"`
 	CompletionTokens int `json:"completion_tokens"`
 	TotalTokens      int `json:"total_tokens"`
+	// CachedPromptTokens are prompt tokens served from the provider's prompt
+	// cache at a steep discount (e.g. Anthropic ~0.1x). They are billed far
+	// cheaper than fresh PromptTokens, so they are tracked separately for
+	// accurate cost estimation. Not included in PromptTokens.
+	CachedPromptTokens int `json:"cached_prompt_tokens,omitempty"`
 }
 
 // ChatResponse wraps the LLM's reply, normalised from either the Chat

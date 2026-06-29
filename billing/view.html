@@ -139,6 +139,7 @@
       <div class="stat"><div class="k">Requests</div><div class="v" id="s-req">0</div></div>
       <div class="stat"><div class="k">Tokens</div><div class="v" id="s-tok">0</div></div>
       <div class="stat"><div class="k">Avg / request</div><div class="v" id="s-avg">$0.00</div></div>
+      <div class="stat"><div class="k">Cache hit</div><div class="v" id="s-cache">0%</div></div>
       <div class="stat"><div class="k">Unpriced calls</div><div class="v" id="s-unp">0</div></div>
     </section>
 
@@ -195,6 +196,7 @@
       $('#s-req').textContent=(t.requests||0).toLocaleString();
       $('#s-tok').textContent=tok(t.total_tokens);
       $('#s-avg').textContent=money4(t.requests?t.cost_usd/t.requests:0);
+      const cin=(t.cached_prompt_tokens||0),pin=(t.prompt_tokens||0)+cin;$('#s-cache').textContent=(pin?Math.round(cin/pin*100):0)+'%';
       $('#s-unp').textContent=(t.unpriced||0).toLocaleString();
       bars($('#bars'),d.daily);
       rows($('#t-agent'),d.by_agent,r=>esc(r.key));

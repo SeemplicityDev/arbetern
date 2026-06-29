@@ -30,6 +30,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"strings"
 )
 
@@ -37,7 +38,7 @@ import (
 type anthropicRequest struct {
 	Model     string             `json:"model"`
 	MaxTokens int                `json:"max_tokens"`
-	System    string             `json:"system,omitempty"`
+	System    interface{}        `json:"system,omitempty"`
 	Messages  []anthropicMessage `json:"messages"`
 	Tools     []anthropicTool    `json:"tools,omitempty"`
 }
@@ -50,9 +51,10 @@ type anthropicMessage struct {
 
 // anthropicTool mirrors Anthropic's tool-definition schema.
 type anthropicTool struct {
-	Name        string          `json:"name"`
-	Description string          `json:"description,omitempty"`
-	InputSchema json.RawMessage `json:"input_schema"`
+	Name         string          `json:"name"`
+	Description  string          `json:"description,omitempty"`
+	InputSchema  json.RawMessage `json:"input_schema"`
+	CacheControl interface{}     `json:"cache_control,omitempty"`
 }
 
 // anthropicResponse is the wire body returned by the Messages API.
@@ -76,8 +78,10 @@ type anthropicContentBlock struct {
 }
 
 type anthropicUsage struct {
-	InputTokens  int `json:"input_tokens"`
-	OutputTokens int `json:"output_tokens"`
+	InputTokens              int `json:"input_tokens"`
+	OutputTokens             int `json:"output_tokens"`
+	CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
+	CacheReadInputTokens     int `json:"cache_read_input_tokens"`
 }
 
 type anthropicResponseError struct {
@@ -100,6 +104,39 @@ func chatToolsToAnthropicTools(tools []Tool) []anthropicTool {
 		})
 	}
 	return out
+}
+
+// ephemeralCache is the Anthropic prompt-cache breakpoint marker. A breakpoint
+// caches the entire prefix up to and including the block it is attached to.
+var ephemeralCache = map[string]string{"type": "ephemeral"}
+
+// promptCacheEnabled reports whether Anthropic prompt caching is on (default
+// true). Set LLM_PROMPT_CACHE=false to disable as a kill-switch.
+func promptCacheEnabled() bool {
+	return !strings.EqualFold(strings.TrimSpace(os.Getenv("LLM_PROMPT_CACHE")), "false")
+}
+
+// markLastMessageCache attaches a cache breakpoint to the final content block
+// of the last message, so each tool-loop round can re-read the conversation
+// prefix accumulated so far at the cache-read rate. String content is promoted
+// to a single text block to carry the marker.
+func markLastMessageCache(msgs []anthropicMessage) {
+	if len(msgs) == 0 {
+		return
+	}
+	last := &msgs[len(msgs)-1]
+	switch c := last.Content.(type) {
+	case string:
+		if strings.TrimSpace(c) == "" {
+			return
+		}
+		last.Content = []map[string]interface{}{{"type": "text", "text": c, "cache_control": ephemeralCache}}
+	case []map[string]interface{}:
+		if len(c) == 0 {
+			return
+		}
+		c[len(c)-1]["cache_control"] = ephemeralCache
+	}
 }
 
 // chatMessagesToAnthropic converts the unified ChatMessage list to the
@@ -205,10 +242,14 @@ func anthropicResponseToChat(r *anthropicResponse) *ChatResponse {
 		FinishReason: r.StopReason,
 	})
 	if r.Usage != nil {
+		// PromptTokens are full-rate input (fresh input + cache writes); cache
+		// reads are tracked separately so they can be priced at the provider's
+		// steep cache-read discount. TotalTokens covers every category.
 		resp.Usage = &Usage{
-			PromptTokens:     r.Usage.InputTokens,
-			CompletionTokens: r.Usage.OutputTokens,
-			TotalTokens:      r.Usage.InputTokens + r.Usage.OutputTokens,
+			PromptTokens:       r.Usage.InputTokens + r.Usage.CacheCreationInputTokens,
+			CachedPromptTokens: r.Usage.CacheReadInputTokens,
+			CompletionTokens:   r.Usage.OutputTokens,
+			TotalTokens:        r.Usage.InputTokens + r.Usage.CacheCreationInputTokens + r.Usage.CacheReadInputTokens + r.Usage.OutputTokens,
 		}
 	}
 	return resp
@@ -217,13 +258,35 @@ func anthropicResponseToChat(r *anthropicResponse) *ChatResponse {
 // doAnthropic calls Foundry's Anthropic Messages API for Claude deployments.
 func (c *Client) doAnthropic(ctx context.Context, messages []ChatMessage, tools []Tool) (*ChatResponse, error) {
 	system, anthMessages := chatMessagesToAnthropic(messages)
+	anthTools := chatToolsToAnthropicTools(tools)
+
+	// Prompt caching: place breakpoints on the static prefix (tool schemas +
+	// system prompt) and on the rolling conversation tail. In a tool-loop the
+	// same large prefix is re-sent every round, so caching lets rounds 2..N
+	// read it at the provider's ~0.1x cache-read rate instead of full price.
+	// This is quality-neutral — the model sees identical input; only billing
+	// and latency improve. Disable with LLM_PROMPT_CACHE=false.
+	var systemField interface{}
+	if s := strings.TrimSpace(system); s != "" {
+		if promptCacheEnabled() {
+			systemField = []map[string]interface{}{{"type": "text", "text": system, "cache_control": ephemeralCache}}
+		} else {
+			systemField = system
+		}
+	}
+	if promptCacheEnabled() {
+		if n := len(anthTools); n > 0 {
+			anthTools[n-1].CacheControl = ephemeralCache
+		}
+		markLastMessageCache(anthMessages)
+	}
 
 	reqBody := anthropicRequest{
 		Model:     c.model,
 		MaxTokens: anthropicMaxTokens,
-		System:    system,
+		System:    systemField,
 		Messages:  anthMessages,
-		Tools:     chatToolsToAnthropicTools(tools),
+		Tools:     anthTools,
 	}
 
 	payload, err := json.Marshal(reqBody)

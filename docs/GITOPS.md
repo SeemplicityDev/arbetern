@@ -28,7 +28,7 @@ arbetern/
 ├── workflows/
 │   ├── ovad/
 │   │   ├── aws-daily-cost.json
-│   │   └── arbetern-autofix.json
+│   │   └── jira-bug-autofix.json
 │   └── seihin/
 │       └── seihin-application-triage.json
 └── dashboards/
@@ -63,10 +63,10 @@ reconciles).
   "short_name": "aws-daily-cost",
   "description": "Posts a daily AWS Cost Explorer summary to Slack at 05:00 UTC.",
   "cron": "0 5 * * *",
-  "prompt": "Daily report — post to Slack channel C0ADQJMTLJU. ...",
+  "prompt": "Daily report — post to Slack channel C0123456789. ...",
   "trigger": { "type": "schedule" },
   "enabled": true,
-  "created_by": "U09DVNHKU48"
+  "created_by": "U0123456789"
 }
 ```
 
@@ -95,7 +95,7 @@ For long-form prompts it can be cleaner to keep the markdown next to the
 descriptor instead of escaping it into a JSON string. Set `prompt_path`
 to one of:
 
-- **Relative to the descriptor** — `"./arbetern-autofix-prompt.md"`,
+- **Relative to the descriptor** — `"./jira-bug-autofix-prompt.md"`,
   `"prompt.md"`, `"../shared/triage.md"`. Resolved against the directory
   the descriptor lives in (`arbetern/workflows/<agent>/`).
 - **Repo-absolute** — `"/arbetern/workflows/_shared/prompt.md"`. Treated
@@ -107,13 +107,13 @@ to one of:
 
 ```jsonc
 {
-  "id": "e177e78b522ab2ef",
+  "id": "a1b2c3d4e5f60718",
   "agent": "ovad",
-  "name": "Arbetern Bug Auto-Fix from Jira",
-  "short_name": "arbetern-autofix",
+  "name": "Jira Bug Auto-Fix",
+  "short_name": "jira-bug-autofix",
   "description": "Polls Jira every hour for open ENG tickets ...",
   "cron": "0 * * * 0-4",
-  "prompt_path": "./arbetern-autofix-prompt.md",
+  "prompt_path": "./jira-bug-autofix-prompt.md",
   "trigger": { "type": "schedule" },
   "enabled": true
 }
@@ -150,7 +150,7 @@ Dashboard files have the dashboards-registry shape, with runtime fields
     { "name": "aws_cost", "type": "aws_cost_explorer", "args": { "granularity": "DAILY" } },
     { "name": "github_prs", "type": "github_open_prs", "args": { "repo": "arbetern" } }
   ],
-  "created_by": "U09DVNHKU48"
+  "created_by": "U0123456789"
 }
 ```
 

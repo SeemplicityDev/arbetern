@@ -12,7 +12,7 @@ intro: |
   • `/ovad query databricks: select sku_name, sum(usage_quantity) from system.billing.usage where usage_date >= :since group by sku_name` — read-only SQL on the warehouse
   • `/ovad create a dashboard of kubernetes cpu utilization by service in datadog US refreshing every 5m` — auto-refreshing dashboard with real timeseries charts
   • `/ovad create a dashboard of datadog monitors in US alerting for env:prod refreshing every 5m` — dashboard of active monitors/alerts
-  • `/ovad create a workflow every 5m: poll jira open bugs in ENG with label arbetern, fix them in github (PR assigned to claude), post to slack C02S5BP9LHX` — scheduled bug-triage workflow
+  • `/ovad create a workflow every 5m: poll jira open bugs in ENG with label arbetern, fix them in github (PR assigned to claude), post to slack C0123456789` — scheduled bug-triage workflow
 
 classifier: |
   You are a command classifier. Given a user message, respond with exactly one word:
