@@ -61,6 +61,8 @@
     .meter .total{font-family:var(--font-display);font-weight:800;font-size:62px;line-height:.95;letter-spacing:-2px;color:var(--text-bright);margin:10px 0 4px;background:linear-gradient(120deg,var(--text-bright),var(--gold));-webkit-background-clip:text;background-clip:text}
     .meter .sub{font-size:13px;color:var(--text-muted)}
     .meter .est{margin-top:14px;font-size:11px;color:var(--text-muted);font-family:var(--font-mono)}
+    .meter .est a{color:var(--gold);text-decoration:none;border-bottom:1px solid transparent}
+    .meter .est a:hover{border-bottom-color:var(--gold)}
     .spark{background:var(--card);padding:22px 26px;display:flex;flex-direction:column}
     .spark .lbl{font-family:var(--font-mono);font-size:11px;letter-spacing:1px;text-transform:uppercase;color:var(--text-muted);margin-bottom:14px}
     .bars{flex:1;display:flex;align-items:flex-end;gap:3px;min-height:120px}
@@ -148,9 +150,10 @@
       <div class="panel"><h2>By source</h2><div id="t-source"></div></div>
     </div>
     <div class="grid2">
-      <div class="panel"><h2>By model</h2><div id="t-model"></div></div>
+      <div class="panel"><h2>By user <small>slack &amp; chat</small></h2><div id="t-user"></div></div>
       <div class="panel"><h2>By workflow</h2><div id="t-wf"></div></div>
     </div>
+    <div class="panel"><h2>By model</h2><div id="t-model"></div></div>
     <div class="panel"><h2>Recent activity <small id="recent-meta"></small></h2><div id="t-recent"></div></div>
 
     <div class="footer">Aggregated on the persistent volume · refreshes every 30s · prices are estimates</div>
@@ -173,7 +176,7 @@
     function recent(el,evs){
       if(!evs||!evs.length){el.innerHTML='<div class="empty">No turns recorded yet</div>';return;}
       let h='<table><thead><tr><th>Time</th><th>Agent</th><th>Source</th><th>Model</th><th class="n">Tokens</th><th class="n">Cost</th></tr></thead><tbody>';
-      evs.slice(0,30).forEach(e=>{const t=new Date(e.at),wf=e.workflow_name?` · ${esc(e.workflow_name)}`:'';h+=`<tr><td>${t.toLocaleString()}</td><td>${esc(e.agent)}</td><td><span class="tag ${e.source}">${e.source}</span>${wf}</td><td>${esc(e.model)}</td><td class="n">${tok(e.total_tokens)}</td><td class="n cost">${money4(e.cost_usd)}</td></tr>`;});
+      evs.slice(0,30).forEach(e=>{const t=new Date(e.at),tag=e.workflow_name?` · ${esc(e.workflow_name)}`:(e.user_id?` · ${esc(e.user_id)}`:'');h+=`<tr><td>${t.toLocaleString()}</td><td>${esc(e.agent)}</td><td><span class="tag ${e.source}">${e.source}</span>${tag}</td><td>${esc(e.model)}</td><td class="n">${tok(e.total_tokens)}</td><td class="n cost">${money4(e.cost_usd)}</td></tr>`;});
       el.innerHTML=h+'</tbody></table>';
     }
     function bars(el,daily){
@@ -187,7 +190,8 @@
       if(!p||(!p.url&&!p.last_sync&&!p.error))return 'Pricing: LLM_PRICE_OVERRIDES only · set PRICE_SOURCE_URL for a live feed';
       let host=p.url;try{host=new URL(p.url).host;}catch(e){}
       if(p.error)return `⚠ Pricing source unavailable (${esc(p.error)}) · ${p.models||0} rates loaded · overrides win`;
-      return `Prices: ${esc(host)} · ${(p.models||0).toLocaleString()} models${p.last_sync?' · synced '+ago(p.last_sync):''} · LLM_PRICE_OVERRIDES win`;
+      const src=/^https?:\/\//i.test(p.url||'')?`<a href="${esc(p.url)}" target="_blank" rel="noopener noreferrer">${esc(host)}</a>`:esc(host);
+      return `Prices: ${src} · ${(p.models||0).toLocaleString()} models${p.last_sync?' · synced '+ago(p.last_sync):''} · LLM_PRICE_OVERRIDES win`;
     }
     async function load(){
       const r=await fetch('/api/billing/summary?days='+days);const d=await r.json();const t=d.totals||{};
@@ -201,6 +205,7 @@
       bars($('#bars'),d.daily);
       rows($('#t-agent'),d.by_agent,r=>esc(r.key));
       rows($('#t-source'),d.by_source,r=>`<span class="tag ${r.key}">${esc(r.key)}</span>`);
+      rows($('#t-user'),d.by_user,r=>esc(r.key));
       rows($('#t-model'),d.by_model,r=>esc(r.key));
       rows($('#t-wf'),d.by_workflow,r=>esc(r.name||r.key)+(r.agent?` <small style="color:var(--text-muted)">${esc(r.agent)}</small>`:''));
       recent($('#t-recent'),d.recent);

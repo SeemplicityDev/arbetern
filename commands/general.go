@@ -205,7 +205,7 @@ func (h *GeneralHandler) buildAggregateCSV(ids []string) (string, string) {
 // recordUsage tags the cumulative token usage of a finished turn with the
 // handler's agent and entry-path metadata and hands it to the billing store.
 // No-op when billing is disabled or no tokens were consumed.
-func (h *GeneralHandler) recordUsage(model string, u llm.Usage) {
+func (h *GeneralHandler) recordUsage(model, userID string, u llm.Usage) {
 	if h.billing == nil || u.TotalTokens == 0 {
 		return
 	}
@@ -213,9 +213,17 @@ func (h *GeneralHandler) recordUsage(model string, u llm.Usage) {
 	if src == "" {
 		src = billing.SourceSlack
 	}
+	// Attribute interactive turns (Slack / chat) to the human who prompted
+	// them; scheduled workflow ticks are attributed via the workflow name, not
+	// the creator, so the user ID is omitted for them.
+	attrUser := ""
+	if src == billing.SourceSlack || src == billing.SourceChat {
+		attrUser = userID
+	}
 	h.billing.Record(billing.Event{
 		Agent:              h.agentID,
 		Source:             src,
+		UserID:             attrUser,
 		WorkflowID:         h.billingWorkflowID,
 		WorkflowName:       h.billingWorkflowName,
 		Model:              model,
@@ -282,7 +290,7 @@ func (h *GeneralHandler) Execute(channelID, userID, text, responseURL, auditTS s
 
 	// Track cumulative token usage across all LLM rounds.
 	var totalUsage llm.Usage
-	defer func() { h.recordUsage(activeClient.Model(), totalUsage) }()
+	defer func() { h.recordUsage(activeClient.Model(), userID, totalUsage) }()
 
 	rounds := h.maxToolRounds
 	if rounds <= 0 {
@@ -472,7 +480,7 @@ func (h *GeneralHandler) ExecuteHeadless(ctx context.Context, userID, prompt str
 	}
 	var mutatingFailures []string
 	var totalUsage llm.Usage
-	defer func() { h.recordUsage(activeClient.Model(), totalUsage) }()
+	defer func() { h.recordUsage(activeClient.Model(), userID, totalUsage) }()
 	for i := 0; i < rounds; i++ {
 		resp, err := activeClient.CompleteWithTools(ctx, messages, tools)
 		if err != nil {
@@ -612,7 +620,7 @@ func (h *GeneralHandler) ExecuteChat(ctx context.Context, userID string, history
 	}
 	emptyResponseRetries := 0
 	var totalUsage llm.Usage
-	defer func() { h.recordUsage(activeClient.Model(), totalUsage) }()
+	defer func() { h.recordUsage(activeClient.Model(), userID, totalUsage) }()
 	for i := 0; i < rounds; i++ {
 		resp, err := activeClient.CompleteWithTools(ctx, messages, tools)
 		if err != nil {

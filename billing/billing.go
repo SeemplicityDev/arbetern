@@ -44,6 +44,7 @@ type Event struct {
 	At                 time.Time `json:"at"`
 	Agent              string    `json:"agent"`
 	Source             string    `json:"source"`
+	UserID             string    `json:"user_id,omitempty"`
 	WorkflowID         string    `json:"workflow_id,omitempty"`
 	WorkflowName       string    `json:"workflow_name,omitempty"`
 	Model              string    `json:"model"`
@@ -93,6 +94,7 @@ type monthData struct {
 	Agents    map[string]*Counts   `json:"agents"`
 	Models    map[string]*Counts   `json:"models"`
 	Sources   map[string]*Counts   `json:"sources"`
+	Users     map[string]*Counts   `json:"users"`
 	Workflows map[string]*wfCounts `json:"workflows"`
 }
 
@@ -103,6 +105,7 @@ func newMonth(key string) *monthData {
 		Agents:    map[string]*Counts{},
 		Models:    map[string]*Counts{},
 		Sources:   map[string]*Counts{},
+		Users:     map[string]*Counts{},
 		Workflows: map[string]*wfCounts{},
 	}
 }
@@ -181,6 +184,9 @@ func (s *Store) Record(e Event) {
 	bucket(m.Agents, e.Agent).add(e)
 	bucket(m.Models, e.Model).add(e)
 	bucket(m.Sources, e.Source).add(e)
+	if e.UserID != "" {
+		bucket(m.Users, e.UserID).add(e)
+	}
 	if e.WorkflowID != "" {
 		key := e.Agent + "/" + e.WorkflowID
 		wf := m.Workflows[key]
@@ -267,6 +273,9 @@ func (s *Store) load() {
 		if m.Sources == nil {
 			m.Sources = map[string]*Counts{}
 		}
+		if m.Users == nil {
+			m.Users = map[string]*Counts{}
+		}
 		if m.Workflows == nil {
 			m.Workflows = map[string]*wfCounts{}
 		}
@@ -296,6 +305,7 @@ type Summary struct {
 	ByAgent    []Row       `json:"by_agent"`
 	ByModel    []Row       `json:"by_model"`
 	BySource   []Row       `json:"by_source"`
+	ByUser     []Row       `json:"by_user"`
 	ByWorkflow []Row       `json:"by_workflow"`
 	Daily      []Row       `json:"daily"`
 	Recent     []Event     `json:"recent"`
@@ -320,6 +330,7 @@ func (s *Store) Summarize(days int) Summary {
 	agents := map[string]*Counts{}
 	models := map[string]*Counts{}
 	sources := map[string]*Counts{}
+	users := map[string]*Counts{}
 	wfs := map[string]*wfCounts{}
 	daily := map[string]*Counts{}
 
@@ -335,6 +346,7 @@ func (s *Store) Summarize(days int) Summary {
 		merge(agents, m.Agents)
 		merge(models, m.Models)
 		merge(sources, m.Sources)
+		merge(users, m.Users)
 		for k, wf := range m.Workflows {
 			dst := wfs[k]
 			if dst == nil {
@@ -348,6 +360,7 @@ func (s *Store) Summarize(days int) Summary {
 	out.ByAgent = rows(agents)
 	out.ByModel = rows(models)
 	out.BySource = rows(sources)
+	out.ByUser = rows(users)
 	out.ByWorkflow = wfRows(wfs)
 	out.Daily = dailyRows(daily)
 	out.Recent = recentSince(s.recent, since)
