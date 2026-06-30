@@ -43,6 +43,8 @@
     .logo .crumb{font-size:12px;color:var(--text-muted);font-family:var(--font-mono)}
     .head-right{display:flex;gap:10px;align-items:center}
     .badge{font-family:var(--font-mono);font-size:11px;padding:4px 12px;border-radius:20px;background:var(--card);border:1px solid var(--border);color:var(--text-muted)}
+    .home-btn{display:inline-flex;align-items:center;gap:6px;font-family:var(--font-mono);font-size:11px;padding:5px 13px;border-radius:20px;background:var(--card);border:1px solid var(--border);color:var(--text-muted);text-decoration:none;transition:border-color .15s,color .15s}
+    .home-btn:hover{border-color:var(--border-accent);color:var(--text-bright);text-decoration:none}
     .theme-toggle{position:relative;width:46px;height:24px;flex-shrink:0;border-radius:20px;background:var(--card-2);border:1px solid var(--border);cursor:pointer;padding:0}
     .theme-toggle:hover{border-color:var(--border-accent)}
     .theme-toggle-knob{position:absolute;top:2px;left:2px;width:18px;height:18px;border-radius:50%;background:var(--accent);color:var(--on-accent);display:flex;align-items:center;justify-content:center;transform:translateX(22px);transition:transform .3s cubic-bezier(.22,1,.36,1)}
@@ -105,6 +107,10 @@
       <div><h1>Usage &amp; Billing</h1><div class="crumb">arbetern · LLM spend</div></div>
     </div>
     <div class="head-right">
+      <a class="home-btn" href="/" title="Back to home">
+        <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 10.5 12 3l9 7.5"/><path d="M5 9.5V21h14V9.5"/></svg>
+        Home
+      </a>
       <span class="badge" id="window-badge">last 30 days</span>
       <button class="theme-toggle" id="theme-toggle" type="button" role="switch" aria-label="Toggle color theme">
         <span class="theme-toggle-knob">
