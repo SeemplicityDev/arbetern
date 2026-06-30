@@ -567,7 +567,7 @@ func (e *workflowExecutor) Run(ctx context.Context, w *workflows.Workflow, promp
 	if name == "" {
 		name = w.Name
 	}
-	return r.RunWorkflow(ctx, w.CreatedBy, w.ID, name, prompt)
+	return r.RunWorkflow(ctx, w.CreatedBy, w.ID, name, w.Model, prompt)
 }
 
 // extractIntroLine returns the second non-empty line from an intro prompt,

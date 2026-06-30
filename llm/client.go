@@ -122,6 +122,20 @@ func NewAzureClient(endpoint, apiKey, deployment string) *Client {
 	}
 }
 
+// WithModel returns a copy of the client targeting a different model/deployment
+// on the same backend — same credentials, HTTP client (connection pool), and
+// compression proxy. Used for per-workflow model overrides. Returns the
+// receiver unchanged when model is empty or already the active one.
+func (c *Client) WithModel(model string) *Client {
+	model = strings.TrimSpace(model)
+	if c == nil || model == "" || model == c.model {
+		return c
+	}
+	clone := *c
+	clone.model = model
+	return &clone
+}
+
 // useAzure returns true when the client is configured for Azure OpenAI.
 func (c *Client) useAzure() bool {
 	return c.azureEndpoint != "" && c.azureAPIKey != ""

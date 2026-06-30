@@ -154,9 +154,13 @@ type Workflow struct {
 	// LastRun, the runner fires a single catch-up tick immediately so a
 	// missed daily report is delivered after a redeploy. Required for
 	// schedule-triggered workflows; ignored for manual / event-triggered.
-	Cron       string  `json:"cron,omitempty"`
-	Prompt     string  `json:"prompt,omitempty"`
-	Tasks      []Task  `json:"tasks,omitempty"`
+	Cron   string `json:"cron,omitempty"`
+	Prompt string `json:"prompt,omitempty"`
+	Tasks  []Task `json:"tasks,omitempty"`
+	// Model overrides the agent's default CODE_MODEL for this workflow's ticks.
+	// It is a backend deployment/model name (e.g. a cheaper model for simple
+	// reporting workflows). Empty == use the configured code model.
+	Model      string  `json:"model,omitempty"`
 	Trigger    Trigger `json:"trigger,omitempty"`
 	CreatedBy  string  `json:"created_by,omitempty"`
 	CreatedAt  string  `json:"created_at"`
@@ -597,6 +601,7 @@ type UpsertSpec struct {
 	Cron        string
 	Prompt      string
 	Tasks       []Task
+	Model       string
 	Trigger     Trigger
 	CreatedBy   string // applied only on first create
 	Enabled     bool
@@ -668,6 +673,7 @@ func (r *Registry) Upsert(ctx context.Context, spec UpsertSpec) (w *Workflow, ch
 			Cron:        cronExpr,
 			Prompt:      spec.Prompt,
 			Tasks:       spec.Tasks,
+			Model:       spec.Model,
 			Trigger:     trig,
 			CreatedBy:   spec.CreatedBy,
 			CreatedAt:   time.Now().UTC().Format(time.RFC3339),
@@ -707,6 +713,7 @@ func (r *Registry) Upsert(ctx context.Context, spec UpsertSpec) (w *Workflow, ch
 	updated.Cron = cronExpr
 	updated.Prompt = spec.Prompt
 	updated.Tasks = append([]Task(nil), spec.Tasks...)
+	updated.Model = spec.Model
 	updated.Trigger = trig
 	updated.Enabled = spec.Enabled
 	updated.Source = spec.Source
@@ -762,10 +769,10 @@ func (r *Registry) ListBySource(src string) []*Workflow {
 // no-op reconciles do not bounce the runner or rewrite the descriptor.
 func upsertFingerprint(spec UpsertSpec, cron, shortName string, trig Trigger) string {
 	type fp struct {
-		Name, ShortName, Description, Cron, Prompt, Source, SourceRef string
-		TriggerType, TriggerRef                                       string
-		Tasks                                                         []Task
-		Enabled                                                       bool
+		Name, ShortName, Description, Cron, Prompt, Model, Source, SourceRef string
+		TriggerType, TriggerRef                                              string
+		Tasks                                                                []Task
+		Enabled                                                              bool
 	}
 	body, _ := json.Marshal(fp{
 		Name:        spec.Name,
@@ -773,6 +780,7 @@ func upsertFingerprint(spec UpsertSpec, cron, shortName string, trig Trigger) st
 		Description: spec.Description,
 		Cron:        cron,
 		Prompt:      spec.Prompt,
+		Model:       spec.Model,
 		Source:      spec.Source,
 		SourceRef:   spec.SourceRef,
 		TriggerType: trig.Type,
@@ -793,6 +801,7 @@ func specFromWorkflow(w *Workflow) UpsertSpec {
 		Cron:        w.Cron,
 		Prompt:      w.Prompt,
 		Tasks:       w.Tasks,
+		Model:       w.Model,
 		Trigger:     w.Trigger,
 		CreatedBy:   w.CreatedBy,
 		Enabled:     w.Enabled,

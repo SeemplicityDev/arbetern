@@ -81,6 +81,7 @@ reconciles).
 | `prompt`      | yes\*             | Natural-language prompt; `\*` either `prompt`, `prompt_path`, or `tasks` is required.              |
 | `prompt_path` | optional          | Load the prompt from a companion file. See [Prompt files](#prompt-files) below. Wins over `prompt` if both are set. |
 | `tasks`       | yes\*             | Ordered list of `{name, prompt}` for multi-step (subflows) workflows.                              |
+| `model`       | optional          | Backend deployment name to use for this workflow's ticks, overriding the agent's default `CODE_MODEL` (e.g. a cheaper model for simple reporting workflows). Empty = use `CODE_MODEL`. |
 | `trigger`     | optional          | `{ "type": "schedule" }` (default), `manual`, `on_success`/`on_failure` (with `"ref":"agent/id"`). |
 | `enabled`     | optional          | Defaults to `true`.                                                                                |
 | `created_by`  | optional          | Slack user ID; surfaced in the UI for attribution.                                                 |

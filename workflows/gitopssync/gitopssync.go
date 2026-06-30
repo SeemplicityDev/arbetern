@@ -62,6 +62,7 @@ type fileSpec struct {
 	// gitops fetcher. See docs/GITOPS.md for the supported reference forms.
 	PromptPath string            `json:"prompt_path"`
 	Tasks      []workflows.Task  `json:"tasks"`
+	Model      string            `json:"model"`
 	Trigger    workflows.Trigger `json:"trigger"`
 	CreatedBy  string            `json:"created_by"`
 	Enabled    *bool             `json:"enabled"`
@@ -111,6 +112,7 @@ func (b *backend) Parse(ctx context.Context, dirAgent, repoPath string, body []b
 			Cron:        spec.Cron,
 			Prompt:      spec.Prompt,
 			Tasks:       spec.Tasks,
+			Model:       spec.Model,
 			Trigger:     spec.Trigger,
 			CreatedBy:   spec.CreatedBy,
 			Enabled:     effective,

@@ -87,6 +87,9 @@ type GeneralHandler struct {
 	billingSource       string
 	billingWorkflowID   string
 	billingWorkflowName string
+	// modelOverride, when set, replaces the default CODE_MODEL for a headless
+	// workflow tick with a specific backend deployment (workflow.Model).
+	modelOverride string
 	// aggregateCache holds the structured results of datadog_logs_aggregate
 	// calls made during this run, keyed by the short ID returned to the LLM
 	// (agg_1, agg_2, …). It lets upload_aggregate_csv assemble a CSV file
@@ -424,12 +427,26 @@ func (h *GeneralHandler) ExecuteHeadless(ctx context.Context, userID, prompt str
 	// than conversational chit-chat, which is the general model's domain.
 	// If no dedicated code model is configured the general model is used as
 	// a fallback and a warning is logged so operators can notice the drift.
-	activeClient := h.modelsClient
-	if h.codeModelsClient != nil {
-		activeClient = h.codeModelsClient
+	//
+	// A per-workflow Model override (h.modelOverride) wins over CODE_MODEL. The
+	// chosen client is captured once as codeClient and reused for the whole
+	// tick so the mid-loop code-tool switch can never revert the override.
+	codeClient := h.codeModelsClient
+	if codeClient == nil {
+		codeClient = h.modelsClient
+	}
+	if h.modelOverride != "" {
+		codeClient = codeClient.WithModel(h.modelOverride)
+	}
+	activeClient := codeClient
+	switch {
+	case h.modelOverride != "":
+		log.Printf("[workflow user=%s agent=%s] using model override (%s) for headless execution",
+			userID, h.agentID, activeClient.Model())
+	case h.codeModelsClient != nil:
 		log.Printf("[workflow user=%s agent=%s] using code model (%s) for headless execution",
 			userID, h.agentID, activeClient.Model())
-	} else {
+	default:
 		log.Printf("[workflow user=%s agent=%s] WARNING: no code model configured, falling back to general model (%s)",
 			userID, h.agentID, activeClient.Model())
 	}
@@ -567,8 +584,8 @@ func (h *GeneralHandler) ExecuteHeadless(ctx context.Context, userID, prompt str
 				"list_directory": true, "get_pull_request": true,
 				"create_dashboard": true, "create_workflow": true, "update_workflow": true, "call_workflow": true,
 			}
-			if codeTools[tc.Function.Name] && h.codeModelsClient != nil && activeClient != h.codeModelsClient {
-				activeClient = h.codeModelsClient
+			if codeTools[tc.Function.Name] && activeClient != codeClient {
+				activeClient = codeClient
 			}
 		}
 	}

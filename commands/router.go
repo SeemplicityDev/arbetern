@@ -349,7 +349,7 @@ func (r *Router) HandleThreadReply(channelID, threadTS, userID, text string) {
 // GitHub, etc.) to produce any user-visible side effects.
 //
 // Returns the final assistant message content or the first tool-loop error.
-func (r *Router) RunWorkflow(ctx context.Context, userID, workflowID, workflowName, prompt string) (string, error) {
+func (r *Router) RunWorkflow(ctx context.Context, userID, workflowID, workflowName, model, prompt string) (string, error) {
 	if strings.TrimSpace(prompt) == "" {
 		return "", fmt.Errorf("workflow prompt is empty")
 	}
@@ -371,6 +371,7 @@ func (r *Router) RunWorkflow(ctx context.Context, userID, workflowID, workflowNa
 	h.billingSource = billing.SourceWorkflow
 	h.billingWorkflowID = workflowID
 	h.billingWorkflowName = workflowName
+	h.modelOverride = model
 	return h.ExecuteHeadless(ctx, userID, prompt)
 }
 

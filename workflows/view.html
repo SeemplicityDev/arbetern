@@ -685,6 +685,7 @@
       const items = [
         { label: 'Agent', value: '/' + wf.agent },
         { label: 'Pattern', value: pattern },
+        { label: 'Model', value: wf.model || 'default (code model)' },
         { label: 'Cron (UTC)', value: trigType === 'schedule' ? (wf.cron || '—') : '—' },
         { label: 'Trigger', value: trigType + (trig.ref ? ' (' + trig.ref + ')' : '') },
         { label: 'Enabled', value: wf.enabled ? 'yes' : 'no' },
