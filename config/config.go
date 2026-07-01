@@ -95,6 +95,13 @@ type Credentials struct {
 	ClickHouseKeySecret      string `cred:"clickhouse-key-secret"`      // Cloud API key secret (HTTP Basic password).
 	ClickHouseOrganizationID string `cred:"clickhouse-organization-id"` // Organization ID the report covers.
 
+	// ClickHouse SQL query interface — HTTP Basic auth against a service's
+	// HTTPS endpoint. A separate surface from the billing API above: it runs
+	// read-only SQL against the databases/tables. Use a SELECT/SHOW-only user.
+	ClickHouseQueryEndpoint string `cred:"clickhouse-query-endpoint"` // Service HTTPS endpoint, e.g. "https://abc123.us-east-1.aws.clickhouse.cloud:8443".
+	ClickHouseQueryUser     string `cred:"clickhouse-query-user"`     // Read-only database username (HTTP Basic username).
+	ClickHouseQueryPassword string `cred:"clickhouse-query-password"` // Database password (HTTP Basic password).
+
 	// Freshworks suite (read-only). Each product authenticates differently and
 	// is configured independently — a product with missing credentials is
 	// simply not advertised. Freshdesk uses HTTP Basic (API key as username);
@@ -248,6 +255,13 @@ func (c *Config) ClickHouseConfigured() bool {
 		c.ClickHouseOrganizationID != ""
 }
 
+// ClickHouseQueryConfigured returns true when the ClickHouse SQL query
+// endpoint and database username are present (the password may be empty for a
+// passwordless user). The first real query is the authoritative health check.
+func (c *Config) ClickHouseQueryConfigured() bool {
+	return c.ClickHouseQueryEndpoint != "" && c.ClickHouseQueryUser != ""
+}
+
 // FreshdeskConfigured returns true when the Freshdesk domain and API key are
 // both present.
 func (c *Config) FreshdeskConfigured() bool {
@@ -303,9 +317,13 @@ func Load() (*Config, error) {
 			AzureManagementGroupID: os.Getenv("AZURE_MANAGEMENT_GROUP_ID"),
 			AzureBillingAccountID:  os.Getenv("AZURE_BILLING_ACCOUNT_ID"),
 			DatabricksHost:         os.Getenv("DATABRICKS_HOST"),
-			DatabricksClientID:     os.Getenv("DATABRICKS_CLIENT_ID"),
-			DatabricksClientSecret: os.Getenv("DATABRICKS_CLIENT_SECRET"),
-			DatabricksWarehouseID:  os.Getenv("DATABRICKS_WAREHOUSE_ID"),
+
+			ClickHouseQueryEndpoint: os.Getenv("CLICKHOUSE_QUERY_ENDPOINT"),
+			ClickHouseQueryUser:     os.Getenv("CLICKHOUSE_QUERY_USER"),
+			ClickHouseQueryPassword: os.Getenv("CLICKHOUSE_QUERY_PASSWORD"),
+			DatabricksClientID:      os.Getenv("DATABRICKS_CLIENT_ID"),
+			DatabricksClientSecret:  os.Getenv("DATABRICKS_CLIENT_SECRET"),
+			DatabricksWarehouseID:   os.Getenv("DATABRICKS_WAREHOUSE_ID"),
 
 			ClickHouseKeyID:          os.Getenv("CLICKHOUSE_KEY_ID"),
 			ClickHouseKeySecret:      os.Getenv("CLICKHOUSE_KEY_SECRET"),

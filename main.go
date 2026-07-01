@@ -1101,14 +1101,23 @@ func refreshIntegrations(
 		chPerms := []permission{
 			{Scope: "billing.usageCost.read", Description: "Read organization usage-cost reports (GET /v1/organizations/{org}/usageCost)", Required: true, Granted: boolPtr(chConnected)},
 		}
+		if cfg.ClickHouseQueryConfigured() {
+			chQueryConnected := clickhouseClient != nil && clickhouseClient.QueryReady()
+			chPerms = append(chPerms, permission{Scope: "sql.read", Description: "Run read-only SQL against the service endpoint (SELECT / SHOW / DESCRIBE / EXISTS)", Required: false, Granted: boolPtr(chQueryConnected)})
+		}
 		activeCH := map[string]string{}
 		if clickhouseClient != nil {
-			activeCH["Organization"] = clickhouseClient.OrganizationID()
+			if clickhouseClient.OrganizationID() != "" {
+				activeCH["Organization"] = clickhouseClient.OrganizationID()
+			}
+			if clickhouseClient.QueryEndpoint() != "" {
+				activeCH["Query endpoint"] = clickhouseClient.QueryEndpoint()
+			}
 		}
 		result = append(result, integration{
 			ID:           "clickhouse",
 			Name:         "ClickHouse Cloud",
-			Configured:   cfg.ClickHouseConfigured(),
+			Configured:   cfg.ClickHouseConfigured() || cfg.ClickHouseQueryConfigured(),
 			AuthMode:     "API key (HTTP Basic)",
 			Permissions:  chPerms,
 			ActiveModels: activeCH,
@@ -1330,15 +1339,21 @@ func main() {
 		log.Printf("Databricks integration enabled (host: %s, warehouse: %s)", databricksClient.Host(), databricksClient.WarehouseID())
 	}
 
-	// ClickHouse Cloud billing client — HTTP Basic auth (key ID + secret)
-	// against the Cloud API. NewClient probes connectivity in the background
-	// and retries, so the usage-cost tool becomes available once the first
-	// authenticated call succeeds. Only attempted when the key ID, key secret
-	// and organization ID are all present.
+	// ClickHouse Cloud client — the billing usage-cost API (HTTP Basic key
+	// ID + secret against the Cloud API) and/or the read-only SQL query
+	// interface (HTTP Basic user + password against a service's HTTPS
+	// endpoint). NewClient probes each configured surface in the background and
+	// retries, so each tool becomes available once its first call succeeds.
+	// Built when EITHER surface is configured.
 	var clickhouseClient *clickhouse.Client
-	if cfg.ClickHouseConfigured() {
-		clickhouseClient = clickhouse.NewClient(cfg.ClickHouseKeyID, cfg.ClickHouseKeySecret, cfg.ClickHouseOrganizationID)
-		log.Printf("ClickHouse integration enabled (organization: %s)", clickhouseClient.OrganizationID())
+	if cfg.ClickHouseConfigured() || cfg.ClickHouseQueryConfigured() {
+		clickhouseClient = clickhouse.NewClient(cfg.ClickHouseKeyID, cfg.ClickHouseKeySecret, cfg.ClickHouseOrganizationID, cfg.ClickHouseQueryEndpoint, cfg.ClickHouseQueryUser, cfg.ClickHouseQueryPassword)
+		if cfg.ClickHouseConfigured() {
+			log.Printf("ClickHouse integration enabled (organization: %s)", clickhouseClient.OrganizationID())
+		}
+		if cfg.ClickHouseQueryConfigured() {
+			log.Printf("ClickHouse SQL query interface enabled (endpoint: %s)", clickhouseClient.QueryEndpoint())
+		}
 	}
 
 	// Freshworks suite (read-only) — Freshdesk (tickets), Freshchat

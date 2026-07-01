@@ -2005,6 +2005,30 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 		})
 	}
 
+	// clickhouse_query: read-only SQL against the ClickHouse service endpoint.
+	// A separate surface from clickhouse_usage_cost — it runs SELECT / SHOW /
+	// DESCRIBE / EXISTS against the actual databases and tables. Gated by the
+	// per-agent allowlist (ovad only) AND by the query interface having
+	// completed its first successful call, so it never advertises itself when
+	// the endpoint is unreachable or unconfigured.
+	if h.canUseIntegration(integrationClickHouse) && h.clickhouseClient != nil && h.clickhouseClient.QueryReady() {
+		tools = append(tools, llm.Tool{
+			Type: "function",
+			Function: llm.ToolFunction{
+				Name:        ToolClickHouseQuery,
+				Description: "Run read-only SQL against the configured ClickHouse service and return the result rows as a table. Use for ad-hoc questions over any database and table the connector can read: enumerate databases with SHOW DATABASES, list a database's tables with SHOW TABLES FROM <db> (optionally LIKE '%pattern%'), inspect a table with DESCRIBE <db>.<table>, check existence with EXISTS TABLE <db>.<table>, and count or aggregate rows with SELECT, e.g. SELECT count() FROM <db>.<table> WHERE …. You may send several read-only statements separated by semicolons; ClickHouse returns the result of the LAST one. EVERY statement must be read-only — only SELECT / WITH / SHOW / DESCRIBE / EXISTS / EXPLAIN / VALUES are allowed; INSERT / ALTER / CREATE / DROP / DELETE / SET / SYSTEM and any other write or state change are rejected. When you need to find the right database or table for a request, first discover them with SHOW DATABASES / SHOW TABLES rather than guessing. Quote database and table identifiers that are not simple lowercase words with backticks.",
+				Parameters: json.RawMessage(`{
+					"type":"object",
+					"properties":{
+						"sql":{"type":"string","description":"Read-only SQL to execute against ClickHouse, e.g. 'SHOW DATABASES', 'SHOW TABLES FROM analytics', 'EXISTS TABLE analytics.findings', or 'SELECT count() FROM analytics.findings'. Only SELECT / WITH / SHOW / DESCRIBE / EXISTS / EXPLAIN / VALUES are permitted; mutations are rejected. Fully-qualify tables as <database>.<table>."},
+						"row_limit":{"type":"integer","description":"Maximum rows to return (1..10000). Defaults to 1000. Large result sets are capped server-side and marked truncated."}
+					},
+					"required":["sql"]
+				}`),
+			},
+		})
+	}
+
 	// Freshworks suite (read-only) — gated to the customer-success and
 	// product-management agents
 	// (restrictedIntegrations: pulse) and per-product on the sub-client being
@@ -4768,6 +4792,28 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		log.Printf("[user=%s channel=%s] clickhouse_usage_cost (org=%s, window=%s..%s, records=%d, grandTotalCHC=%.2f)",
 			userID, channelID, res.OrganizationID, res.FromDate, res.ToDate, len(res.Records), res.GrandTotalCHC)
 		return clickhouse.FormatUsageCost(res)
+
+	case ToolClickHouseQuery:
+		if h.clickhouseClient == nil || !h.clickhouseClient.QueryReady() {
+			return preconditionErrf("Error: ClickHouse SQL query interface is not connected.")
+		}
+		args, errMsg := parseToolArgs[struct {
+			SQL      string `json:"sql"`
+			RowLimit int    `json:"row_limit"`
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
+		}
+		if strings.TrimSpace(args.SQL) == "" {
+			return preconditionErrf("Error: sql is required (a read-only ClickHouse statement).")
+		}
+		res, err := h.clickhouseClient.Query(ctx, args.SQL, args.RowLimit)
+		if err != nil {
+			return fmt.Sprintf("Error running ClickHouse query: %v", err)
+		}
+		log.Printf("[user=%s channel=%s] clickhouse_query (endpoint=%s, rows=%d, truncated=%t)",
+			userID, channelID, res.Endpoint, res.RowCount, res.Truncated)
+		return clickhouse.FormatSQLResult(res)
 
 	case ToolFreshdeskListTickets:
 		if h.freshworksClient == nil || !h.freshworksClient.Desk.Ready() {

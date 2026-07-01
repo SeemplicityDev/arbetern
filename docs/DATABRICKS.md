@@ -77,6 +77,10 @@ Databricks integration enabled (host: https://dbc-....cloud.databricks.com, ware
 > read-only by construction, but Unity Catalog grants are still the real
 > boundary on what data the agent can see.
 
+> Every request is sent with the HTTP `User-Agent: arbetern/databricks-connector`,
+> so queries this connector runs are attributable to arbetern in the workspace's
+> audit logs.
+
 ## Helm Deployment
 
 Static credentials via the chart's secret values:

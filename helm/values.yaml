@@ -243,6 +243,12 @@ secretValues:
   # clickhouse-key-id: ""             # Cloud API key ID (HTTP Basic username)
   # clickhouse-key-secret: ""         # Cloud API key secret (HTTP Basic password)
   # clickhouse-organization-id: ""    # Organization ID the usage-cost report covers
+  # ClickHouse SQL query interface (optional — enables the read-only clickhouse_query tool for the ovad agent).
+  # Points at a service's own HTTPS endpoint and authenticates with a database user that has ONLY SELECT/SHOW
+  # privileges. The connector also refuses any non-read-only statement in code. See docs/CLICKHOUSE.md.
+  # clickhouse-query-endpoint: ""     # Service HTTPS endpoint, e.g. https://abc123.us-east-1.aws.clickhouse.cloud:8443
+  # clickhouse-query-user: ""         # Read-only database username (HTTP Basic username)
+  # clickhouse-query-password: ""     # Database password (HTTP Basic password)
   # Freshworks suite (optional, read-only — enables Freshdesk / Freshchat / CRM tools for the pulse and seihin agents).
   # Each product is configured independently; set only the products you use. See docs/FRESHWORKS.md.
   # freshdesk-domain: ""               # Freshdesk host, e.g. acme.freshdesk.com

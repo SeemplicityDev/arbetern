@@ -90,6 +90,11 @@ secretValues:
   # clickhouse-key-id: "your-clickhouse-key-id"
   # clickhouse-key-secret: "your-clickhouse-key-secret"
   # clickhouse-organization-id: "00000000-0000-0000-0000-000000000000"
+  # ClickHouse SQL query interface (optional — enables the read-only clickhouse_query tool for ovad).
+  # Point at a service's HTTPS endpoint and authenticate with a database user that has ONLY SELECT/SHOW.
+  # clickhouse-query-endpoint: "https://abc123.us-east-1.aws.clickhouse.cloud:8443"
+  # clickhouse-query-user: "readonly"
+  # clickhouse-query-password: "REPLACE_ME"
   # Freshworks suite (optional, read-only — enables Freshdesk / Freshchat / CRM tools for the pulse and seihin agents).
   # Each product is configured independently; set only the ones you use. The domains are non-secret;
   # the API keys/tokens are. All keys are gated to pulse and seihin in code — prefer mounting them under
@@ -183,6 +188,9 @@ secretValues:
 #     clickhouse-key-id: "REPLACE_ME"
 #     clickhouse-key-secret: "REPLACE_ME"
 #     clickhouse-organization-id: "00000000-0000-0000-0000-000000000000"
+#     clickhouse-query-endpoint: "https://abc123.us-east-1.aws.clickhouse.cloud:8443"
+#     clickhouse-query-user: "readonly"
+#     clickhouse-query-password: "REPLACE_ME"
 #   pulse:
 #     chorus-api-token: "REPLACE_ME"
 #     # Freshworks is gated to pulse and seihin in code; mounting it here keeps

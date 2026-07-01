@@ -50,7 +50,7 @@ Bayes.
 
 | Agent | Profession | Description |
 |---|---|---|
-| **ovad** | DevOps & SRE Engineer | Debugs CI/CD failures, reads/modifies repo files, opens PRs, searches Datadog logs/monitors/infrastructure, runs read-only SQL on a Databricks warehouse, and reports ClickHouse Cloud usage cost — all from a Slack slash command |
+| **ovad** | DevOps & SRE Engineer | Debugs CI/CD failures, reads/modifies repo files, opens PRs, searches Datadog logs/monitors/infrastructure, runs read-only SQL on a Databricks warehouse, queries ClickHouse databases/tables read-only, and reports ClickHouse Cloud usage cost — all from a Slack slash command |
 | **agent-q** | QA & Test Engineer | Analyzes test failures, reviews test coverage, suggests test cases, and triages flaky tests |
 | **goldsai** | Security Researcher | Assesses CVE impact on your codebase, audits dependencies, reviews code for vulnerabilities, and recommends remediation |
 | **seihin** (製品) | Sr. Technical Product Manager | Reviews and refines Jira tickets, rewrites descriptions with PM best practices, manages ticket quality at scale |
@@ -148,6 +148,7 @@ All live under `persistence.mountPath` in the chart and default to `./data/<feat
 | `AZURE_AUTHORITY_HOST` / `AZURE_MANAGEMENT_HOST` | Optional sovereign-cloud overrides (Azure Government, China). Default to the public-cloud endpoints |
 | `DATABRICKS_HOST` / `DATABRICKS_CLIENT_ID` / `DATABRICKS_CLIENT_SECRET` / `DATABRICKS_WAREHOUSE_ID` | Databricks SQL warehouse + OAuth M2M service-principal credentials. Enables the read-only `databricks_query` tool for the **ovad agent only**. SP needs `CAN USE` on the warehouse + `SELECT` on the target catalogs/schemas. See [docs/DATABRICKS.md](docs/DATABRICKS.md) |
 | `CLICKHOUSE_KEY_ID` / `CLICKHOUSE_KEY_SECRET` / `CLICKHOUSE_ORGANIZATION_ID` | ClickHouse Cloud API key (HTTP Basic key ID + secret) and organization ID. Enables the read-only `clickhouse_usage_cost` billing tool for the **ovad agent only**. See [docs/CLICKHOUSE.md](docs/CLICKHOUSE.md) |
+| `CLICKHOUSE_QUERY_ENDPOINT` / `CLICKHOUSE_QUERY_USER` / `CLICKHOUSE_QUERY_PASSWORD` | ClickHouse service HTTPS endpoint (e.g. `https://…clickhouse.cloud:8443`) + a read-only database user. Enables the read-only `clickhouse_query` SQL tool for the **ovad agent only** (SELECT/SHOW/DESCRIBE/EXISTS; mutations rejected). Queries are tagged with the `arbetern` User-Agent in `system.query_log`. See [docs/CLICKHOUSE.md](docs/CLICKHOUSE.md) |
 | `FRESHDESK_DOMAIN` / `FRESHDESK_API_KEY` | Freshdesk host (e.g. `acme.freshdesk.com`) + API key. Enables the read-only Freshdesk ticket tools for the **pulse agent only** |
 | `FRESHCHAT_URL` / `FRESHCHAT_API_TOKEN` | Freshchat API base incl. `/v2` (e.g. `https://acme-123.freshchat.com/v2`) + Bearer token. Enables the read-only Freshchat conversation tools for the **pulse agent only** |
 | `FRESHWORKS_CRM_DOMAIN` / `FRESHWORKS_CRM_API_KEY` | Freshworks CRM host (e.g. `acme.myfreshworks.com`) + API key. Enables the read-only CRM search/contact/deal tools for the **pulse and seihin agents**. See [docs/FRESHWORKS.md](docs/FRESHWORKS.md) |

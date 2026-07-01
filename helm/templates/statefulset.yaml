@@ -278,6 +278,23 @@ spec:
                   name: {{ .Values.secretName }}
                   key: clickhouse-organization-id
             {{- end }}
+            {{- if index .Values.secretValues "clickhouse-query-endpoint" }}
+            - name: CLICKHOUSE_QUERY_ENDPOINT
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: clickhouse-query-endpoint
+            - name: CLICKHOUSE_QUERY_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: clickhouse-query-user
+            - name: CLICKHOUSE_QUERY_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: clickhouse-query-password
+            {{- end }}
             {{- if index .Values.secretValues "freshdesk-domain" }}
             - name: FRESHDESK_DOMAIN
               valueFrom:

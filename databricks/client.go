@@ -1,18 +1,11 @@
-// Package databricks wraps the subset of the Databricks REST API that
-// arbetern needs — currently the SQL Statement Execution API
-// (/api/2.0/sql/statements). It lets an agent run a read-only SQL query
-// against a Databricks SQL warehouse and get the rows back inline.
+// Package databricks wraps the Databricks SQL Statement Execution API
+// (/api/2.0/sql/statements) so an agent can run read-only SQL against a SQL
+// warehouse and get the rows inline.
 //
-// Authentication uses OAuth 2.0 machine-to-machine (client credentials)
-// against a workspace-level service principal: a client ID + client secret
-// are exchanged at the workspace token endpoint ({host}/oidc/v1/token) for a
-// short-lived bearer token (scope "all-apis"), sent via HTTP Basic auth.
-// This mirrors the flow the official Databricks SDK uses. Tokens are cached
-// in-process and refreshed shortly before they expire.
-//
-// A SQL warehouse ID selects the compute that runs the statement. The
-// workspace URL, client ID, client secret and warehouse ID are all supplied
-// via configuration (see config.Credentials).
+// Auth is OAuth 2.0 machine-to-machine: a service-principal client ID/secret
+// are exchanged at {host}/oidc/v1/token (scope "all-apis") for a short-lived
+// bearer token, cached in-process and refreshed before expiry. A warehouse ID
+// selects the compute. All are supplied via config.Credentials.
 package databricks
 
 import (
@@ -59,6 +52,10 @@ const (
 	// httpTimeout bounds a single HTTP round-trip. It must exceed
 	// defaultWaitTimeout so the synchronous execute call isn't cut off.
 	httpTimeout = 90 * time.Second
+
+	// userAgent identifies arbetern to Databricks (sent on every request) so
+	// queries are attributable in the workspace's audit logs.
+	userAgent = "arbetern/databricks-connector"
 )
 
 // Client talks to the Databricks SQL Statement Execution API for one
@@ -137,20 +134,11 @@ func (c *Client) retryConnect() {
 // --------------------------------------------------------------------------
 
 // Query executes read-only SQL against the configured SQL warehouse and
-// returns the rows. sqlText may be a script of several `;`-separated statements
-// — e.g. DECLARE/SET session variables followed by a SELECT — in which case the
-// warehouse returns the result of the final statement. params bind `:name`
-// markers in the statement. rowLimit caps the rows returned (<=0 uses the
-// default). The call blocks synchronously for up to defaultWaitTimeout and then
-// polls until the statement reaches a terminal state or maxPollDuration
-// elapses.
-//
-// Query rejects anything that is not clearly read-only (see
-// validateReadOnlySQL): every statement must begin with a read-only keyword and
-// none may contain a mutating verb. The tool is a reporting/query surface, and
-// refusing mutations keeps an LLM-generated statement from accidentally writing
-// to or dropping data even if the service principal has been granted more than
-// it should.
+// returns the rows. sqlText may be a `;`-separated script (e.g. DECLARE/SET
+// then SELECT); the warehouse returns the final statement's result. params
+// bind `:name` markers; rowLimit caps the rows (<=0 uses the default). The call
+// blocks up to defaultWaitTimeout, then polls until terminal or maxPollDuration.
+// It rejects anything not clearly read-only (see validateReadOnlySQL).
 func (c *Client) Query(ctx context.Context, sqlText string, params []QueryParam, rowLimit int) (*QueryResult, error) {
 	sqlText = strings.TrimSpace(sqlText)
 	if sqlText == "" {
@@ -320,10 +308,10 @@ func (c *Client) doJSON(ctx context.Context, method, path string, body any, out 
 	}
 	req.Header.Set("Authorization", "Bearer "+tok)
 	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", userAgent)
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("databricks request failed: %w", err)
@@ -373,6 +361,7 @@ func (c *Client) token(ctx context.Context) (string, error) {
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", userAgent)
 	req.SetBasicAuth(c.clientID, c.clientSecret)
 
 	resp, err := c.httpClient.Do(req)
@@ -422,24 +411,19 @@ func normalizeHost(raw string) string {
 	return h
 }
 
-// readOnlyLeadKeywords are the statement-leading verbs we permit. Anything not
-// listed here (INSERT, UPDATE, DELETE, MERGE, CREATE, DROP, ALTER, TRUNCATE,
-// GRANT, …) is rejected by default. DECLARE / SET / USE / BEGIN / END allow the
-// session-setup statements that commonly precede a reporting SELECT in a
-// multi-statement script — e.g. `DECLARE OR REPLACE VARIABLE … ; WITH … SELECT`.
+// readOnlyLeadKeywords are the statement-leading verbs we permit; anything
+// else is rejected. DECLARE / SET / USE / BEGIN / END cover the session setup
+// that can precede a reporting SELECT in a multi-statement script.
 var readOnlyLeadKeywords = map[string]bool{
 	"SELECT": true, "WITH": true, "SHOW": true, "DESCRIBE": true, "DESC": true,
 	"EXPLAIN": true, "VALUES": true, "TABLE": true, "DECLARE": true, "SET": true,
 	"USE": true, "BEGIN": true, "END": true,
 }
 
-// mutatingKeywords are verbs that write data, change schema, or alter
-// privileges. They are rejected even when they appear AFTER an allowed leading
-// keyword — e.g. inside a `WITH … INSERT` CTE or a `BEGIN … END` block — so a
-// read-only-looking prefix can't smuggle a mutation past the leading-keyword
-// check. Read-only modifiers such as REPLACE (`DECLARE OR REPLACE VARIABLE`)
-// and transaction words like COMMIT are intentionally excluded so they don't
-// reject legitimate reporting queries.
+// mutatingKeywords are verbs that write data, change schema or alter
+// privileges. They are rejected even after an allowed leading keyword (e.g. a
+// `WITH … INSERT` CTE). REPLACE (`DECLARE OR REPLACE VARIABLE`) and COMMIT are
+// intentionally excluded so they don't reject legitimate reporting queries.
 var mutatingKeywords = map[string]bool{
 	"INSERT": true, "UPDATE": true, "DELETE": true, "MERGE": true, "UPSERT": true,
 	"CREATE": true, "DROP": true, "ALTER": true, "TRUNCATE": true, "UNDROP": true,
@@ -448,13 +432,10 @@ var mutatingKeywords = map[string]bool{
 	"REPAIR": true, "MSCK": true, "REFRESH": true, "CACHE": true, "UNCACHE": true,
 }
 
-// validateReadOnlySQL checks that every statement in sqlText is read-only.
-// sqlText may be a script of several `;`-separated statements: each one must
-// begin with a keyword in readOnlyLeadKeywords AND must not contain any
-// mutatingKeyword anywhere outside string literals, quoted identifiers and
-// comments. It returns nil when the whole script is read-only, or an error
-// naming the first offending keyword. A script with no statement (only
-// comments / whitespace) is rejected.
+// validateReadOnlySQL checks that every `;`-separated statement begins with an
+// allowed lead keyword and contains no mutating keyword (outside strings,
+// quoted identifiers and comments). It returns an error naming the first
+// offender; a script with no statement is rejected.
 func validateReadOnlySQL(sqlText string) error {
 	sawStatement := false
 	for _, toks := range scanSQLStatements(sqlText) {
@@ -477,13 +458,10 @@ func validateReadOnlySQL(sqlText string) error {
 	return nil
 }
 
-// scanSQLStatements splits sql into statements at top-level semicolons and
-// returns, for each statement, the uppercased word tokens that appear OUTSIDE
-// of string literals ('…' and "…"), quoted identifiers (`…`) and comments
-// (-- … and /* … */). Tokens are all the read-only check needs, and tracking
-// quote/comment state in a single pass means a `;`, keyword or `:marker`
-// hiding inside a string or comment can never affect statement boundaries or
-// keyword detection.
+// scanSQLStatements splits sql at top-level semicolons and returns the
+// uppercased word tokens of each statement, ignoring anything inside string
+// literals, quoted identifiers (`…`) and comments so they can't affect
+// statement boundaries or keyword detection.
 func scanSQLStatements(sql string) [][]string {
 	var (
 		stmts [][]string
