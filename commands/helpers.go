@@ -95,6 +95,7 @@ const (
 	integrationAWS        = "aws"
 	integrationDatabricks = "databricks"
 	integrationClickHouse = "clickhouse"
+	integrationFreshworks = "freshworks"
 )
 
 // restrictedIntegrations is the single source of truth for hard per-agent
@@ -129,6 +130,9 @@ var restrictedIntegrations = map[string][]string{
 	integrationDatabricks: {"ovad"},
 	// ClickHouse Cloud billing is exposed to the DevOps/SRE agent only.
 	integrationClickHouse: {"ovad"},
+	// Freshworks (Freshdesk tickets, Freshchat conversations, CRM) is exposed
+	// to the customer-success agent only.
+	integrationFreshworks: {"pulse"},
 }
 
 // toolIntegration maps a tool name to the integration that gates it. Tools
@@ -188,6 +192,15 @@ var toolIntegration = map[string]string{
 	"databricks_query": integrationDatabricks,
 	// ClickHouse Cloud billing.
 	"clickhouse_usage_cost": integrationClickHouse,
+	// Freshworks (Freshdesk / Freshchat / CRM).
+	"freshdesk_list_tickets":              integrationFreshworks,
+	"freshdesk_get_ticket":                integrationFreshworks,
+	"freshdesk_search_tickets":            integrationFreshworks,
+	"freshchat_get_conversation":          integrationFreshworks,
+	"freshchat_get_conversation_messages": integrationFreshworks,
+	"freshworks_crm_search":               integrationFreshworks,
+	"freshworks_crm_get_contact":          integrationFreshworks,
+	"freshworks_crm_get_deal":             integrationFreshworks,
 }
 
 // agentCanUseIntegration reports whether agentID may use the named

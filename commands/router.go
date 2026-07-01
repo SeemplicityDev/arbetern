@@ -16,6 +16,7 @@ import (
 	"github.com/justmike1/arbetern/dashboards"
 	"github.com/justmike1/arbetern/databricks"
 	"github.com/justmike1/arbetern/datadog"
+	"github.com/justmike1/arbetern/freshworks"
 	"github.com/justmike1/arbetern/github"
 	"github.com/justmike1/arbetern/llm"
 	"github.com/justmike1/arbetern/nvd"
@@ -38,6 +39,7 @@ type Router struct {
 	azureClient      *azure.Client
 	databricksClient *databricks.Client
 	clickhouseClient *clickhouse.Client
+	freshworksClient *freshworks.Client
 	dashboards       *dashboards.Registry
 	workflows        *workflows.Registry
 	contextProvider  *ContextProvider
@@ -51,7 +53,7 @@ type Router struct {
 	billing          UsageRecorder
 }
 
-func NewRouter(slackClient SlackClient, ghClient *github.Client, modelsClient *llm.Client, codeModelsClient *llm.Client, jiraClient *atlassian.Client, nvdClient *nvd.Client, sfClient *salesforce.Client, chorusClient *chorus.Client, datadogClients *datadog.MultiClient, awsClient *aws.Client, azureClient *azure.Client, databricksClient *databricks.Client, clickhouseClient *clickhouse.Client, dashboardRegistry *dashboards.Registry, workflowRegistry *workflows.Registry, pp PromptProvider, agentID, appURL string, sessions *SessionStore, maxToolRounds int, userContextStore *UserContextStore, usage UsageRecorder) *Router {
+func NewRouter(slackClient SlackClient, ghClient *github.Client, modelsClient *llm.Client, codeModelsClient *llm.Client, jiraClient *atlassian.Client, nvdClient *nvd.Client, sfClient *salesforce.Client, chorusClient *chorus.Client, datadogClients *datadog.MultiClient, awsClient *aws.Client, azureClient *azure.Client, databricksClient *databricks.Client, clickhouseClient *clickhouse.Client, freshworksClient *freshworks.Client, dashboardRegistry *dashboards.Registry, workflowRegistry *workflows.Registry, pp PromptProvider, agentID, appURL string, sessions *SessionStore, maxToolRounds int, userContextStore *UserContextStore, usage UsageRecorder) *Router {
 	// Channel-context cache reuses the thread session window so that an
 	// active in-thread conversation does not re-fetch Slack history on
 	// every turn. Falls back to the package default when sessions is nil.
@@ -75,6 +77,7 @@ func NewRouter(slackClient SlackClient, ghClient *github.Client, modelsClient *l
 		azureClient:      azureClient,
 		databricksClient: databricksClient,
 		clickhouseClient: clickhouseClient,
+		freshworksClient: freshworksClient,
 		dashboards:       dashboardRegistry,
 		workflows:        workflowRegistry,
 		contextProvider:  NewContextProvider(slackClient, cacheTTL),
@@ -260,6 +263,7 @@ func (r *Router) newGeneralHandler(userContext string, session *ThreadSession) *
 		azureClient:      r.azureClient,
 		databricksClient: r.databricksClient,
 		clickhouseClient: r.clickhouseClient,
+		freshworksClient: r.freshworksClient,
 		dashboards:       r.dashboards,
 		workflows:        r.workflows,
 		contextProvider:  r.contextProvider,

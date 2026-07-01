@@ -94,6 +94,17 @@ type Credentials struct {
 	ClickHouseKeyID          string `cred:"clickhouse-key-id"`          // Cloud API key ID (HTTP Basic username).
 	ClickHouseKeySecret      string `cred:"clickhouse-key-secret"`      // Cloud API key secret (HTTP Basic password).
 	ClickHouseOrganizationID string `cred:"clickhouse-organization-id"` // Organization ID the report covers.
+
+	// Freshworks suite (read-only). Each product authenticates differently and
+	// is configured independently — a product with missing credentials is
+	// simply not advertised. Freshdesk uses HTTP Basic (API key as username);
+	// Freshchat uses a Bearer JWT; the CRM uses a `Token token=<key>` header.
+	FreshdeskDomain     string `cred:"freshdesk-domain"`       // Freshdesk host, e.g. "acme.freshdesk.com".
+	FreshdeskAPIKey     string `cred:"freshdesk-api-key"`      // Freshdesk API key (HTTP Basic username).
+	FreshchatURL        string `cred:"freshchat-url"`          // Freshchat API base incl. /v2, e.g. "https://acme-123.freshchat.com/v2".
+	FreshchatAPIToken   string `cred:"freshchat-api-token"`    // Freshchat API token (Bearer JWT).
+	FreshworksCRMDomain string `cred:"freshworks-crm-domain"`  // Freshworks CRM host, e.g. "acme.myfreshworks.com".
+	FreshworksCRMAPIKey string `cred:"freshworks-crm-api-key"` // Freshworks CRM API key.
 }
 
 // Config bundles every runtime setting the app reads on startup. Credential
@@ -237,6 +248,30 @@ func (c *Config) ClickHouseConfigured() bool {
 		c.ClickHouseOrganizationID != ""
 }
 
+// FreshdeskConfigured returns true when the Freshdesk domain and API key are
+// both present.
+func (c *Config) FreshdeskConfigured() bool {
+	return c.FreshdeskDomain != "" && c.FreshdeskAPIKey != ""
+}
+
+// FreshchatConfigured returns true when the Freshchat URL and token are both
+// present.
+func (c *Config) FreshchatConfigured() bool {
+	return c.FreshchatURL != "" && c.FreshchatAPIToken != ""
+}
+
+// FreshworksCRMConfigured returns true when the Freshworks CRM domain and API
+// key are both present.
+func (c *Config) FreshworksCRMConfigured() bool {
+	return c.FreshworksCRMDomain != "" && c.FreshworksCRMAPIKey != ""
+}
+
+// FreshworksConfigured returns true when at least one Freshworks product
+// (Freshdesk, Freshchat, or CRM) has its credentials present.
+func (c *Config) FreshworksConfigured() bool {
+	return c.FreshdeskConfigured() || c.FreshchatConfigured() || c.FreshworksCRMConfigured()
+}
+
 func Load() (*Config, error) {
 	cfg := &Config{
 		Credentials: Credentials{
@@ -275,6 +310,13 @@ func Load() (*Config, error) {
 			ClickHouseKeyID:          os.Getenv("CLICKHOUSE_KEY_ID"),
 			ClickHouseKeySecret:      os.Getenv("CLICKHOUSE_KEY_SECRET"),
 			ClickHouseOrganizationID: os.Getenv("CLICKHOUSE_ORGANIZATION_ID"),
+
+			FreshdeskDomain:     os.Getenv("FRESHDESK_DOMAIN"),
+			FreshdeskAPIKey:     os.Getenv("FRESHDESK_API_KEY"),
+			FreshchatURL:        os.Getenv("FRESHCHAT_URL"),
+			FreshchatAPIToken:   os.Getenv("FRESHCHAT_API_TOKEN"),
+			FreshworksCRMDomain: os.Getenv("FRESHWORKS_CRM_DOMAIN"),
+			FreshworksCRMAPIKey: os.Getenv("FRESHWORKS_CRM_API_KEY"),
 		},
 
 		GeneralModel:        os.Getenv("GENERAL_MODEL"),

@@ -278,6 +278,42 @@ spec:
                   name: {{ .Values.secretName }}
                   key: clickhouse-organization-id
             {{- end }}
+            {{- if index .Values.secretValues "freshdesk-domain" }}
+            - name: FRESHDESK_DOMAIN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: freshdesk-domain
+            - name: FRESHDESK_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: freshdesk-api-key
+            {{- end }}
+            {{- if index .Values.secretValues "freshchat-url" }}
+            - name: FRESHCHAT_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: freshchat-url
+            - name: FRESHCHAT_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: freshchat-api-token
+            {{- end }}
+            {{- if index .Values.secretValues "freshworks-crm-domain" }}
+            - name: FRESHWORKS_CRM_DOMAIN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: freshworks-crm-domain
+            - name: FRESHWORKS_CRM_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: freshworks-crm-api-key
+            {{- end }}
             - name: GOMEMLIMIT
               value: {{ .Values.goRuntime.goMemLimit | quote }}
             - name: GOGC

@@ -13,6 +13,7 @@ import (
 	"github.com/justmike1/arbetern/config"
 	"github.com/justmike1/arbetern/databricks"
 	"github.com/justmike1/arbetern/datadog"
+	"github.com/justmike1/arbetern/freshworks"
 	"github.com/justmike1/arbetern/nvd"
 	"github.com/justmike1/arbetern/salesforce"
 )
@@ -31,6 +32,7 @@ type agentIntegrationClients struct {
 	nvd        *nvd.Client
 	databricks *databricks.Client
 	clickhouse *clickhouse.Client
+	freshworks *freshworks.Client
 }
 
 // buildAgentScopedClients returns a set of integration clients tailored for a
@@ -158,6 +160,20 @@ func buildAgentScopedClients(
 			log.Printf("ClickHouse override for agent %q (organization: %s)", agentID, out.clickhouse.OrganizationID())
 		} else {
 			out.clickhouse = nil
+		}
+	}
+
+	if agentCfg.FreshdeskDomain != globalCfg.FreshdeskDomain ||
+		agentCfg.FreshdeskAPIKey != globalCfg.FreshdeskAPIKey ||
+		agentCfg.FreshchatURL != globalCfg.FreshchatURL ||
+		agentCfg.FreshchatAPIToken != globalCfg.FreshchatAPIToken ||
+		agentCfg.FreshworksCRMDomain != globalCfg.FreshworksCRMDomain ||
+		agentCfg.FreshworksCRMAPIKey != globalCfg.FreshworksCRMAPIKey {
+		if agentCfg.FreshworksConfigured() {
+			out.freshworks = freshworks.NewClient(agentCfg.FreshdeskDomain, agentCfg.FreshdeskAPIKey, agentCfg.FreshchatURL, agentCfg.FreshchatAPIToken, agentCfg.FreshworksCRMDomain, agentCfg.FreshworksCRMAPIKey)
+			log.Printf("Freshworks override for agent %q (products: %v)", agentID, out.freshworks.Products())
+		} else {
+			out.freshworks = nil
 		}
 	}
 

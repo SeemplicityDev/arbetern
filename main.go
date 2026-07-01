@@ -29,6 +29,7 @@ import (
 	dashgitops "github.com/justmike1/arbetern/dashboards/gitopssync"
 	"github.com/justmike1/arbetern/databricks"
 	"github.com/justmike1/arbetern/datadog"
+	"github.com/justmike1/arbetern/freshworks"
 	"github.com/justmike1/arbetern/github"
 	"github.com/justmike1/arbetern/llm"
 	"github.com/justmike1/arbetern/nvd"
@@ -637,6 +638,7 @@ func refreshIntegrations(
 	azureClient *azure.Client,
 	databricksClient *databricks.Client,
 	clickhouseClient *clickhouse.Client,
+	freshworksClient *freshworks.Client,
 	modelsClient *llm.Client,
 	codeModelsClient *llm.Client,
 ) {
@@ -1092,6 +1094,29 @@ func refreshIntegrations(
 		})
 	}
 
+	// --- Freshworks (Freshdesk / Freshchat / CRM) ---
+	{
+		fwPerms := []permission{
+			{Scope: "freshdesk.tickets.read", Description: "Read Freshdesk tickets and conversations", Required: false, Granted: boolPtr(cfg.FreshdeskConfigured())},
+			{Scope: "freshchat.conversations.read", Description: "Read Freshchat conversations and messages", Required: false, Granted: boolPtr(cfg.FreshchatConfigured())},
+			{Scope: "crm.records.read", Description: "Read Freshworks CRM contacts, deals and search", Required: false, Granted: boolPtr(cfg.FreshworksCRMConfigured())},
+		}
+		activeFW := map[string]string{}
+		if freshworksClient != nil {
+			if p := freshworksClient.Products(); len(p) > 0 {
+				activeFW["Products"] = strings.Join(p, ", ")
+			}
+		}
+		result = append(result, integration{
+			ID:           "freshworks",
+			Name:         "Freshworks",
+			Configured:   cfg.FreshworksConfigured(),
+			AuthMode:     "API key / Bearer token",
+			Permissions:  fwPerms,
+			ActiveModels: activeFW,
+		})
+	}
+
 	integrationsMu.Lock()
 	integrationsCache = result
 	integrationsMu.Unlock()
@@ -1112,16 +1137,17 @@ func startIntegrationsRefresher(
 	azureClient *azure.Client,
 	databricksClient *databricks.Client,
 	clickhouseClient *clickhouse.Client,
+	freshworksClient *freshworks.Client,
 	modelsClient *llm.Client,
 	codeModelsClient *llm.Client,
 ) {
-	refreshIntegrations(cfg, slackClient, ghClient, jiraClient, sfClient, chorusClient, datadogClients, awsClient, azureClient, databricksClient, clickhouseClient, modelsClient, codeModelsClient)
+	refreshIntegrations(cfg, slackClient, ghClient, jiraClient, sfClient, chorusClient, datadogClients, awsClient, azureClient, databricksClient, clickhouseClient, freshworksClient, modelsClient, codeModelsClient)
 
 	go func() {
 		ticker := time.NewTicker(1 * time.Hour)
 		defer ticker.Stop()
 		for range ticker.C {
-			refreshIntegrations(cfg, slackClient, ghClient, jiraClient, sfClient, chorusClient, datadogClients, awsClient, azureClient, databricksClient, clickhouseClient, modelsClient, codeModelsClient)
+			refreshIntegrations(cfg, slackClient, ghClient, jiraClient, sfClient, chorusClient, datadogClients, awsClient, azureClient, databricksClient, clickhouseClient, freshworksClient, modelsClient, codeModelsClient)
 		}
 	}()
 }
@@ -1289,6 +1315,17 @@ func main() {
 		log.Printf("ClickHouse integration enabled (organization: %s)", clickhouseClient.OrganizationID())
 	}
 
+	// Freshworks suite (read-only) — Freshdesk (tickets), Freshchat
+	// (conversations) and Freshworks CRM (sales). Each product is configured
+	// independently; the umbrella client leaves a product's sub-client nil when
+	// its credentials are absent, and the command layer only advertises the
+	// tools whose product is configured.
+	var freshworksClient *freshworks.Client
+	if cfg.FreshworksConfigured() {
+		freshworksClient = freshworks.NewClient(cfg.FreshdeskDomain, cfg.FreshdeskAPIKey, cfg.FreshchatURL, cfg.FreshchatAPIToken, cfg.FreshworksCRMDomain, cfg.FreshworksCRMAPIKey)
+		log.Printf("Freshworks integration enabled (products: %v)", freshworksClient.Products())
+	}
+
 	// Discover agents and register per-agent webhook routes (/<agent>/webhook).
 	agents, err := prompts.DiscoverAgents("")
 	if err != nil {
@@ -1299,7 +1336,7 @@ func main() {
 	}
 
 	// Start background integration permission refresher (runs once now, then every hour).
-	startIntegrationsRefresher(cfg, slackClient, ghClient, jiraClient, sfClient, chorusClient, datadogClients, awsClient, azureClient, databricksClient, clickhouseClient, modelsClient, codeModelsClient)
+	startIntegrationsRefresher(cfg, slackClient, ghClient, jiraClient, sfClient, chorusClient, datadogClients, awsClient, azureClient, databricksClient, clickhouseClient, freshworksClient, modelsClient, codeModelsClient)
 
 	// Thread session store — enables follow-up replies in threads without /commands.
 	sessions := commands.NewSessionStore(cfg.ThreadSessionTTL)
@@ -1412,9 +1449,10 @@ func main() {
 			nvd:        nvdClient,
 			databricks: databricksClient,
 			clickhouse: clickhouseClient,
+			freshworks: freshworksClient,
 		})
 
-		router := commands.NewRouter(slackClient, ghClient, modelsClient, codeModelsClient, agentClients.jira, agentClients.nvd, agentClients.sf, agentClients.chorus, agentClients.datadog, agentClients.aws, agentClients.azure, agentClients.databricks, agentClients.clickhouse, dashRegistry, wfRegistry, ap, agent.ID, cfg.AppURL, sessions, cfg.MaxToolRounds, userContextStore, billingStore)
+		router := commands.NewRouter(slackClient, ghClient, modelsClient, codeModelsClient, agentClients.jira, agentClients.nvd, agentClients.sf, agentClients.chorus, agentClients.datadog, agentClients.aws, agentClients.azure, agentClients.databricks, agentClients.clickhouse, agentClients.freshworks, dashRegistry, wfRegistry, ap, agent.ID, cfg.AppURL, sessions, cfg.MaxToolRounds, userContextStore, billingStore)
 		routers[agent.ID] = router
 
 		// Background sweepers for the per-router in-memory caches so

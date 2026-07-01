@@ -21,6 +21,7 @@ import (
 	"github.com/justmike1/arbetern/dashboards"
 	"github.com/justmike1/arbetern/databricks"
 	"github.com/justmike1/arbetern/datadog"
+	"github.com/justmike1/arbetern/freshworks"
 	"github.com/justmike1/arbetern/github"
 	"github.com/justmike1/arbetern/llm"
 	"github.com/justmike1/arbetern/nvd"
@@ -66,6 +67,7 @@ type GeneralHandler struct {
 	azureClient      *azure.Client
 	databricksClient *databricks.Client
 	clickhouseClient *clickhouse.Client
+	freshworksClient *freshworks.Client
 	dashboards       *dashboards.Registry
 	workflows        *workflows.Registry
 	contextProvider  *ContextProvider
@@ -1973,6 +1975,140 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 				}`),
 			},
 		})
+	}
+
+	// Freshworks suite (read-only) — gated to the customer-success agent
+	// (restrictedIntegrations: pulse) and per-product on the sub-client being
+	// configured, so only the products with credentials advertise their tools.
+	if h.canUseIntegration(integrationFreshworks) && h.freshworksClient != nil {
+		if h.freshworksClient.Desk.Ready() {
+			tools = append(tools,
+				llm.Tool{
+					Type: "function",
+					Function: llm.ToolFunction{
+						Name:        "freshdesk_list_tickets",
+						Description: "List recent Freshdesk support tickets, newest-updated first. Optionally filter to tickets updated on or after a timestamp. Returns ticket ID, subject, status, priority and last-updated time. Use for questions like 'show recent support tickets' or 'what tickets changed since yesterday'.",
+						Parameters: json.RawMessage(`{
+							"type":"object",
+							"properties":{
+								"updated_since":{"type":"string","description":"Optional RFC3339 timestamp (e.g. 2026-02-01T00:00:00Z). Only tickets updated on or after this instant are returned."},
+								"page":{"type":"integer","description":"1-based page number. Omit for the first page."},
+								"per_page":{"type":"integer","description":"Results per page, 1..100 (default 30)."}
+							}
+						}`),
+					},
+				},
+				llm.Tool{
+					Type: "function",
+					Function: llm.ToolFunction{
+						Name:        "freshdesk_get_ticket",
+						Description: "Get a single Freshdesk ticket by its numeric ID, including its full description and (optionally) its conversation thread of replies and private notes. Use after freshdesk_list_tickets or freshdesk_search_tickets to drill into a ticket.",
+						Parameters: json.RawMessage(`{
+							"type":"object",
+							"properties":{
+								"ticket_id":{"type":"integer","description":"Numeric Freshdesk ticket ID."},
+								"include_conversations":{"type":"boolean","description":"When true, embed the ticket's replies and notes. Defaults to true."}
+							},
+							"required":["ticket_id"]
+						}`),
+					},
+				},
+				llm.Tool{
+					Type: "function",
+					Function: llm.ToolFunction{
+						Name:        "freshdesk_search_tickets",
+						Description: "Search Freshdesk tickets using the Freshdesk filter query syntax, e.g. \"priority:4 AND status:2\" for urgent open tickets, or \"agent_id:123\" or \"tag:'escalated'\". Do NOT wrap the query in quotes yourself. Returns matching tickets with status and priority.",
+						Parameters: json.RawMessage(`{
+							"type":"object",
+							"properties":{
+								"query":{"type":"string","description":"Freshdesk filter query, e.g. 'priority:4 AND status:2'. Supported fields include status, priority, type, tag, agent_id, group_id, created_at, updated_at, due_by."}
+							},
+							"required":["query"]
+						}`),
+					},
+				},
+			)
+		}
+		if h.freshworksClient.Chat.Ready() {
+			tools = append(tools,
+				llm.Tool{
+					Type: "function",
+					Function: llm.ToolFunction{
+						Name:        "freshchat_get_conversation",
+						Description: "Get a Freshchat conversation header by its conversation ID (status, channel, assigned agent, and any inline messages). Use freshchat_get_conversation_messages to read the full message thread.",
+						Parameters: json.RawMessage(`{
+							"type":"object",
+							"properties":{
+								"conversation_id":{"type":"string","description":"Freshchat conversation ID."}
+							},
+							"required":["conversation_id"]
+						}`),
+					},
+				},
+				llm.Tool{
+					Type: "function",
+					Function: llm.ToolFunction{
+						Name:        "freshchat_get_conversation_messages",
+						Description: "Get the messages in a Freshchat conversation by conversation ID. Returns each message's actor (user/agent/system), timestamp and text. Use to read what was said in a live-chat conversation.",
+						Parameters: json.RawMessage(`{
+							"type":"object",
+							"properties":{
+								"conversation_id":{"type":"string","description":"Freshchat conversation ID."},
+								"page":{"type":"integer","description":"1-based page of messages. Omit for the first page."}
+							},
+							"required":["conversation_id"]
+						}`),
+					},
+				},
+			)
+		}
+		if h.freshworksClient.CRM.Ready() {
+			tools = append(tools,
+				llm.Tool{
+					Type: "function",
+					Function: llm.ToolFunction{
+						Name:        "freshworks_crm_search",
+						Description: "Search the Freshworks CRM (Freshsales) for contacts, deals and accounts matching a term (name, email, company, etc.). Returns each hit's name, type and ID. Use the returned IDs with freshworks_crm_get_contact or freshworks_crm_get_deal to fetch details.",
+						Parameters: json.RawMessage(`{
+							"type":"object",
+							"properties":{
+								"query":{"type":"string","description":"Search term, e.g. a person's name, email, or company."},
+								"entities":{"type":"array","items":{"type":"string"},"description":"Optional record types to search: contact, deal, sales_account, user, lead. Defaults to contact, deal and sales_account."}
+							},
+							"required":["query"]
+						}`),
+					},
+				},
+				llm.Tool{
+					Type: "function",
+					Function: llm.ToolFunction{
+						Name:        "freshworks_crm_get_contact",
+						Description: "Get a Freshworks CRM contact by its numeric ID (name, title, email, phone, location). Use after freshworks_crm_search.",
+						Parameters: json.RawMessage(`{
+							"type":"object",
+							"properties":{
+								"contact_id":{"type":"integer","description":"Numeric CRM contact ID."}
+							},
+							"required":["contact_id"]
+						}`),
+					},
+				},
+				llm.Tool{
+					Type: "function",
+					Function: llm.ToolFunction{
+						Name:        "freshworks_crm_get_deal",
+						Description: "Get a Freshworks CRM deal/opportunity by its numeric ID (name, amount, stage, probability, expected/closed dates). Use after freshworks_crm_search.",
+						Parameters: json.RawMessage(`{
+							"type":"object",
+							"properties":{
+								"deal_id":{"type":"integer","description":"Numeric CRM deal ID."}
+							},
+							"required":["deal_id"]
+						}`),
+					},
+				},
+			)
+		}
 	}
 
 	// http_get: read-only outbound HTTP for workflows that need upstream
@@ -4603,6 +4739,172 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		log.Printf("[user=%s channel=%s] clickhouse_usage_cost (org=%s, window=%s..%s, records=%d, grandTotalCHC=%.2f)",
 			userID, channelID, res.OrganizationID, res.FromDate, res.ToDate, len(res.Records), res.GrandTotalCHC)
 		return clickhouse.FormatUsageCost(res)
+
+	case "freshdesk_list_tickets":
+		if h.freshworksClient == nil || !h.freshworksClient.Desk.Ready() {
+			return preconditionErrf("Error: Freshdesk integration is not connected.")
+		}
+		args, errMsg := parseToolArgs[struct {
+			UpdatedSince string `json:"updated_since"`
+			Page         int    `json:"page"`
+			PerPage      int    `json:"per_page"`
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
+		}
+		tickets, err := h.freshworksClient.Desk.ListTickets(ctx, args.UpdatedSince, args.Page, args.PerPage)
+		if err != nil {
+			return fmt.Sprintf("Error listing Freshdesk tickets: %v", err)
+		}
+		log.Printf("[user=%s channel=%s] freshdesk_list_tickets (results=%d)", userID, channelID, len(tickets))
+		return freshworks.FormatTicketList(tickets, "Freshdesk tickets")
+
+	case "freshdesk_get_ticket":
+		if h.freshworksClient == nil || !h.freshworksClient.Desk.Ready() {
+			return preconditionErrf("Error: Freshdesk integration is not connected.")
+		}
+		args, errMsg := parseToolArgs[struct {
+			TicketID             int64 `json:"ticket_id"`
+			IncludeConversations *bool `json:"include_conversations"`
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
+		}
+		if args.TicketID <= 0 {
+			return preconditionErrf("Error: ticket_id is required.")
+		}
+		include := true
+		if args.IncludeConversations != nil {
+			include = *args.IncludeConversations
+		}
+		ticket, err := h.freshworksClient.Desk.GetTicket(ctx, args.TicketID, include)
+		if err != nil {
+			return fmt.Sprintf("Error fetching Freshdesk ticket: %v", err)
+		}
+		log.Printf("[user=%s channel=%s] freshdesk_get_ticket (id=%d)", userID, channelID, args.TicketID)
+		return freshworks.FormatTicket(ticket)
+
+	case "freshdesk_search_tickets":
+		if h.freshworksClient == nil || !h.freshworksClient.Desk.Ready() {
+			return preconditionErrf("Error: Freshdesk integration is not connected.")
+		}
+		args, errMsg := parseToolArgs[struct {
+			Query string `json:"query"`
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
+		}
+		if strings.TrimSpace(args.Query) == "" {
+			return preconditionErrf("Error: query is required.")
+		}
+		tickets, total, err := h.freshworksClient.Desk.SearchTickets(ctx, args.Query)
+		if err != nil {
+			return fmt.Sprintf("Error searching Freshdesk tickets: %v", err)
+		}
+		log.Printf("[user=%s channel=%s] freshdesk_search_tickets (query=%q, total=%d)", userID, channelID, args.Query, total)
+		return freshworks.FormatTicketList(tickets, fmt.Sprintf("Freshdesk search (%d total)", total))
+
+	case "freshchat_get_conversation":
+		if h.freshworksClient == nil || !h.freshworksClient.Chat.Ready() {
+			return preconditionErrf("Error: Freshchat integration is not connected.")
+		}
+		args, errMsg := parseToolArgs[struct {
+			ConversationID string `json:"conversation_id"`
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
+		}
+		if strings.TrimSpace(args.ConversationID) == "" {
+			return preconditionErrf("Error: conversation_id is required.")
+		}
+		conv, err := h.freshworksClient.Chat.GetConversation(ctx, args.ConversationID)
+		if err != nil {
+			return fmt.Sprintf("Error fetching Freshchat conversation: %v", err)
+		}
+		log.Printf("[user=%s channel=%s] freshchat_get_conversation (id=%s)", userID, channelID, args.ConversationID)
+		return freshworks.FormatChatConversation(conv)
+
+	case "freshchat_get_conversation_messages":
+		if h.freshworksClient == nil || !h.freshworksClient.Chat.Ready() {
+			return preconditionErrf("Error: Freshchat integration is not connected.")
+		}
+		args, errMsg := parseToolArgs[struct {
+			ConversationID string `json:"conversation_id"`
+			Page           int    `json:"page"`
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
+		}
+		if strings.TrimSpace(args.ConversationID) == "" {
+			return preconditionErrf("Error: conversation_id is required.")
+		}
+		msgs, err := h.freshworksClient.Chat.GetConversationMessages(ctx, args.ConversationID, args.Page)
+		if err != nil {
+			return fmt.Sprintf("Error fetching Freshchat messages: %v", err)
+		}
+		log.Printf("[user=%s channel=%s] freshchat_get_conversation_messages (id=%s, messages=%d)", userID, channelID, args.ConversationID, len(msgs))
+		return freshworks.FormatChatMessages(args.ConversationID, msgs)
+
+	case "freshworks_crm_search":
+		if h.freshworksClient == nil || !h.freshworksClient.CRM.Ready() {
+			return preconditionErrf("Error: Freshworks CRM integration is not connected.")
+		}
+		args, errMsg := parseToolArgs[struct {
+			Query    string   `json:"query"`
+			Entities []string `json:"entities"`
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
+		}
+		if strings.TrimSpace(args.Query) == "" {
+			return preconditionErrf("Error: query is required.")
+		}
+		results, err := h.freshworksClient.CRM.Search(ctx, args.Query, args.Entities)
+		if err != nil {
+			return fmt.Sprintf("Error searching Freshworks CRM: %v", err)
+		}
+		log.Printf("[user=%s channel=%s] freshworks_crm_search (query=%q, results=%d)", userID, channelID, args.Query, len(results))
+		return freshworks.FormatCRMSearch(args.Query, results)
+
+	case "freshworks_crm_get_contact":
+		if h.freshworksClient == nil || !h.freshworksClient.CRM.Ready() {
+			return preconditionErrf("Error: Freshworks CRM integration is not connected.")
+		}
+		args, errMsg := parseToolArgs[struct {
+			ContactID int64 `json:"contact_id"`
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
+		}
+		if args.ContactID <= 0 {
+			return preconditionErrf("Error: contact_id is required.")
+		}
+		contact, err := h.freshworksClient.CRM.GetContact(ctx, args.ContactID)
+		if err != nil {
+			return fmt.Sprintf("Error fetching Freshworks CRM contact: %v", err)
+		}
+		log.Printf("[user=%s channel=%s] freshworks_crm_get_contact (id=%d)", userID, channelID, args.ContactID)
+		return freshworks.FormatCRMContact(contact)
+
+	case "freshworks_crm_get_deal":
+		if h.freshworksClient == nil || !h.freshworksClient.CRM.Ready() {
+			return preconditionErrf("Error: Freshworks CRM integration is not connected.")
+		}
+		args, errMsg := parseToolArgs[struct {
+			DealID int64 `json:"deal_id"`
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
+		}
+		if args.DealID <= 0 {
+			return preconditionErrf("Error: deal_id is required.")
+		}
+		deal, err := h.freshworksClient.CRM.GetDeal(ctx, args.DealID)
+		if err != nil {
+			return fmt.Sprintf("Error fetching Freshworks CRM deal: %v", err)
+		}
+		log.Printf("[user=%s channel=%s] freshworks_crm_get_deal (id=%d)", userID, channelID, args.DealID)
+		return freshworks.FormatCRMDeal(deal)
 
 	case "http_get":
 		args, errMsg := parseToolArgs[struct {

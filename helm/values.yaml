@@ -243,6 +243,14 @@ secretValues:
   # clickhouse-key-id: ""             # Cloud API key ID (HTTP Basic username)
   # clickhouse-key-secret: ""         # Cloud API key secret (HTTP Basic password)
   # clickhouse-organization-id: ""    # Organization ID the usage-cost report covers
+  # Freshworks suite (optional, read-only — enables Freshdesk / Freshchat / CRM tools for the pulse agent only).
+  # Each product is configured independently; set only the products you use. See docs/FRESHWORKS.md.
+  # freshdesk-domain: ""               # Freshdesk host, e.g. acme.freshdesk.com
+  # freshdesk-api-key: ""             # Freshdesk API key (Profile settings → Your API Key)
+  # freshchat-url: ""                 # Freshchat API base incl. /v2, e.g. https://acme-123.freshchat.com/v2
+  # freshchat-api-token: ""          # Freshchat API token (Bearer JWT, Admin → API Tokens)
+  # freshworks-crm-domain: ""        # Freshworks CRM host, e.g. acme.myfreshworks.com
+  # freshworks-crm-api-key: ""       # Freshworks CRM API key (Settings → API Settings)
 
 # Optional OAuth2 authentication proxy (oauth2-proxy subchart). Disabled by
 # default; values are passed straight through to the subchart
