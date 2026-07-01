@@ -237,8 +237,9 @@ func (h *GeneralHandler) buildAggregateCSV(ids []string) (string, string) {
 
 // recordUsage tags the cumulative token usage of a finished turn with the
 // handler's agent and entry-path metadata and hands it to the billing store.
-// No-op when billing is disabled or no tokens were consumed.
-func (h *GeneralHandler) recordUsage(model, userID string, u llm.Usage) {
+// No-op when billing is disabled or no tokens were consumed. comp carries the
+// Headroom compression savings accumulated across the turn's LLM rounds.
+func (h *GeneralHandler) recordUsage(model, userID string, u llm.Usage, comp llm.CompressionStats) {
 	if h.billing == nil || u.TotalTokens == 0 {
 		return
 	}
@@ -254,16 +255,18 @@ func (h *GeneralHandler) recordUsage(model, userID string, u llm.Usage) {
 		attrUser = userID
 	}
 	h.billing.Record(billing.Event{
-		Agent:              h.agentID,
-		Source:             src,
-		UserID:             attrUser,
-		WorkflowID:         h.billingWorkflowID,
-		WorkflowName:       h.billingWorkflowName,
-		Model:              model,
-		PromptTokens:       u.PromptTokens,
-		CachedPromptTokens: u.CachedPromptTokens,
-		CompletionTokens:   u.CompletionTokens,
-		TotalTokens:        u.TotalTokens,
+		Agent:                  h.agentID,
+		Source:                 src,
+		UserID:                 attrUser,
+		WorkflowID:             h.billingWorkflowID,
+		WorkflowName:           h.billingWorkflowName,
+		Model:                  model,
+		PromptTokens:           u.PromptTokens,
+		CachedPromptTokens:     u.CachedPromptTokens,
+		CompletionTokens:       u.CompletionTokens,
+		TotalTokens:            u.TotalTokens,
+		CompressionInputTokens: comp.TokensBefore,
+		CompressionSavedTokens: comp.TokensSaved,
 	})
 }
 
@@ -321,9 +324,10 @@ func (h *GeneralHandler) Execute(channelID, userID, text, responseURL, auditTS s
 	blockedPreActionAcks := 0
 	emptyResponseRetries := 0
 
-	// Track cumulative token usage across all LLM rounds.
+	// Track cumulative token usage and compression savings across all LLM rounds.
 	var totalUsage llm.Usage
-	defer func() { h.recordUsage(activeClient.Model(), userID, totalUsage) }()
+	var totalCompression llm.CompressionStats
+	defer func() { h.recordUsage(activeClient.Model(), userID, totalUsage, totalCompression) }()
 
 	rounds := h.maxToolRounds
 	if rounds <= 0 {
@@ -343,6 +347,11 @@ func (h *GeneralHandler) Execute(channelID, userID, text, responseURL, auditTS s
 			totalUsage.CachedPromptTokens += resp.Usage.CachedPromptTokens
 			totalUsage.CompletionTokens += resp.Usage.CompletionTokens
 			totalUsage.TotalTokens += resp.Usage.TotalTokens
+		}
+		if resp.Compression != nil {
+			totalCompression.TokensBefore += resp.Compression.TokensBefore
+			totalCompression.TokensAfter += resp.Compression.TokensAfter
+			totalCompression.TokensSaved += resp.Compression.TokensSaved
 		}
 
 		if len(resp.Choices) == 0 {
@@ -527,7 +536,8 @@ func (h *GeneralHandler) ExecuteHeadless(ctx context.Context, userID, prompt str
 	}
 	var mutatingFailures []string
 	var totalUsage llm.Usage
-	defer func() { h.recordUsage(activeClient.Model(), userID, totalUsage) }()
+	var totalCompression llm.CompressionStats
+	defer func() { h.recordUsage(activeClient.Model(), userID, totalUsage, totalCompression) }()
 	for i := 0; i < rounds; i++ {
 		resp, err := activeClient.CompleteWithTools(ctx, messages, tools)
 		if err != nil {
@@ -540,6 +550,11 @@ func (h *GeneralHandler) ExecuteHeadless(ctx context.Context, userID, prompt str
 			totalUsage.CachedPromptTokens += resp.Usage.CachedPromptTokens
 			totalUsage.CompletionTokens += resp.Usage.CompletionTokens
 			totalUsage.TotalTokens += resp.Usage.TotalTokens
+		}
+		if resp.Compression != nil {
+			totalCompression.TokensBefore += resp.Compression.TokensBefore
+			totalCompression.TokensAfter += resp.Compression.TokensAfter
+			totalCompression.TokensSaved += resp.Compression.TokensSaved
 		}
 		if len(resp.Choices) == 0 {
 			return "", fmt.Errorf("LLM returned no choices")
@@ -667,7 +682,8 @@ func (h *GeneralHandler) ExecuteChat(ctx context.Context, userID string, history
 	}
 	emptyResponseRetries := 0
 	var totalUsage llm.Usage
-	defer func() { h.recordUsage(activeClient.Model(), userID, totalUsage) }()
+	var totalCompression llm.CompressionStats
+	defer func() { h.recordUsage(activeClient.Model(), userID, totalUsage, totalCompression) }()
 	for i := 0; i < rounds; i++ {
 		resp, err := activeClient.CompleteWithTools(ctx, messages, tools)
 		if err != nil {
@@ -679,6 +695,11 @@ func (h *GeneralHandler) ExecuteChat(ctx context.Context, userID string, history
 			totalUsage.CachedPromptTokens += resp.Usage.CachedPromptTokens
 			totalUsage.CompletionTokens += resp.Usage.CompletionTokens
 			totalUsage.TotalTokens += resp.Usage.TotalTokens
+		}
+		if resp.Compression != nil {
+			totalCompression.TokensBefore += resp.Compression.TokensBefore
+			totalCompression.TokensAfter += resp.Compression.TokensAfter
+			totalCompression.TokensSaved += resp.Compression.TokensSaved
 		}
 		if resp.Error != nil {
 			return "", fmt.Errorf("%s", resp.Error.Message)
@@ -4357,14 +4378,15 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		if args.Query == "" {
 			return "Error: query is required."
 		}
-		result, err := h.datadogClients.AggregatePercentiles(ctx, args.Site, args.Query, args.From, args.To, args.GroupBy, args.Measure)
+		result, data, err := h.datadogClients.AggregatePercentilesReport(ctx, args.Site, args.Query, args.From, args.To, args.GroupBy, args.Measure)
 		if err != nil {
 			return fmt.Sprintf("Error aggregating Datadog logs: %v", err)
 		}
 		log.Printf("[user=%s channel=%s] aggregated Datadog logs for %q (group_by=%v, measure=%s, site=%s)", userID, channelID, args.Query, []string(args.GroupBy), args.Measure, args.Site)
-		// Cache the structured result so upload_aggregate_csv can attach the
-		// full dataset as a CSV file without the model re-typing it inline.
-		if data, derr := h.datadogClients.AggregatePercentilesData(ctx, args.Site, args.Query, args.From, args.To, args.GroupBy, args.Measure); derr == nil && len(data) > 0 {
+		// Cache the structured result (computed from the same single query) so
+		// upload_aggregate_csv can attach the full dataset as a CSV file
+		// without the model re-typing it inline.
+		if len(data) > 0 {
 			id := h.cacheAggregate(args.Query, data)
 			result += fmt.Sprintf("\n\n(Full result cached as aggregate_id=%q. To attach the complete table(s) as a downloadable CSV file in Slack, call upload_aggregate_csv with this id — do NOT retype the rows.)", id)
 		}

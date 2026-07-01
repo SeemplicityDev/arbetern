@@ -73,10 +73,11 @@
     .bar span{position:absolute;top:-26px;left:50%;transform:translateX(-50%);font-family:var(--font-mono);font-size:10px;color:var(--text-bright);background:var(--card-2);border:1px solid var(--border);padding:1px 5px;border-radius:4px;white-space:nowrap;opacity:0;pointer-events:none}
     .bar:hover span{opacity:1}
     .spark .axis{display:flex;justify-content:space-between;margin-top:8px;font-family:var(--font-mono);font-size:10px;color:var(--text-muted)}
-    .stats{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:26px}
+    .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:14px;margin-bottom:26px}
     .stat{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:16px 18px}
     .stat .k{font-family:var(--font-mono);font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:var(--text-muted)}
     .stat .v{font-family:var(--font-display);font-size:26px;font-weight:700;color:var(--text-bright);margin-top:6px}
+    .stat .v small{font-family:var(--font-mono);font-size:13px;font-weight:500;color:var(--green)}
     .grid2{display:grid;grid-template-columns:1fr 1fr;gap:18px}
     .panel{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:18px 20px;margin-bottom:18px}
     .panel h2{font-family:var(--font-display);font-size:14px;font-weight:600;color:var(--text-bright);margin-bottom:12px;display:flex;align-items:center;gap:8px}
@@ -148,6 +149,7 @@
       <div class="stat"><div class="k">Tokens</div><div class="v" id="s-tok">0</div></div>
       <div class="stat"><div class="k">Avg / request</div><div class="v" id="s-avg">$0.00</div></div>
       <div class="stat"><div class="k">Cache hit</div><div class="v" id="s-cache">0%</div></div>
+      <div class="stat"><div class="k">Compression saved</div><div class="v" id="s-comp">0</div></div>
     </section>
 
     <div class="grid2">
@@ -180,8 +182,8 @@
     }
     function recent(el,evs){
       if(!evs||!evs.length){el.innerHTML='<div class="empty">No turns recorded yet</div>';return;}
-      let h='<table><thead><tr><th>Time</th><th>Agent</th><th>Source</th><th>Model</th><th class="n">Tokens</th><th class="n">Cost</th></tr></thead><tbody>';
-      evs.slice(0,30).forEach(e=>{const t=new Date(e.at),tag=e.workflow_name?` · ${esc(e.workflow_name)}`:(e.user_id?` · ${esc(e.user_id)}`:'');h+=`<tr><td>${t.toLocaleString()}</td><td>${esc(e.agent)}</td><td><span class="tag ${e.source}">${e.source}</span>${tag}</td><td>${esc(e.model)}</td><td class="n">${tok(e.total_tokens)}</td><td class="n cost">${money4(e.cost_usd)}</td></tr>`;});
+      let h='<table><thead><tr><th>Time</th><th>Agent</th><th>Source</th><th>Model</th><th class="n">Tokens</th><th class="n">Saved</th><th class="n">Cost</th></tr></thead><tbody>';
+      evs.slice(0,30).forEach(e=>{const t=new Date(e.at),tag=e.workflow_name?` · ${esc(e.workflow_name)}`:(e.user_id?` · ${esc(e.user_id)}`:'');const cs=e.compression_saved_tokens||0,ci=e.compression_input_tokens||0,cp=ci?Math.round(cs/ci*100):0,saved=cs?`${tok(cs)} <small style="color:var(--text-muted)">${cp}%</small>`:'—';h+=`<tr><td>${t.toLocaleString()}</td><td>${esc(e.agent)}</td><td><span class="tag ${e.source}">${e.source}</span>${tag}</td><td>${esc(e.model)}</td><td class="n">${tok(e.total_tokens)}</td><td class="n">${saved}</td><td class="n cost">${money4(e.cost_usd)}</td></tr>`;});
       el.innerHTML=h+'</tbody></table>';
     }
     function bars(el,daily){
@@ -206,6 +208,7 @@
       $('#s-tok').textContent=tok(t.total_tokens);
       $('#s-avg').textContent=money4(t.requests?t.cost_usd/t.requests:0);
       const cin=(t.cached_prompt_tokens||0),pin=(t.prompt_tokens||0)+cin;$('#s-cache').textContent=(pin?Math.round(cin/pin*100):0)+'%';
+      const csave=(t.compression_saved_tokens||0),cinp=(t.compression_input_tokens||0);$('#s-comp').innerHTML=csave?`${tok(csave)} <small>${cinp?Math.round(csave/cinp*100):0}%</small>`:'0';
       bars($('#bars'),d.daily);
       rows($('#t-agent'),d.by_agent,r=>esc(r.key));
       rows($('#t-source'),d.by_source,r=>`<span class="tag ${r.key}">${esc(r.key)}</span>`);

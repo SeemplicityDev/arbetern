@@ -1,13 +1,16 @@
 package datadog
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -448,33 +451,118 @@ func (c *Client) baseURL() string {
 	return fmt.Sprintf("https://api.%s", c.site)
 }
 
+// Rate-limit / retry tuning for the Datadog transport.
+const (
+	// ddMaxRetries bounds retry attempts on 429 and 5xx responses.
+	ddMaxRetries = 4
+	// ddBaseRetryWait is the initial backoff, doubled each attempt.
+	ddBaseRetryWait = 1 * time.Second
+	// ddMaxRetryWait caps a single backoff wait.
+	ddMaxRetryWait = 30 * time.Second
+)
+
+// doRequest issues an HTTP request and returns its body and response, retrying
+// on 429 (rate limit) and 5xx with backoff. Datadog enforces per-org rate
+// limits — the smaller EU org 429s readily under the perf-baseline report's
+// burst of aggregate calls — and signals the cooldown via X-RateLimit-Reset
+// (seconds until reset); doRequest honours that header, then Retry-After, then
+// an exponential backoff. bodyBytes is nil for GET and re-read on each attempt;
+// logPath is logged on retry (secrets travel in headers, not the URL).
+func (c *Client) doRequest(ctx context.Context, method, u, logPath string, bodyBytes []byte) ([]byte, *http.Response, error) {
+	var lastErr error
+	for attempt := 0; ; attempt++ {
+		var bodyReader io.Reader
+		if bodyBytes != nil {
+			bodyReader = bytes.NewReader(bodyBytes)
+		}
+		req, err := http.NewRequestWithContext(ctx, method, u, bodyReader)
+		if err != nil {
+			return nil, nil, fmt.Errorf("creating request: %w", err)
+		}
+		c.setHeaders(req)
+		if bodyBytes != nil {
+			req.Header.Set("Content-Type", "application/json")
+		}
+
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			lastErr = fmt.Errorf("datadog API request failed: %w", err)
+			if attempt >= ddMaxRetries || !ctxSleep(ctx, ddRetryWait(nil, attempt)) {
+				return nil, nil, lastErr
+			}
+			continue
+		}
+
+		body, readErr := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
+		_ = resp.Body.Close()
+		if readErr != nil {
+			return nil, nil, fmt.Errorf("reading response body: %w", readErr)
+		}
+
+		retryable := resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500
+		if retryable && attempt < ddMaxRetries {
+			wait := ddRetryWait(resp, attempt)
+			log.Printf("[datadog:%s] %s %s -> %d, retrying in %s (attempt %d/%d)",
+				c.SiteLabel(), method, logPath, resp.StatusCode, wait, attempt+1, ddMaxRetries)
+			if ctxSleep(ctx, wait) {
+				continue
+			}
+			return nil, nil, ctx.Err()
+		}
+		return body, resp, nil
+	}
+}
+
+// ddRetryWait is the backoff before the next attempt: Datadog's
+// X-RateLimit-Reset (seconds until the limit resets) when present, else a
+// Retry-After header, else exponential backoff. Clamped to ddMaxRetryWait.
+func ddRetryWait(resp *http.Response, attempt int) time.Duration {
+	wait := ddBaseRetryWait << attempt
+	if resp != nil {
+		for _, h := range []string{"X-RateLimit-Reset", "Retry-After"} {
+			if v := strings.TrimSpace(resp.Header.Get(h)); v != "" {
+				if secs, err := strconv.Atoi(v); err == nil && secs > 0 {
+					wait = time.Duration(secs) * time.Second
+					break
+				}
+			}
+		}
+	}
+	if wait <= 0 {
+		wait = ddBaseRetryWait
+	}
+	if wait > ddMaxRetryWait {
+		wait = ddMaxRetryWait
+	}
+	return wait
+}
+
+// ctxSleep waits for d or until ctx is cancelled, returning true if the full
+// wait elapsed and false if ctx was cancelled first.
+func ctxSleep(ctx context.Context, d time.Duration) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-t.C:
+		return true
+	}
+}
+
 func (c *Client) get(ctx context.Context, path string, params url.Values, target interface{}) error {
 	u := c.baseURL() + path
 	if params != nil {
 		u += "?" + params.Encode()
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	body, resp, err := c.doRequest(ctx, http.MethodGet, u, path, nil)
 	if err != nil {
-		return fmt.Errorf("creating request: %w", err)
+		return err
 	}
-	c.setHeaders(req)
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("datadog API request failed: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
-	if err != nil {
-		return fmt.Errorf("reading response body: %w", err)
-	}
-
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("datadog API returned %d: %s", resp.StatusCode, string(body))
 	}
-
 	return decodeJSON(resp, body, target)
 }
 
@@ -486,28 +574,13 @@ func (c *Client) post(ctx context.Context, path string, payload interface{}, tar
 		return fmt.Errorf("encoding request body: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, strings.NewReader(string(bodyBytes)))
+	body, resp, err := c.doRequest(ctx, http.MethodPost, u, path, bodyBytes)
 	if err != nil {
-		return fmt.Errorf("creating request: %w", err)
+		return err
 	}
-	c.setHeaders(req)
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("datadog API request failed: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
-	if err != nil {
-		return fmt.Errorf("reading response body: %w", err)
-	}
-
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("datadog API returned %d: %s", resp.StatusCode, string(body))
 	}
-
 	return decodeJSON(resp, body, target)
 }
 

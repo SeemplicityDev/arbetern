@@ -52,19 +52,26 @@ type Event struct {
 	CachedPromptTokens int       `json:"cached_prompt_tokens,omitempty"`
 	CompletionTokens   int       `json:"completion_tokens"`
 	TotalTokens        int       `json:"total_tokens"`
-	CostUSD            float64   `json:"cost_usd"`
-	Unpriced           bool      `json:"unpriced,omitempty"`
+	// Compression{Input,Saved}Tokens track Headroom savings for this turn; the
+	// saved-% is derived as CompressionSavedTokens / CompressionInputTokens.
+	CompressionInputTokens int     `json:"compression_input_tokens,omitempty"`
+	CompressionSavedTokens int     `json:"compression_saved_tokens,omitempty"`
+	CostUSD                float64 `json:"cost_usd"`
+	Unpriced               bool    `json:"unpriced,omitempty"`
 }
 
 // Counts is a rolled-up tally shared by every aggregation dimension.
 type Counts struct {
-	Requests           int     `json:"requests"`
-	PromptTokens       int64   `json:"prompt_tokens"`
-	CachedPromptTokens int64   `json:"cached_prompt_tokens"`
-	CompletionTokens   int64   `json:"completion_tokens"`
-	TotalTokens        int64   `json:"total_tokens"`
-	CostUSD            float64 `json:"cost_usd"`
-	Unpriced           int     `json:"unpriced"`
+	Requests           int   `json:"requests"`
+	PromptTokens       int64 `json:"prompt_tokens"`
+	CachedPromptTokens int64 `json:"cached_prompt_tokens"`
+	CompletionTokens   int64 `json:"completion_tokens"`
+	TotalTokens        int64 `json:"total_tokens"`
+	// Headroom compression rollup; saved-% = CompressionSavedTokens / CompressionInputTokens.
+	CompressionInputTokens int64   `json:"compression_input_tokens"`
+	CompressionSavedTokens int64   `json:"compression_saved_tokens"`
+	CostUSD                float64 `json:"cost_usd"`
+	Unpriced               int     `json:"unpriced"`
 }
 
 func (c *Counts) add(e Event) {
@@ -73,6 +80,8 @@ func (c *Counts) add(e Event) {
 	c.CachedPromptTokens += int64(e.CachedPromptTokens)
 	c.CompletionTokens += int64(e.CompletionTokens)
 	c.TotalTokens += int64(e.TotalTokens)
+	c.CompressionInputTokens += int64(e.CompressionInputTokens)
+	c.CompressionSavedTokens += int64(e.CompressionSavedTokens)
 	c.CostUSD += e.CostUSD
 	if e.Unpriced {
 		c.Unpriced++
@@ -374,6 +383,8 @@ func (c *Counts) addCounts(o *Counts) {
 	c.CachedPromptTokens += o.CachedPromptTokens
 	c.CompletionTokens += o.CompletionTokens
 	c.TotalTokens += o.TotalTokens
+	c.CompressionInputTokens += o.CompressionInputTokens
+	c.CompressionSavedTokens += o.CompressionSavedTokens
 	c.CostUSD += o.CostUSD
 	c.Unpriced += o.Unpriced
 }

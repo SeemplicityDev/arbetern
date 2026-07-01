@@ -56,6 +56,14 @@ type Usage struct {
 	CachedPromptTokens int `json:"cached_prompt_tokens,omitempty"`
 }
 
+// CompressionStats reports the tokens Headroom removed from an LLM request's
+// messages before the provider call. Zero-valued when compression made no change.
+type CompressionStats struct {
+	TokensBefore int `json:"tokens_before"`
+	TokensAfter  int `json:"tokens_after"`
+	TokensSaved  int `json:"tokens_saved"`
+}
+
 // ChatResponse wraps the LLM's reply, normalised from either the Chat
 // Completions or Responses API format into a single struct.
 type ChatResponse struct {
@@ -67,7 +75,10 @@ type ChatResponse struct {
 		FinishReason string `json:"finish_reason"`
 	} `json:"choices"`
 	Usage *Usage `json:"usage,omitempty"`
-	Error *struct {
+	// Compression, when non-nil, reports Headroom savings applied to this
+	// request. Set by CompleteWithTools; never decoded from a provider response.
+	Compression *CompressionStats `json:"-"`
+	Error       *struct {
 		Message string `json:"message"`
 	} `json:"error,omitempty"`
 }

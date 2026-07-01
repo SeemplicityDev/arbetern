@@ -205,14 +205,28 @@ func (c *Client) Complete(ctx context.Context, systemPrompt, userPrompt string) 
 // CompleteWithTools sends messages and tool definitions, returning the LLM's
 // response which may include tool calls to execute.
 func (c *Client) CompleteWithTools(ctx context.Context, messages []ChatMessage, tools []Tool) (*ChatResponse, error) {
-	messages = c.compressMessages(ctx, messages)
-	if c.isResponsesModel() {
-		return c.doResponses(ctx, messages, tools)
+	messages, comp := c.compressMessages(ctx, messages)
+
+	var (
+		resp *ChatResponse
+		err  error
+	)
+	switch {
+	case c.isResponsesModel():
+		resp, err = c.doResponses(ctx, messages, tools)
+	case c.useAzure() && isAnthropicModel(c.model):
+		resp, err = c.doAnthropic(ctx, messages, tools)
+	default:
+		resp, err = c.doChat(ctx, messages, tools)
 	}
-	if c.useAzure() && isAnthropicModel(c.model) {
-		return c.doAnthropic(ctx, messages, tools)
+	if err != nil {
+		return nil, err
 	}
-	return c.doChat(ctx, messages, tools)
+	// Attach compression savings so billing can attribute them to this turn.
+	if resp != nil && comp.TokensSaved > 0 {
+		resp.Compression = &comp
+	}
+	return resp, nil
 }
 
 // compressRequest is the body for Headroom's POST /v1/compress endpoint.
@@ -247,15 +261,17 @@ func (c *Client) compressModel() string {
 
 // compressMessages returns the conversation compressed via Headroom's
 // /v1/compress endpoint, or the messages unchanged when no proxy is configured
-// or on any error (fail-open: compression never breaks an LLM call).
-func (c *Client) compressMessages(ctx context.Context, messages []ChatMessage) []ChatMessage {
+// or on any error (fail-open: compression never breaks an LLM call). The
+// returned CompressionStats reports the token savings (zero when compression
+// was disabled, skipped, or made no change).
+func (c *Client) compressMessages(ctx context.Context, messages []ChatMessage) ([]ChatMessage, CompressionStats) {
 	if c.compressURL == "" || len(messages) == 0 {
-		return messages
+		return messages, CompressionStats{}
 	}
 
 	payload, err := json.Marshal(compressRequest{Model: c.compressModel(), Messages: messages})
 	if err != nil {
-		return messages
+		return messages, CompressionStats{}
 	}
 
 	// Bound the compression round-trip independently of the 120s LLM timeout.
@@ -264,35 +280,39 @@ func (c *Client) compressMessages(ctx context.Context, messages []ChatMessage) [
 
 	req, err := http.NewRequestWithContext(cctx, http.MethodPost, c.compressURL+"/v1/compress", bytes.NewReader(payload))
 	if err != nil {
-		return messages
+		return messages, CompressionStats{}
 	}
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		log.Printf("[llm] headroom compress unavailable, sending uncompressed: %v", err)
-		return messages
+		return messages, CompressionStats{}
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
 	if err != nil {
-		return messages
+		return messages, CompressionStats{}
 	}
 	if resp.StatusCode != http.StatusOK {
 		log.Printf("[llm] headroom compress returned %d, sending uncompressed", resp.StatusCode)
-		return messages
+		return messages, CompressionStats{}
 	}
 
 	var cr compressResponse
 	if err := json.Unmarshal(body, &cr); err != nil || len(cr.Messages) == 0 {
-		return messages
+		return messages, CompressionStats{}
 	}
 	if cr.TokensSaved > 0 {
 		pct := float64(cr.TokensSaved) / float64(cr.TokensBefore) * 100
 		log.Printf("[llm] headroom compressed %d->%d tokens (saved %d, %.1f%%)", cr.TokensBefore, cr.TokensAfter, cr.TokensSaved, pct)
 	}
-	return cr.Messages
+	return cr.Messages, CompressionStats{
+		TokensBefore: cr.TokensBefore,
+		TokensAfter:  cr.TokensAfter,
+		TokensSaved:  cr.TokensSaved,
+	}
 }
 
 func (c *Client) doChat(ctx context.Context, messages []ChatMessage, tools []Tool) (*ChatResponse, error) {

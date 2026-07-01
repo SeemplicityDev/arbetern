@@ -194,24 +194,32 @@ func bucketKey(by map[string]interface{}, facets []string) string {
 	return strings.Join(parts, " | ")
 }
 
-// AggregatePercentiles is the high-level helper behind the datadog_logs_aggregate
-// tool: for each bucket of the group-by facet(s) it returns the event count and,
-// when a measure is given, p50/p95/p99 of that measure (sorted by p95 desc; by
-// count desc when no measure). Passing more than one facet produces a composite
-// breakdown (one row per facet-value combination); passing none returns a single
-// overall bucket. Runs on the requested site(s) and returns a Slack/markdown-
-// friendly table per site.
-func (mc *MultiClient) AggregatePercentiles(ctx context.Context, site, query, from, to string, groupBy []string, measure string) (string, error) {
+// AggregatePercentilesReport is the high-level helper behind the
+// datadog_logs_aggregate tool. For each bucket of the group-by facet(s) it
+// returns the event count and, when a measure is given, p50/p95/p99 of that
+// measure (sorted by p95 desc; by count desc when no measure). Passing more
+// than one facet produces a composite breakdown (one row per facet-value
+// combination); passing none returns a single overall bucket.
+//
+// It runs each site's aggregation EXACTLY ONCE, deriving both the
+// Slack/markdown table and the structured per-site rows from the same response.
+// Querying once (instead of once to format and again to cache) halves the
+// Datadog API load per tool call — important for the smaller EU org, which is
+// quick to 429 rate-limit under the report's burst of aggregate calls.
+func (mc *MultiClient) AggregatePercentilesReport(ctx context.Context, site, query, from, to string, groupBy []string, measure string) (string, []PercentileResult, error) {
 	facets := normalizeGroupByFacets(groupBy)
 	cs := mc.clients(site)
 	if len(cs) == 0 {
-		return "", fmt.Errorf("no Datadog client configured for site %q", site)
+		return "", nil, fmt.Errorf("no Datadog client configured for site %q", site)
 	}
 	compute := percentilePreset(measure)
 	groupByReq := buildPercentileGroupBy(facets, measure)
 	multi := len(cs) > 1
-	var parts []string
-	var lastErr error
+	var (
+		parts   []string
+		results []PercentileResult
+		lastErr error
+	)
 	for _, c := range cs {
 		resp, err := c.LogsAggregate(ctx, query, from, to, compute, groupByReq)
 		if err != nil {
@@ -222,11 +230,12 @@ func (mc *MultiClient) AggregatePercentiles(ctx context.Context, site, query, fr
 			continue
 		}
 		parts = append(parts, FormatAggregatePercentiles(resp, c.SiteLabel(), facets, measure))
+		results = append(results, percentileResultFromResponse(resp, c.SiteLabel(), facets, measure))
 	}
 	if len(parts) == 0 && lastErr != nil {
-		return "", lastErr
+		return "", nil, lastErr
 	}
-	return strings.Join(parts, "\n\n"), nil
+	return strings.Join(parts, "\n\n"), results, nil
 }
 
 // PercentileRow is one bucket's result: the (composite) group key plus the
@@ -249,50 +258,31 @@ type PercentileResult struct {
 	Rows    []PercentileRow
 }
 
-// AggregatePercentilesData is the structured sibling of AggregatePercentiles:
-// it returns one PercentileResult per queried site (rows sorted by p95 desc),
-// so callers can render the data as CSV or other formats without re-parsing
-// the Slack table. Sites that error are skipped; if every site errors the
-// last error is returned.
-func (mc *MultiClient) AggregatePercentilesData(ctx context.Context, site, query, from, to string, groupBy []string, measure string) ([]PercentileResult, error) {
-	facets := normalizeGroupByFacets(groupBy)
-	cs := mc.clients(site)
-	if len(cs) == 0 {
-		return nil, fmt.Errorf("no Datadog client configured for site %q", site)
+// percentileResultFromResponse converts one site's aggregate response into a
+// PercentileResult with rows sorted by p95 desc (by count desc when no measure
+// is given), matching the ordering of the rendered table.
+func percentileResultFromResponse(resp *AggregateResponse, siteLabel string, facets []string, measure string) PercentileResult {
+	res := PercentileResult{
+		Site:    siteLabel,
+		GroupBy: joinFacetNames(facets),
+		Measure: strings.TrimPrefix(measure, "@"),
 	}
-	compute := percentilePreset(measure)
-	groupByReq := buildPercentileGroupBy(facets, measure)
-	groupByName := joinFacetNames(facets)
-	meas := strings.TrimPrefix(measure, "@")
-	var results []PercentileResult
-	var lastErr error
-	for _, c := range cs {
-		resp, err := c.LogsAggregate(ctx, query, from, to, compute, groupByReq)
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		res := PercentileResult{Site: c.SiteLabel(), GroupBy: groupByName, Measure: meas}
-		if resp != nil {
-			buckets := resp.Data.Buckets
-			idx := sortComputeIndex(measure)
-			sort.SliceStable(buckets, func(i, j int) bool { return buckets[i].Computes[idx] > buckets[j].Computes[idx] })
-			for _, b := range buckets {
-				res.Rows = append(res.Rows, PercentileRow{
-					Key:   bucketKey(b.By, facets),
-					Count: b.Computes["c0"],
-					P50:   b.Computes["c1"],
-					P95:   b.Computes["c2"],
-					P99:   b.Computes["c3"],
-				})
-			}
-		}
-		results = append(results, res)
+	if resp == nil {
+		return res
 	}
-	if len(results) == 0 && lastErr != nil {
-		return nil, lastErr
+	buckets := resp.Data.Buckets
+	idx := sortComputeIndex(measure)
+	sort.SliceStable(buckets, func(i, j int) bool { return buckets[i].Computes[idx] > buckets[j].Computes[idx] })
+	for _, b := range buckets {
+		res.Rows = append(res.Rows, PercentileRow{
+			Key:   bucketKey(b.By, facets),
+			Count: b.Computes["c0"],
+			P50:   b.Computes["c1"],
+			P95:   b.Computes["c2"],
+			P99:   b.Computes["c3"],
+		})
 	}
-	return results, nil
+	return res
 }
 
 // FormatAggregatePercentiles renders an aggregate response as a table. facets
