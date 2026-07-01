@@ -90,10 +90,10 @@ secretValues:
   # clickhouse-key-id: "your-clickhouse-key-id"
   # clickhouse-key-secret: "your-clickhouse-key-secret"
   # clickhouse-organization-id: "00000000-0000-0000-0000-000000000000"
-  # Freshworks suite (optional, read-only — enables Freshdesk / Freshchat / CRM tools for the pulse agent only).
+  # Freshworks suite (optional, read-only — enables Freshdesk / Freshchat / CRM tools for the pulse and seihin agents).
   # Each product is configured independently; set only the ones you use. The domains are non-secret;
-  # the API keys/tokens are. All keys are gated to pulse in code — prefer mounting them under
-  # customCredentials.pulse below so the material never reaches other agents. See docs/FRESHWORKS.md.
+  # the API keys/tokens are. All keys are gated to pulse and seihin in code — prefer mounting them under
+  # customCredentials.pulse (and customCredentials.seihin) below so the material never reaches other agents. See docs/FRESHWORKS.md.
   # freshdesk-domain: "acme.freshdesk.com"                      # Freshdesk host
   # freshdesk-api-key: "your-freshdesk-api-key"                 # Profile settings → Your API Key
   # freshchat-url: "https://acme-1a2b3c.freshchat.com/v2"       # API base — must include /v2
@@ -185,9 +185,9 @@ secretValues:
 #     clickhouse-organization-id: "00000000-0000-0000-0000-000000000000"
 #   pulse:
 #     chorus-api-token: "REPLACE_ME"
-#     # Freshworks is gated to pulse in code; mounting it here keeps the
-#     # credentials off every other agent. Domains are non-secret. Set only the
-#     # products you use. See docs/FRESHWORKS.md.
+#     # Freshworks is gated to pulse and seihin in code; mounting it here keeps
+#     # the credentials off every other agent. Domains are non-secret. Set only
+#     # the products you use. See docs/FRESHWORKS.md.
 #     freshdesk-domain: "acme.freshdesk.com"
 #     freshdesk-api-key: "REPLACE_ME"
 #     freshchat-url: "https://acme-1a2b3c.freshchat.com/v2"

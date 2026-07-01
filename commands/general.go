@@ -127,6 +127,34 @@ type cachedAggregate struct {
 	results []datadog.PercentileResult
 }
 
+// groupBySpec accepts the datadog_logs_aggregate "group_by" argument as either
+// a single facet string, a comma-separated string, or a JSON array of facets.
+// Multiple facets produce a composite breakdown (one row per facet-value
+// combination). Empty input leaves the slice nil, so the datadog layer groups
+// nothing (a single overall bucket).
+type groupBySpec []string
+
+func (g *groupBySpec) UnmarshalJSON(data []byte) error {
+	trimmed := strings.TrimSpace(string(data))
+	if trimmed == "" || trimmed == "null" {
+		return nil
+	}
+	if strings.HasPrefix(trimmed, "[") {
+		var arr []string
+		if err := json.Unmarshal(data, &arr); err != nil {
+			return err
+		}
+		*g = arr
+		return nil
+	}
+	var s string
+	if err := json.Unmarshal(data, &s); err != nil {
+		return err
+	}
+	*g = groupBySpec{s}
+	return nil
+}
+
 // resolveUploadChannel picks the Slack channel a file upload should be shared
 // to. It prefers an explicit channel_id from the tool args, then the channel
 // the command is running in, then the handler's current channel. In a headless
@@ -713,7 +741,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 		{
 			Type: "function",
 			Function: llm.ToolFunction{
-				Name:        "list_org_repos",
+				Name:        ToolListOrgRepos,
 				Description: "List all repositories in the GitHub organization that the bot has access to. Use ONLY when the user explicitly asks to list/discover repos, or when no repository was provided and repo discovery is required.",
 				Parameters:  json.RawMessage(`{"type":"object","properties":{}}`),
 			},
@@ -721,7 +749,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 		{
 			Type: "function",
 			Function: llm.ToolFunction{
-				Name:        "list_user_repos",
+				Name:        ToolListUserRepos,
 				Description: "List all repositories accessible by the authenticated GitHub user. Use ONLY when the user explicitly asks to list/discover repos, or when no repository was provided and repo discovery is required.",
 				Parameters:  json.RawMessage(`{"type":"object","properties":{}}`),
 			},
@@ -729,7 +757,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 		{
 			Type: "function",
 			Function: llm.ToolFunction{
-				Name:        "list_repo_teams",
+				Name:        ToolListRepoTeams,
 				Description: "List the GitHub teams that have direct access to a repository, with each team's permission level (admin, maintain, push, triage, or pull). This mirrors Settings → Collaborators and teams → Direct access in the GitHub UI. Use this to answer 'who can trigger / merge / admin <repo>'. Requires the bot's token to have read:org plus access to the repo; a 403 from GitHub usually means the token lacks read:org or the repo is private to another team. For more than ~3 repos, prefer `list_repo_teams_bulk` instead (parallel fetch).",
 				Parameters: json.RawMessage(`{
 					"type":"object",
@@ -743,7 +771,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 		{
 			Type: "function",
 			Function: llm.ToolFunction{
-				Name:        "list_repo_teams_bulk",
+				Name:        ToolListRepoTeamsBulk,
 				Description: "Parallel version of list_repo_teams. Pass an array of repo names (without owner); GitHub is queried with up to 8 concurrent requests and a single combined response is returned. Per-repo errors (404 for missing-admin, etc.) are reported inline alongside the successful entries — they do NOT abort the whole call. Use this whenever you need teams for more than a handful of repos at once; calling list_repo_teams in a loop is strictly slower.",
 				Parameters: json.RawMessage(`{
 					"type":"object",
@@ -757,7 +785,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 		{
 			Type: "function",
 			Function: llm.ToolFunction{
-				Name:        "get_files_bulk",
+				Name:        ToolGetFilesBulk,
 				Description: "Parallel version of get_file_content. Pass an array of {repo, path, branch?} specs; GitHub is queried with up to 8 concurrent requests and a single combined response is returned. Per-file errors are reported inline alongside the successful entries — they do NOT abort the whole call. Use this whenever you need more than a handful of files at once; calling get_file_content in a loop is strictly slower. Each file is independently truncated to 32000 chars.",
 				Parameters: json.RawMessage(`{
 					"type":"object",
@@ -783,7 +811,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 		{
 			Type: "function",
 			Function: llm.ToolFunction{
-				Name:        "get_file_content",
+				Name:        ToolGetFileContent,
 				Description: "Read the content of a file from a GitHub repository.",
 				Parameters: json.RawMessage(`{
 					"type":"object",
@@ -799,7 +827,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 		{
 			Type: "function",
 			Function: llm.ToolFunction{
-				Name:        "get_repo_default_branch",
+				Name:        ToolGetRepoDefaultBranch,
 				Description: "Get the default branch name of a repository.",
 				Parameters: json.RawMessage(`{
 					"type":"object",
@@ -813,7 +841,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 		{
 			Type: "function",
 			Function: llm.ToolFunction{
-				Name:        "get_authenticated_user",
+				Name:        ToolGetAuthenticatedUser,
 				Description: "Get the GitHub username of the authenticated bot user.",
 				Parameters:  json.RawMessage(`{"type":"object","properties":{}}`),
 			},
@@ -821,7 +849,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 		{
 			Type: "function",
 			Function: llm.ToolFunction{
-				Name:        "resolve_owner",
+				Name:        ToolResolveOwner,
 				Description: "Resolve the GitHub organization or user that owns repositories.",
 				Parameters:  json.RawMessage(`{"type":"object","properties":{}}`),
 			},
@@ -829,7 +857,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 		{
 			Type: "function",
 			Function: llm.ToolFunction{
-				Name:        "fetch_channel_context",
+				Name:        ToolFetchChannelContext,
 				Description: "Fetch recent messages from the current Slack channel for additional context about the ongoing conversation.",
 				Parameters:  json.RawMessage(`{"type":"object","properties":{}}`),
 			},
@@ -837,7 +865,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 		{
 			Type: "function",
 			Function: llm.ToolFunction{
-				Name:        "search_files",
+				Name:        ToolSearchFiles,
 				Description: "Search for files in a repository by name or path pattern. Returns all file paths containing the search term. Use this FIRST when looking for a specific file — it is much faster than navigating directories one by one.",
 				Parameters: json.RawMessage(`{
 					"type":"object",
@@ -853,7 +881,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 		{
 			Type: "function",
 			Function: llm.ToolFunction{
-				Name:        "list_directory",
+				Name:        ToolListDirectory,
 				Description: "List the files and subdirectories at a path in a GitHub repository. Use this when get_file_content fails because a path is a directory, or when you need to discover what files exist under a path.",
 				Parameters: json.RawMessage(`{
 					"type":"object",
@@ -869,7 +897,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 		{
 			Type: "function",
 			Function: llm.ToolFunction{
-				Name:        "modify_file",
+				Name:        ToolModifyFile,
 				Description: "Modify a file in a GitHub repository using a safe find-and-replace approach. Provide the exact text to find (old_content) and the replacement text (new_content). The tool reads the FULL file from GitHub, performs the replacement, then creates a branch, commits, and opens a PR. Multiple modify_file calls for the SAME repository are automatically grouped into a SINGLE pull request — so when implementing a change that touches several files, just call modify_file for each file and all changes will land in one PR. IMPORTANT: old_content must be an exact substring of the current file — include enough surrounding lines (3-5) will ensure a unique match. Only the matched section is replaced; the rest of the file is preserved.",
 				Parameters: json.RawMessage(`{
 					"type":"object",
@@ -891,7 +919,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 		{
 			Type: "function",
 			Function: llm.ToolFunction{
-				Name:        "create_file",
+				Name:        ToolCreateFile,
 				Description: "Create a NEW file in a GitHub repository. Use this when you need to add a file that does not yet exist (e.g. a new YAML config, a new workflow, a new script). The tool creates a branch, commits the new file, and opens a PR. Multiple create_file and modify_file calls for the SAME repository are automatically grouped into a SINGLE pull request. Do NOT use this for files that already exist — use modify_file instead.",
 				Parameters: json.RawMessage(`{
 					"type":"object",
@@ -912,7 +940,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 		{
 			Type: "function",
 			Function: llm.ToolFunction{
-				Name:        "regex_replace_file",
+				Name:        ToolRegexReplaceFile,
 				Description: "Bulk-replace all matches of a SIMPLE regex pattern in a file. Best for uniform single-line replacements across a whole file (e.g. 'change all image.tag to latest'). Do NOT use for scoped/structural changes in a specific section — use modify_file instead for those. Keep patterns short and per-line. Avoid complex multi-line regex with (?:.|\\n)*? or lookaheads — if you need those, use modify_file. The tool reads the FULL file from GitHub, applies a Go RE2 regex replacement on ALL matches, creates a branch, commits, and opens a PR. Multiple calls for the same repo are grouped into a SINGLE PR. Replacement supports $1, $2 for captured groups.",
 				Parameters: json.RawMessage(`{
 					"type":"object",
@@ -934,7 +962,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 		{
 			Type: "function",
 			Function: llm.ToolFunction{
-				Name:        "get_pull_request",
+				Name:        ToolGetPullRequest,
 				Description: "Get details, changed files, and diff of a GitHub pull request by number or URL. Use this to analyze what a PR changed, understand code patterns introduced or removed, and find old/new usage patterns.",
 				Parameters: json.RawMessage(`{
 					"type":"object",
@@ -950,7 +978,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 		{
 			Type: "function",
 			Function: llm.ToolFunction{
-				Name:        "list_pull_requests",
+				Name:        ToolListPullRequests,
 				Description: "List recent pull requests in a repository. Useful for finding relevant PRs by title, discovering recent changes, or identifying the PR that introduced a particular change.",
 				Parameters: json.RawMessage(`{
 					"type":"object",
@@ -966,7 +994,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 		{
 			Type: "function",
 			Function: llm.ToolFunction{
-				Name:        "list_commits",
+				Name:        ToolListCommits,
 				Description: "List commits in a repository, optionally filtered by branch, author, and a time window. Use this for daily/weekly activity digests (pass since=YYYY-MM-DDT00:00:00Z and until=YYYY-MM-DDT23:59:59Z for one UTC day), or to find the commit that introduced a specific change. Returns SHA, first line of commit message, author login, author date, and commit URL. If 'branch' is omitted, the repo's default branch is used — so this captures direct-to-default pushes that never went through a PR, in addition to merge/squash commits from merged PRs.",
 				Parameters: json.RawMessage(`{
 					"type":"object",
@@ -985,7 +1013,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 		{
 			Type: "function",
 			Function: llm.ToolFunction{
-				Name:        "search_code",
+				Name:        ToolSearchCode,
 				Description: "Search for code content within a GitHub repository. Unlike search_files (which matches file names/paths), this searches inside file contents. Use this to find usages of functions, classes, patterns, imports, or any code string across the entire repository. Returns matching files with code fragments showing the context around each match.",
 				Parameters: json.RawMessage(`{
 					"type":"object",
@@ -1000,7 +1028,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 		{
 			Type: "function",
 			Function: llm.ToolFunction{
-				Name:        "search_code_org",
+				Name:        ToolSearchCodeOrg,
 				Description: "Search for code content across ALL repositories in the GitHub organization in a single call. Use this instead of search_code when the user asks to find usages, secrets, patterns, or code across multiple repos, the entire org, or 'every repo'. This is MUCH faster and more complete than calling search_code repo by repo. Returns matching files grouped by repository with code fragments.",
 				Parameters: json.RawMessage(`{
 					"type":"object",
@@ -1014,7 +1042,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 		{
 			Type: "function",
 			Function: llm.ToolFunction{
-				Name:        "get_workflow_run",
+				Name:        ToolGetWorkflowRun,
 				Description: "Fetch details and logs for a GitHub Actions workflow run. Use this PROACTIVELY whenever you see a failed CI/CD notification, a GitHub Actions URL, or the user mentions a build/deploy/pipeline failure. Returns the run status, jobs, steps, annotations, and actual log output for any failed jobs so you can diagnose the root cause.",
 				Parameters: json.RawMessage(`{
 					"type":"object",
@@ -1028,7 +1056,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 		{
 			Type: "function",
 			Function: llm.ToolFunction{
-				Name:        "rerun_failed_jobs",
+				Name:        ToolRerunFailedJobs,
 				Description: "Re-run only the failed jobs (and their dependent jobs) in a GitHub Actions workflow run. This is equivalent to clicking 'Re-run failed jobs' in the GitHub Actions UI. Use this when the user asks to retry, rerun, or re-trigger a failed workflow. Only works on completed runs that have at least one failed job.",
 				Parameters: json.RawMessage(`{
 					"type":"object",
@@ -1042,7 +1070,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 		{
 			Type: "function",
 			Function: llm.ToolFunction{
-				Name:        "rerun_workflow",
+				Name:        ToolRerunWorkflow,
 				Description: "Re-run an entire GitHub Actions workflow run (all jobs, not just failed ones). This is equivalent to clicking 'Re-run all jobs' in the GitHub Actions UI. Use this when the user wants to completely re-trigger a workflow from scratch.",
 				Parameters: json.RawMessage(`{
 					"type":"object",
@@ -1056,7 +1084,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 		{
 			Type: "function",
 			Function: llm.ToolFunction{
-				Name:        "reply_in_thread",
+				Name:        ToolReplyInThread,
 				Description: "Post a message as a threaded reply to a specific Slack message. Use this when the user asks you to reply inside someone's thread or respond to a particular message. You need the thread_ts of the target message from the channel context. IMPORTANT: Messages marked [BOT] are this bot's own messages — never reply to those. Always use the thread_ts of the HUMAN user's message (e.g. the person mentioned by name like 'Alex', 'Sam', etc.).",
 				Parameters: json.RawMessage(`{
 					"type":"object",
@@ -1071,7 +1099,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 		{
 			Type: "function",
 			Function: llm.ToolFunction{
-				Name:        "post_slack_message",
+				Name:        ToolPostSlackMessage,
 				Description: "Post a message to a specific Slack channel by channel ID. Use this when the user gives you an explicit channel ID (e.g. 'C0123456789') and asks you to send a message there, OR inside a scheduled workflow tick where no interactive thread is available. If 'thread_ts' is set, the message is posted as a threaded reply under that parent message (use this to keep multi-part reports on the same thread — capture the ts returned by the first call and pass it as thread_ts on subsequent calls). Supports Slack markdown. Returns the posted message ts on success.",
 				Parameters: json.RawMessage(`{
 					"type":"object",
@@ -1087,7 +1115,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 		{
 			Type: "function",
 			Function: llm.ToolFunction{
-				Name:        "slack_conversations_history",
+				Name:        ToolSlackConversationsHistory,
 				Description: "Read recent messages from a Slack channel by channel ID. Use this in scheduled workflows that need to react to messages posted in a specific channel (e.g. polling an alerts channel). Returns messages newest-first, each annotated with ts, thread_ts, sender, and whether it was posted by a bot. Pass 'oldest' to fetch only messages posted after a prior watermark ts — leave empty to fetch the most recent 'limit' messages regardless of age. Typical first-run usage: oldest='' and limit=1 to grab only the latest message; subsequent ticks: oldest=<previous-watermark-ts> and limit=20.",
 				Parameters: json.RawMessage(`{
 					"type":"object",
@@ -1103,7 +1131,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 		{
 			Type: "function",
 			Function: llm.ToolFunction{
-				Name:        "slack_conversations_replies",
+				Name:        ToolSlackConversationsReplies,
 				Description: "Read the replies in a Slack thread by channel ID and the parent message's ts. Use this in scheduled workflows to inspect a thread before acting on it — e.g. to dedupe (check whether a prior tick already replied to an alert with a tracking link or an ack) or to read follow-up context. Returns the parent message followed by its replies, oldest-first, each annotated with ts, thread_ts, sender, and whether it was posted by a bot. The 'thread_ts' is the ts of the parent (top-level) message; for a reply's ts use its 'thread_ts' field to address the parent thread.",
 				Parameters: json.RawMessage(`{
 					"type":"object",
@@ -1119,7 +1147,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 		{
 			Type: "function",
 			Function: llm.ToolFunction{
-				Name:        "upload_snippet",
+				Name:        ToolUploadSnippet,
 				Description: "Upload a text file snippet to Slack. Use this instead of posting a long message when the content is large (e.g., full search results with file paths and code lines, log dumps, CSV data, large code blocks). The snippet appears as a collapsible file attachment in the channel/thread, keeping the conversation clean. PREFER this over reply_in_thread or plain messages whenever the output would exceed ~30 lines or ~2000 characters. Ideal for: org-wide search results, full file listings, detailed tables, log output, code dumps. IMPORTANT: you must supply the COMPLETE file body in the 'content' argument of THIS call — it is not generated or filled in for you. Do not call this tool with an empty or omitted 'content'.",
 				Parameters: json.RawMessage(`{
 					"type":"object",
@@ -1138,7 +1166,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 		{
 			Type: "function",
 			Function: llm.ToolFunction{
-				Name:        "upload_aggregate_csv",
+				Name:        ToolUploadAggregateCSV,
 				Description: "Attach the FULL result(s) of one or more datadog_logs_aggregate calls to Slack as a single downloadable CSV file. Use this for performance-baseline / per-endpoint / per-tenant reports instead of pasting big tables into messages or trying to retype the data into upload_snippet. Each datadog_logs_aggregate call returns an aggregate_id (e.g. 'agg_1'); pass those ids here and the complete tables are rendered server-side — you do NOT need to (and must not) re-emit the rows yourself. The CSV columns are: site,group_by,key,measure,count,p50,p95,p99. The file is posted into the current thread/channel. Optionally pass 's3_bucket' + 's3_key' to ALSO archive the exact same CSV bytes to S3 (durable storage outside Slack's ~retention); on success the tool result includes the s3:// URI and a clickable AWS-console link you can post into the thread.",
 				Parameters: json.RawMessage(`{
 					"type":"object",
@@ -1158,7 +1186,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 		{
 			Type: "function",
 			Function: llm.ToolFunction{
-				Name:        "fetch_thread_context",
+				Name:        ToolFetchThreadContext,
 				Description: "Fetch the full conversation from a Slack thread URL. Use this FIRST whenever the user provides a Slack thread/message link (https://...slack.com/archives/...) to read the thread's content before acting on it (e.g., creating a Jira ticket, summarizing, replying). Returns all messages in the thread. The response also includes the channel_id and thread_ts so you can reply_in_thread afterwards.",
 				Parameters: json.RawMessage(`{
 					"type":"object",
@@ -1176,7 +1204,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 		tools = append(tools, llm.Tool{
 			Type: "function",
 			Function: llm.ToolFunction{
-				Name:        "lookup_cve",
+				Name:        ToolLookupCVE,
 				Description: "Look up a specific CVE by its ID from the NVD (National Vulnerability Database). Returns full details: description, CVSS scores, affected products (CPEs), weaknesses (CWEs), and references. ALWAYS call this tool FIRST when the user mentions a CVE ID (e.g. CVE-2025-13836) to get authoritative data before searching code.",
 				Parameters: json.RawMessage(`{
 					"type":"object",
@@ -1189,7 +1217,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 		}, llm.Tool{
 			Type: "function",
 			Function: llm.ToolFunction{
-				Name:        "search_cve",
+				Name:        ToolSearchCVE,
 				Description: "Search NVD for CVEs by keyword. Returns matching CVEs with their descriptions and CVSS scores. Useful for finding CVEs related to a specific library, product, or vulnerability type when you don't have the exact CVE ID.",
 				Parameters: json.RawMessage(`{
 					"type":"object",
@@ -1208,7 +1236,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 		tools = append(tools, llm.Tool{
 			Type: "function",
 			Function: llm.ToolFunction{
-				Name:        "salesforce_query",
+				Name:        ToolSalesforceQuery,
 				Description: "Execute a SOQL query against Salesforce. Use this to query Accounts, Opportunities, Contacts, and other Salesforce objects. Returns structured records. SOQL is similar to SQL but queries Salesforce objects. IMPORTANT: Use relationship fields for joins (e.g. Account.Name on Opportunity, Owner.Name). Date literals like NEXT_N_DAYS:90, LAST_N_DAYS:30, TODAY, THIS_QUARTER are very useful. Always include Id in SELECT. Limit results to avoid large payloads (default LIMIT 50). Example queries:\n- Renewals in next 90 days: SELECT Id, Name, Account.Name, StageName, CloseDate, Amount, Owner.Name FROM Opportunity WHERE CloseDate = NEXT_N_DAYS:90 AND StageName != 'Closed Won' AND StageName != 'Closed Lost' AND Type = 'Renewal' ORDER BY CloseDate ASC\n- Account details: SELECT Id, Name, Type, Industry, Owner.Name, Website FROM Account WHERE Name LIKE '%CustomerName%'\n- Contacts for account: SELECT Id, Name, Email, Title, Phone, Account.Name FROM Contact WHERE Account.Name LIKE '%CustomerName%'",
 				Parameters: json.RawMessage(`{
 					"type":"object",
@@ -1221,7 +1249,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 		}, llm.Tool{
 			Type: "function",
 			Function: llm.ToolFunction{
-				Name:        "salesforce_describe",
+				Name:        ToolSalesforceDescribe,
 				Description: "Describe a Salesforce object to discover its available fields, types, and labels. Use this when you need to explore object schema before writing a SOQL query — e.g., to find the correct field name for renewal date, health score, or custom fields. Common objects: Account, Opportunity, Contact, Case, Lead, Task, Event.",
 				Parameters: json.RawMessage(`{
 					"type":"object",
@@ -1239,7 +1267,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 		tools = append(tools, llm.Tool{
 			Type: "function",
 			Function: llm.ToolFunction{
-				Name:        "chorus_list_conversations",
+				Name:        ToolChorusListConversations,
 				Description: "List Chorus conversations (meetings, calls, recordings, emails) matching optional filters. This is the primary tool for ANY Chorus query — listings, deal data, engagement activity, participant searches, etc. Returns summaries with meeting notes, action items, participants, trackers, and opportunity info. Dates use ISO-8601 (e.g. '2026-02-01T00:00:00Z'). Optimize which params you pass based on the user's request.",
 				Parameters: json.RawMessage(`{
 					"type":"object",
@@ -1263,7 +1291,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 		}, llm.Tool{
 			Type: "function",
 			Function: llm.ToolFunction{
-				Name:        "chorus_get_conversation",
+				Name:        ToolChorusGetConversation,
 				Description: "Get full details for a specific Chorus conversation by its ID. Returns recording analytics, deal info, account, participants with roles/titles, trackers, action items, metrics, and summary. Use this after chorus_list_conversations to drill into a specific call.",
 				Parameters: json.RawMessage(`{
 					"type":"object",
@@ -1276,7 +1304,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 		}, llm.Tool{
 			Type: "function",
 			Function: llm.ToolFunction{
-				Name:        "chorus_create_sales_qualification",
+				Name:        ToolChorusCreateSalesQualification,
 				Description: "Extract Sales Qualification Framework data (e.g. MEDDIC) from a Chorus call transcript by recording ID. This triggers AI analysis of the recording and returns structured qualification fields with supporting quotes. Use this when the user wants to analyze a call for sales qualification criteria.",
 				Parameters: json.RawMessage(`{
 					"type":"object",
@@ -1289,7 +1317,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 		}, llm.Tool{
 			Type: "function",
 			Function: llm.ToolFunction{
-				Name:        "chorus_get_sales_qualification",
+				Name:        ToolChorusGetSalesQualification,
 				Description: "Retrieve a previously extracted Sales Qualification Framework analysis by recording ID. Returns MEDDIC (or other framework) fields, supporting quotes, meeting notes, and next steps. Use this to check if a qualification analysis already exists before creating a new one.",
 				Parameters: json.RawMessage(`{
 					"type":"object",
@@ -1302,7 +1330,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 		}, llm.Tool{
 			Type: "function",
 			Function: llm.ToolFunction{
-				Name:        "chorus_writeback_crm",
+				Name:        ToolChorusWritebackCRM,
 				Description: "Write sales-qualification-derived field updates back to the CRM (e.g. Salesforce). Updates opportunity fields based on insights extracted from Chorus call analysis. Use this after reviewing sales qualification data to push updates to CRM records.",
 				Parameters: json.RawMessage(`{
 					"type":"object",
@@ -1323,7 +1351,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 		tools = append(tools, llm.Tool{
 			Type: "function",
 			Function: llm.ToolFunction{
-				Name:        "create_jira_ticket",
+				Name:        ToolCreateJiraTicket,
 				Description: "Create a Jira ticket (issue). Use this when the user asks to create a ticket, task, story, or bug from the conversation content (e.g., a test plan, action item, or bug report). Populate the summary and description from the relevant content discussed in the conversation. IMPORTANT: Format the description using markdown — use # for headers, - for bullet lists, 1) for numbered lists, **bold** for emphasis, and `code` for inline code. Structure the ticket professionally with clear sections (e.g., ## Context, ## Scope, ## Acceptance Criteria). If the user asks to assign the ticket to a person, use the assignee field — or pass account_id directly when you already have the Jira accountId from resolve_jira_user (skips the fuzzy name search). If the user asks to assign to a team, use the team field. Set use_active_sprint=true to drop the new ticket into the project's currently active sprint. Use fields for arbitrary Jira fields like priority or custom fields (e.g. {\"priority\":{\"name\":\"High\"}}); typed parameters above always win on conflict.",
 				Parameters: json.RawMessage(`{
 					"type":"object",
@@ -1344,14 +1372,14 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 		}, llm.Tool{
 			Type: "function",
 			Function: llm.ToolFunction{
-				Name:        "list_jira_projects",
+				Name:        ToolListJiraProjects,
 				Description: "List all Jira projects visible to the bot. Use this to discover available project keys before creating a ticket.",
 				Parameters:  json.RawMessage(`{"type":"object","properties":{}}`),
 			},
 		}, llm.Tool{
 			Type: "function",
 			Function: llm.ToolFunction{
-				Name:        "search_jira_issues",
+				Name:        ToolSearchJiraIssues,
 				Description: "Search for Jira issues using JQL (Jira Query Language). IMPORTANT: Jira Cloud does NOT reliably support searching by display name. Before searching by assignee, you MUST first call resolve_jira_user to get the user's Jira account ID, then use that account ID in JQL (e.g. assignee = 'accountId'). Common JQL examples: 'assignee = \"712020:abc-def\" AND status = \"In Progress\"', 'project = ENG AND status = \"To Do\"'. When searching for a specific user's tickets: 1) call get_slack_user_info to get their real name, 2) call resolve_jira_user with that name to get the Jira account ID, 3) use the account ID in the JQL query.",
 				Parameters: json.RawMessage(`{
 					"type":"object",
@@ -1365,7 +1393,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 		}, llm.Tool{
 			Type: "function",
 			Function: llm.ToolFunction{
-				Name:        "get_jira_issue",
+				Name:        ToolGetJiraIssue,
 				Description: "Get full details of a specific Jira issue by its key (e.g. 'ENG-123'). Returns summary, description, status, assignee, priority, labels, and more.",
 				Parameters: json.RawMessage(`{
 					"type":"object",
@@ -1378,7 +1406,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 		}, llm.Tool{
 			Type: "function",
 			Function: llm.ToolFunction{
-				Name:        "get_jira_label_author",
+				Name:        ToolGetJiraLabelAuthor,
 				Description: "Determine WHO added (or removed) a label on a Jira issue, read deterministically from the issue changelog/history. This is the ONLY reliable way to attribute a label to a person — the issue's reporter and assignee do NOT reveal who applied a label. Returns each label change in chronological order with the Jira user who made it (display name, account ID, email), and identifies the most recent person who added the label. Use this before stating 'label added by <person>' in any summary.",
 				Parameters: json.RawMessage(`{
 					"type":"object",
@@ -1392,7 +1420,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 		}, llm.Tool{
 			Type: "function",
 			Function: llm.ToolFunction{
-				Name:        "update_jira_issue",
+				Name:        ToolUpdateJiraIssue,
 				Description: "Update a Jira issue's description or summary. Use this to rewrite, refine, or improve ticket descriptions. IMPORTANT: Format the new description using markdown — use # for headers, - for bullet lists, 1) for numbered lists, **bold** for emphasis. Structure it professionally with clear sections.",
 				Parameters: json.RawMessage(`{
 					"type":"object",
@@ -1407,7 +1435,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 		}, llm.Tool{
 			Type: "function",
 			Function: llm.ToolFunction{
-				Name:        "assign_jira_active_sprint",
+				Name:        ToolAssignJiraActiveSprint,
 				Description: "Move an existing Jira issue into the project's currently active sprint, overriding any prior (stale/closed) sprint value. No-op when the issue is already in the active sprint. Returns an informative message when no scrum board or active sprint exists for the project. Sprint field is the only thing mutated — summary, description, status, assignee are untouched.",
 				Parameters: json.RawMessage(`{
 					"type":"object",
@@ -1421,7 +1449,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 		}, llm.Tool{
 			Type: "function",
 			Function: llm.ToolFunction{
-				Name:        "assign_jira_team",
+				Name:        ToolAssignJiraTeam,
 				Description: "Assign an existing Jira issue to a team by team UUID. The Jira Teams integration uses UUIDs (NOT display names) — call resolve_jira_team first to obtain the UUID. Team field is the only thing mutated — summary, description, status, assignee, sprint are untouched. No-op (returns success) when the team is already set to the requested UUID.",
 				Parameters: json.RawMessage(`{
 					"type":"object",
@@ -1435,7 +1463,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 		}, llm.Tool{
 			Type: "function",
 			Function: llm.ToolFunction{
-				Name:        "add_jira_comment",
+				Name:        ToolAddJiraComment,
 				Description: "Post a comment on a Jira issue. The body is rendered from markdown to ADF (Atlassian Document Format) automatically — supports # headers, - bullets, 1) ordered lists, **bold**, `code`, and [text](url) links. To @-mention a Jira user so they get a real notification (not just a plain-text string), use the syntax `@[Display Name](accountId)` — e.g. `@[Jane Doe](712020:abc-def-...)`. ALWAYS call resolve_jira_user first to get the accountId; never invent or guess it, and never write a bare `@Name` because it will be posted as inert plain text. Use when the user asks to comment on, reply to, or annotate a ticket.",
 				Parameters: json.RawMessage(`{
 					"type":"object",
@@ -1449,7 +1477,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 		}, llm.Tool{
 			Type: "function",
 			Function: llm.ToolFunction{
-				Name:        "list_jira_comments",
+				Name:        ToolListJiraComments,
 				Description: "List the most recent comments on a Jira issue, newest first. Use to summarize discussion on a ticket or pull recent context before replying.",
 				Parameters: json.RawMessage(`{
 					"type":"object",
@@ -1463,7 +1491,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 		}, llm.Tool{
 			Type: "function",
 			Function: llm.ToolFunction{
-				Name:        "link_jira_issues",
+				Name:        ToolLinkJiraIssues,
 				Description: "Create a typed link between two Jira issues. The 'link_type' is the relationship name as it appears in Jira (e.g. 'Relates', 'Blocks', 'Causes', 'Duplicates', 'Cloners'). The inward issue is the source of the relationship and the outward issue is the target — e.g. for 'Blocks', inward_key blocks outward_key.",
 				Parameters: json.RawMessage(`{
 					"type":"object",
@@ -1482,7 +1510,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 	tools = append(tools, llm.Tool{
 		Type: "function",
 		Function: llm.ToolFunction{
-			Name:        "get_slack_user_info",
+			Name:        ToolGetSlackUserInfo,
 			Description: "Get the real name and profile information of a Slack user by their user ID. Use this to resolve the current user's real name for Jira queries. The user_id is available from the conversation context (the person who sent the command).",
 			Parameters: json.RawMessage(`{
 				"type":"object",
@@ -1500,7 +1528,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 	tools = append(tools, llm.Tool{
 		Type: "function",
 		Function: llm.ToolFunction{
-			Name:        "lookup_slack_user",
+			Name:        ToolLookupSlackUser,
 			Description: "Resolve a person to their Slack user ID so you can @-mention them. This is the ONLY way to turn a Jira user (e.g. the label author from get_jira_label_author) into a real Slack ping. Pass their email (MOST reliable — uses Slack users.lookupByEmail) and/or their display name. Returns the Slack user ID and the ready-to-paste mention token `<@USERID>`. A bare `@Display Name` in a Slack message is inert text that pings nobody — you MUST use the `<@USERID>` form from this tool to actually notify someone. If the person cannot be uniquely resolved, the tool says so; in that case fall back to plain `@Display Name` rather than guessing an ID.",
 			Parameters: json.RawMessage(`{
 				"type":"object",
@@ -1517,7 +1545,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 		tools = append(tools, llm.Tool{
 			Type: "function",
 			Function: llm.ToolFunction{
-				Name:        "resolve_jira_user",
+				Name:        ToolResolveJiraUser,
 				Description: "Search for a Jira user by name and/or email and return their account ID. IMPORTANT: Jira Cloud JQL does NOT reliably support searching by display name (e.g. assignee = 'Jane Doe' may return zero results). You MUST call this tool first to get the user's Jira account ID, then use that account ID in JQL queries (e.g. assignee = 'accountId'). This is the ONLY reliable way to find issues by assignee in Jira Cloud. ALWAYS pass both name AND email (from get_slack_user_info) for best results — email-based search is the most reliable.",
 				Parameters: json.RawMessage(`{
 					"type":"object",
@@ -1531,7 +1559,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 		}, llm.Tool{
 			Type: "function",
 			Function: llm.ToolFunction{
-				Name:        "resolve_jira_team",
+				Name:        ToolResolveJiraTeam,
 				Description: "Resolve a Jira team name to its UUID and JQL clause name. The Jira Teams integration field uses UUIDs, NOT display names, in JQL. You MUST call this tool first when searching for a team's tickets — it returns the JQL clause (e.g. 'Team[Team]') and team UUID. Then use the result in JQL like: '\"Team[Team]\" = \"<uuid>\"'. Example: resolve_jira_team({\"team_name\": \"DevOps\"}) → clause='Team[Team]', uuid='d6c2ac7c-...', then search with JQL '\"Team[Team]\" = \"d6c2ac7c-...\" AND status = \"In Progress\"'.",
 				Parameters: json.RawMessage(`{
 					"type":"object",
@@ -1547,7 +1575,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 		tools = append(tools, llm.Tool{
 			Type: "function",
 			Function: llm.ToolFunction{
-				Name:        "get_jira_dashboard",
+				Name:        ToolGetJiraDashboard,
 				Description: "Fetch a Jira dashboard by its numeric ID, including its name, owner, and all configured gadgets. Use this when a user shares a dashboard URL like https://org.atlassian.net/jira/dashboards/10014 — extract the numeric ID from the URL. Returns dashboard metadata and a list of gadgets with their titles and positions.",
 				Parameters: json.RawMessage(`{
 					"type":"object",
@@ -1560,7 +1588,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 		}, llm.Tool{
 			Type: "function",
 			Function: llm.ToolFunction{
-				Name:        "get_jira_filter",
+				Name:        ToolGetJiraFilter,
 				Description: "Fetch a Jira saved filter by its numeric ID and optionally execute its JQL to return matching issues. Use this when a user shares a filter URL like https://org.atlassian.net/issues/?filter=11901 — extract the numeric ID. Returns the filter name, owner, JQL query, and (if run_jql is true) the issues matching that JQL.",
 				Parameters: json.RawMessage(`{
 					"type":"object",
@@ -1578,7 +1606,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 		tools = append(tools, llm.Tool{
 			Type: "function",
 			Function: llm.ToolFunction{
-				Name:        "search_confluence_pages",
+				Name:        ToolSearchConfluencePages,
 				Description: "Search Confluence pages using CQL (Confluence Query Language). Useful for finding documentation, runbooks, architecture decision records, and knowledge-base articles. Common CQL examples: 'text ~ \"deployment guide\"', 'space = DEV AND title ~ \"runbook\"', 'label = \"architecture\" AND type = page'. Returns page IDs, titles, and links — use get_confluence_page to fetch the full content of a matching page.",
 				Parameters: json.RawMessage(`{
 					"type":"object",
@@ -1592,7 +1620,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 		}, llm.Tool{
 			Type: "function",
 			Function: llm.ToolFunction{
-				Name:        "get_confluence_page",
+				Name:        ToolGetConfluencePage,
 				Description: "Retrieve the full content of a Confluence page. Accepts a numeric page ID, a full Confluence page URL, or a Confluence short/tiny link (e.g. https://site.atlassian.net/wiki/x/AQAF3Q). Returns the page title, body (in storage/XHTML format), and a web link. Use search_confluence_pages first if you need to find a page by title or content.",
 				Parameters: json.RawMessage(`{
 					"type":"object",
@@ -1605,14 +1633,14 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 		}, llm.Tool{
 			Type: "function",
 			Function: llm.ToolFunction{
-				Name:        "list_confluence_spaces",
+				Name:        ToolListConfluenceSpaces,
 				Description: "List all Confluence spaces visible to the bot. Useful for discovering available spaces before searching for pages. Returns space keys, names, and types.",
 				Parameters:  json.RawMessage(`{"type":"object","properties":{}}`),
 			},
 		}, llm.Tool{
 			Type: "function",
 			Function: llm.ToolFunction{
-				Name:        "create_confluence_page",
+				Name:        ToolCreateConfluencePage,
 				Description: "Create a new Confluence page in a specified space. Use this when the user asks to create documentation, write a guide, or generate a wiki page. The body should be in Confluence storage format (XHTML). You can use basic HTML tags: <h1>-<h6> for headings, <p> for paragraphs, <ul>/<ol>/<li> for lists, <table>/<tr>/<th>/<td> for tables, <code> for inline code, <ac:structured-macro ac:name=\"code\"><ac:plain-text-body><![CDATA[...]]></ac:plain-text-body></ac:structured-macro> for code blocks, <strong> for bold, <em> for italic, and <a href=\"url\">text</a> for links.",
 				Parameters: json.RawMessage(`{
 					"type":"object",
@@ -1633,12 +1661,12 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 		tools = append(tools, llm.Tool{
 			Type: "function",
 			Function: llm.ToolFunction{
-				Name:        "datadog_search_logs",
-				Description: "Search Datadog logs using the Log Search API. Use this to find error logs, investigate incidents, debug service issues, or check what happened in a specific time window. Supports full Datadog log query syntax (e.g. 'service:task-exec status:error', 'pod_name:precalc* @error', 'env:prod source:kubernetes'). ALWAYS use this when the user asks about logs, errors, or recent failures in production. Time range defaults to the last 1 hour if not specified.",
+				Name:        ToolDatadogSearchLogs,
+				Description: "Search Datadog logs using the Log Search API. Use this to find error logs, investigate incidents, debug service issues, or check what happened in a specific time window. Supports full Datadog log query syntax (e.g. 'service:my-service status:error', 'pod_name:my-pod* @error', 'env:prod source:kubernetes'). ALWAYS use this when the user asks about logs, errors, or recent failures in production. Time range defaults to the last 1 hour if not specified.",
 				Parameters: json.RawMessage(`{
 					"type":"object",
 					"properties":{
-						"query":{"type":"string","description":"Datadog log search query (e.g. 'service:task-exec status:error', 'pod_name:my-pod', 'env:prod @http.status_code:>499')"},
+						"query":{"type":"string","description":"Datadog log search query (e.g. 'service:my-service status:error', 'pod_name:my-pod', 'env:prod @http.status_code:>499')"},
 						"from":{"type":"string","description":"Start of time range in ISO-8601 (e.g. '2026-03-12T10:00:00Z'). Defaults to 1 hour ago."},
 						"to":{"type":"string","description":"End of time range in ISO-8601. Defaults to now."},
 						"limit":{"type":"integer","description":"Max log entries to return (default: 20, max: 50)"},
@@ -1650,14 +1678,14 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 		}, llm.Tool{
 			Type: "function",
 			Function: llm.ToolFunction{
-				Name:        "datadog_logs_aggregate",
-				Description: "Compute SERVER-SIDE aggregations and accurate percentiles over Datadog logs (no sampling, no row cap — unlike datadog_search_logs). For each value of a group-by facet it returns count + p50/p95/p99 of a numeric measure, sorted by p95 descending. Use this for performance baselines and 'how slow is endpoint X / which customers are slowest' questions. Example: query 'service:api-service \"request end\"', group_by '@endpoint_name', measure '@time_took' → per-endpoint latency percentiles over the whole window. Switch measure to '@infra_extra.mem_delta_mb' for memory, or group_by to '@customer_schema' for per-customer attribution. Requires the measure to be a registered Datadog measure facet. Time range defaults to the last 14 days.",
+				Name:        ToolDatadogLogsAggregate,
+				Description: "Compute SERVER-SIDE aggregations and accurate percentiles over Datadog logs (no sampling, no row cap — unlike datadog_search_logs). For each bucket of the group-by facet(s) it returns the event count and, when a measure is given, p50/p95/p99 of that numeric measure, sorted by p95 descending (by count when no measure). Use this for performance baselines and 'how slow is X / which values are worst / how many events per group' questions. Example: query 'service:my-service status:ok', group_by '@resource_name', measure '@duration' → per-resource latency percentiles over the whole window. Omit measure for a count-only breakdown (e.g. group_by '@error_id' to get per-error event counts). Pass MULTIPLE facets (e.g. group_by ['@resource_name','@http.method']) to get a composite breakdown — one row per facet-value combination — instead of a single global number. Omit group_by for one overall bucket. Requires any measure to be a registered Datadog measure facet. Time range defaults to the last 14 days.",
 				Parameters: json.RawMessage(`{
 					"type":"object",
 					"properties":{
-						"query":{"type":"string","description":"Datadog log search query to aggregate over (e.g. 'service:api-service \"request end\"'). Append exclusions like '-@customer_schema:(acme* OR demo*)' to drop test tenants."},
-						"group_by":{"type":"string","description":"Facet to group by (e.g. '@endpoint_name', '@customer_schema'). Default '@endpoint_name'."},
-						"measure":{"type":"string","description":"Numeric measure facet to compute p50/p95/p99 over (e.g. '@time_took' seconds, '@infra_extra.mem_delta_mb' MB). Default '@time_took'."},
+						"query":{"type":"string","description":"Datadog log search query to aggregate over (e.g. 'service:my-service status:ok'). Append exclusions like '-@some_facet:(test* OR demo*)' to drop unwanted values."},
+						"group_by":{"description":"Facet(s) to group by. Either a single facet string (e.g. '@resource_name') or an array of facets for a composite breakdown (e.g. ['@resource_name','@http.method']). Omit for a single overall bucket (no grouping).","oneOf":[{"type":"string"},{"type":"array","items":{"type":"string"}}]},
+						"measure":{"type":"string","description":"OPTIONAL. Numeric measure facet to compute p50/p95/p99 over (e.g. '@duration', '@network.bytes_written'). Omit for a count-only aggregation (just the event count per bucket). Must be a registered Datadog measure facet when provided."},
 						"from":{"type":"string","description":"Start of time range: ISO-8601, unix-ms, or date-math ('now-14d'). Defaults to 14 days ago."},
 						"to":{"type":"string","description":"End of time range. Defaults to now."},
 						"site":{"type":"string","enum":["us","eu"],"description":"Datadog site to query: 'us' (datadoghq.com), 'eu' (datadoghq.eu). Omit to query all configured sites (recommended for platform-wide baselines)."}
@@ -1668,12 +1696,12 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 		}, llm.Tool{
 			Type: "function",
 			Function: llm.ToolFunction{
-				Name:        "datadog_list_monitors",
-				Description: "List Datadog monitors, optionally filtered by query. Use this to find monitors related to a service, environment, or alert type. Supports Datadog monitor search syntax (e.g. 'tag:service:task-exec', 'tag:env:prod', monitor name substrings). Returns monitor name, status (OK/Alert/Warn/No Data), type, tags, and direct links.",
+				Name:        ToolDatadogListMonitors,
+				Description: "List Datadog monitors, optionally filtered by query. Use this to find monitors related to a service, environment, or alert type. Supports Datadog monitor search syntax (e.g. 'tag:service:my-service', 'tag:env:prod', monitor name substrings). Returns monitor name, status (OK/Alert/Warn/No Data), type, tags, and direct links.",
 				Parameters: json.RawMessage(`{
 					"type":"object",
 					"properties":{
-						"query":{"type":"string","description":"Monitor search query (e.g. 'tag:env:prod', 'task-exec', 'tag:team:devops'). Empty returns all monitors."},
+						"query":{"type":"string","description":"Monitor search query (e.g. 'tag:env:prod', 'my-service', 'tag:team:devops'). Empty returns all monitors."},
 						"limit":{"type":"integer","description":"Max monitors to return (default: 20, max: 50)"},
 						"site":{"type":"string","enum":["us","eu"],"description":"Datadog site to query: 'us' (datadoghq.com), 'eu' (datadoghq.eu). Infer from URLs in the user's message. Omit to query all configured sites."}
 					}
@@ -1682,7 +1710,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 		}, llm.Tool{
 			Type: "function",
 			Function: llm.ToolFunction{
-				Name:        "datadog_get_monitor",
+				Name:        ToolDatadogGetMonitor,
 				Description: "Get full details of a specific Datadog monitor by its numeric ID. Returns the monitor's name, query, message (notification template with reasoning/escalation steps), status, tags, creator, and timestamps. Use this to understand WHY a monitor triggered — the query shows the threshold condition and the message contains the team's documented reasoning and next steps. Extract the monitor ID from Datadog URLs (e.g. https://app.datadoghq.com/monitors/12345 → ID is 12345, https://app.datadoghq.eu/monitors/12345 → ID is 12345, site=eu).",
 				Parameters: json.RawMessage(`{
 					"type":"object",
@@ -1696,12 +1724,12 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 		}, llm.Tool{
 			Type: "function",
 			Function: llm.ToolFunction{
-				Name:        "datadog_list_hosts",
+				Name:        ToolDatadogListHosts,
 				Description: "List infrastructure hosts from Datadog, optionally filtered. Use this to check host health, find hosts running a specific service, or investigate infrastructure issues. Returns host names, up/down status, apps, tags, and cloud metadata.",
 				Parameters: json.RawMessage(`{
 					"type":"object",
 					"properties":{
-						"filter":{"type":"string","description":"Filter hosts by name, tag, or other attributes (e.g. 'precalc', 'env:prod')"},
+						"filter":{"type":"string","description":"Filter hosts by name, tag, or other attributes (e.g. 'web', 'env:prod')"},
 						"count":{"type":"integer","description":"Max hosts to return (default: 20, max: 100)"},
 						"site":{"type":"string","enum":["us","eu"],"description":"Datadog site to query: 'us' (datadoghq.com), 'eu' (datadoghq.eu). Infer from URLs in the user's message. Omit to query all configured sites."}
 					}
@@ -1710,7 +1738,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 		}, llm.Tool{
 			Type: "function",
 			Function: llm.ToolFunction{
-				Name:        "datadog_get_dashboard",
+				Name:        ToolDatadogGetDashboard,
 				Description: "Fetch a Datadog dashboard by its ID. Returns the dashboard title, description, layout, author, and all widget definitions (titles, types). Use this when a user shares a Datadog dashboard URL (e.g. https://app.datadoghq.com/dashboard/abc-def-ghi or https://app.datadoghq.eu/dashboard/abc-def-ghi) — extract the dashboard ID from the URL path. Useful for understanding what metrics/monitors a team tracks.",
 				Parameters: json.RawMessage(`{
 					"type":"object",
@@ -1724,12 +1752,12 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 		}, llm.Tool{
 			Type: "function",
 			Function: llm.ToolFunction{
-				Name:        "datadog_list_dashboards",
+				Name:        ToolDatadogListDashboards,
 				Description: "List Datadog dashboards, optionally filtered by title keyword. Use this to discover available dashboards for a team, service, or topic.",
 				Parameters: json.RawMessage(`{
 					"type":"object",
 					"properties":{
-						"query":{"type":"string","description":"Filter dashboards by title keyword (e.g. 'task-exec', 'production', 'SLO'). Empty returns all."},
+						"query":{"type":"string","description":"Filter dashboards by title keyword (e.g. 'my-service', 'production', 'SLO'). Empty returns all."},
 						"count":{"type":"integer","description":"Max dashboards to return (default: 20, max: 50)"},
 						"site":{"type":"string","enum":["us","eu"],"description":"Datadog site to query: 'us' (datadoghq.com), 'eu' (datadoghq.eu). Infer from URLs in the user's message. Omit to query all configured sites."}
 					}
@@ -1738,7 +1766,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 		}, llm.Tool{
 			Type: "function",
 			Function: llm.ToolFunction{
-				Name:        "datadog_query_metrics",
+				Name:        ToolDatadogQueryMetrics,
 				Description: "Run a Datadog timeseries metrics query and get per-series aggregates (avg/min/max/last). Use this whenever the user asks about CPU, memory, network, disk, latency, throughput, error rate, or any numeric metric broken down by tags (service, pod, cluster, host, etc.) — this is the ONLY tool that can answer those questions. Returns series sorted by avg descending so low/high utilizers are easy to spot. Do client-side filtering (e.g. \"under 20% CPU\") by reading the series list in the result. Query MUST be a valid Datadog metric expression with an aggregator and scope. Examples: `avg:kubernetes.cpu.usage.total{cluster_name:prod-us} by {kube_service}` (raw CPU usage), `avg:kubernetes.cpu.usage.total{*} by {kube_service} / avg:kubernetes.cpu.limits{*} by {kube_service} * 100` (CPU utilization vs limit, %), `avg:kubernetes.memory.usage{*} by {kube_deployment}`, `sum:kubernetes.pods.running{*} by {cluster_name}`, `avg:system.load.1{*} by {host}`. Prefer `by {kube_service}` or `by {kube_deployment}` when the user asks \"which services/deployments\". Default time window is the last 1 hour. If the initial query returns too many series, re-run with a tighter scope filter.",
 				Parameters: json.RawMessage(`{
 					"type":"object",
@@ -1762,7 +1790,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 		tools = append(tools, llm.Tool{
 			Type: "function",
 			Function: llm.ToolFunction{
-				Name:        "aws_get_cost_and_usage",
+				Name:        ToolAWSGetCostAndUsage,
 				Description: "Query AWS Cost Explorer for cost and usage data. Use this for daily/weekly/monthly cost reports, cost-by-service breakdowns, cost-by-account (for payer / linked accounts), week-over-week trend analysis, and anomaly spotting. 'start' and 'end' are YYYY-MM-DD and 'end' is EXCLUSIVE (Cost Explorer convention: to report through 2026-04-21 inclusive, pass end=2026-04-22). Default window is the last 8 days at DAILY granularity with AmortizedCost — AmortizedCost is used by default so Reserved Instance and Savings Plan up-front charges are spread evenly across their commitment term (required for accurate daily trend analysis on accounts that use RIs/SPs). Set group_by to break down by SERVICE (e.g. 'Amazon Elastic Compute Cloud - Compute', 'Amazon Relational Database Service', 'AWS Lambda'), LINKED_ACCOUNT, REGION, USAGE_TYPE, INSTANCE_TYPE, OPERATION, PURCHASE_TYPE, RECORD_TYPE. Use service_filter to restrict to one exact service name (find the exact string via aws_list_dimension_values with dimension=SERVICE). Use exclude_charge_types to drop RECORD_TYPE rows that aren't real spend — pass [\"Credit\",\"Refund\",\"Tax\",\"Solution Provider Program Discount\"] to mirror the AWS console's default Charge-type filter so reported totals match the console. Use exclude_services to drop whole services whose name CONTAINS a substring (case-insensitive, e.g. [\"Databricks\"]) from the total, every group, and downstream math — the tool resolves the matching exact service names automatically, so you never need a separate grouped call just to post-filter them out. WARNING: each Cost Explorer API call costs $0.01 — avoid looping over services; prefer one grouped call over N filtered calls.",
 				Parameters: json.RawMessage(`{
 					"type":"object",
@@ -1781,7 +1809,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 		}, llm.Tool{
 			Type: "function",
 			Function: llm.ToolFunction{
-				Name:        "aws_get_cost_forecast",
+				Name:        ToolAWSGetCostForecast,
 				Description: "Project future AWS spend using Cost Explorer's forecast model. Use this when the user asks 'how much will we spend next month / this week?'. 'start' must be >= today (CE rejects past dates) and 'end' must be within 12 months. Default window: tomorrow → +30 days at DAILY granularity. Pass exclude_charge_types to mirror the console's default Charge-type filter so the forecast matches the console's projection. Pass exclude_services to project spend with whole services removed (e.g. [\"Databricks\"]); the tool resolves the matching exact names over the last 30 settled days and excludes them from the projection, so you do not need to approximate the exclusion yourself.",
 				Parameters: json.RawMessage(`{
 					"type":"object",
@@ -1798,7 +1826,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 		}, llm.Tool{
 			Type: "function",
 			Function: llm.ToolFunction{
-				Name:        "aws_list_dimension_values",
+				Name:        ToolAWSListDimensionValues,
 				Description: "Enumerate possible values for a Cost Explorer dimension (e.g. list every SERVICE that accrued cost in the last 30 days). Useful to discover the exact service name strings before using them as service_filter in aws_get_cost_and_usage — service names are long and finicky ('Amazon Elastic Compute Cloud - Compute', not 'EC2').",
 				Parameters: json.RawMessage(`{
 					"type":"object",
@@ -1814,7 +1842,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 		}, llm.Tool{
 			Type: "function",
 			Function: llm.ToolFunction{
-				Name:        "aws_s3_put_object",
+				Name:        ToolAWSS3PutObject,
 				Description: "Write (upload) text content to an object in an S3 bucket. The object is created or overwritten at the exact key you give (S3 objects are immutable: every write replaces the whole object, so to APPEND you must first read the object with aws_s3_get_object, concatenate your new content, and write the combined text back). 'bucket' is the bucket name — you may instead paste a full 's3://bucket/key' URI or an 'arn:aws:s3:::bucket/key' ARN and leave 'key' empty; the bucket and key are split for you. 'key' is the full object path including any folder prefixes and the filename (e.g. 'reports/2026-06-11.csv'). 'content' is the literal text stored as the object body. The bucket's region is detected automatically.",
 				Parameters: json.RawMessage(`{
 					"type":"object",
@@ -1830,7 +1858,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 		}, llm.Tool{
 			Type: "function",
 			Function: llm.ToolFunction{
-				Name:        "aws_s3_get_object",
+				Name:        ToolAWSS3GetObject,
 				Description: "Read (download) the text content of an S3 object — for example to read back an object before rewriting it with appended content. Returns the object body plus its size and last-modified time. Bodies larger than 1 MiB are truncated. 'bucket' may be a bare name, an 's3://bucket/key' URI, or an 'arn:aws:s3:::bucket/key' ARN; 'key' is the full object path. An error that the object does not exist (NoSuchKey) is the normal signal that the file has not been created yet — handle it by creating the object with aws_s3_put_object.",
 				Parameters: json.RawMessage(`{
 					"type":"object",
@@ -1844,7 +1872,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 		}, llm.Tool{
 			Type: "function",
 			Function: llm.ToolFunction{
-				Name:        "aws_s3_list_objects",
+				Name:        ToolAWSS3ListObjects,
 				Description: "List objects in an S3 bucket, optionally under a key prefix — for example to enumerate which dated files already exist under a folder. Returns each object's key, size and last-modified time, sorted by key so date-stamped filenames come back in chronological order. One page only, capped at 1000 keys. 'bucket' may be a bare name, an 's3://' URI, or an ARN; 'prefix' narrows the listing.",
 				Parameters: json.RawMessage(`{
 					"type":"object",
@@ -1870,7 +1898,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 		tools = append(tools, llm.Tool{
 			Type: "function",
 			Function: llm.ToolFunction{
-				Name:        "azure_get_cost_and_usage",
+				Name:        ToolAzureGetCostAndUsage,
 				Description: "Query Azure Cost Management for cost and usage data across every subscription nested under the configured management group (defaults to the tenant root MG — tenant-wide). Use for daily/weekly/monthly cost reports, cost-by-service breakdowns, cost-by-resource-group, region splits, per-subscription breakdowns (group_by=SubscriptionName / SubscriptionId), and trend analysis. 'start' and 'end' are YYYY-MM-DD and 'end' is treated EXCLUSIVE (mirrors AWS Cost Explorer: to report through 2026-04-21 inclusive, pass end=2026-04-22 — Azure's underlying API is inclusive but arbetern normalises). Default window: last 8 days at Daily granularity, ActualCost. Pass AmortizedCost to spread Reservation / Savings Plan up-front charges across their commitment term. Set group_by to break down by ServiceName (e.g. 'Virtual Machines', 'Storage', 'Azure Kubernetes Service'), ResourceGroupName, ResourceLocation, MeterCategory, ChargeType, SubscriptionName, SubscriptionId, ResourceId. Use service_filter to restrict to one exact ServiceName (find the exact string via azure_list_dimension_values with dimension=ServiceName).",
 				Parameters: json.RawMessage(`{
 					"type":"object",
@@ -1887,7 +1915,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 		}, llm.Tool{
 			Type: "function",
 			Function: llm.ToolFunction{
-				Name:        "azure_get_cost_forecast",
+				Name:        ToolAzureGetCostForecast,
 				Description: "Project future Azure spend across every subscription nested under the configured management group (tenant-wide by default) using Cost Management's forecast endpoint. Use this when the user asks 'how much will we spend next month / this week?'. Default window: today → +30 days at Daily granularity, ActualCost.",
 				Parameters: json.RawMessage(`{
 					"type":"object",
@@ -1902,7 +1930,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 		}, llm.Tool{
 			Type: "function",
 			Function: llm.ToolFunction{
-				Name:        "azure_list_dimension_values",
+				Name:        ToolAzureListDimensionValues,
 				Description: "Enumerate possible values for an Azure Cost Management dimension (e.g. list every ServiceName that accrued cost, or every SubscriptionName the SP can see) across the configured management group. Useful to discover the exact service-name strings before passing them as service_filter to azure_get_cost_and_usage — Azure service names are case-sensitive and finicky ('Virtual Machines', not 'VM'; 'Azure Kubernetes Service', not 'AKS').",
 				Parameters: json.RawMessage(`{
 					"type":"object",
@@ -1926,7 +1954,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 		tools = append(tools, llm.Tool{
 			Type: "function",
 			Function: llm.ToolFunction{
-				Name:        "databricks_query",
+				Name:        ToolDatabricksQuery,
 				Description: "Run read-only SQL against the configured Databricks SQL warehouse and return the result rows as a table. Use for ad-hoc analytics over Unity Catalog tables and Databricks system tables (e.g. system.billing.usage for cost/DBU analysis), including SELECT, WITH (CTEs), SHOW, DESCRIBE, EXPLAIN and VALUES. You may send a script of several read-only statements separated by semicolons — e.g. one or more DECLARE/SET session variables followed by a final SELECT — and the warehouse returns the result of the LAST statement. EVERY statement must be read-only: INSERT/UPDATE/DELETE/MERGE/CREATE/DROP/ALTER/TRUNCATE/GRANT and other writes are rejected, whether standalone or hidden inside a WITH/BEGIN block. AI/ML SQL functions such as ai_forecast(), ai_query() and vector_search() are supported inside a SELECT/WITH. Still prefer named parameter markers (:name) supplied via the 'parameters' array for user-supplied values — e.g. SELECT * FROM t WHERE day >= :since with parameters [{\"name\":\"since\",\"value\":\"2024-01-01\",\"type\":\"DATE\"}] — since it avoids quoting/injection bugs; use DECLARE/SET only when you genuinely need session variables.",
 				Parameters: json.RawMessage(`{
 					"type":"object",
@@ -1962,7 +1990,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 		tools = append(tools, llm.Tool{
 			Type: "function",
 			Function: llm.ToolFunction{
-				Name:        "clickhouse_usage_cost",
+				Name:        ToolClickHouseUsageCost,
 				Description: "Retrieve the ClickHouse Cloud organization usage-cost report for a date range. Returns the grand total plus a per-day, per-entity breakdown of spend in ClickHouse Credits (CHC), where each entity is a service, data warehouse or ClickPipe, plus a cost-by-category split (compute, storage, backup, data transfer). Use for questions like 'what did we spend on ClickHouse last week / this month' or 'which service is driving ClickHouse cost'. The window is capped at 31 days: to_date may be at most 30 days after from_date. Dates are ISO-8601 (YYYY-MM-DD) and evaluated in UTC. Optionally narrow by resource tag via 'filters' (e.g. \"tag:Environment=Production\").",
 				Parameters: json.RawMessage(`{
 					"type":"object",
@@ -1977,7 +2005,8 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 		})
 	}
 
-	// Freshworks suite (read-only) — gated to the customer-success agent
+	// Freshworks suite (read-only) — gated to the customer-success and
+	// product-management agents
 	// (restrictedIntegrations: pulse) and per-product on the sub-client being
 	// configured, so only the products with credentials advertise their tools.
 	if h.canUseIntegration(integrationFreshworks) && h.freshworksClient != nil {
@@ -1986,7 +2015,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 				llm.Tool{
 					Type: "function",
 					Function: llm.ToolFunction{
-						Name:        "freshdesk_list_tickets",
+						Name:        ToolFreshdeskListTickets,
 						Description: "List recent Freshdesk support tickets, newest-updated first. Optionally filter to tickets updated on or after a timestamp. Returns ticket ID, subject, status, priority and last-updated time. Use for questions like 'show recent support tickets' or 'what tickets changed since yesterday'.",
 						Parameters: json.RawMessage(`{
 							"type":"object",
@@ -2001,7 +2030,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 				llm.Tool{
 					Type: "function",
 					Function: llm.ToolFunction{
-						Name:        "freshdesk_get_ticket",
+						Name:        ToolFreshdeskGetTicket,
 						Description: "Get a single Freshdesk ticket by its numeric ID, including its full description and (optionally) its conversation thread of replies and private notes. Use after freshdesk_list_tickets or freshdesk_search_tickets to drill into a ticket.",
 						Parameters: json.RawMessage(`{
 							"type":"object",
@@ -2016,7 +2045,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 				llm.Tool{
 					Type: "function",
 					Function: llm.ToolFunction{
-						Name:        "freshdesk_search_tickets",
+						Name:        ToolFreshdeskSearchTickets,
 						Description: "Search Freshdesk tickets using the Freshdesk filter query syntax, e.g. \"priority:4 AND status:2\" for urgent open tickets, or \"agent_id:123\" or \"tag:'escalated'\". Do NOT wrap the query in quotes yourself. Returns matching tickets with status and priority.",
 						Parameters: json.RawMessage(`{
 							"type":"object",
@@ -2034,7 +2063,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 				llm.Tool{
 					Type: "function",
 					Function: llm.ToolFunction{
-						Name:        "freshchat_get_conversation",
+						Name:        ToolFreshchatGetConversation,
 						Description: "Get a Freshchat conversation header by its conversation ID (status, channel, assigned agent, and any inline messages). Use freshchat_get_conversation_messages to read the full message thread.",
 						Parameters: json.RawMessage(`{
 							"type":"object",
@@ -2048,7 +2077,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 				llm.Tool{
 					Type: "function",
 					Function: llm.ToolFunction{
-						Name:        "freshchat_get_conversation_messages",
+						Name:        ToolFreshchatGetConversationMessages,
 						Description: "Get the messages in a Freshchat conversation by conversation ID. Returns each message's actor (user/agent/system), timestamp and text. Use to read what was said in a live-chat conversation.",
 						Parameters: json.RawMessage(`{
 							"type":"object",
@@ -2067,7 +2096,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 				llm.Tool{
 					Type: "function",
 					Function: llm.ToolFunction{
-						Name:        "freshworks_crm_search",
+						Name:        ToolFreshworksCRMSearch,
 						Description: "Search the Freshworks CRM (Freshsales) for contacts, deals and accounts matching a term (name, email, company, etc.). Returns each hit's name, type and ID. Use the returned IDs with freshworks_crm_get_contact or freshworks_crm_get_deal to fetch details.",
 						Parameters: json.RawMessage(`{
 							"type":"object",
@@ -2082,7 +2111,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 				llm.Tool{
 					Type: "function",
 					Function: llm.ToolFunction{
-						Name:        "freshworks_crm_get_contact",
+						Name:        ToolFreshworksCRMGetContact,
 						Description: "Get a Freshworks CRM contact by its numeric ID (name, title, email, phone, location). Use after freshworks_crm_search.",
 						Parameters: json.RawMessage(`{
 							"type":"object",
@@ -2096,7 +2125,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 				llm.Tool{
 					Type: "function",
 					Function: llm.ToolFunction{
-						Name:        "freshworks_crm_get_deal",
+						Name:        ToolFreshworksCRMGetDeal,
 						Description: "Get a Freshworks CRM deal/opportunity by its numeric ID (name, amount, stage, probability, expected/closed dates). Use after freshworks_crm_search.",
 						Parameters: json.RawMessage(`{
 							"type":"object",
@@ -2117,7 +2146,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 	tools = append(tools, llm.Tool{
 		Type: "function",
 		Function: llm.ToolFunction{
-			Name:        "http_get",
+			Name:        ToolHTTPGet,
 			Description: "Perform a read-only HTTP GET against a public URL and return the response body (truncated). Intended for fetching public metadata such as GitHub releases JSON (e.g. https://api.github.com/repos/<owner>/<repo>/releases/latest), raw files on GitHub (e.g. https://raw.githubusercontent.com/<owner>/<repo>/<branch>/<path>), or other small public JSON / YAML / text endpoints. Only http(s) schemes are allowed; the request must NOT carry credentials. For Helm chart version checks, fetch the chart's upstream `Chart.yaml` directly from its source repo on GitHub (raw.githubusercontent.com) instead of trying to scrape a Helm index or an OCI registry. Do NOT use to circumvent existing tools (use get_file_content, github_*, datadog_*, etc. when applicable).",
 			Parameters: json.RawMessage(`{
 				"type":"object",
@@ -2210,7 +2239,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		return preconditionErrf("Error: %s is not available to the %s agent.", name, h.agentID)
 	}
 	switch name {
-	case "list_org_repos":
+	case ToolListOrgRepos:
 		owner, err := h.ghClient.ResolveOwner(ctx)
 		if err != nil {
 			return fmt.Sprintf("Error resolving owner: %v", err)
@@ -2225,7 +2254,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		log.Printf("[user=%s channel=%s] listed %d org repos for %s", userID, channelID, len(repos), owner)
 		return fmt.Sprintf("Organization: %s\nRepositories (%d):\n%s", owner, len(repos), strings.Join(repos, "\n"))
 
-	case "list_user_repos":
+	case ToolListUserRepos:
 		repos, err := h.ghClient.ListUserRepos(ctx)
 		if err != nil {
 			return fmt.Sprintf("Error listing user repos: %v", err)
@@ -2236,7 +2265,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		log.Printf("[user=%s channel=%s] listed %d user repos", userID, channelID, len(repos))
 		return fmt.Sprintf("Repositories (%d):\n%s", len(repos), strings.Join(repos, "\n"))
 
-	case "list_repo_teams":
+	case ToolListRepoTeams:
 		args, errMsg := parseToolArgs[struct {
 			Repo string `json:"repo"`
 		}](argsJSON)
@@ -2261,7 +2290,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		log.Printf("[user=%s channel=%s] listed %d teams for %s/%s", userID, channelID, len(teams), owner, args.Repo)
 		return fmt.Sprintf("Teams with direct access to %s/%s (%d):\n%s", owner, args.Repo, len(teams), strings.Join(lines, "\n"))
 
-	case "list_repo_teams_bulk":
+	case ToolListRepoTeamsBulk:
 		args, errMsg := parseToolArgs[struct {
 			Repos []string `json:"repos"`
 		}](argsJSON)
@@ -2311,7 +2340,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		log.Printf("[user=%s channel=%s] list_repo_teams_bulk: %d ok, %d errors (of %d repos)", userID, channelID, okCount, errCount, len(repos))
 		return fmt.Sprintf("Bulk list_repo_teams: %d ok, %d errors (of %d repos):%s", okCount, errCount, len(repos), sb.String())
 
-	case "get_files_bulk":
+	case ToolGetFilesBulk:
 		args, errMsg := parseToolArgs[struct {
 			Files []github.FileFetchSpec `json:"files"`
 		}](argsJSON)
@@ -2360,7 +2389,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		log.Printf("[user=%s channel=%s] get_files_bulk: %d ok, %d errors (of %d files)", userID, channelID, okCount, errCount, len(clean))
 		return fmt.Sprintf("Bulk get_file_content: %d ok, %d errors (of %d files):%s", okCount, errCount, len(clean), sb.String())
 
-	case "get_file_content":
+	case ToolGetFileContent:
 		args, errMsg := parseToolArgs[struct {
 			Repo   string `json:"repo"`
 			Path   string `json:"path"`
@@ -2391,7 +2420,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		}
 		return content
 
-	case "get_repo_default_branch":
+	case ToolGetRepoDefaultBranch:
 		args, errMsg := parseToolArgs[struct {
 			Repo string `json:"repo"`
 		}](argsJSON)
@@ -2408,21 +2437,21 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		}
 		return fmt.Sprintf("Default branch for %s: %s", args.Repo, branch)
 
-	case "get_authenticated_user":
+	case ToolGetAuthenticatedUser:
 		user, err := h.ghClient.GetAuthenticatedUser(ctx)
 		if err != nil {
 			return fmt.Sprintf("Error: %v", err)
 		}
 		return fmt.Sprintf("Authenticated as: %s", user)
 
-	case "resolve_owner":
+	case ToolResolveOwner:
 		owner, err := h.ghClient.ResolveOwner(ctx)
 		if err != nil {
 			return fmt.Sprintf("Error: %v", err)
 		}
 		return fmt.Sprintf("Resolved owner: %s", owner)
 
-	case "search_files":
+	case ToolSearchFiles:
 		args, errMsg := parseToolArgs[struct {
 			Repo    string `json:"repo"`
 			Pattern string `json:"pattern"`
@@ -2449,7 +2478,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		}
 		return fmt.Sprintf("Found %d matches:\n%s", len(matches), strings.Join(matches, "\n"))
 
-	case "list_directory":
+	case ToolListDirectory:
 		args, errMsg := parseToolArgs[struct {
 			Repo   string `json:"repo"`
 			Path   string `json:"path"`
@@ -2469,7 +2498,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		log.Printf("[user=%s channel=%s] listed directory %s/%s/%s (%d entries)", userID, channelID, args.Repo, branch, args.Path, len(entries))
 		return fmt.Sprintf("Contents of %s/%s:\n%s", args.Repo, args.Path, strings.Join(entries, "\n"))
 
-	case "fetch_channel_context":
+	case ToolFetchChannelContext:
 		context, err := h.contextProvider.GetChannelContext(channelID)
 		if err != nil {
 			return fmt.Sprintf("Error fetching channel context: %v", err)
@@ -2477,7 +2506,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		log.Printf("[user=%s channel=%s] fetched channel context via tool", userID, channelID)
 		return context
 
-	case "modify_file":
+	case ToolModifyFile:
 		args, errMsg := parseToolArgs[struct {
 			Repo        string `json:"repo"`
 			Path        string `json:"path"`
@@ -2538,7 +2567,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		}
 		return fmt.Sprintf("Changes committed to existing PR: %s", result.PrURL)
 
-	case "create_file":
+	case ToolCreateFile:
 		args, errMsg := parseToolArgs[struct {
 			Repo        string `json:"repo"`
 			Path        string `json:"path"`
@@ -2572,7 +2601,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		}
 		return fmt.Sprintf("File created and committed to existing PR: %s", result.PrURL)
 
-	case "regex_replace_file":
+	case ToolRegexReplaceFile:
 		args, errMsg := parseToolArgs[struct {
 			Repo        string `json:"repo"`
 			Path        string `json:"path"`
@@ -2625,7 +2654,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		}
 		return fmt.Sprintf("Replaced %d matches. Changes committed to existing PR: %s", matches, result.PrURL)
 
-	case "get_pull_request":
+	case ToolGetPullRequest:
 		args, errMsg := parseToolArgs[struct {
 			Repo   string `json:"repo"`
 			Number int    `json:"number"`
@@ -2658,7 +2687,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		log.Printf("[user=%s channel=%s] fetched PR #%d in %s/%s", userID, channelID, args.Number, owner, args.Repo)
 		return github.FormatPRSummary(pr)
 
-	case "list_pull_requests":
+	case ToolListPullRequests:
 		args, errMsg := parseToolArgs[struct {
 			Repo  string `json:"repo"`
 			State string `json:"state"`
@@ -2686,7 +2715,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		log.Printf("[user=%s channel=%s] listed %d PRs in %s", userID, channelID, len(prs), args.Repo)
 		return sb.String()
 
-	case "list_commits":
+	case ToolListCommits:
 		args, errMsg := parseToolArgs[struct {
 			Repo   string `json:"repo"`
 			Branch string `json:"branch"`
@@ -2739,7 +2768,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		log.Printf("[user=%s channel=%s] listed %d commits in %s", userID, channelID, len(commits), args.Repo)
 		return sb.String()
 
-	case "search_code":
+	case ToolSearchCode:
 		args, errMsg := parseToolArgs[struct {
 			Repo  string `json:"repo"`
 			Query string `json:"query"`
@@ -2769,7 +2798,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		log.Printf("[user=%s channel=%s] searched code in %s for '%s' (%d matches)", userID, channelID, args.Repo, args.Query, len(results))
 		return sb.String()
 
-	case "search_code_org":
+	case ToolSearchCodeOrg:
 		args, errMsg := parseToolArgs[struct {
 			Query string `json:"query"`
 		}](argsJSON)
@@ -2811,7 +2840,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		log.Printf("[user=%s channel=%s] searched code across org '%s' for '%s' (%d matches in %d repos)", userID, channelID, owner, args.Query, len(results), len(repoOrder))
 		return sb.String()
 
-	case "get_workflow_run":
+	case ToolGetWorkflowRun:
 		args, errMsg := parseToolArgs[struct {
 			URL string `json:"url"`
 		}](argsJSON)
@@ -2831,7 +2860,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		log.Printf("[user=%s channel=%s] fetched workflow run %s/%s/%d (conclusion: %s)", userID, channelID, owner, repo, runID, summary.Conclusion)
 		return result
 
-	case "rerun_failed_jobs":
+	case ToolRerunFailedJobs:
 		args, errMsg := parseToolArgs[struct {
 			URL string `json:"url"`
 		}](argsJSON)
@@ -2849,7 +2878,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		log.Printf("[user=%s channel=%s] successfully triggered rerun of failed jobs for %s/%s/%d", userID, channelID, owner, repo, runID)
 		return fmt.Sprintf("Successfully triggered re-run of failed jobs for workflow run %d in %s/%s. The run is now in progress: %s", runID, owner, repo, args.URL)
 
-	case "rerun_workflow":
+	case ToolRerunWorkflow:
 		args, errMsg := parseToolArgs[struct {
 			URL string `json:"url"`
 		}](argsJSON)
@@ -2867,7 +2896,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		log.Printf("[user=%s channel=%s] successfully triggered full rerun of %s/%s/%d", userID, channelID, owner, repo, runID)
 		return fmt.Sprintf("Successfully triggered full re-run of workflow run %d in %s/%s. All jobs will run again: %s", runID, owner, repo, args.URL)
 
-	case "reply_in_thread":
+	case ToolReplyInThread:
 		args, errMsg := parseToolArgs[struct {
 			ThreadTS string `json:"thread_ts"`
 			Text     string `json:"text"`
@@ -2881,7 +2910,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		log.Printf("[user=%s channel=%s] posted thread reply to ts=%s", userID, channelID, args.ThreadTS)
 		return "Successfully posted reply in thread."
 
-	case "post_slack_message":
+	case ToolPostSlackMessage:
 		args, errMsg := parseToolArgs[struct {
 			ChannelID string `json:"channel_id"`
 			Text      string `json:"text"`
@@ -2941,7 +2970,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		log.Printf("[user=%s channel=%s] posted message to %s (ts=%s)", userID, channelID, args.ChannelID, ts)
 		return fmt.Sprintf("Successfully posted to channel %s (ts=%s).", args.ChannelID, ts)
 
-	case "slack_conversations_history":
+	case ToolSlackConversationsHistory:
 		args, errMsg := parseToolArgs[struct {
 			ChannelID string `json:"channel_id"`
 			Oldest    string `json:"oldest"`
@@ -2971,7 +3000,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		log.Printf("[user=%s channel=%s] fetched %d messages from %s (oldest=%q)", userID, channelID, len(msgs), args.ChannelID, args.Oldest)
 		return fmt.Sprintf("Channel history (channel_id=%s, count=%d, oldest_requested=%q):\n\n%s", args.ChannelID, len(msgs), args.Oldest, formatted)
 
-	case "slack_conversations_replies":
+	case ToolSlackConversationsReplies:
 		args, errMsg := parseToolArgs[struct {
 			ChannelID string `json:"channel_id"`
 			ThreadTS  string `json:"thread_ts"`
@@ -3001,7 +3030,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		log.Printf("[user=%s channel=%s] fetched %d thread messages from %s (thread_ts=%s)", userID, channelID, len(msgs), args.ChannelID, args.ThreadTS)
 		return fmt.Sprintf("Thread replies (channel_id=%s, thread_ts=%s, count=%d, includes parent):\n\n%s", args.ChannelID, args.ThreadTS, len(msgs), formatted)
 
-	case "upload_snippet":
+	case ToolUploadSnippet:
 		args, errMsg := parseToolArgs[struct {
 			Content   string `json:"content"`
 			Filename  string `json:"filename"`
@@ -3034,7 +3063,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		log.Printf("[user=%s channel=%s] uploaded file snippet %s (%s) to %s", userID, channelID, fileID, args.Filename, targetChannel)
 		return fmt.Sprintf("Successfully uploaded snippet '%s' as %s to channel %s.", args.Title, args.Filename, targetChannel)
 
-	case "upload_aggregate_csv":
+	case ToolUploadAggregateCSV:
 		args, errMsg := parseToolArgs[struct {
 			AggregateIDs []string `json:"aggregate_ids"`
 			Filename     string   `json:"filename"`
@@ -3095,7 +3124,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		}
 		return result
 
-	case "fetch_thread_context":
+	case ToolFetchThreadContext:
 		args, errMsg := parseToolArgs[struct {
 			URL string `json:"url"`
 		}](argsJSON)
@@ -3117,7 +3146,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		log.Printf("[user=%s channel=%s] fetched thread context from %s (%d messages)", userID, channelID, args.URL, len(msgs))
 		return fmt.Sprintf("Thread context (channel_id=%s, thread_ts=%s):\n\n%s", threadChannelID, threadTS, formatted)
 
-	case "create_jira_ticket":
+	case ToolCreateJiraTicket:
 		if errMsg := requireReady("Jira", h.jiraClient); errMsg != "" {
 			return errMsg
 		}
@@ -3271,7 +3300,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		}
 		return result
 
-	case "list_jira_projects":
+	case ToolListJiraProjects:
 		if errMsg := requireReady("Jira", h.jiraClient); errMsg != "" {
 			return errMsg
 		}
@@ -3285,7 +3314,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		log.Printf("[user=%s channel=%s] listed %d Jira projects", userID, channelID, len(projects))
 		return fmt.Sprintf("Jira projects (%d):\n%s", len(projects), strings.Join(projects, "\n"))
 
-	case "search_jira_issues":
+	case ToolSearchJiraIssues:
 		if errMsg := requireReady("Jira", h.jiraClient); errMsg != "" {
 			return errMsg
 		}
@@ -3326,7 +3355,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		log.Printf("[user=%s channel=%s] searched Jira issues with JQL, found %d", userID, channelID, len(issues))
 		return sb.String()
 
-	case "get_jira_issue":
+	case ToolGetJiraIssue:
 		if errMsg := requireReady("Jira", h.jiraClient); errMsg != "" {
 			return errMsg
 		}
@@ -3363,7 +3392,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		log.Printf("[user=%s channel=%s] fetched Jira issue %s", userID, channelID, args.IssueKey)
 		return sb.String()
 
-	case "get_jira_label_author":
+	case ToolGetJiraLabelAuthor:
 		if errMsg := requireReady("Jira", h.jiraClient); errMsg != "" {
 			return errMsg
 		}
@@ -3417,7 +3446,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		log.Printf("[user=%s channel=%s] fetched Jira label history for %s (%d changes)", userID, channelID, args.IssueKey, len(changes))
 		return sb.String()
 
-	case "update_jira_issue":
+	case ToolUpdateJiraIssue:
 		if errMsg := requireReady("Jira", h.jiraClient); errMsg != "" {
 			return errMsg
 		}
@@ -3454,7 +3483,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		log.Printf("[user=%s channel=%s] updated Jira issue %s (%s)", userID, channelID, args.IssueKey, strings.Join(updated, ", "))
 		return fmt.Sprintf("Successfully updated %s: %s", args.IssueKey, strings.Join(updated, " and "))
 
-	case "assign_jira_active_sprint":
+	case ToolAssignJiraActiveSprint:
 		if errMsg := requireReady("Jira", h.jiraClient); errMsg != "" {
 			return errMsg
 		}
@@ -3495,7 +3524,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		log.Printf("[user=%s channel=%s] assigned %s to active sprint %q (id %d) on project %s", userID, channelID, issueKey, sprint.Name, sprint.ID, project)
 		return fmt.Sprintf("Assigned %s to active sprint %q (id %d).", issueKey, sprint.Name, sprint.ID)
 
-	case "assign_jira_team":
+	case ToolAssignJiraTeam:
 		if errMsg := requireReady("Jira", h.jiraClient); errMsg != "" {
 			return errMsg
 		}
@@ -3522,7 +3551,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		log.Printf("[user=%s channel=%s] assigned %s to team %s (field %s)", userID, channelID, issueKey, teamID, fieldID)
 		return fmt.Sprintf("Assigned %s to team %s.", issueKey, teamID)
 
-	case "add_jira_comment":
+	case ToolAddJiraComment:
 		if errMsg := requireReady("Jira", h.jiraClient); errMsg != "" {
 			return errMsg
 		}
@@ -3540,7 +3569,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		log.Printf("[user=%s channel=%s] added Jira comment %s on %s", userID, channelID, comment.ID, args.IssueKey)
 		return fmt.Sprintf("Comment added to %s (id %s) by %s.", args.IssueKey, comment.ID, comment.Author.DisplayName)
 
-	case "list_jira_comments":
+	case ToolListJiraComments:
 		if errMsg := requireReady("Jira", h.jiraClient); errMsg != "" {
 			return errMsg
 		}
@@ -3570,7 +3599,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		log.Printf("[user=%s channel=%s] listed %d comments on %s", userID, channelID, len(comments), args.IssueKey)
 		return sb.String()
 
-	case "link_jira_issues":
+	case ToolLinkJiraIssues:
 		if errMsg := requireReady("Jira", h.jiraClient); errMsg != "" {
 			return errMsg
 		}
@@ -3588,7 +3617,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		log.Printf("[user=%s channel=%s] linked %s -> %s as %q", userID, channelID, args.InwardKey, args.OutwardKey, args.LinkType)
 		return fmt.Sprintf("Linked %s → %s as %q.", args.InwardKey, args.OutwardKey, args.LinkType)
 
-	case "get_slack_user_info":
+	case ToolGetSlackUserInfo:
 		args, errMsg := parseToolArgs[struct {
 			UserID string `json:"user_id"`
 		}](argsJSON)
@@ -3602,7 +3631,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		return fmt.Sprintf("Slack User Info:\n  User ID: %s\n  Real Name: %s\n  Display Name: %s\n  Email: %s\n  Title: %s",
 			user.ID, user.RealName, user.Profile.DisplayName, user.Profile.Email, user.Profile.Title)
 
-	case "lookup_slack_user":
+	case ToolLookupSlackUser:
 		args, errMsg := parseToolArgs[struct {
 			Email string `json:"email"`
 			Name  string `json:"name"`
@@ -3643,7 +3672,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		}
 		return fmt.Sprintf("Could not uniquely resolve a Slack user from the given email/name.%s Do NOT invent a Slack ID. Fall back to plain text \"@%s\" (which does not ping) for attribution.", hint, name)
 
-	case "resolve_jira_team":
+	case ToolResolveJiraTeam:
 		if errMsg := requireReady("Jira", h.jiraClient); errMsg != "" {
 			return errMsg
 		}
@@ -3667,7 +3696,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		log.Printf("[user=%s channel=%s] resolved Jira team %q → %s (clause: %s)", userID, channelID, args.TeamName, teamID, jqlClause)
 		return fmt.Sprintf("Team resolved:\n  Display Name: %s\n  Team UUID: %s\n  JQL Clause: %s\n\nUse in JQL: \"%s\" = \"%s\"\nExample: \"%s\" = \"%s\" AND status = \"In Progress\" ORDER BY priority DESC", displayName, teamID, jqlClause, jqlClause, teamID, jqlClause, teamID)
 
-	case "resolve_jira_user":
+	case ToolResolveJiraUser:
 		if errMsg := requireReady("Jira", h.jiraClient); errMsg != "" {
 			return errMsg
 		}
@@ -3751,7 +3780,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 
 	// ---- Dashboard & Filter tools ----
 
-	case "get_jira_dashboard":
+	case ToolGetJiraDashboard:
 		if errMsg := requireReady("Jira", h.jiraClient); errMsg != "" {
 			return errMsg
 		}
@@ -3804,7 +3833,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		log.Printf("[user=%s channel=%s] fetched Jira dashboard %s (%s, %d gadgets)", userID, channelID, args.DashboardID, dash.Name, len(gadgets))
 		return sb2.String()
 
-	case "get_jira_filter":
+	case ToolGetJiraFilter:
 		if errMsg := requireReady("Jira", h.jiraClient); errMsg != "" {
 			return errMsg
 		}
@@ -3869,7 +3898,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 
 	// ---- Confluence tools ----
 
-	case "search_confluence_pages":
+	case ToolSearchConfluencePages:
 		if errMsg := requireReady("Atlassian", h.jiraClient); errMsg != "" {
 			return errMsg
 		}
@@ -3905,7 +3934,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		}
 		return sb2.String()
 
-	case "get_confluence_page":
+	case ToolGetConfluencePage:
 		if errMsg := requireReady("Atlassian", h.jiraClient); errMsg != "" {
 			return errMsg
 		}
@@ -3938,7 +3967,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		log.Printf("[user=%s channel=%s] fetched Confluence page %s (%q)", userID, channelID, page.ID, page.Title)
 		return fmt.Sprintf("Page: %s (id: %s, v%d)\nLink: %s\n\n%s", page.Title, page.ID, page.Version, link, body)
 
-	case "list_confluence_spaces":
+	case ToolListConfluenceSpaces:
 		if errMsg := requireReady("Atlassian", h.jiraClient); errMsg != "" {
 			return errMsg
 		}
@@ -3957,7 +3986,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		}
 		return sb3.String()
 
-	case "create_confluence_page":
+	case ToolCreateConfluencePage:
 		if errMsg := requireReady("Atlassian", h.jiraClient); errMsg != "" {
 			return errMsg
 		}
@@ -3985,7 +4014,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		log.Printf("[user=%s channel=%s] created Confluence page %s (%q) in space %s", userID, channelID, result.ID, result.Title, args.SpaceKey)
 		return fmt.Sprintf("Confluence page created: *%s* (id: %s)\n%s", result.Title, result.ID, result.WebURL)
 
-	case "lookup_cve":
+	case ToolLookupCVE:
 		if h.nvdClient == nil {
 			return "Error: NVD integration is not configured."
 		}
@@ -4006,7 +4035,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		log.Printf("[user=%s channel=%s] looked up CVE %s from NVD", userID, channelID, args.CVEID)
 		return nvd.FormatCVE(cve)
 
-	case "search_cve":
+	case ToolSearchCVE:
 		if h.nvdClient == nil {
 			return "Error: NVD integration is not configured."
 		}
@@ -4036,7 +4065,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		log.Printf("[user=%s channel=%s] searched NVD for '%s' (%d results)", userID, channelID, args.Keyword, total)
 		return sb.String()
 
-	case "salesforce_query":
+	case ToolSalesforceQuery:
 		if errMsg := requireReady("Salesforce", h.sfClient); errMsg != "" {
 			return errMsg
 		}
@@ -4083,7 +4112,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 			return fmt.Sprintf("Query returned %d record(s):\n```\n%s\n```", result.TotalSize, output)
 		}
 
-	case "salesforce_describe":
+	case ToolSalesforceDescribe:
 		if errMsg := requireReady("Salesforce", h.sfClient); errMsg != "" {
 			return errMsg
 		}
@@ -4117,7 +4146,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 
 	// ---- Chorus tools ----
 
-	case "chorus_list_conversations":
+	case ToolChorusListConversations:
 		if errMsg := requireReady("Chorus", h.chorusClient); errMsg != "" {
 			return errMsg
 		}
@@ -4163,7 +4192,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		log.Printf("[user=%s channel=%s] listed %d Chorus conversations", userID, channelID, len(engagements))
 		return chorus.FormatEngagements(engagements)
 
-	case "chorus_get_conversation":
+	case ToolChorusGetConversation:
 		if errMsg := requireReady("Chorus", h.chorusClient); errMsg != "" {
 			return errMsg
 		}
@@ -4183,7 +4212,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		log.Printf("[user=%s channel=%s] fetched Chorus conversation %s (%q)", userID, channelID, args.ConversationID, conv.Attributes.Name)
 		return chorus.FormatConversation(conv)
 
-	case "chorus_create_sales_qualification":
+	case ToolChorusCreateSalesQualification:
 		if errMsg := requireReady("Chorus", h.chorusClient); errMsg != "" {
 			return errMsg
 		}
@@ -4203,7 +4232,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		log.Printf("[user=%s channel=%s] created sales qualification for recording %s", userID, channelID, args.RecordingID)
 		return chorus.FormatSalesQualification(sq)
 
-	case "chorus_get_sales_qualification":
+	case ToolChorusGetSalesQualification:
 		if errMsg := requireReady("Chorus", h.chorusClient); errMsg != "" {
 			return errMsg
 		}
@@ -4223,7 +4252,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		log.Printf("[user=%s channel=%s] fetched sales qualification for recording %s", userID, channelID, args.RecordingID)
 		return chorus.FormatSalesQualification(sq)
 
-	case "chorus_writeback_crm":
+	case ToolChorusWritebackCRM:
 		if errMsg := requireReady("Chorus", h.chorusClient); errMsg != "" {
 			return errMsg
 		}
@@ -4262,7 +4291,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 
 	// ---- Datadog tools ----
 
-	case "datadog_search_logs":
+	case ToolDatadogSearchLogs:
 		if h.datadogClients == nil {
 			return "Error: Datadog integration is not configured. Set DD_API_KEY_US/DD_APP_KEY_US and/or DD_API_KEY_EU/DD_APP_KEY_EU to enable it."
 		}
@@ -4286,17 +4315,17 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		log.Printf("[user=%s channel=%s] searched Datadog logs for %q (site=%s)", userID, channelID, args.Query, args.Site)
 		return result
 
-	case "datadog_logs_aggregate":
+	case ToolDatadogLogsAggregate:
 		if h.datadogClients == nil {
 			return "Error: Datadog integration is not configured. Set DD_API_KEY_US/DD_APP_KEY_US and/or DD_API_KEY_EU/DD_APP_KEY_EU to enable it."
 		}
 		args, errMsg := parseToolArgs[struct {
-			Query   string `json:"query"`
-			GroupBy string `json:"group_by"`
-			Measure string `json:"measure"`
-			From    string `json:"from"`
-			To      string `json:"to"`
-			Site    string `json:"site"`
+			Query   string      `json:"query"`
+			GroupBy groupBySpec `json:"group_by"`
+			Measure string      `json:"measure"`
+			From    string      `json:"from"`
+			To      string      `json:"to"`
+			Site    string      `json:"site"`
 		}](argsJSON)
 		if errMsg != "" {
 			return errMsg
@@ -4308,7 +4337,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		if err != nil {
 			return fmt.Sprintf("Error aggregating Datadog logs: %v", err)
 		}
-		log.Printf("[user=%s channel=%s] aggregated Datadog logs for %q (group_by=%s, measure=%s, site=%s)", userID, channelID, args.Query, args.GroupBy, args.Measure, args.Site)
+		log.Printf("[user=%s channel=%s] aggregated Datadog logs for %q (group_by=%v, measure=%s, site=%s)", userID, channelID, args.Query, []string(args.GroupBy), args.Measure, args.Site)
 		// Cache the structured result so upload_aggregate_csv can attach the
 		// full dataset as a CSV file without the model re-typing it inline.
 		if data, derr := h.datadogClients.AggregatePercentilesData(ctx, args.Site, args.Query, args.From, args.To, args.GroupBy, args.Measure); derr == nil && len(data) > 0 {
@@ -4317,7 +4346,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		}
 		return result
 
-	case "datadog_list_monitors":
+	case ToolDatadogListMonitors:
 		if h.datadogClients == nil {
 			return "Error: Datadog integration is not configured. Set DD_API_KEY_US/DD_APP_KEY_US and/or DD_API_KEY_EU/DD_APP_KEY_EU to enable it."
 		}
@@ -4336,7 +4365,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		log.Printf("[user=%s channel=%s] listed Datadog monitors (query=%q, site=%s)", userID, channelID, args.Query, args.Site)
 		return result
 
-	case "datadog_get_monitor":
+	case ToolDatadogGetMonitor:
 		if h.datadogClients == nil {
 			return "Error: Datadog integration is not configured. Set DD_API_KEY_US/DD_APP_KEY_US and/or DD_API_KEY_EU/DD_APP_KEY_EU to enable it."
 		}
@@ -4357,7 +4386,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		log.Printf("[user=%s channel=%s] fetched Datadog monitor %s (site=%s)", userID, channelID, args.MonitorID, args.Site)
 		return result
 
-	case "datadog_list_hosts":
+	case ToolDatadogListHosts:
 		if h.datadogClients == nil {
 			return "Error: Datadog integration is not configured. Set DD_API_KEY_US/DD_APP_KEY_US and/or DD_API_KEY_EU/DD_APP_KEY_EU to enable it."
 		}
@@ -4376,7 +4405,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		log.Printf("[user=%s channel=%s] listed Datadog hosts (filter=%q, site=%s)", userID, channelID, args.Filter, args.Site)
 		return result
 
-	case "datadog_get_dashboard":
+	case ToolDatadogGetDashboard:
 		if h.datadogClients == nil {
 			return "Error: Datadog integration is not configured. Set DD_API_KEY_US/DD_APP_KEY_US and/or DD_API_KEY_EU/DD_APP_KEY_EU to enable it."
 		}
@@ -4397,7 +4426,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		log.Printf("[user=%s channel=%s] fetched Datadog dashboard %s (site=%s)", userID, channelID, args.DashboardID, args.Site)
 		return result
 
-	case "datadog_list_dashboards":
+	case ToolDatadogListDashboards:
 		if h.datadogClients == nil {
 			return "Error: Datadog integration is not configured. Set DD_API_KEY_US/DD_APP_KEY_US and/or DD_API_KEY_EU/DD_APP_KEY_EU to enable it."
 		}
@@ -4416,7 +4445,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		log.Printf("[user=%s channel=%s] listed Datadog dashboards (query=%q, site=%s)", userID, channelID, args.Query, args.Site)
 		return result
 
-	case "datadog_query_metrics":
+	case ToolDatadogQueryMetrics:
 		if h.datadogClients == nil {
 			return "Error: Datadog integration is not configured. Set DD_API_KEY_US/DD_APP_KEY_US and/or DD_API_KEY_EU/DD_APP_KEY_EU to enable it."
 		}
@@ -4441,7 +4470,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 
 	// ---- AWS Cost Explorer tools ----
 
-	case "aws_get_cost_and_usage":
+	case ToolAWSGetCostAndUsage:
 		if h.awsClient == nil {
 			return "Error: AWS integration is not configured. Set AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY (or AWS_PROFILE, or EKS IRSA via AWS_WEB_IDENTITY_TOKEN_FILE + AWS_ROLE_ARN) to enable Cost Explorer tools."
 		}
@@ -4475,7 +4504,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 			userID, channelID, res.Start, res.End, res.Granularity, res.Metric, res.GroupBy, args.ServiceFilter)
 		return aws.FormatCostAndUsage(res)
 
-	case "aws_get_cost_forecast":
+	case ToolAWSGetCostForecast:
 		if h.awsClient == nil {
 			return "Error: AWS integration is not configured. Set AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY (or AWS_PROFILE, or EKS IRSA via AWS_WEB_IDENTITY_TOKEN_FILE + AWS_ROLE_ARN) to enable Cost Explorer tools."
 		}
@@ -4505,7 +4534,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 			userID, channelID, res.Start, res.End, res.Granularity, res.Metric)
 		return aws.FormatForecast(res)
 
-	case "aws_list_dimension_values":
+	case ToolAWSListDimensionValues:
 		if h.awsClient == nil {
 			return "Error: AWS integration is not configured. Set AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY (or AWS_PROFILE, or EKS IRSA via AWS_WEB_IDENTITY_TOKEN_FILE + AWS_ROLE_ARN) to enable Cost Explorer tools."
 		}
@@ -4534,7 +4563,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 			userID, channelID, res.Dimension, res.Start, res.End, len(res.Values))
 		return aws.FormatDimensionValues(res)
 
-	case "aws_s3_put_object":
+	case ToolAWSS3PutObject:
 		if h.awsClient == nil {
 			return "Error: AWS integration is not configured. Set AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY (or AWS_PROFILE, or EKS IRSA via AWS_WEB_IDENTITY_TOKEN_FILE + AWS_ROLE_ARN) to enable AWS S3 tools."
 		}
@@ -4555,7 +4584,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 			userID, channelID, res.Bucket, res.Key, res.Region, res.Size)
 		return aws.FormatS3Put(res)
 
-	case "aws_s3_get_object":
+	case ToolAWSS3GetObject:
 		if h.awsClient == nil {
 			return "Error: AWS integration is not configured. Set AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY (or AWS_PROFILE, or EKS IRSA via AWS_WEB_IDENTITY_TOKEN_FILE + AWS_ROLE_ARN) to enable AWS S3 tools."
 		}
@@ -4574,7 +4603,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 			userID, channelID, res.Bucket, res.Key, res.Region, res.Size, res.Truncated)
 		return aws.FormatS3Get(res)
 
-	case "aws_s3_list_objects":
+	case ToolAWSS3ListObjects:
 		if h.awsClient == nil {
 			return "Error: AWS integration is not configured. Set AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY (or AWS_PROFILE, or EKS IRSA via AWS_WEB_IDENTITY_TOKEN_FILE + AWS_ROLE_ARN) to enable AWS S3 tools."
 		}
@@ -4596,7 +4625,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 
 	// ---- Azure Cost Management tools ----
 
-	case "azure_get_cost_and_usage":
+	case ToolAzureGetCostAndUsage:
 		if h.azureClient == nil {
 			return "Error: Azure integration is not configured. Set AZURE_TENANT_ID / AZURE_CLIENT_ID / AZURE_CLIENT_SECRET (and optionally AZURE_MANAGEMENT_GROUP_ID) to enable Azure Cost Management tools."
 		}
@@ -4626,7 +4655,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 			userID, channelID, res.Start, res.End, res.Granularity, res.Metric, res.GroupBy, args.ServiceFilter)
 		return azure.FormatCostAndUsage(res)
 
-	case "azure_get_cost_forecast":
+	case ToolAzureGetCostForecast:
 		if h.azureClient == nil {
 			return "Error: Azure integration is not configured. Set AZURE_TENANT_ID / AZURE_CLIENT_ID / AZURE_CLIENT_SECRET (and optionally AZURE_MANAGEMENT_GROUP_ID) to enable Azure Cost Management tools."
 		}
@@ -4652,7 +4681,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 			userID, channelID, res.Start, res.End, res.Granularity, res.Metric)
 		return azure.FormatForecast(res)
 
-	case "azure_list_dimension_values":
+	case ToolAzureListDimensionValues:
 		if h.azureClient == nil {
 			return "Error: Azure integration is not configured. Set AZURE_TENANT_ID / AZURE_CLIENT_ID / AZURE_CLIENT_SECRET (and optionally AZURE_MANAGEMENT_GROUP_ID) to enable Azure Cost Management tools."
 		}
@@ -4681,7 +4710,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 
 	// ---- Databricks SQL (ovad only) ----
 
-	case "databricks_query":
+	case ToolDatabricksQuery:
 		if errMsg := requireReady("Databricks", h.databricksClient); errMsg != "" {
 			return errMsg
 		}
@@ -4717,7 +4746,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 
 	// ---- ClickHouse Cloud billing (ovad only) ----
 
-	case "clickhouse_usage_cost":
+	case ToolClickHouseUsageCost:
 		if errMsg := requireReady("ClickHouse", h.clickhouseClient); errMsg != "" {
 			return errMsg
 		}
@@ -4740,7 +4769,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 			userID, channelID, res.OrganizationID, res.FromDate, res.ToDate, len(res.Records), res.GrandTotalCHC)
 		return clickhouse.FormatUsageCost(res)
 
-	case "freshdesk_list_tickets":
+	case ToolFreshdeskListTickets:
 		if h.freshworksClient == nil || !h.freshworksClient.Desk.Ready() {
 			return preconditionErrf("Error: Freshdesk integration is not connected.")
 		}
@@ -4759,7 +4788,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		log.Printf("[user=%s channel=%s] freshdesk_list_tickets (results=%d)", userID, channelID, len(tickets))
 		return freshworks.FormatTicketList(tickets, "Freshdesk tickets")
 
-	case "freshdesk_get_ticket":
+	case ToolFreshdeskGetTicket:
 		if h.freshworksClient == nil || !h.freshworksClient.Desk.Ready() {
 			return preconditionErrf("Error: Freshdesk integration is not connected.")
 		}
@@ -4784,7 +4813,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		log.Printf("[user=%s channel=%s] freshdesk_get_ticket (id=%d)", userID, channelID, args.TicketID)
 		return freshworks.FormatTicket(ticket)
 
-	case "freshdesk_search_tickets":
+	case ToolFreshdeskSearchTickets:
 		if h.freshworksClient == nil || !h.freshworksClient.Desk.Ready() {
 			return preconditionErrf("Error: Freshdesk integration is not connected.")
 		}
@@ -4804,7 +4833,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		log.Printf("[user=%s channel=%s] freshdesk_search_tickets (query=%q, total=%d)", userID, channelID, args.Query, total)
 		return freshworks.FormatTicketList(tickets, fmt.Sprintf("Freshdesk search (%d total)", total))
 
-	case "freshchat_get_conversation":
+	case ToolFreshchatGetConversation:
 		if h.freshworksClient == nil || !h.freshworksClient.Chat.Ready() {
 			return preconditionErrf("Error: Freshchat integration is not connected.")
 		}
@@ -4824,7 +4853,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		log.Printf("[user=%s channel=%s] freshchat_get_conversation (id=%s)", userID, channelID, args.ConversationID)
 		return freshworks.FormatChatConversation(conv)
 
-	case "freshchat_get_conversation_messages":
+	case ToolFreshchatGetConversationMessages:
 		if h.freshworksClient == nil || !h.freshworksClient.Chat.Ready() {
 			return preconditionErrf("Error: Freshchat integration is not connected.")
 		}
@@ -4845,7 +4874,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		log.Printf("[user=%s channel=%s] freshchat_get_conversation_messages (id=%s, messages=%d)", userID, channelID, args.ConversationID, len(msgs))
 		return freshworks.FormatChatMessages(args.ConversationID, msgs)
 
-	case "freshworks_crm_search":
+	case ToolFreshworksCRMSearch:
 		if h.freshworksClient == nil || !h.freshworksClient.CRM.Ready() {
 			return preconditionErrf("Error: Freshworks CRM integration is not connected.")
 		}
@@ -4866,7 +4895,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		log.Printf("[user=%s channel=%s] freshworks_crm_search (query=%q, results=%d)", userID, channelID, args.Query, len(results))
 		return freshworks.FormatCRMSearch(args.Query, results)
 
-	case "freshworks_crm_get_contact":
+	case ToolFreshworksCRMGetContact:
 		if h.freshworksClient == nil || !h.freshworksClient.CRM.Ready() {
 			return preconditionErrf("Error: Freshworks CRM integration is not connected.")
 		}
@@ -4886,7 +4915,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		log.Printf("[user=%s channel=%s] freshworks_crm_get_contact (id=%d)", userID, channelID, args.ContactID)
 		return freshworks.FormatCRMContact(contact)
 
-	case "freshworks_crm_get_deal":
+	case ToolFreshworksCRMGetDeal:
 		if h.freshworksClient == nil || !h.freshworksClient.CRM.Ready() {
 			return preconditionErrf("Error: Freshworks CRM integration is not connected.")
 		}
@@ -4906,7 +4935,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		log.Printf("[user=%s channel=%s] freshworks_crm_get_deal (id=%d)", userID, channelID, args.DealID)
 		return freshworks.FormatCRMDeal(deal)
 
-	case "http_get":
+	case ToolHTTPGet:
 		args, errMsg := parseToolArgs[struct {
 			URL      string `json:"url"`
 			Accept   string `json:"accept"`

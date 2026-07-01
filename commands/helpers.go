@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -86,6 +87,10 @@ func requireReady(name string, c OAuthClient) string {
 // Integration names used as keys in restrictedIntegrations / toolIntegration
 // and at the tool registration / dispatch sites. Declared as constants so the
 // allowlist and the call sites can never drift via a typo.
+//
+// integrationGitHub/Slack/Azure are open to every agent (they are deliberately
+// absent from restrictedIntegrations); they exist so the single toolIntegration
+// catalogue in tools.go can name their owner without gating them.
 const (
 	integrationNVD        = "nvd"
 	integrationSalesforce = "salesforce"
@@ -96,6 +101,9 @@ const (
 	integrationDatabricks = "databricks"
 	integrationClickHouse = "clickhouse"
 	integrationFreshworks = "freshworks"
+	integrationGitHub     = "github"
+	integrationSlack      = "slack"
+	integrationAzure      = "azure"
 )
 
 // restrictedIntegrations is the single source of truth for hard per-agent
@@ -131,76 +139,24 @@ var restrictedIntegrations = map[string][]string{
 	// ClickHouse Cloud billing is exposed to the DevOps/SRE agent only.
 	integrationClickHouse: {"ovad"},
 	// Freshworks (Freshdesk tickets, Freshchat conversations, CRM) is exposed
-	// to the customer-success agent only.
-	integrationFreshworks: {"pulse"},
+	// to the customer-success and product-management agents.
+	integrationFreshworks: {"pulse", "seihin"},
 }
 
-// toolIntegration maps a tool name to the integration that gates it. Tools
-// absent from this map are universal (GitHub, Slack, Azure, dashboards,
-// workflows, http_get, …) and are never refused on a per-agent basis. It backs
-// the dispatch-side guard so a fabricated call to a tool the agent was never
-// advertised is rejected before it reaches a connector.
-var toolIntegration = map[string]string{
-	// NVD.
-	"lookup_cve": integrationNVD,
-	"search_cve": integrationNVD,
-	// Salesforce.
-	"salesforce_query":    integrationSalesforce,
-	"salesforce_describe": integrationSalesforce,
-	// Chorus.
-	"chorus_list_conversations":         integrationChorus,
-	"chorus_get_conversation":           integrationChorus,
-	"chorus_create_sales_qualification": integrationChorus,
-	"chorus_get_sales_qualification":    integrationChorus,
-	"chorus_writeback_crm":              integrationChorus,
-	// Atlassian (Jira + Confluence).
-	"create_jira_ticket":        integrationAtlassian,
-	"list_jira_projects":        integrationAtlassian,
-	"search_jira_issues":        integrationAtlassian,
-	"get_jira_issue":            integrationAtlassian,
-	"update_jira_issue":         integrationAtlassian,
-	"assign_jira_active_sprint": integrationAtlassian,
-	"assign_jira_team":          integrationAtlassian,
-	"add_jira_comment":          integrationAtlassian,
-	"list_jira_comments":        integrationAtlassian,
-	"link_jira_issues":          integrationAtlassian,
-	"resolve_jira_user":         integrationAtlassian,
-	"resolve_jira_team":         integrationAtlassian,
-	"get_jira_dashboard":        integrationAtlassian,
-	"get_jira_filter":           integrationAtlassian,
-	"search_confluence_pages":   integrationAtlassian,
-	"get_confluence_page":       integrationAtlassian,
-	"list_confluence_spaces":    integrationAtlassian,
-	"create_confluence_page":    integrationAtlassian,
-	// Datadog.
-	"datadog_search_logs":     integrationDatadog,
-	"datadog_logs_aggregate":  integrationDatadog,
-	"datadog_list_monitors":   integrationDatadog,
-	"datadog_get_monitor":     integrationDatadog,
-	"datadog_list_hosts":      integrationDatadog,
-	"datadog_get_dashboard":   integrationDatadog,
-	"datadog_list_dashboards": integrationDatadog,
-	"datadog_query_metrics":   integrationDatadog,
-	// AWS.
-	"aws_get_cost_and_usage":    integrationAWS,
-	"aws_get_cost_forecast":     integrationAWS,
-	"aws_list_dimension_values": integrationAWS,
-	"aws_s3_put_object":         integrationAWS,
-	"aws_s3_get_object":         integrationAWS,
-	"aws_s3_list_objects":       integrationAWS,
-	// Databricks.
-	"databricks_query": integrationDatabricks,
-	// ClickHouse Cloud billing.
-	"clickhouse_usage_cost": integrationClickHouse,
-	// Freshworks (Freshdesk / Freshchat / CRM).
-	"freshdesk_list_tickets":              integrationFreshworks,
-	"freshdesk_get_ticket":                integrationFreshworks,
-	"freshdesk_search_tickets":            integrationFreshworks,
-	"freshchat_get_conversation":          integrationFreshworks,
-	"freshchat_get_conversation_messages": integrationFreshworks,
-	"freshworks_crm_search":               integrationFreshworks,
-	"freshworks_crm_get_contact":          integrationFreshworks,
-	"freshworks_crm_get_deal":             integrationFreshworks,
+// ToolsForIntegration returns the sorted tool names owned by the given
+// integration (one of the integration* constant values), derived from the
+// single-source toolIntegration catalogue (tools.go) so the UI's "Tools" tab
+// can never drift from the dispatch guard. Works for the open connectors
+// (github, slack, azure) too, since they are listed in toolIntegration.
+func ToolsForIntegration(integration string) []string {
+	var names []string
+	for tool, integ := range toolIntegration {
+		if integ == integration {
+			names = append(names, tool)
+		}
+	}
+	sort.Strings(names)
+	return names
 }
 
 // agentCanUseIntegration reports whether agentID may use the named

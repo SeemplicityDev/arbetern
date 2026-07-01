@@ -243,7 +243,7 @@ secretValues:
   # clickhouse-key-id: ""             # Cloud API key ID (HTTP Basic username)
   # clickhouse-key-secret: ""         # Cloud API key secret (HTTP Basic password)
   # clickhouse-organization-id: ""    # Organization ID the usage-cost report covers
-  # Freshworks suite (optional, read-only — enables Freshdesk / Freshchat / CRM tools for the pulse agent only).
+  # Freshworks suite (optional, read-only — enables Freshdesk / Freshchat / CRM tools for the pulse and seihin agents).
   # Each product is configured independently; set only the products you use. See docs/FRESHWORKS.md.
   # freshdesk-domain: ""               # Freshdesk host, e.g. acme.freshdesk.com
   # freshdesk-api-key: ""             # Freshdesk API key (Profile settings → Your API Key)

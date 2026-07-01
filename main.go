@@ -60,6 +60,7 @@ type integration struct {
 	AuthMode     string            `json:"auth_mode,omitempty"`
 	ActiveModels map[string]string `json:"active_models,omitempty"`
 	Permissions  []permission      `json:"permissions"`
+	Tools        []string          `json:"tools,omitempty"`
 }
 
 var (
@@ -68,6 +69,26 @@ var (
 )
 
 func boolPtr(v bool) *bool { return &v }
+
+// integrationToolNames returns the sorted tool names exposed by the integration
+// with the given UI id, for the home page "Tools" tab. Every connector's list
+// comes from the single-source commands.ToolsForIntegration (backed by the
+// toolIntegration catalogue in commands/tools.go), including the open
+// connectors (github/slack/azure). The only special case is the shared
+// Atlassian client, whose tools are split across the "jira" and "confluence"
+// cards by name.
+func integrationToolNames(id string) []string {
+	if id == "jira" || id == "confluence" {
+		var names []string
+		for _, t := range commands.ToolsForIntegration("atlassian") {
+			if strings.Contains(t, "confluence") == (id == "confluence") {
+				names = append(names, t)
+			}
+		}
+		return names
+	}
+	return commands.ToolsForIntegration(id)
+}
 
 // agentsCacheTTL is how long the discovered agents list is served from memory
 // before the next request rebuilds it. Agent discovery walks the agents/
@@ -1115,6 +1136,11 @@ func refreshIntegrations(
 			Permissions:  fwPerms,
 			ActiveModels: activeFW,
 		})
+	}
+
+	// Populate each integration's tool list for the home page "Tools" tab.
+	for i := range result {
+		result[i].Tools = integrationToolNames(result[i].ID)
 	}
 
 	integrationsMu.Lock()

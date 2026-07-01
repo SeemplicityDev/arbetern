@@ -1,7 +1,8 @@
 # Freshworks Integration
 
 Arbetern integrates with the **Freshworks** product suite so the **pulse**
-(customer-success) agent can read support and sales context directly from Slack:
+(customer-success) and **seihin** (product-management) agents can read support
+and sales context directly from Slack:
 
 - **Freshdesk** (ticketing) — list, search and read support tickets and their
   conversation threads.
@@ -13,11 +14,12 @@ Arbetern integrates with the **Freshworks** product suite so the **pulse**
 All tools are **read-only** (list / search / get). None of them create or
 modify anything in Freshworks.
 
-> **Scope: this integration is restricted to the `pulse` agent only.** The
-> Freshworks tools are advertised exclusively to pulse and the dispatch layer
-> rejects the call from any other agent, even if its model fabricates a tool
-> name. The allowlist lives in one place — `restrictedIntegrations` in
-> [`commands/helpers.go`](../commands/helpers.go) (`"freshworks": {"pulse"}`).
+> **Scope: this integration is restricted to the `pulse` and `seihin` agents.**
+> The Freshworks tools are advertised exclusively to those agents and the
+> dispatch layer rejects the call from any other agent, even if its model
+> fabricates a tool name. The allowlist lives in one place —
+> `restrictedIntegrations` in
+> [`commands/helpers.go`](../commands/helpers.go) (`"freshworks": {"pulse", "seihin"}`).
 > To expose Freshworks to additional agents, add their IDs there; both tool
 > registration and dispatch read the same map.
 
@@ -105,9 +107,10 @@ secretValues:
 The chart wires each pair into the matching environment variables on the app
 container only when its `-domain` / `-url` key is present.
 
-Because the tools are gated to `pulse` in code, prefer mounting the credentials
-under `customCredentials.pulse` so the secret material never reaches other
-agents' pods:
+Because the tools are gated to `pulse` and `seihin` in code, prefer mounting the
+credentials under `customCredentials.pulse` (and `customCredentials.seihin` if
+that agent should also reach Freshworks) so the secret material never reaches
+other agents' pods:
 
 ```yaml
 customCredentials:
@@ -125,5 +128,5 @@ customCredentials:
 - All tools are **read-only**; there is no write path to Freshworks.
 - API keys/tokens are provided via environment variables (Kubernetes Secrets in
   the Helm chart) and are never logged.
-- Access is restricted to the `pulse` agent via the central allowlist; the
-  dispatch layer refuses the tools for any other agent.
+- Access is restricted to the `pulse` and `seihin` agents via the central
+  allowlist; the dispatch layer refuses the tools for any other agent.

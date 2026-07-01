@@ -95,43 +95,125 @@ func (c *Client) LogsAggregate(ctx context.Context, query, from, to string, comp
 	return &resp, nil
 }
 
-// percentilePreset is the fixed set of computes used by AggregatePercentiles:
-// count, then p50/p95/p99 of the measure. The c-index order MUST match.
+// percentilePreset is the compute set for AggregatePercentiles: always count
+// (c0). When a measure is given it also adds p50/p95/p99 of that measure
+// (c1/c2/c3); with no measure it is a count-only aggregation. The c-index
+// order MUST match the readers below.
 func percentilePreset(measure string) []AggregateCompute {
-	return []AggregateCompute{
-		{Aggregation: "count"},                   // c0
-		{Aggregation: "median", Metric: measure}, // c1 — p50
-		{Aggregation: "pc95", Metric: measure},   // c2
-		{Aggregation: "pc99", Metric: measure},   // c3
+	compute := []AggregateCompute{{Aggregation: "count"}} // c0
+	if measure != "" {
+		compute = append(compute,
+			AggregateCompute{Aggregation: "median", Metric: measure}, // c1 — p50
+			AggregateCompute{Aggregation: "pc95", Metric: measure},   // c2
+			AggregateCompute{Aggregation: "pc99", Metric: measure},   // c3
+		)
 	}
+	return compute
+}
+
+// normalizeGroupByFacets cleans a group-by specification into an ordered,
+// de-duplicated slice of facets. Each element may itself be a comma-separated
+// list (so callers can pass "@a,@b" or a real slice). An empty specification
+// yields an empty slice, meaning "no grouping" (a single overall bucket).
+func normalizeGroupByFacets(facets []string) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, f := range facets {
+		for _, part := range strings.Split(f, ",") {
+			p := strings.TrimSpace(part)
+			if p == "" || seen[p] {
+				continue
+			}
+			seen[p] = true
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// buildPercentileGroupBy builds the request's group_by slice: one entry per
+// facet, each limited and sorted descending — by the p95 measure when a measure
+// is given, otherwise by count. Multiple entries produce nested buckets whose
+// `by` map carries every facet value. An empty facet slice yields no group_by
+// (a single overall bucket).
+func buildPercentileGroupBy(facets []string, measure string) []AggregateGroupBy {
+	sortSpec := &AggregateSort{Aggregation: "count", Order: "desc", Type: "measure"}
+	if measure != "" {
+		sortSpec = &AggregateSort{Aggregation: "pc95", Metric: measure, Order: "desc", Type: "measure"}
+	}
+	gb := make([]AggregateGroupBy, 0, len(facets))
+	for _, f := range facets {
+		gb = append(gb, AggregateGroupBy{
+			Facet: f,
+			Limit: 100,
+			Sort:  sortSpec,
+		})
+	}
+	return gb
+}
+
+// sortComputeIndex is the computes key rows are ranked by: p95 (c2) when a
+// measure is present, otherwise count (c0).
+func sortComputeIndex(measure string) string {
+	if measure == "" {
+		return "c0"
+	}
+	return "c2"
+}
+
+// joinFacetNames renders the facet list as a stable label, stripping the
+// leading "@" from each and joining multiple facets with "+" (e.g. "a+b").
+// An empty facet slice renders as "all". Used for table headings and the CSV
+// group_by column.
+func joinFacetNames(facets []string) string {
+	if len(facets) == 0 {
+		return "all"
+	}
+	names := make([]string, len(facets))
+	for i, f := range facets {
+		names[i] = strings.TrimPrefix(f, "@")
+	}
+	return strings.Join(names, "+")
+}
+
+// bucketKey builds a display key for one bucket by concatenating its value for
+// each facet in order, joined with " | ". Missing values render as "—". An
+// empty facet slice (no grouping) renders as "all".
+func bucketKey(by map[string]interface{}, facets []string) string {
+	if len(facets) == 0 {
+		return "all"
+	}
+	parts := make([]string, 0, len(facets))
+	for _, f := range facets {
+		v := "—"
+		if val, ok := by[f]; ok && val != nil {
+			v = fmt.Sprintf("%v", val)
+		}
+		parts = append(parts, v)
+	}
+	return strings.Join(parts, " | ")
 }
 
 // AggregatePercentiles is the high-level helper behind the datadog_logs_aggregate
-// tool: for each value of groupByFacet, it returns count + p50/p95/p99 of the
-// given measure, sorted by p95 descending. Runs on the requested site(s) and
-// returns a Slack/markdown-friendly table per site.
-func (mc *MultiClient) AggregatePercentiles(ctx context.Context, site, query, from, to, groupByFacet, measure string) (string, error) {
-	if groupByFacet == "" {
-		groupByFacet = "@endpoint_name"
-	}
-	if measure == "" {
-		measure = "@time_took"
-	}
+// tool: for each bucket of the group-by facet(s) it returns the event count and,
+// when a measure is given, p50/p95/p99 of that measure (sorted by p95 desc; by
+// count desc when no measure). Passing more than one facet produces a composite
+// breakdown (one row per facet-value combination); passing none returns a single
+// overall bucket. Runs on the requested site(s) and returns a Slack/markdown-
+// friendly table per site.
+func (mc *MultiClient) AggregatePercentiles(ctx context.Context, site, query, from, to string, groupBy []string, measure string) (string, error) {
+	facets := normalizeGroupByFacets(groupBy)
 	cs := mc.clients(site)
 	if len(cs) == 0 {
 		return "", fmt.Errorf("no Datadog client configured for site %q", site)
 	}
 	compute := percentilePreset(measure)
-	groupBy := []AggregateGroupBy{{
-		Facet: groupByFacet,
-		Limit: 100,
-		Sort:  &AggregateSort{Aggregation: "pc95", Metric: measure, Order: "desc", Type: "measure"},
-	}}
+	groupByReq := buildPercentileGroupBy(facets, measure)
 	multi := len(cs) > 1
 	var parts []string
 	var lastErr error
 	for _, c := range cs {
-		resp, err := c.LogsAggregate(ctx, query, from, to, compute, groupBy)
+		resp, err := c.LogsAggregate(ctx, query, from, to, compute, groupByReq)
 		if err != nil {
 			lastErr = err
 			if multi {
@@ -139,7 +221,7 @@ func (mc *MultiClient) AggregatePercentiles(ctx context.Context, site, query, fr
 			}
 			continue
 		}
-		parts = append(parts, FormatAggregatePercentiles(resp, c.SiteLabel(), groupByFacet, measure))
+		parts = append(parts, FormatAggregatePercentiles(resp, c.SiteLabel(), facets, measure))
 	}
 	if len(parts) == 0 && lastErr != nil {
 		return "", lastErr
@@ -147,8 +229,10 @@ func (mc *MultiClient) AggregatePercentiles(ctx context.Context, site, query, fr
 	return strings.Join(parts, "\n\n"), nil
 }
 
-// PercentileRow is one group's percentile result: the facet value plus
-// count/p50/p95/p99 of the measure.
+// PercentileRow is one bucket's result: the (composite) group key plus the
+// event count and, when a measure was requested, p50/p95/p99 of the measure
+// (0 for a count-only aggregation). For multi-facet group-bys Key holds the
+// facet values joined with " | "; when ungrouped Key is "all".
 type PercentileRow struct {
 	Key   string
 	Count float64
@@ -160,8 +244,8 @@ type PercentileRow struct {
 // PercentileResult is the structured, per-site result of AggregatePercentilesData.
 type PercentileResult struct {
 	Site    string
-	GroupBy string // facet name without leading "@" (e.g. "endpoint_name")
-	Measure string // measure facet without leading "@" (e.g. "time_took")
+	GroupBy string // facet name(s) without leading "@"; multiple facets joined with "+" (e.g. "a+b"), or "all" when ungrouped
+	Measure string // measure facet without leading "@"
 	Rows    []PercentileRow
 }
 
@@ -170,44 +254,32 @@ type PercentileResult struct {
 // so callers can render the data as CSV or other formats without re-parsing
 // the Slack table. Sites that error are skipped; if every site errors the
 // last error is returned.
-func (mc *MultiClient) AggregatePercentilesData(ctx context.Context, site, query, from, to, groupByFacet, measure string) ([]PercentileResult, error) {
-	if groupByFacet == "" {
-		groupByFacet = "@endpoint_name"
-	}
-	if measure == "" {
-		measure = "@time_took"
-	}
+func (mc *MultiClient) AggregatePercentilesData(ctx context.Context, site, query, from, to string, groupBy []string, measure string) ([]PercentileResult, error) {
+	facets := normalizeGroupByFacets(groupBy)
 	cs := mc.clients(site)
 	if len(cs) == 0 {
 		return nil, fmt.Errorf("no Datadog client configured for site %q", site)
 	}
 	compute := percentilePreset(measure)
-	groupBy := []AggregateGroupBy{{
-		Facet: groupByFacet,
-		Limit: 100,
-		Sort:  &AggregateSort{Aggregation: "pc95", Metric: measure, Order: "desc", Type: "measure"},
-	}}
-	facet := strings.TrimPrefix(groupByFacet, "@")
+	groupByReq := buildPercentileGroupBy(facets, measure)
+	groupByName := joinFacetNames(facets)
 	meas := strings.TrimPrefix(measure, "@")
 	var results []PercentileResult
 	var lastErr error
 	for _, c := range cs {
-		resp, err := c.LogsAggregate(ctx, query, from, to, compute, groupBy)
+		resp, err := c.LogsAggregate(ctx, query, from, to, compute, groupByReq)
 		if err != nil {
 			lastErr = err
 			continue
 		}
-		res := PercentileResult{Site: c.SiteLabel(), GroupBy: facet, Measure: meas}
+		res := PercentileResult{Site: c.SiteLabel(), GroupBy: groupByName, Measure: meas}
 		if resp != nil {
 			buckets := resp.Data.Buckets
-			sort.SliceStable(buckets, func(i, j int) bool { return buckets[i].Computes["c2"] > buckets[j].Computes["c2"] })
+			idx := sortComputeIndex(measure)
+			sort.SliceStable(buckets, func(i, j int) bool { return buckets[i].Computes[idx] > buckets[j].Computes[idx] })
 			for _, b := range buckets {
-				name := "—"
-				if v, ok := b.By[groupByFacet]; ok && v != nil {
-					name = fmt.Sprintf("%v", v)
-				}
 				res.Rows = append(res.Rows, PercentileRow{
-					Key:   name,
+					Key:   bucketKey(b.By, facets),
 					Count: b.Computes["c0"],
 					P50:   b.Computes["c1"],
 					P95:   b.Computes["c2"],
@@ -223,29 +295,51 @@ func (mc *MultiClient) AggregatePercentilesData(ctx context.Context, site, query
 	return results, nil
 }
 
-// FormatAggregatePercentiles renders a percentile-preset response as a table.
-func FormatAggregatePercentiles(resp *AggregateResponse, siteLabel, groupByFacet, measure string) string {
-	facet := strings.TrimPrefix(groupByFacet, "@")
+// FormatAggregatePercentiles renders an aggregate response as a table. facets
+// may hold one or more group-by facets; for multiple facets each row's key is
+// the composite "value1 | value2" and the key column is widened. With no
+// measure it renders a count-only table sorted by count.
+func FormatAggregatePercentiles(resp *AggregateResponse, siteLabel string, facets []string, measure string) string {
+	facets = normalizeGroupByFacets(facets)
+	label := joinFacetNames(facets)
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "*[%s]* %s — p50/p95/p99 of `%s` (sorted by p95 desc)\n", siteLabel, facet, measure)
+	if measure == "" {
+		fmt.Fprintf(&sb, "*[%s]* %s — event counts (sorted desc)\n", siteLabel, label)
+	} else {
+		fmt.Fprintf(&sb, "*[%s]* %s — p50/p95/p99 of `%s` (sorted by p95 desc)\n", siteLabel, label, measure)
+	}
 	if resp == nil || len(resp.Data.Buckets) == 0 {
 		sb.WriteString("_No matching samples in the window._")
 		return sb.String()
 	}
 	rows := resp.Data.Buckets
-	// Defensive: re-sort by p95 (c2) desc in case the API limit clipped before sorting.
-	sort.SliceStable(rows, func(i, j int) bool { return rows[i].Computes["c2"] > rows[j].Computes["c2"] })
-	fmt.Fprintf(&sb, "%-32s %10s %10s %10s %10s\n", facet, "count", "p50", "p95", "p99")
+	// Defensive: re-sort desc in case the API limit clipped before sorting.
+	idx := sortComputeIndex(measure)
+	sort.SliceStable(rows, func(i, j int) bool { return rows[i].Computes[idx] > rows[j].Computes[idx] })
+	// Widen the key column for composite (multi-facet) keys.
+	keyWidth := 32
+	if len(facets) > 1 {
+		keyWidth = 48
+	}
+	if measure == "" {
+		fmt.Fprintf(&sb, "%-*s %10s\n", keyWidth, label, "count")
+		for _, b := range rows {
+			name := bucketKey(b.By, facets)
+			if len(name) > keyWidth {
+				name = name[:keyWidth-1] + "…"
+			}
+			fmt.Fprintf(&sb, "%-*s %10.0f\n", keyWidth, name, b.Computes["c0"])
+		}
+		return sb.String()
+	}
+	fmt.Fprintf(&sb, "%-*s %10s %10s %10s %10s\n", keyWidth, label, "count", "p50", "p95", "p99")
 	for _, b := range rows {
-		name := "—"
-		if v, ok := b.By[groupByFacet]; ok && v != nil {
-			name = fmt.Sprintf("%v", v)
+		name := bucketKey(b.By, facets)
+		if len(name) > keyWidth {
+			name = name[:keyWidth-1] + "…"
 		}
-		if len(name) > 32 {
-			name = name[:31] + "…"
-		}
-		fmt.Fprintf(&sb, "%-32s %10.0f %10.3f %10.3f %10.3f\n",
-			name, b.Computes["c0"], b.Computes["c1"], b.Computes["c2"], b.Computes["c3"])
+		fmt.Fprintf(&sb, "%-*s %10.0f %10.3f %10.3f %10.3f\n",
+			keyWidth, name, b.Computes["c0"], b.Computes["c1"], b.Computes["c2"], b.Computes["c3"])
 	}
 	return sb.String()
 }

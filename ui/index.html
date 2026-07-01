@@ -1260,6 +1260,79 @@
       font-size: 12px;
     }
 
+    /* ── Integration detail tabs (Permissions / Tools) ─────────── */
+    .integration-tabs {
+      display: flex;
+      gap: 4px;
+      margin-top: 16px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .integration-tab {
+      appearance: none;
+      background: none;
+      border: none;
+      border-bottom: 2px solid transparent;
+      color: var(--text-muted);
+      font-family: inherit;
+      font-size: 12px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.4px;
+      padding: 8px 12px;
+      margin-bottom: -1px;
+      cursor: pointer;
+      transition: color 0.15s, border-color 0.15s;
+    }
+
+    .integration-tab:hover {
+      color: var(--text);
+    }
+
+    .integration-tab.active {
+      color: var(--text);
+      border-bottom-color: var(--accent, #7aa2f7);
+    }
+
+    .integration-tab .tab-count {
+      font-size: 10px;
+      font-weight: 700;
+      color: var(--text-muted);
+      background: var(--card-2);
+      border-radius: 8px;
+      padding: 1px 6px;
+      margin-left: 4px;
+    }
+
+    .integration-tab-panel[hidden] {
+      display: none;
+    }
+
+    .integration-tools-list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-top: 14px;
+    }
+
+    .tool-chip {
+      font-family: var(--font-mono);
+      font-size: 12px;
+      color: var(--text);
+      background: var(--card-2);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 4px 8px;
+      white-space: nowrap;
+    }
+
+    .integration-tools-empty {
+      margin-top: 14px;
+      color: var(--text-muted);
+      font-style: italic;
+      font-size: 13px;
+    }
+
     /* ── Agent Integration Badges ────────────────── */
     .agent-integrations {
       display: flex;
@@ -1717,6 +1790,7 @@
         { id: 'slack', name: 'Slack' },
         { id: 'azure', name: 'Azure' },
         { id: 'datadog', name: 'Datadog' },
+        { id: 'freshworks', name: 'Freshworks' },
       ],
       'agent-q': [
         { id: 'github', name: 'GitHub' },
@@ -2632,6 +2706,7 @@
 
     let integrationsData = [];
     let expandedIntegration = null;
+    let activeIntegrationTab = 'permissions';
 
     function renderIntegrations(integrations) {
       const grid = document.getElementById('integrations-grid');
@@ -2686,6 +2761,11 @@
             <button class="integration-detail-close" onclick="toggleIntegration('${ig.id}')" title="Close">&times;</button>
           </div>
           ${ig.active_models && Object.keys(ig.active_models).length ? `<div class="integration-active-models">${Object.entries(ig.active_models).map(([label, model]) => `<div class="integration-active-model"><span class="model-label">${escapeHtml(label)}</span><span class="model-value">${escapeHtml(model)}</span></div>`).join('')}</div>` : ''}
+          <div class="integration-tabs">
+            <button class="integration-tab${activeIntegrationTab === 'permissions' ? ' active' : ''}" data-tab="permissions" onclick="setIntegrationTab('permissions')">Permissions <span class="tab-count">${ig.permissions.length}</span></button>
+            <button class="integration-tab${activeIntegrationTab === 'tools' ? ' active' : ''}" data-tab="tools" onclick="setIntegrationTab('tools')">Tools <span class="tab-count">${(ig.tools || []).length}</span></button>
+          </div>
+          <div class="integration-tab-panel" data-tab-panel="permissions"${activeIntegrationTab === 'permissions' ? '' : ' hidden'}>
           <table class="permissions-table">
             <thead>
               <tr>
@@ -2719,12 +2799,32 @@
               }).join('')}
             </tbody>
           </table>
+          </div>
+          <div class="integration-tab-panel" data-tab-panel="tools"${activeIntegrationTab === 'tools' ? '' : ' hidden'}>
+            ${(ig.tools && ig.tools.length)
+              ? `<div class="integration-tools-list">${ig.tools.map(t => `<code class="tool-chip">${escapeHtml(t)}</code>`).join('')}</div>`
+              : '<div class="integration-tools-empty">No tools are exposed by this integration.</div>'}
+          </div>
         </div>`;
     }
 
     function toggleIntegration(id) {
-      expandedIntegration = expandedIntegration === id ? null : id;
+      const opening = expandedIntegration !== id;
+      expandedIntegration = opening ? id : null;
+      if (opening) activeIntegrationTab = 'permissions';
       renderIntegrations(integrationsData);
+    }
+
+    // Switch the open integration's detail view between the Permissions and
+    // Tools tabs without re-rendering the whole panel (preserves scroll).
+    function setIntegrationTab(tab) {
+      activeIntegrationTab = tab;
+      document.querySelectorAll('.integration-tab').forEach(b => {
+        b.classList.toggle('active', b.dataset.tab === tab);
+      });
+      document.querySelectorAll('.integration-tab-panel').forEach(p => {
+        p.hidden = p.dataset.tabPanel !== tab;
+      });
     }
 
     async function loadIntegrations() {

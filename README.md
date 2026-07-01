@@ -150,7 +150,7 @@ All live under `persistence.mountPath` in the chart and default to `./data/<feat
 | `CLICKHOUSE_KEY_ID` / `CLICKHOUSE_KEY_SECRET` / `CLICKHOUSE_ORGANIZATION_ID` | ClickHouse Cloud API key (HTTP Basic key ID + secret) and organization ID. Enables the read-only `clickhouse_usage_cost` billing tool for the **ovad agent only**. See [docs/CLICKHOUSE.md](docs/CLICKHOUSE.md) |
 | `FRESHDESK_DOMAIN` / `FRESHDESK_API_KEY` | Freshdesk host (e.g. `acme.freshdesk.com`) + API key. Enables the read-only Freshdesk ticket tools for the **pulse agent only** |
 | `FRESHCHAT_URL` / `FRESHCHAT_API_TOKEN` | Freshchat API base incl. `/v2` (e.g. `https://acme-123.freshchat.com/v2`) + Bearer token. Enables the read-only Freshchat conversation tools for the **pulse agent only** |
-| `FRESHWORKS_CRM_DOMAIN` / `FRESHWORKS_CRM_API_KEY` | Freshworks CRM host (e.g. `acme.myfreshworks.com`) + API key. Enables the read-only CRM search/contact/deal tools for the **pulse agent only**. See [docs/FRESHWORKS.md](docs/FRESHWORKS.md) |
+| `FRESHWORKS_CRM_DOMAIN` / `FRESHWORKS_CRM_API_KEY` | Freshworks CRM host (e.g. `acme.myfreshworks.com`) + API key. Enables the read-only CRM search/contact/deal tools for the **pulse and seihin agents**. See [docs/FRESHWORKS.md](docs/FRESHWORKS.md) |
 
 </details>
 
@@ -928,7 +928,7 @@ Global prompts (e.g. `security`) are defined in `agents/prompts.yaml` and inheri
 | Azure Cost Management | [docs/AZURE.md](docs/AZURE.md) | ovad (and any agent running Azure cost workflows) |
 | Databricks SQL | [docs/DATABRICKS.md](docs/DATABRICKS.md) | ovad only |
 | ClickHouse Cloud | [docs/CLICKHOUSE.md](docs/CLICKHOUSE.md) | ovad only |
-| Freshworks (Freshdesk + Freshchat + CRM) | [docs/FRESHWORKS.md](docs/FRESHWORKS.md) | pulse only |
+| Freshworks (Freshdesk + Freshchat + CRM) | [docs/FRESHWORKS.md](docs/FRESHWORKS.md) | pulse, seihin |
 | Headroom (LLM compression) | [docs/HEADROOM.md](docs/HEADROOM.md) | Optional infra — all backends |
 
 ## Contributing
