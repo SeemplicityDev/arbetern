@@ -2061,13 +2061,14 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 					Type: "function",
 					Function: llm.ToolFunction{
 						Name:        ToolFreshdeskListTickets,
-						Description: "List recent Freshdesk support tickets, newest-updated first. Optionally filter to tickets updated on or after a timestamp. Returns ticket ID, subject, status, priority and last-updated time. Use for questions like 'show recent support tickets' or 'what tickets changed since yesterday'.",
+						Description: "List recent Freshdesk support tickets, newest-updated first. Optionally filter to tickets updated on or after a timestamp, or to tickets requested by a specific customer email. Returns ticket ID, subject, status, priority and last-updated time. Use for questions like 'show recent support tickets' or 'tickets from bob@customer.com'. To find tickets ASSIGNED to a support agent (e.g. 'tickets on my name'), first call freshdesk_find_agent to get the agent_id, then freshdesk_search_tickets with query 'agent_id:<id>'.",
 						Parameters: json.RawMessage(`{
 							"type":"object",
 							"properties":{
 								"updated_since":{"type":"string","description":"Optional RFC3339 timestamp (e.g. 2026-02-01T00:00:00Z). Only tickets updated on or after this instant are returned."},
+								"requester_email":{"type":"string","description":"Optional. Only tickets REQUESTED by this contact/customer email are returned. This is the requester, not the assigned agent."},
 								"page":{"type":"integer","description":"1-based page number. Omit for the first page."},
-								"per_page":{"type":"integer","description":"Results per page, 1..100 (default 30)."}
+								"per_page":{"type":"integer","description":"Results per page, 1..50 (default 20). Keep this small — only the first 20 are rendered, so pulling more just wastes context."}
 							}
 						}`),
 					},
@@ -2098,6 +2099,20 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 								"query":{"type":"string","description":"Freshdesk filter query, e.g. 'priority:4 AND status:2'. Supported fields include status, priority, type, tag, agent_id, group_id, created_at, updated_at, due_by."}
 							},
 							"required":["query"]
+						}`),
+					},
+				},
+				llm.Tool{
+					Type: "function",
+					Function: llm.ToolFunction{
+						Name:        ToolFreshdeskFindAgent,
+						Description: "Resolve a Freshdesk support agent by email or name and return their numeric agent_id. Use this first when asked for tickets ASSIGNED to a person (e.g. 'tickets on my name' / 'tickets assigned to Jane'), then pass the agent_id into freshdesk_search_tickets as query 'agent_id:<id>'. Email is the reliable key; name does a case-insensitive substring match.",
+						Parameters: json.RawMessage(`{
+							"type":"object",
+							"properties":{
+								"email":{"type":"string","description":"Agent email address (preferred, exact match)."},
+								"name":{"type":"string","description":"Agent full or partial name (case-insensitive substring match). Used only when email is not provided."}
+							}
 						}`),
 					},
 				},
@@ -4842,14 +4857,15 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 			return preconditionErrf("Error: Freshdesk integration is not connected.")
 		}
 		args, errMsg := parseToolArgs[struct {
-			UpdatedSince string `json:"updated_since"`
-			Page         int    `json:"page"`
-			PerPage      int    `json:"per_page"`
+			UpdatedSince   string `json:"updated_since"`
+			RequesterEmail string `json:"requester_email"`
+			Page           int    `json:"page"`
+			PerPage        int    `json:"per_page"`
 		}](argsJSON)
 		if errMsg != "" {
 			return errMsg
 		}
-		tickets, err := h.freshworksClient.Desk.ListTickets(ctx, args.UpdatedSince, args.Page, args.PerPage)
+		tickets, err := h.freshworksClient.Desk.ListTickets(ctx, args.UpdatedSince, args.RequesterEmail, args.Page, args.PerPage)
 		if err != nil {
 			return fmt.Sprintf("Error listing Freshdesk tickets: %v", err)
 		}
@@ -4900,6 +4916,27 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		}
 		log.Printf("[user=%s channel=%s] freshdesk_search_tickets (query=%q, total=%d)", userID, channelID, args.Query, total)
 		return freshworks.FormatTicketList(tickets, fmt.Sprintf("Freshdesk search (%d total)", total))
+
+	case ToolFreshdeskFindAgent:
+		if h.freshworksClient == nil || !h.freshworksClient.Desk.Ready() {
+			return preconditionErrf("Error: Freshdesk integration is not connected.")
+		}
+		args, errMsg := parseToolArgs[struct {
+			Email string `json:"email"`
+			Name  string `json:"name"`
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
+		}
+		if strings.TrimSpace(args.Email) == "" && strings.TrimSpace(args.Name) == "" {
+			return preconditionErrf("Error: email or name is required.")
+		}
+		agents, err := h.freshworksClient.Desk.FindAgents(ctx, args.Email, args.Name)
+		if err != nil {
+			return fmt.Sprintf("Error finding Freshdesk agent: %v", err)
+		}
+		log.Printf("[user=%s channel=%s] freshdesk_find_agent (matches=%d)", userID, channelID, len(agents))
+		return freshworks.FormatAgents(agents)
 
 	case ToolFreshchatGetConversation:
 		if h.freshworksClient == nil || !h.freshworksClient.Chat.Ready() {

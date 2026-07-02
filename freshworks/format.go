@@ -7,15 +7,16 @@ import (
 )
 
 const (
-	// maxListRows caps how many tickets/results a list/search renders inline so
-	// a large result set stays within Slack message limits.
-	maxListRows = 30
+	// maxListRows caps how many tickets/results a list/search renders inline.
+	maxListRows = 20
 	// maxBodyChars truncates long ticket descriptions / message bodies.
-	maxBodyChars = 1500
+	maxBodyChars = 800
 	// maxConversations caps how many ticket replies/notes are rendered.
-	maxConversations = 20
+	maxConversations = 8
 	// maxChatMessages caps how many chat messages are rendered.
-	maxChatMessages = 50
+	maxChatMessages = 25
+	// maxItemBody truncates a single reply / note / chat message body.
+	maxItemBody = 350
 )
 
 func truncate(s string, max int) string {
@@ -95,6 +96,38 @@ func FormatTicketConversations(ticketID int64, convs []TicketConversation) strin
 	return sb.String()
 }
 
+// FormatAgents renders resolved Freshdesk agents, highlighting the agent_id to
+// use in a ticket search.
+func FormatAgents(agents []Agent) string {
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "*Freshdesk agents — %d match(es)*\n", len(agents))
+	if len(agents) == 0 {
+		sb.WriteString("_No matching agents._\n")
+		return sb.String()
+	}
+	limit := len(agents)
+	if limit > maxListRows {
+		limit = maxListRows
+	}
+	for i := 0; i < limit; i++ {
+		a := agents[i]
+		name := strings.TrimSpace(a.Contact.Name)
+		if name == "" {
+			name = "(no name)"
+		}
+		fmt.Fprintf(&sb, "• *%s* — agent_id `%d`", name, a.ID)
+		if a.Contact.Email != "" {
+			fmt.Fprintf(&sb, " · %s", a.Contact.Email)
+		}
+		sb.WriteString("\n")
+	}
+	if len(agents) > limit {
+		fmt.Fprintf(&sb, "_…and %d more._\n", len(agents)-limit)
+	}
+	sb.WriteString("_Search their tickets with freshdesk_search_tickets query `agent_id:<id>`._\n")
+	return sb.String()
+}
+
 func formatConversations(convs []TicketConversation) string {
 	var sb strings.Builder
 	limit := len(convs)
@@ -109,7 +142,7 @@ func formatConversations(convs []TicketConversation) string {
 		} else if c.Incoming {
 			direction = "Incoming"
 		}
-		fmt.Fprintf(&sb, "• _%s · %s_\n   %s\n", direction, c.CreatedAt, truncate(c.BodyText, 600))
+		fmt.Fprintf(&sb, "• _%s · %s_\n   %s\n", direction, c.CreatedAt, truncate(c.BodyText, maxItemBody))
 	}
 	if len(convs) > limit {
 		fmt.Fprintf(&sb, "_…and %d more._\n", len(convs)-limit)
@@ -171,7 +204,7 @@ func formatChatMessages(msgs []ChatMessage) string {
 		if text == "" {
 			continue
 		}
-		fmt.Fprintf(&sb, "• _%s · %s_\n   %s\n", actor, m.CreatedTime, truncate(text, 600))
+		fmt.Fprintf(&sb, "• _%s · %s_\n   %s\n", actor, m.CreatedTime, truncate(text, maxItemBody))
 	}
 	if len(msgs) > limit {
 		fmt.Fprintf(&sb, "_…and %d more._\n", len(msgs)-limit)

@@ -66,6 +66,16 @@ type ticketSearchResponse struct {
 	Total   int      `json:"total"`
 }
 
+// Agent is a Freshdesk agent. The display name and email live on the nested
+// contact object.
+type Agent struct {
+	ID      int64 `json:"id"`
+	Contact struct {
+		Name  string `json:"name"`
+		Email string `json:"email"`
+	} `json:"contact"`
+}
+
 func freshdeskStatus(code int) string {
 	switch code {
 	case 2:

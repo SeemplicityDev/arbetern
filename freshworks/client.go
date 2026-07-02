@@ -150,25 +150,67 @@ func (d *DeskClient) get(ctx context.Context, path string, query url.Values, out
 
 // ListTickets returns recent tickets, newest-updated first. updatedSince
 // (RFC3339, optional) narrows to tickets updated at or after that instant.
-func (d *DeskClient) ListTickets(ctx context.Context, updatedSince string, page, perPage int) ([]Ticket, error) {
+// requesterEmail (optional) narrows to tickets requested by that contact email.
+func (d *DeskClient) ListTickets(ctx context.Context, updatedSince, requesterEmail string, page, perPage int) ([]Ticket, error) {
 	if !d.Ready() {
 		return nil, fmt.Errorf("freshdesk not configured")
 	}
 	q := url.Values{}
 	q.Set("order_by", "updated_at")
 	q.Set("order_type", "desc")
-	q.Set("per_page", clampStr(perPage, 1, 100, 30))
+	// Cap the page size to what the formatter renders.
+	q.Set("per_page", clampStr(perPage, 1, 50, maxListRows))
 	if page > 0 {
 		q.Set("page", clampStr(page, 1, 1_000_000, 1))
 	}
 	if s := strings.TrimSpace(updatedSince); s != "" {
 		q.Set("updated_since", s)
 	}
+	if s := strings.TrimSpace(requesterEmail); s != "" {
+		q.Set("email", s)
+	}
 	var tickets []Ticket
 	if err := d.get(ctx, "/api/v2/tickets", q, &tickets); err != nil {
 		return nil, err
 	}
 	return tickets, nil
+}
+
+// FindAgents resolves Freshdesk agents by email (exact, via the API's email
+// filter) or by a case-insensitive substring of their name. Exactly one of
+// email or name should be supplied; email is preferred. Use the returned agent
+// IDs with SearchTickets (`agent_id:<id>`) to find assigned tickets.
+func (d *DeskClient) FindAgents(ctx context.Context, email, name string) ([]Agent, error) {
+	if !d.Ready() {
+		return nil, fmt.Errorf("freshdesk not configured")
+	}
+	email = strings.TrimSpace(email)
+	name = strings.TrimSpace(name)
+	if email == "" && name == "" {
+		return nil, fmt.Errorf("email or name is required")
+	}
+	q := url.Values{}
+	if email != "" {
+		q.Set("email", email)
+	} else {
+		// The agents endpoint has no name filter, so pull a page and match locally.
+		q.Set("per_page", "100")
+	}
+	var agents []Agent
+	if err := d.get(ctx, "/api/v2/agents", q, &agents); err != nil {
+		return nil, err
+	}
+	if email != "" || name == "" {
+		return agents, nil
+	}
+	needle := strings.ToLower(name)
+	matched := make([]Agent, 0, len(agents))
+	for _, a := range agents {
+		if strings.Contains(strings.ToLower(a.Contact.Name), needle) {
+			matched = append(matched, a)
+		}
+	}
+	return matched, nil
 }
 
 // GetTicket returns a single ticket. When includeConversations is true the
@@ -263,7 +305,7 @@ func (c *ChatClient) GetConversationMessages(ctx context.Context, conversationID
 		return nil, fmt.Errorf("conversation_id is required")
 	}
 	q := url.Values{}
-	q.Set("items_per_page", "50")
+	q.Set("items_per_page", clampStr(0, 1, maxChatMessages, maxChatMessages))
 	if page > 0 {
 		q.Set("page", clampStr(page, 1, 1_000_000, 1))
 	}
@@ -332,9 +374,39 @@ func (c *CRMClient) Search(ctx context.Context, query string, entities []string)
 	q := url.Values{}
 	q.Set("q", query)
 	q.Set("include", strings.Join(clean, ","))
-	var results []CRMSearchResult
-	if err := c.get(ctx, "/search", q, &results); err != nil {
+	// Decode into raw first: the search endpoint normally returns a bare array,
+	// but some accounts wrap the results in an object keyed by entity type.
+	var raw json.RawMessage
+	if err := c.get(ctx, "/search", q, &raw); err != nil {
 		return nil, err
+	}
+	return parseCRMSearch(raw)
+}
+
+// parseCRMSearch decodes a CRM search body that may be either a bare array of
+// results or an object whose values are arrays of results.
+func parseCRMSearch(raw json.RawMessage) ([]CRMSearchResult, error) {
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" || trimmed == "null" {
+		return nil, nil
+	}
+	if strings.HasPrefix(trimmed, "[") {
+		var results []CRMSearchResult
+		if err := json.Unmarshal(raw, &results); err != nil {
+			return nil, fmt.Errorf("decoding search results: %w", err)
+		}
+		return results, nil
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		return nil, fmt.Errorf("decoding search results: %w", err)
+	}
+	var results []CRMSearchResult
+	for _, v := range obj {
+		var part []CRMSearchResult
+		if json.Unmarshal(v, &part) == nil {
+			results = append(results, part...)
+		}
 	}
 	return results, nil
 }

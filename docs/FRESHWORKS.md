@@ -31,9 +31,10 @@ work.
 
 | Tool | Product | Description |
 |---|---|---|
-| `freshdesk_list_tickets` | Freshdesk | List recent tickets (newest-updated first), optionally filtered by `updated_since` |
+| `freshdesk_list_tickets` | Freshdesk | List recent tickets (newest-updated first), optionally filtered by `updated_since` or by requester email |
 | `freshdesk_get_ticket` | Freshdesk | Get one ticket by ID, optionally with its conversation thread |
-| `freshdesk_search_tickets` | Freshdesk | Search tickets with the Freshdesk filter query syntax (e.g. `priority:4 AND status:2`) |
+| `freshdesk_search_tickets` | Freshdesk | Search tickets with the Freshdesk filter query syntax (e.g. `priority:4 AND status:2`, `agent_id:123`) |
+| `freshdesk_find_agent` | Freshdesk | Resolve an agent's `agent_id` by email or name (for `agent_id:<id>` searches of assigned tickets) |
 | `freshchat_get_conversation` | Freshchat | Get a conversation header by conversation ID |
 | `freshchat_get_conversation_messages` | Freshchat | Get the messages in a conversation |
 | `freshworks_crm_search` | CRM | Search contacts, deals and accounts by term |

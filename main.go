@@ -1900,11 +1900,14 @@ func main() {
 	}
 
 	srv := &http.Server{
-		Addr:         ":" + cfg.Port,
-		Handler:      gatedHandler,
-		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 90 * time.Second,
-		IdleTimeout:  120 * time.Second,
+		Addr:    ":" + cfg.Port,
+		Handler: gatedHandler,
+		// WriteTimeout must exceed the longest handler: a UI chat turn is bounded
+		// by chat.chatRequestTimeout (5m); a lower cap would sever it mid-turn.
+		ReadTimeout:       30 * time.Second,
+		ReadHeaderTimeout: 30 * time.Second,
+		WriteTimeout:      6 * time.Minute,
+		IdleTimeout:       120 * time.Second,
 	}
 
 	// Graceful shutdown on SIGTERM/SIGINT (Kubernetes pod termination).

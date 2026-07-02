@@ -285,6 +285,9 @@ oauth2-proxy:
     configFile: |-
       email_domains = ["*"]
       upstreams = ["http://arbetern:80"]
+      # Must exceed a UI chat turn (chat.chatRequestTimeout, 5m); the 30s default
+      # aborts long turns with a 502.
+      upstream_timeout = "360s"
       # Trust the ALB's X-Forwarded-* headers (TLS is terminated upstream).
       # Required behind an L7 proxy for https callback URLs, the secure cookie,
       # and real client IP in X-Forwarded-For (arbetern's UI_ALLOWED_CIDRS gate).
