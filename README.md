@@ -510,6 +510,13 @@ describing how the report is assembled. Any `{{VAR}}` placeholder in the prompt
 becomes a declared **input** (e.g. `{{TENANT}}`). The template is registered via
 GitOps at `arbetern/dashboards/<agent>/<id>.json` with `kind: "prompt"`.
 
+This is a generic, **agent-agnostic** framework: any agent can own prompt
+dashboards (Pulse's per-account summary is just one example). An instance renders
+through the owning agent's own tool-loop, so e.g. an `ovad` prompt dashboard can
+compile a per-service reliability report from Datadog + GitHub, a `seihin` one a
+per-feature adoption brief, etc. — the use case lives entirely in the external
+prompt.
+
 Rendering is driven from the management UI (there is no slash command):
 
 1. Open the template's dashboard page. It shows a **Render** form — one field per
@@ -528,6 +535,10 @@ Rendering is fire-and-forget (like the workflow **run now** button): the render
 endpoint returns immediately and the instance page polls until the first report
 lands. A prompt dashboard with **no** `{{VAR}}` placeholders is self-contained
 and renders in place on its schedule.
+
+From an instance page you can **▶ re-render** it in place (reuses its saved
+inputs and the current template prompt) or **⬇ PDF** to export the report via the
+browser's print → *Save as PDF* (a print-optimised, document-style layout).
 
 Because the report is produced by the LLM, its exact structure and the
 integrations it consults live entirely in the external prompt — no per-tenant

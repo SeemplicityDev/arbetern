@@ -149,12 +149,43 @@
     .input-chip{font-size:12px;background:var(--deep);border:1px solid var(--border);border-radius:20px;padding:3px 11px;color:var(--text-muted)}
     .input-chip b{color:var(--text-bright);font-weight:600}
     .report-tmpl{font-size:12px;color:var(--accent);margin-left:auto}
+    .rerender-btn{background:var(--card);color:var(--text);border:1px solid var(--border);border-radius:7px;padding:4px 12px;font-family:inherit;font-size:12px;font-weight:600;cursor:pointer}
+    .rerender-btn:hover{border-color:var(--border-accent)}
+    .rerender-btn:disabled{opacity:.55;cursor:wait}
     .render-error{background:rgba(196,127,127,.1);border:1px solid rgba(196,127,127,.45);color:var(--red);border-radius:8px;padding:10px 14px;margin:0 0 16px;font-size:13px;line-height:1.5;word-break:break-word}
     /* Prompt card (toggled by the header "prompt" button) */
     #prompt-card{margin-bottom:16px}
     .prompt-card-title{font-size:12px;text-transform:uppercase;letter-spacing:.5px;color:var(--text-muted);margin-bottom:8px;font-weight:600}
     .prompt{background:var(--deep);border:1px solid var(--border);border-radius:10px;padding:14px;font-family:var(--font-mono);font-size:12px;line-height:1.55;color:var(--text);overflow:auto;white-space:pre-wrap;word-break:break-word;max-height:420px;margin:0}
     .badge.active{border-color:var(--border-accent);color:var(--text-bright)}
+
+    /* Export to PDF: a print-optimised layout (browser "Save as PDF"). Strips
+       the app chrome and forces a clean, light, document-style report. */
+    @media print {
+      header > div:last-child, #gitops-banner, #prompt-card, .footer,
+      .prompt-form, .instances, #pf-rerender, #pf-rerender-status, .report-tmpl,
+      #sources:empty { display:none !important; }
+      html, body { background:#fff !important; color:#111 !important; }
+      body::before { display:none !important; }
+      header { border:none !important; margin-bottom:6px !important; }
+      main { padding:0 !important; max-width:none !important; }
+      #title { color:#000 !important; }
+      .meta, .description { color:#333 !important; }
+      .report { background:#fff !important; border:none !important; padding:0 !important; box-shadow:none !important; color:#111 !important; }
+      .report .md-h, .report h1, .report h2, .report h3, .report h4 { color:#000 !important; }
+      .report a { color:#000 !important; text-decoration:underline; }
+      .report code, .report .md-pre { background:#f3f3f3 !important; border:1px solid #ddd !important; color:#111 !important; }
+      .report .md-pre code { border:none !important; }
+      .report .md-quote { color:#333 !important; background:#f7f7f7 !important; border-left-color:#bbb !important; }
+      .report .md-table th, .report .md-table td { border:1px solid #999 !important; color:#111 !important; }
+      .report .md-table th { background:#eee !important; }
+      .report .md-table tr:nth-child(even) td { background:#f7f7f7 !important; }
+      .report-inputs { border-color:#ccc !important; }
+      .input-chip { background:#f3f3f3 !important; border-color:#ddd !important; color:#333 !important; }
+      .input-chip b { color:#000 !important; }
+      .render-error { color:#8a1f1f !important; background:#fdf1f1 !important; border-color:#e0b4b4 !important; }
+      @page { margin: 15mm; }
+    }
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
@@ -171,6 +202,9 @@
     <button id="prompt-btn" class="badge" type="button"
       style="cursor:pointer;font-family:inherit;color:var(--text);background:var(--card);display:none;"
       title="Show the prompt this dashboard renders from.">≡ prompt</button>
+    <button id="pdf-btn" class="badge" type="button"
+      style="cursor:pointer;font-family:inherit;color:var(--text);background:var(--card);display:none;"
+      title="Export this dashboard as a PDF (opens your browser's print dialog — choose 'Save as PDF').">⬇ PDF</button>
     <button id="gitops-sync-btn" class="badge" type="button"
       style="cursor:pointer;font-family:inherit;color:var(--text);background:var(--card);display:none;"
       title="Reconcile this dashboard registry with the source repo right now.">⟳ sync now</button>
@@ -846,6 +880,8 @@
       ).join(' ');
       const tmplURL = '/' + encodeURIComponent(d.agent) + '/dashboard/' + encodeURIComponent(d.template_id);
       head = '<div class="report-inputs">' + chips +
+        '<button id="pf-rerender" class="rerender-btn" type="button" title="Re-render this instance now with its saved inputs (uses the current template prompt).">▶ re-render</button>' +
+        '<span id="pf-rerender-status" class="pf-status"></span>' +
         '<a class="report-tmpl" href="' + tmplURL + '">↑ template</a></div>';
     }
     // Surface a failed render so the user knows the report is stale/missing.
@@ -862,6 +898,33 @@
           ? ''
           : '<div class="empty">Rendering… this can take up to a minute. This page refreshes automatically.</div>');
     panel.innerHTML = '<div class="report">' + head + errBanner + body + '</div>';
+    wireRerender(d);
+  }
+
+  // Re-render an existing instance in place with its saved inputs. Posts to the
+  // parent template's render endpoint (same instance id = same slug), so the
+  // report is rebuilt with the current template prompt. Fire-and-forget: the
+  // 15s poll picks up the fresh Markdown when the render finishes.
+  function wireRerender(d){
+    const btn = document.getElementById('pf-rerender');
+    if (!btn) return;
+    btn.addEventListener('click', async () => {
+      const status = document.getElementById('pf-rerender-status');
+      const orig = btn.textContent;
+      btn.disabled = true; btn.textContent = '▶ re-rendering…';
+      if (status) { status.textContent = ''; status.style.color = 'var(--text-muted)'; }
+      try {
+        const res = await fetch('/api/dashboards/' + encodeURIComponent(d.agent) + '/' + encodeURIComponent(d.template_id) + '/render', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ inputs: d.inputs || {}, interval: d.sync_interval || '' }),
+        });
+        if (!res.ok) { const t = await res.text(); throw new Error(t || ('HTTP ' + res.status)); }
+        if (status) status.textContent = 'queued — refreshing when ready…';
+      } catch (e) {
+        btn.disabled = false; btn.textContent = orig;
+        if (status) { status.textContent = 'Re-render failed: ' + e.message; status.style.color = 'var(--red)'; }
+      }
+    });
   }
 
   function wirePromptForm(d){
@@ -975,6 +1038,18 @@
       } else {
         promptBtn.style.display = 'none';
         promptCard.style.display = 'none';
+      }
+
+      // Export to PDF: shown once there is a rendered report to export.
+      const pdfBtn = document.getElementById('pdf-btn');
+      if (d.kind === 'prompt' && d.markdown && d.markdown.trim()) {
+        pdfBtn.style.display = '';
+        if (!pdfBtn.dataset.bound) {
+          pdfBtn.addEventListener('click', () => window.print());
+          pdfBtn.dataset.bound = '1';
+        }
+      } else {
+        pdfBtn.style.display = 'none';
       }
 
       // Prompt-driven dashboard: a template (render form) or an instance (report).
