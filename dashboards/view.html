@@ -354,7 +354,9 @@
     let html = '', i = 0;
     const isTableSep = s => /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)+\|?\s*$/.test(s);
     // Split a table row on unescaped '|' only, then unescape '\|' inside cells.
-    const splitRow = s => s.replace(/^\s*\|/, '').replace(/\|\s*$/, '').split(/(?<!\\)\|/).map(c => c.trim().replace(/\\\|/g, '|'));
+    // (Uses a placeholder instead of lookbehind for older-Safari compatibility.)
+    const splitRow = s => s.replace(/^\s*\|/, '').replace(/\|\s*$/, '')
+      .replace(/\\\|/g, '\u0001').split('|').map(c => c.trim().replace(/\u0001/g, '|'));
     while (i < lines.length){
       const line = lines[i];
       if (/^\s*```/.test(line)){                       // fenced code block
