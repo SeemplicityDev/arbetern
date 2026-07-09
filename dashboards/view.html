@@ -43,9 +43,6 @@
     }
     html[data-theme="light"] body::before{
       background-image:linear-gradient(rgba(50,62,80,.05) 1px,transparent 1px),linear-gradient(90deg,rgba(50,62,80,.05) 1px,transparent 1px)}
-    html[data-theme="light"] .band-yellow{background:rgba(138,124,57,.14);color:#8a7c39}
-    html[data-theme="light"] .score-box.band-yellow{color:#8a7c39}
-    html[data-theme="light"] .score-box.band-yellow .num{color:#8a7c39}
     .theme-toggle{position:relative;width:46px;height:24px;flex-shrink:0;border-radius:20px;background:var(--card-2);border:1px solid var(--border);cursor:pointer;padding:0;transition:background .2s ease,border-color .2s ease}
     .theme-toggle:hover{border-color:var(--border-accent)}
     .theme-toggle-knob{position:absolute;top:2px;left:2px;width:18px;height:18px;border-radius:50%;background:var(--accent);color:var(--on-accent);display:flex;align-items:center;justify-content:center;transform:translateX(22px);transition:transform .3s cubic-bezier(.22,1,.36,1)}
@@ -99,44 +96,6 @@
     a{color:var(--accent);text-decoration:none}
     a:hover{text-decoration:underline}
 
-    /* Account-health summary panel (Kind="account") */
-    .account{display:grid;grid-template-columns:260px 1fr;gap:20px;background:var(--card);border:1px solid var(--border);border-radius:14px;padding:20px;margin-bottom:24px}
-    .score-box{display:flex;flex-direction:column;align-items:center;justify-content:center;padding:18px;border-radius:12px;background:var(--deep);border:1px solid var(--border);position:relative;overflow:hidden}
-    .score-box::before{content:'';position:absolute;inset:0 0 auto 0;height:3px;background:currentColor;opacity:.7}
-    .score-box .num{font-family:var(--font-display);font-size:56px;font-weight:800;line-height:1;letter-spacing:-1px}
-    .score-box .band{margin-top:10px;padding:4px 12px;border-radius:20px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.5px}
-    .band-green{background:rgba(131,176,138,.14);color:var(--green)}
-    .band-yellow{background:rgba(192,178,100,.14);color:#c0b264}
-    .band-orange{background:rgba(199,154,94,.14);color:var(--amber)}
-    .band-red{background:rgba(196,127,127,.14);color:var(--red)}
-    .score-box.band-green{color:var(--green)}
-    .score-box.band-yellow{color:#c0b264}
-    .score-box.band-orange{color:var(--amber)}
-    .score-box.band-red{color:var(--red)}
-    .score-box.band-green .num{color:var(--green)}
-    .score-box.band-yellow .num{color:#c0b264}
-    .score-box.band-orange .num{color:var(--amber)}
-    .score-box.band-red .num{color:var(--red)}
-    .score-box .source-meta{color:var(--text-muted)}
-    .lists{display:grid;grid-template-columns:1fr 1fr;gap:18px}
-    .list-block h3{font-size:12px;text-transform:uppercase;letter-spacing:.5px;color:var(--text-muted);margin-bottom:8px;font-weight:600}
-    .list-block ul{list-style:none;padding:0;margin:0}
-    .list-block li{padding:6px 0;border-bottom:1px solid var(--border);font-size:13px;line-height:1.45}
-    .list-block li:last-child{border-bottom:none}
-    .signal-chart{margin-top:18px;background:var(--deep);border:1px solid var(--border);border-radius:10px;padding:14px;grid-column:1 / -1}
-    .score-why{grid-column:1 / -1;background:var(--deep);border:1px solid var(--border);border-radius:10px;padding:14px}
-    .score-why h3{font-size:12px;text-transform:uppercase;letter-spacing:.5px;color:var(--text-muted);margin:0 0 10px;font-weight:600}
-    .score-why .sig{padding:8px 0;border-bottom:1px solid var(--border)}
-    .score-why .sig:last-child{border-bottom:none}
-    .score-why .sig-head{display:flex;justify-content:space-between;align-items:baseline;gap:10px;font-size:13px}
-    .score-why .sig-name{font-weight:600;color:var(--text-bright)}
-    .score-why .sig-score{font-family:var(--font-mono);font-size:12px;color:var(--text-muted)}
-    .score-why .sig-score .delta-bad{color:var(--red)}
-    .score-why .sig-score .delta-ok{color:var(--green)}
-    .score-why ul{list-style:none;padding:0;margin:6px 0 0}
-    .score-why li{font-size:12px;color:var(--text-muted);padding:2px 0 2px 14px;position:relative;line-height:1.45}
-    .score-why li:before{content:'◦';position:absolute;left:0;color:var(--text-muted)}
-    canvas#signal-chart{max-height:220px}
     /* Datadog metrics (datadog_query_metrics source) chart widgets. */
     .metrics-site{margin-bottom:18px}
     .metrics-site:last-child{margin-bottom:0}
@@ -150,7 +109,52 @@
     .metrics-summary{margin-top:10px;font-size:12px;color:var(--text-muted)}
     .metrics-summary table{font-size:12px}
     .metrics-summary th,.metrics-summary td{padding:4px 10px}
-    @media (max-width: 800px){ .account{grid-template-columns:1fr} .lists{grid-template-columns:1fr} }
+
+    /* Prompt-driven dashboard: rendered Markdown report (Kind="prompt") */
+    .report{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:24px 28px;margin-bottom:24px;line-height:1.6;font-size:14px}
+    .report .md-h{font-family:var(--font-display);color:var(--text-bright);line-height:1.3;margin:22px 0 10px}
+    .report h1.md-h{font-size:24px} .report h2.md-h{font-size:20px;border-bottom:1px solid var(--border);padding-bottom:6px}
+    .report h3.md-h{font-size:16px} .report h4.md-h,.report h5.md-h,.report h6.md-h{font-size:14px;text-transform:uppercase;letter-spacing:.4px;color:var(--text-muted)}
+    .report > *:first-child{margin-top:0}
+    .report p{margin:10px 0}
+    .report .md-list{margin:8px 0;padding-left:22px}
+    .report .md-list li{margin:4px 0}
+    .report a{color:var(--accent)}
+    .report code{font-family:var(--font-mono);font-size:12.5px;background:var(--deep);border:1px solid var(--border);border-radius:4px;padding:1px 5px}
+    .report .md-pre{background:var(--deep);border:1px solid var(--border);border-radius:8px;padding:12px 14px;overflow:auto;margin:12px 0}
+    .report .md-pre code{background:none;border:none;padding:0;font-size:12.5px;white-space:pre}
+    .report .md-quote{border-left:3px solid var(--border-accent);margin:12px 0;padding:4px 14px;color:var(--text-muted);background:var(--deep);border-radius:0 8px 8px 0}
+    .report hr{border:none;border-top:1px solid var(--border);margin:20px 0}
+    .report .md-table{border-collapse:collapse;width:100%;margin:14px 0;font-size:13px}
+    .report .md-table th,.report .md-table td{border:1px solid var(--border);padding:7px 12px;text-align:left;vertical-align:top}
+    .report .md-table th{background:var(--deep);color:var(--text-bright);font-weight:600}
+    .report .md-table tr:nth-child(even) td{background:rgba(127,127,127,.04)}
+    /* Prompt template render form + rendered-instance list */
+    .prompt-form h3, .instances h3{font-size:13px;text-transform:uppercase;letter-spacing:.5px;color:var(--text-muted);margin:0 0 10px;font-weight:600}
+    .prompt-form .form-row{margin-bottom:12px}
+    .prompt-form label{display:block;font-size:12px;color:var(--text-muted);margin-bottom:5px}
+    .prompt-form label .opt{text-transform:none;letter-spacing:0;opacity:.7}
+    .prompt-form input[type=text]{width:100%;max-width:420px;background:var(--deep);border:1px solid var(--border);border-radius:8px;padding:10px 12px;color:var(--text);font-family:inherit;font-size:13px;outline:none;transition:border-color .15s ease,box-shadow .15s ease}
+    .prompt-form input[type=text]:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(114,151,189,.15)}
+    .form-actions{display:flex;align-items:center;gap:12px;margin-top:16px}
+    .render-btn{background:var(--accent);color:var(--on-accent,#0b1220);border:none;border-radius:8px;padding:9px 18px;font-family:inherit;font-size:13px;font-weight:600;cursor:pointer;transition:opacity .15s ease}
+    .render-btn:hover{opacity:.9} .render-btn:disabled{opacity:.55;cursor:wait}
+    .pf-status{font-size:12px;color:var(--text-muted)}
+    .instances{margin-top:24px;border-top:1px solid var(--border);padding-top:18px}
+    .inst-row{display:flex;justify-content:space-between;align-items:center;gap:14px;padding:10px 12px;border:1px solid var(--border);border-radius:8px;margin-bottom:8px;background:var(--deep);text-decoration:none;color:var(--text)}
+    .inst-row:hover{border-color:var(--border-accent);text-decoration:none}
+    .inst-label{font-weight:600;color:var(--text-bright)}
+    .inst-when{font-size:12px;color:var(--text-muted)}
+    .report-inputs{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:16px;padding-bottom:14px;border-bottom:1px solid var(--border)}
+    .input-chip{font-size:12px;background:var(--deep);border:1px solid var(--border);border-radius:20px;padding:3px 11px;color:var(--text-muted)}
+    .input-chip b{color:var(--text-bright);font-weight:600}
+    .report-tmpl{font-size:12px;color:var(--accent);margin-left:auto}
+    .render-error{background:rgba(196,127,127,.1);border:1px solid rgba(196,127,127,.45);color:var(--red);border-radius:8px;padding:10px 14px;margin:0 0 16px;font-size:13px;line-height:1.5;word-break:break-word}
+    /* Prompt card (toggled by the header "prompt" button) */
+    #prompt-card{margin-bottom:16px}
+    .prompt-card-title{font-size:12px;text-transform:uppercase;letter-spacing:.5px;color:var(--text-muted);margin-bottom:8px;font-weight:600}
+    .prompt{background:var(--deep);border:1px solid var(--border);border-radius:10px;padding:14px;font-family:var(--font-mono);font-size:12px;line-height:1.55;color:var(--text);overflow:auto;white-space:pre-wrap;word-break:break-word;max-height:420px;margin:0}
+    .badge.active{border-color:var(--border-accent);color:var(--text-bright)}
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
@@ -164,6 +168,9 @@
   <div style="display:flex;gap:10px;align-items:center">
     <button id="theme-toggle" class="theme-toggle" type="button" role="switch" aria-label="Toggle color theme"><span class="theme-toggle-knob"><svg class="tt-sun" viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><circle cx="12" cy="12" r="4" fill="currentColor" stroke="none"/><path d="M12 2.5v2M12 19.5v2M2.5 12h2M19.5 12h2M5 5l1.4 1.4M17.6 17.6 19 19M19 5l-1.4 1.4M6.4 17.6 5 19"/></svg><svg class="tt-moon" viewBox="0 0 24 24" width="11" height="11" fill="currentColor"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg></span></button>
     <span class="badge" id="sync-badge">syncing</span>
+    <button id="prompt-btn" class="badge" type="button"
+      style="cursor:pointer;font-family:inherit;color:var(--text);background:var(--card);display:none;"
+      title="Show the prompt this dashboard renders from.">≡ prompt</button>
     <button id="gitops-sync-btn" class="badge" type="button"
       style="cursor:pointer;font-family:inherit;color:var(--text);background:var(--card);display:none;"
       title="Reconcile this dashboard registry with the source repo right now.">⟳ sync now</button>
@@ -173,6 +180,10 @@
 <main>
   <div class="description" id="description"></div>
   <div id="gitops-banner" style="display:none;background:rgba(114,151,189,.08);border:1px solid rgba(114,151,189,.4);border-radius:10px;padding:12px 14px;margin-bottom:14px;color:var(--text);font-size:13px;line-height:1.55"></div>
+  <div id="prompt-card" style="display:none">
+    <div class="prompt-card-title">Prompt</div>
+    <pre class="prompt" id="prompt-text"></pre>
+  </div>
   <div id="account-panel" style="display:none"></div>
   <div id="sources"></div>
   <div class="footer">
@@ -275,6 +286,85 @@
       '<a href="$1" target="_blank" rel="noopener">$1<\/a>');
   }
 
+  // Render a self-contained, XSS-safe subset of GitHub-flavoured Markdown.
+  // Everything is HTML-escaped up front, so no raw markup from the model can
+  // reach the DOM; only the transforms below re-introduce tags we control.
+  function mdInline(s){
+    // s is already HTML-escaped. Order matters: code spans first so their
+    // contents are not further transformed.
+    const codes = [];
+    s = s.replace(/`([^`]+)`/g, (m, c) => { codes.push(c); return '\u0000'+(codes.length-1)+'\u0000'; });
+    // Links [text](url) — only http(s) URLs are allowed.
+    s = s.replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g,
+      '<a href="$2" target="_blank" rel="noopener">$1</a>');
+    // Bare URLs.
+    s = s.replace(/(^|[\s(])(https?:\/\/[^\s<>()]+)(?=[)\].,;:!?]*(\s|$))/g,
+      '$1<a href="$2" target="_blank" rel="noopener">$2<\/a>');
+    s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+    s = s.replace(/__([^_]+)__/g, '<strong>$1</strong>');
+    s = s.replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<em>$2</em>');
+    s = s.replace(/(^|[^_])_([^_\n]+)_/g, '$1<em>$2</em>');
+    s = s.replace(/~~([^~]+)~~/g, '<del>$1</del>');
+    s = s.replace(/\u0000(\d+)\u0000/g, (m, i) => '<code>'+codes[+i]+'</code>');
+    return s;
+  }
+  function renderMarkdown(md){
+    const src = escapeHtml(String(md || ''));
+    const lines = src.split('\n');
+    let html = '', i = 0;
+    const isTableSep = s => /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)+\|?\s*$/.test(s);
+    const splitRow = s => s.replace(/^\s*\|/, '').replace(/\|\s*$/, '').split('|').map(c => c.trim());
+    while (i < lines.length){
+      const line = lines[i];
+      if (/^\s*```/.test(line)){                       // fenced code block
+        i++; const buf = [];
+        while (i < lines.length && !/^\s*```/.test(lines[i])){ buf.push(lines[i]); i++; }
+        i++; html += '<pre class="md-pre"><code>'+buf.join('\n')+'</code></pre>';
+        continue;
+      }
+      const h = line.match(/^\s*(#{1,6})\s+(.*?)\s*#*$/);
+      if (h){ const lvl = h[1].length; html += '<h'+lvl+' class="md-h">'+mdInline(h[2])+'</h'+lvl+'>'; i++; continue; }
+      if (/^\s*([-*_])(\s*\1){2,}\s*$/.test(line)){ html += '<hr>'; i++; continue; }   // ---
+      // GFM table: header row + separator row.
+      if (line.indexOf('|') !== -1 && i+1 < lines.length && isTableSep(lines[i+1])){
+        const head = splitRow(line);
+        i += 2; const rows = [];
+        while (i < lines.length && lines[i].indexOf('|') !== -1 && lines[i].trim() !== ''){ rows.push(splitRow(lines[i])); i++; }
+        let t = '<table class="md-table"><thead><tr>';
+        head.forEach(c => t += '<th>'+mdInline(c)+'</th>');
+        t += '</tr></thead><tbody>';
+        rows.forEach(r => { t += '<tr>'; for (let k=0;k<head.length;k++) t += '<td>'+mdInline(r[k]||'')+'</td>'; t += '</tr>'; });
+        t += '</tbody></table>'; html += t; continue;
+      }
+      if (/^\s*>\s?/.test(line)){                        // blockquote
+        const buf = [];
+        while (i < lines.length && /^\s*>\s?/.test(lines[i])){ buf.push(lines[i].replace(/^\s*>\s?/, '')); i++; }
+        html += '<blockquote class="md-quote">'+mdInline(buf.join('<br>'))+'</blockquote>';
+        continue;
+      }
+      if (/^\s*(\d+)[.)]\s+/.test(line)){                // ordered list
+        let t = '<ol class="md-list">';
+        while (i < lines.length && /^\s*(\d+)[.)]\s+/.test(lines[i])){ t += '<li>'+mdInline(lines[i].replace(/^\s*(\d+)[.)]\s+/, ''))+'</li>'; i++; }
+        t += '</ol>'; html += t; continue;
+      }
+      if (/^\s*[-*+]\s+/.test(line)){                    // unordered list
+        let t = '<ul class="md-list">';
+        while (i < lines.length && /^\s*[-*+]\s+/.test(lines[i])){ t += '<li>'+mdInline(lines[i].replace(/^\s*[-*+]\s+/, ''))+'</li>'; i++; }
+        t += '</ul>'; html += t; continue;
+      }
+      if (line.trim() === ''){ i++; continue; }          // blank line
+      // Paragraph: gather consecutive non-blank, non-structural lines.
+      const buf = [];
+      while (i < lines.length && lines[i].trim() !== '' &&
+             !/^\s*(#{1,6}\s|```|>\s?|[-*+]\s|\d+[.)]\s)/.test(lines[i]) &&
+             !(lines[i].indexOf('|') !== -1 && i+1 < lines.length && isTableSep(lines[i+1]))){
+        buf.push(lines[i]); i++;
+      }
+      html += '<p>'+mdInline(buf.join('<br>'))+'</p>';
+    }
+    return html;
+  }
+
   function renderCell(v){
     if (v === null || v === undefined) return '';
     if (typeof v === 'string') {
@@ -326,7 +416,6 @@
     return '<pre class="content">' + escapeHtml(String(content)) + '</pre>';
   }
 
-  let signalChart = null;
   // Chart.js instances keyed by canvas DOM id so we can destroy them on re-render.
   const metricsCharts = {};
   let metricsChartSeq = 0;
@@ -699,72 +788,133 @@
     return blocks;
   }
 
-  function renderAccount(panel, acct){
-    const band = (acct.band || 'yellow').toLowerCase();
-    const risks = (acct.risks || []).map(r => '<li>' + escapeHtml(r) + '</li>').join('') || '<li class="empty">No top risks.</li>';
-    const actions = (acct.actions || []).map(r => '<li>' + escapeHtml(r) + '</li>').join('') || '<li class="empty">No immediate actions.</li>';
-    const signalsList = acct.signals || [];
-    const whyRows = signalsList.map(s => {
-      const score = s.score ?? 0;
-      const weight = s.weight ?? 0;
-      const delta = score - weight;
-      let deltaHtml = '';
-      if (delta < 0) {
-        deltaHtml = ' <span class="delta-bad">(' + delta + ')</span>';
-      } else if (weight > 0) {
-        deltaHtml = ' <span class="delta-ok">(full credit)</span>';
+  // ---------- Prompt-driven dashboards (templates + instances) ----------
+  function promptInputs(prompt){
+    const re = /\{\{\s*([A-Za-z0-9_]+)\s*\}\}/g;
+    const seen = {}, out = []; let m;
+    while ((m = re.exec(prompt || ''))) {
+      const n = m[1], k = n.toUpperCase();
+      if (!seen[k]) { seen[k] = true; out.push(n); }
+    }
+    return out;
+  }
+
+  function renderPromptDashboard(d, panel){
+    panel.style.display = 'block';
+    document.getElementById('sources').innerHTML = '';
+    const isInstance = !!d.template_id;
+    const inputs = promptInputs(d.prompt);
+    const badge = document.getElementById('sync-badge');
+
+    if (!isInstance && inputs.length > 0) {
+      // Template with declared inputs: render form + list of instances.
+      if (badge) { badge.textContent = 'template'; badge.className = 'badge'; }
+      // Don't rebuild the form on the 15s poll — it would wipe what the user
+      // is typing. Just refresh the instance list.
+      if (document.getElementById('pf-render')) { loadInstances(d); return; }
+      const fields = inputs.map(name =>
+        '<div class="form-row"><label>' + escapeHtml(name) + '</label>' +
+        '<input type="text" data-input="' + escapeHtml(name) + '" autocomplete="off" placeholder="' + escapeHtml(name) + '" /></div>'
+      ).join('');
+      const iv = escapeHtml(d.sync_interval || '5m');
+      panel.innerHTML =
+        '<div class="report"><div class="prompt-form">' +
+          '<h3>Render this dashboard</h3>' +
+          '<p class="empty" style="margin:0 0 14px">Fill in the inputs and render a live instance. It auto-refreshes every ' + iv + '.</p>' +
+          fields +
+          '<div class="form-row"><label>Refresh interval <span class="opt">(optional, e.g. 5m, 1h)</span></label>' +
+            '<input type="text" id="pf-interval" autocomplete="off" placeholder="' + iv + '" /></div>' +
+          '<div class="form-actions"><button id="pf-render" class="render-btn" type="button">▶ render</button>' +
+            '<span id="pf-status" class="pf-status"></span></div>' +
+        '</div><div class="instances" id="pf-instances"><h3>Rendered instances</h3>' +
+          '<div class="empty">Loading…</div></div></div>';
+      wirePromptForm(d);
+      loadInstances(d);
+      return;
+    }
+
+    // Instance or self-contained (placeholder-free) prompt dashboard: show report.
+    if (badge) {
+      if (d.last_error) { badge.textContent = 'error'; badge.className = 'badge err'; }
+      else if (d.markdown) { badge.textContent = 'live'; badge.className = 'badge ok'; }
+      else { badge.textContent = 'rendering'; badge.className = 'badge'; }
+    }
+    let head = '';
+    if (isInstance && d.inputs) {
+      const chips = Object.keys(d.inputs).sort().map(k =>
+        '<span class="input-chip"><b>' + escapeHtml(k) + '</b>: ' + escapeHtml(d.inputs[k]) + '</span>'
+      ).join(' ');
+      const tmplURL = '/' + encodeURIComponent(d.agent) + '/dashboard/' + encodeURIComponent(d.template_id);
+      head = '<div class="report-inputs">' + chips +
+        '<a class="report-tmpl" href="' + tmplURL + '">↑ template</a></div>';
+    }
+    // Surface a failed render so the user knows the report is stale/missing.
+    let errBanner = '';
+    if (d.last_error) {
+      const when = d.last_sync ? ' (' + fmtTime(d.last_sync) + ')' : '';
+      errBanner = '<div class="render-error"><strong>Last render failed</strong>' + escapeHtml(when) +
+        ': ' + escapeHtml(d.last_error) +
+        (d.markdown && d.markdown.trim() ? ' — showing the previous successful report below.' : '') + '</div>';
+    }
+    const body = (d.markdown && d.markdown.trim())
+      ? renderMarkdown(d.markdown)
+      : (d.last_error
+          ? ''
+          : '<div class="empty">Rendering… this can take up to a minute. This page refreshes automatically.</div>');
+    panel.innerHTML = '<div class="report">' + head + errBanner + body + '</div>';
+  }
+
+  function wirePromptForm(d){
+    const btn = document.getElementById('pf-render');
+    if (!btn) return;
+    btn.addEventListener('click', async () => {
+      const inputs = {};
+      document.querySelectorAll('#account-panel input[data-input]').forEach(el => {
+        inputs[el.getAttribute('data-input')] = el.value.trim();
+      });
+      const status = document.getElementById('pf-status');
+      const missing = Object.keys(inputs).filter(k => !inputs[k]);
+      if (missing.length) { status.textContent = 'Fill in: ' + missing.join(', '); status.style.color = 'var(--red)'; return; }
+      const intervalEl = document.getElementById('pf-interval');
+      const interval = intervalEl ? intervalEl.value.trim() : '';
+      const orig = btn.textContent;
+      btn.disabled = true; btn.textContent = '▶ rendering…'; status.textContent = '';
+      try {
+        const res = await fetch('/api/dashboards/' + encodeURIComponent(d.agent) + '/' + encodeURIComponent(d.id) + '/render', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ inputs: inputs, interval: interval }),
+        });
+        if (!res.ok) { const t = await res.text(); throw new Error(t || ('HTTP ' + res.status)); }
+        const body = await res.json();
+        window.location.pathname = body.view_url; // the instance page polls until markdown lands
+      } catch (e) {
+        status.textContent = 'Render failed: ' + e.message; status.style.color = 'var(--red)';
+        btn.disabled = false; btn.textContent = orig;
       }
-      const reasons = (s.reasons || []).map(r => '<li>' + escapeHtml(r) + '</li>').join('')
-        || '<li>no contributing signals recorded</li>';
-      return '<div class="sig">' +
-        '<div class="sig-head">' +
-          '<span class="sig-name">' + escapeHtml(s.name || '') + '</span>' +
-          '<span class="sig-score">' + score + ' / ' + weight + deltaHtml + '</span>' +
-        '</div>' +
-        '<ul>' + reasons + '</ul>' +
-      '</div>';
-    }).join('') || '<div class="sig"><div class="sig-head"><span class="sig-name">No signals scored yet.</span></div></div>';
-    panel.innerHTML =
-      '<div class="account">' +
-        '<div class="score-box band-' + escapeHtml(band) + '">' +
-          '<div class="num">' + (acct.score ?? 0) + '</div>' +
-          '<div class="band band-' + escapeHtml(band) + '">' + escapeHtml(band) + '</div>' +
-          '<div class="source-meta" style="margin-top:10px">' + escapeHtml(acct.account_name || '') + '</div>' +
-        '</div>' +
-        '<div class="lists">' +
-          '<div class="list-block"><h3>Top risks</h3><ul>' + risks + '</ul></div>' +
-          '<div class="list-block"><h3>Action items</h3><ul>' + actions + '</ul></div>' +
-        '</div>' +
-        '<div class="score-why"><h3>Why this score</h3>' + whyRows + '</div>' +
-        '<div class="signal-chart"><canvas id="signal-chart"></canvas></div>' +
-      '</div>';
-    // Signal breakdown bar chart.
-    const signals = acct.signals || [];
-    const labels = signals.map(s => s.name);
-    const scored = signals.map(s => s.score);
-    const weights = signals.map(s => s.weight);
-    const ctx = panel.querySelector('#signal-chart').getContext('2d');
-    if (signalChart) signalChart.destroy();
-    // Chart.js global loaded via CDN; bail gracefully if the CDN is blocked.
-    if (typeof Chart === 'undefined') return;
-    signalChart = new Chart(ctx, {
-      type: 'bar',
-      data: {
-        labels,
-        datasets: [
-          { label: 'Score', data: scored, backgroundColor: '#7297bd', borderRadius: 4 },
-          { label: 'Weight (max)', data: weights, backgroundColor: 'rgba(114,151,189,0.22)', borderRadius: 4 },
-        ],
-      },
-      options: {
-        responsive: true, maintainAspectRatio: false,
-        plugins: { legend: { labels: { color: inkTick() } } },
-        scales: {
-          x: { ticks: { color: inkTick() }, grid: { color: inkGrid() } },
-          y: { ticks: { color: inkTick() }, grid: { color: inkGrid() }, beginAtZero: true },
-        },
-      },
     });
+  }
+
+  async function loadInstances(d){
+    const box = document.getElementById('pf-instances');
+    if (!box) return;
+    try {
+      const res = await fetch('/api/dashboards?agent=' + encodeURIComponent(d.agent), { cache: 'no-store' });
+      if (!res.ok) return;
+      const list = await res.json();
+      const insts = (list || []).filter(x => x.template_id === d.id);
+      if (!insts.length) { box.innerHTML = '<h3>Rendered instances</h3><div class="empty">None yet — render one above.</div>'; return; }
+      insts.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+      const rows = insts.map(x => {
+        const label = (x.inputs && Object.keys(x.inputs).length)
+          ? Object.keys(x.inputs).sort().map(k => escapeHtml(x.inputs[k])).join(' · ')
+          : escapeHtml(x.name || x.id);
+        const when = x.last_sync ? fmtTime(x.last_sync) : 'pending';
+        const url = '/' + encodeURIComponent(x.agent) + '/dashboard/' + encodeURIComponent(x.id);
+        return '<a class="inst-row" href="' + url + '"><span class="inst-label">' + label +
+          '</span><span class="inst-when">' + when + '</span></a>';
+      }).join('');
+      box.innerHTML = '<h3>Rendered instances</h3>' + rows;
+    } catch (e) { /* best-effort */ }
   }
 
   async function load(){
@@ -806,14 +956,34 @@
       if (d.last_error) { badge.textContent = 'error'; badge.className = 'badge err'; }
       else if (d.last_sync) { badge.textContent = 'live'; badge.className = 'badge ok'; }
 
-      // Account-health summary panel (only for Kind="account").
-      const acctPanel = document.getElementById('account-panel');
-      if (d.kind === 'account' && d.account) {
-        acctPanel.style.display = 'block';
-        renderAccount(acctPanel, d.account);
+      // Prompt dashboards expose their source prompt behind a toggle button
+      // (like a workflow's Prompt card), so you can see what the report renders
+      // from without opening the raw JSON.
+      const promptBtn = document.getElementById('prompt-btn');
+      const promptCard = document.getElementById('prompt-card');
+      if (d.kind === 'prompt' && d.prompt) {
+        document.getElementById('prompt-text').textContent = d.prompt;
+        promptBtn.style.display = '';
+        if (!promptBtn.dataset.bound) {
+          promptBtn.addEventListener('click', () => {
+            const show = promptCard.style.display === 'none';
+            promptCard.style.display = show ? 'block' : 'none';
+            promptBtn.classList.toggle('active', show);
+          });
+          promptBtn.dataset.bound = '1';
+        }
       } else {
-        acctPanel.style.display = 'none';
+        promptBtn.style.display = 'none';
+        promptCard.style.display = 'none';
       }
+
+      // Prompt-driven dashboard: a template (render form) or an instance (report).
+      const acctPanel = document.getElementById('account-panel');
+      if (d.kind === 'prompt') {
+        renderPromptDashboard(d, acctPanel);
+        return;
+      }
+      acctPanel.style.display = 'none';
 
       const sources = document.getElementById('sources');
       sources.innerHTML = '';
@@ -852,7 +1022,6 @@
       document.documentElement.dataset.theme = next;
       try { localStorage.setItem('arbetern-theme', next); } catch (e) {}
       label(next);
-      applyChartTheme(signalChart);
       Object.values(metricsCharts).forEach(applyChartTheme);
     });
     label(document.documentElement.dataset.theme || 'dark');

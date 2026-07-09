@@ -238,7 +238,7 @@ func FormatCRMSearch(query string, results []CRMSearchResult) string {
 	}
 	for i := 0; i < limit; i++ {
 		r := results[i]
-		line := fmt.Sprintf("• *%s* (%s, id %d)", r.Name, r.Type, r.ID)
+		line := fmt.Sprintf("• *%s* (%s, id %s)", r.Name, r.Type, r.ID)
 		if r.Email != "" {
 			line += " — " + r.Email
 		}

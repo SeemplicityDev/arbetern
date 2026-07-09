@@ -111,13 +111,10 @@ REST endpoints.
 
 ## Where Salesforce Data Surfaces
 
-- **Pulse account dashboards**: the account fan-out runs SOQL like
-  `SELECT Id, Name, StageName, CloseDate, Amount FROM Opportunity WHERE Account.Name = '<account>' AND IsClosed = false`
-  and feeds the results into the health score.
 - **Source dashboards** (any agent): include `salesforce_query` as a source
   when creating a dashboard via `/<agent> create dashboard …`.
-- **Workflows**: scheduled or event-triggered workflows can call
-  `salesforce_query` directly inside their tool-loop.
+- **Prompt dashboards / workflows**: a prompt-driven dashboard or a scheduled
+  workflow can call `salesforce_query` directly inside its tool-loop.
 
 ## Troubleshooting
 

@@ -76,27 +76,6 @@ type clientExecutor struct{ Clients }
 // NewExecutor returns an Executor that dispatches sources to the supplied integration clients.
 func NewExecutor(c Clients) Executor { return &clientExecutor{Clients: c} }
 
-// RebuildAccount refreshes a Kind="account" dashboard by re-running the full
-// account fan-out (salesforce resolve, jira/chorus/datadog fetches, health
-// scoring). The caller is responsible for preserving identity fields (ID,
-// CreatedAt, etc.) on the returned dashboard. This satisfies the
-// AccountRebuilder interface so the registry's sync loop can refresh account
-// dashboards correctly — their Sources have no Args and would otherwise fail
-// in the generic Execute path.
-func (e *clientExecutor) RebuildAccount(ctx context.Context, d *Dashboard) (*Dashboard, error) {
-	if d == nil {
-		return nil, fmt.Errorf("nil dashboard")
-	}
-	var name string
-	if d.Account != nil {
-		name = d.Account.AccountName
-	}
-	if strings.TrimSpace(name) == "" {
-		return nil, fmt.Errorf("account dashboard %s has no account name to rebuild from", d.ID)
-	}
-	return BuildAccountDashboard(ctx, e.Clients, d.Agent, d.CreatedBy, name)
-}
-
 // Execute dispatches a DataSource to the matching integration client.
 // All source types are read-only. Unknown types return an error — they are
 // validated at creation time via SupportsType, so this should not fire in practice.

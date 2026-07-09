@@ -1381,7 +1381,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 						"description":{"type":"string","description":"Detailed, well-structured description using markdown formatting. Use ## for section headers, - for bullet points, 1) for numbered steps, **bold** for key terms, and backticks for code references. Organize into clear sections like Context, Scope, Test Plan, Acceptance Criteria, References, etc."},
 						"issue_type":{"type":"string","description":"Issue type: 'Task', 'Bug', 'Story', 'Epic', etc. Default: 'Task'."},
 						"labels":{"type":"array","items":{"type":"string"},"description":"Optional labels to apply to the ticket (e.g. ['qa','automated-test'])."},
-						"assignee":{"type":"string","description":"Name of the person to assign the ticket to (e.g. 'Udi', 'John Smith'). The system will search for a matching Jira user. Ignored when account_id is set."},
+						"assignee":{"type":"string","description":"Name of the person to assign the ticket to (e.g. 'Ada', 'John Smith'). The system will search for a matching Jira user. Ignored when account_id is set."},
 						"account_id":{"type":"string","description":"Jira accountId of the assignee (e.g. '712020:abc-def'). When set, skips the fuzzy name search performed for 'assignee'. Get one via resolve_jira_user."},
 						"team":{"type":"string","description":"Name of the team to assign the ticket to (e.g. 'Application', 'DevOps', 'asgard'). The system will search for a matching Jira team."},
 						"use_active_sprint":{"type":"boolean","description":"When true, drop the new ticket into the project's currently active sprint (if a scrum board with an active sprint exists). Silently skipped when no active sprint is found."},
@@ -1555,7 +1555,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 				"type":"object",
 				"properties":{
 					"email":{"type":"string","description":"The person's email address (most reliable). Use the email returned by get_jira_label_author / resolve_jira_user when available."},
-					"name":{"type":"string","description":"The person's display/real name (e.g. 'Noa Barron'). Used only as a fallback when email is missing or does not match; resolves ONLY when exactly one Slack user has that name."}
+					"name":{"type":"string","description":"The person's display/real name (e.g. 'Ada Lovelace'). Used only as a fallback when email is missing or does not match; resolves ONLY when exactly one Slack user has that name."}
 				}
 			}`),
 		},
@@ -2092,11 +2092,11 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 					Type: "function",
 					Function: llm.ToolFunction{
 						Name:        ToolFreshdeskSearchTickets,
-						Description: "Search Freshdesk tickets using the Freshdesk filter query syntax, e.g. \"priority:4 AND status:2\" for urgent open tickets, or \"agent_id:123\" or \"tag:'escalated'\". Do NOT wrap the query in quotes yourself. Returns matching tickets with status and priority.",
+						Description: "Search Freshdesk tickets using the Freshdesk filter query syntax, e.g. \"priority:4 AND status:2\" for urgent open tickets, or \"agent_id:123\" or \"tag:'escalated'\". Do NOT wrap the query in quotes yourself. ONLY these fields are valid: status, priority, type, tag, agent_id, group_id, company_id, created_at, updated_at, due_by, fr_due_by (plus custom fields as cf_<name>). Free-text search and fields like 'company', 'subject', 'description', 'email' or 'name' are NOT supported and return HTTP 400 — do not guess them. To scope to a customer/company you need its numeric company_id (query 'company_id:<id>'); to find tickets from one person use freshdesk_list_tickets with their exact requester email instead. Returns matching tickets with status and priority.",
 						Parameters: json.RawMessage(`{
 							"type":"object",
 							"properties":{
-								"query":{"type":"string","description":"Freshdesk filter query, e.g. 'priority:4 AND status:2'. Supported fields include status, priority, type, tag, agent_id, group_id, created_at, updated_at, due_by."}
+								"query":{"type":"string","description":"Freshdesk filter query, e.g. 'priority:4 AND status:2' or 'company_id:1234'. Valid fields ONLY: status, priority, type, tag, agent_id, group_id, company_id, created_at, updated_at, due_by, fr_due_by, cf_<custom>. No free-text; no 'company'/'subject'/'email'/'name' fields."}
 							},
 							"required":["query"]
 						}`),

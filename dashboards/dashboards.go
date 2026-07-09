@@ -21,6 +21,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -39,6 +40,19 @@ const (
 	MaxSyncInterval = 24 * time.Hour
 	// DefaultSyncInterval is used when the caller omits or provides an invalid value.
 	DefaultSyncInterval = 5 * time.Minute
+
+	// KindPrompt marks a prompt-driven dashboard. Instead of a fixed list of
+	// deterministic Sources, a prompt dashboard owns a natural-language Prompt
+	// that is run through the owning agent's LLM tool-loop — like a workflow —
+	// and renders the model's Markdown output.
+	//
+	// A prompt dashboard descriptor synced from GitOps is a TEMPLATE. When its
+	// Prompt contains {{VAR}} placeholders, the template is not rendered itself;
+	// the UI shows a form (one field per detected input) and each submission
+	// renders a per-input INSTANCE (TemplateID set, Inputs populated). A prompt
+	// dashboard with NO placeholders is self-contained and renders in place. Both
+	// instances and placeholder-free templates auto-refresh on their sync ticker.
+	KindPrompt = "prompt"
 )
 
 // DataSource is a single read-only query executed on each sync.
@@ -66,9 +80,9 @@ type Dashboard struct {
 	Name        string `json:"name"`
 	ShortName   string `json:"short_name"`
 	Description string `json:"description,omitempty"`
-	// Kind distinguishes a plain sources dashboard (empty / "sources") from an
-	// account-health dashboard ("account"). The HTML viewer switches layout based
-	// on this field.
+	// Kind distinguishes a plain sources dashboard (empty / "sources") from a
+	// prompt-driven dashboard (KindPrompt). The HTML viewer switches layout
+	// based on this field.
 	Kind         string                  `json:"kind,omitempty"`
 	SyncInterval string                  `json:"sync_interval"`
 	Sources      []DataSource            `json:"sources"`
@@ -77,35 +91,26 @@ type Dashboard struct {
 	LastSync     string                  `json:"last_sync,omitempty"`
 	LastError    string                  `json:"last_error,omitempty"`
 	Data         map[string]SourceResult `json:"data,omitempty"`
-	// Account is populated for Kind=="account" dashboards and drives the health
-	// summary panel (score badge, risks, actions, signal bars).
-	Account *AccountSummary `json:"account,omitempty"`
+	// Prompt is the natural-language instruction for Kind==KindPrompt
+	// dashboards. It may contain {{VAR}} placeholders (declared inputs)
+	// substituted at render time. Ignored for sources dashboards.
+	Prompt string `json:"prompt,omitempty"`
+	// TemplateID is set on a rendered INSTANCE of a prompt template and points
+	// back to the template's ID. Empty on the template itself.
+	TemplateID string `json:"template_id,omitempty"`
+	// Inputs holds the resolved {{VAR}} values for a rendered instance
+	// (var name -> value). Empty on a template.
+	Inputs map[string]string `json:"inputs,omitempty"`
+	// Markdown holds the model's rendered report for a prompt-dashboard
+	// instance (or a placeholder-free prompt dashboard). The HTML viewer
+	// renders it when Kind==KindPrompt.
+	Markdown string `json:"markdown,omitempty"`
 	// Source identifies how the dashboard was created. "" / "ui" =
 	// interactive; "gitops" = managed by the GitOps poller.
 	Source string `json:"source,omitempty"`
 	// SourceRef is an informational pointer to the upstream definition
 	// for non-ui sources (e.g. "<owner>/<repo>@<branch>:<path>").
 	SourceRef string `json:"source_ref,omitempty"`
-}
-
-// AccountSummary captures the health-score output for an account dashboard.
-type AccountSummary struct {
-	AccountName string   `json:"account_name"`
-	AccountID   string   `json:"account_id,omitempty"`
-	Score       int      `json:"score"`
-	Band        string   `json:"band"` // green | yellow | orange | red
-	Risks       []string `json:"risks,omitempty"`
-	Actions     []string `json:"actions,omitempty"`
-	Signals     []Signal `json:"signals,omitempty"`
-	GeneratedAt string   `json:"generated_at"`
-}
-
-// Signal is one row of the health breakdown.
-type Signal struct {
-	Name    string   `json:"name"`
-	Weight  int      `json:"weight"`
-	Score   int      `json:"score"`
-	Reasons []string `json:"reasons,omitempty"`
 }
 
 // ViewURL returns the path to the HTML view for this dashboard.
@@ -131,14 +136,13 @@ type Executor interface {
 	Execute(ctx context.Context, src DataSource) (any, error)
 }
 
-// AccountRebuilder is an optional Executor extension for Kind="account"
-// dashboards. Account dashboards are built via a dedicated fan-out
-// (see BuildAccountDashboard) and their Sources carry no Args — the generic
-// per-source Execute path would fail with "requires args.X" on every sync.
-// When the Executor implements this interface, syncOne routes account
-// dashboards through RebuildAccount instead of iterating Sources.
-type AccountRebuilder interface {
-	RebuildAccount(ctx context.Context, d *Dashboard) (*Dashboard, error)
+// PromptRenderer runs a fully-substituted prompt through the owning agent's
+// LLM tool-loop and returns the Markdown report. It is implemented outside
+// this package (in main, over the router map) because rendering needs the
+// full agent tool-loop, and installed post-construction via SetPromptRenderer
+// (mirrors how the workflows registry receives its Executor).
+type PromptRenderer interface {
+	RenderPrompt(ctx context.Context, agent, dashboardID, dashboardName, prompt string) (string, error)
 }
 
 // runner owns the goroutine driving one dashboard's sync loop.
@@ -152,6 +156,7 @@ type Registry struct {
 	mu       sync.RWMutex
 	dir      string
 	executor Executor
+	renderer PromptRenderer
 	items    map[string]*Dashboard // key: agent/id
 	runners  map[string]*runner    // key: agent/id
 }
@@ -175,6 +180,15 @@ func New(dir string, exec Executor) (*Registry, error) {
 
 // Dir returns the root directory managed by the registry.
 func (r *Registry) Dir() string { return r.dir }
+
+// SetPromptRenderer installs the prompt renderer post-construction. It is
+// wired after the router map is built (which depends on the registry), so a
+// prompt dashboard loaded at boot only renders once this is set.
+func (r *Registry) SetPromptRenderer(pr PromptRenderer) {
+	r.mu.Lock()
+	r.renderer = pr
+	r.mu.Unlock()
+}
 
 func key(agent, id string) string { return agent + "/" + id }
 
@@ -411,6 +425,7 @@ type UpsertSpec struct {
 	Kind         string
 	SyncInterval string
 	Sources      []DataSource
+	Prompt       string // required when Kind==KindPrompt
 	CreatedBy    string // applied only on first create
 	Source       string
 	SourceRef    string
@@ -430,7 +445,11 @@ func (r *Registry) UpsertFromSpec(ctx context.Context, spec UpsertSpec) (d *Dash
 	if strings.TrimSpace(spec.Name) == "" {
 		return nil, false, fmt.Errorf("dashboard name is required")
 	}
-	if len(spec.Sources) == 0 {
+	if spec.Kind == KindPrompt {
+		if strings.TrimSpace(spec.Prompt) == "" {
+			return nil, false, fmt.Errorf("prompt dashboard requires a prompt")
+		}
+	} else if len(spec.Sources) == 0 {
 		return nil, false, fmt.Errorf("at least one source is required")
 	}
 	interval := strings.TrimSpace(spec.SyncInterval)
@@ -458,6 +477,7 @@ func (r *Registry) UpsertFromSpec(ctx context.Context, spec UpsertSpec) (d *Dash
 			Kind:         spec.Kind,
 			SyncInterval: interval,
 			Sources:      spec.Sources,
+			Prompt:       spec.Prompt,
 			CreatedBy:    spec.CreatedBy,
 			CreatedAt:    time.Now().UTC().Format(time.RFC3339),
 			Source:       spec.Source,
@@ -488,6 +508,7 @@ func (r *Registry) UpsertFromSpec(ctx context.Context, spec UpsertSpec) (d *Dash
 	updated.Kind = spec.Kind
 	updated.SyncInterval = interval
 	updated.Sources = append([]DataSource(nil), spec.Sources...)
+	updated.Prompt = spec.Prompt
 	updated.Source = spec.Source
 	updated.SourceRef = spec.SourceRef
 
@@ -524,8 +545,8 @@ func (r *Registry) ListBySource(src string) []*Dashboard {
 // no-op reconciles do not bounce the runner or rewrite the descriptor.
 func upsertFingerprint(spec UpsertSpec, interval, shortName string) string {
 	type fp struct {
-		Name, ShortName, Description, Kind, SyncInterval, Source, SourceRef string
-		Sources                                                             []DataSource
+		Name, ShortName, Description, Kind, SyncInterval, Source, SourceRef, Prompt string
+		Sources                                                                     []DataSource
 	}
 	body, _ := json.Marshal(fp{
 		Name:         spec.Name,
@@ -535,6 +556,7 @@ func upsertFingerprint(spec UpsertSpec, interval, shortName string) string {
 		SyncInterval: interval,
 		Source:       spec.Source,
 		SourceRef:    spec.SourceRef,
+		Prompt:       spec.Prompt,
 		Sources:      spec.Sources,
 	})
 	return string(body)
@@ -550,6 +572,7 @@ func specFromDashboard(d *Dashboard) UpsertSpec {
 		Kind:         d.Kind,
 		SyncInterval: d.SyncInterval,
 		Sources:      d.Sources,
+		Prompt:       d.Prompt,
 		CreatedBy:    d.CreatedBy,
 		Source:       d.Source,
 		SourceRef:    d.SourceRef,
@@ -605,40 +628,11 @@ func (r *Registry) syncOne(ctx context.Context, agent, id string) {
 	// Work on a copy so concurrent readers see a stable snapshot.
 	d := *orig
 
-	// Account dashboards have their own fan-out + health scoring — their
-	// Sources carry no Args, so running them through the generic executor
-	// would just yield "requires args.X" on every sync. Delegate to the
-	// rebuilder which re-resolves the account and recomputes the score.
-	if d.Kind == "account" {
-		if rb, ok := r.executor.(AccountRebuilder); ok {
-			refreshed, err := rb.RebuildAccount(ctx, &d)
-			if err != nil {
-				d.LastError = err.Error()
-				d.LastSync = time.Now().UTC().Format(time.RFC3339)
-				r.mu.Lock()
-				r.items[key(agent, id)] = &d
-				r.mu.Unlock()
-				if perr := r.persist(&d); perr != nil {
-					log.Printf("[dashboards] persist %s/%s failed: %v", agent, id, perr)
-				}
-				return
-			}
-			// Preserve stable identity fields across rebuilds.
-			refreshed.ID = d.ID
-			refreshed.Agent = d.Agent
-			refreshed.ShortName = d.ShortName
-			refreshed.CreatedBy = d.CreatedBy
-			refreshed.CreatedAt = d.CreatedAt
-			refreshed.SyncInterval = d.SyncInterval
-			refreshed.LastError = ""
-			r.mu.Lock()
-			r.items[key(agent, id)] = refreshed
-			r.mu.Unlock()
-			if err := r.persist(refreshed); err != nil {
-				log.Printf("[dashboards] persist %s/%s failed: %v", agent, id, err)
-			}
-			return
-		}
+	// Prompt-driven dashboards render through the LLM tool-loop, not the
+	// source executor.
+	if d.Kind == KindPrompt {
+		r.syncPrompt(ctx, agent, id, &d)
+		return
 	}
 
 	data := make(map[string]SourceResult, len(d.Sources))
@@ -699,3 +693,201 @@ func readFile(path string) (*Dashboard, error) {
 func newID() (string, error) { return store.NewID() }
 
 func slugify(s string) string { return store.Slugify(s, "dashboard") }
+
+// promptInputRe matches a {{VAR}} placeholder. Names are [A-Za-z0-9_].
+var promptInputRe = regexp.MustCompile(`\{\{\s*([A-Za-z0-9_]+)\s*\}\}`)
+
+// PromptInputs returns the distinct {{VAR}} placeholder names in a prompt, in
+// first-seen order. Case-insensitive dedupe (TENANT and tenant are one input),
+// preserving the first spelling seen.
+func PromptInputs(prompt string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, m := range promptInputRe.FindAllStringSubmatch(prompt, -1) {
+		name := m[1]
+		key := strings.ToUpper(name)
+		if !seen[key] {
+			seen[key] = true
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
+// SubstitutePromptInputs replaces every {{VAR}} in prompt with the matching
+// value from inputs (case-insensitive on the name). Unmatched placeholders are
+// left untouched.
+func SubstitutePromptInputs(prompt string, inputs map[string]string) string {
+	if len(inputs) == 0 {
+		return prompt
+	}
+	return promptInputRe.ReplaceAllStringFunc(prompt, func(tok string) string {
+		name := promptInputRe.FindStringSubmatch(tok)[1]
+		for k, v := range inputs {
+			if strings.EqualFold(k, name) {
+				return v
+			}
+		}
+		return tok
+	})
+}
+
+// InstanceSlug builds the id suffix for a rendered instance from its input
+// values (sorted by key for determinism). Falls back to "default" when there
+// are no inputs.
+func InstanceSlug(inputs map[string]string) string {
+	if len(inputs) == 0 {
+		return "default"
+	}
+	keys := make([]string, 0, len(inputs))
+	for k := range inputs {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		parts = append(parts, store.Slugify(inputs[k], "v"))
+	}
+	return strings.Join(parts, "-")
+}
+
+// buildPromptInstance builds a rendered-instance shell for a prompt template
+// with the given input values. Markdown is empty — it is populated by the
+// first sync. The ID is slug-derived so re-rendering the same inputs
+// overwrites the same instance.
+func buildPromptInstance(tmpl *Dashboard, inputs map[string]string, createdBy string) *Dashboard {
+	now := time.Now().UTC().Format(time.RFC3339)
+	label := instanceLabel(inputs)
+	name := tmpl.Name
+	if label != "" {
+		name = tmpl.Name + " — " + label
+	}
+	inst := &Dashboard{
+		ID:           tmpl.ID + "-" + InstanceSlug(inputs),
+		Agent:        tmpl.Agent,
+		Name:         name,
+		ShortName:    tmpl.ShortName,
+		Description:  tmpl.Description,
+		Kind:         KindPrompt,
+		SyncInterval: tmpl.SyncInterval,
+		Prompt:       tmpl.Prompt, // snapshot; live template prompt preferred at render
+		TemplateID:   tmpl.ID,
+		Inputs:       inputs,
+		CreatedBy:    createdBy,
+		CreatedAt:    now,
+	}
+	if inst.SyncInterval == "" {
+		inst.SyncInterval = DefaultSyncInterval.String()
+	}
+	return inst
+}
+
+// instanceLabel renders input values as a human label (values joined by " · ").
+func instanceLabel(inputs map[string]string) string {
+	if len(inputs) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(inputs))
+	for k := range inputs {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		parts = append(parts, inputs[k])
+	}
+	return strings.Join(parts, " · ")
+}
+
+// RenderInstance creates (or overwrites) a rendered instance of the prompt
+// template templateID with the given input values, starts its refresh ticker,
+// and fires an immediate render. It returns the instance shell straight away
+// (Markdown still empty); the caller polls the instance's data.json until the
+// first render lands. This mirrors the workflow "run now" fire-and-forget flow.
+//
+// interval overrides the instance's auto-refresh cadence when non-empty and a
+// valid Go duration; otherwise the template's sync_interval is inherited.
+func (r *Registry) RenderInstance(ctx context.Context, agent, templateID string, inputs map[string]string, interval string) (*Dashboard, error) {
+	tmpl, ok := r.Get(agent, templateID)
+	if !ok {
+		return nil, fmt.Errorf("prompt dashboard %s/%s not found", agent, templateID)
+	}
+	if tmpl.Kind != KindPrompt {
+		return nil, fmt.Errorf("dashboard %s/%s is not a prompt dashboard", agent, templateID)
+	}
+	if tmpl.TemplateID != "" {
+		return nil, fmt.Errorf("dashboard %s/%s is already an instance, not a template", agent, templateID)
+	}
+	required := PromptInputs(tmpl.Prompt)
+	for _, name := range required {
+		found := false
+		for k, v := range inputs {
+			if strings.EqualFold(k, name) && strings.TrimSpace(v) != "" {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return nil, fmt.Errorf("missing value for input %q", name)
+		}
+	}
+	inst := buildPromptInstance(tmpl, inputs, tmpl.CreatedBy)
+	if s := strings.TrimSpace(interval); s != "" {
+		if _, err := time.ParseDuration(s); err == nil {
+			inst.SyncInterval = s
+		}
+	}
+	if err := r.persist(inst); err != nil {
+		return nil, err
+	}
+	r.mu.Lock()
+	r.items[key(agent, inst.ID)] = inst
+	r.mu.Unlock()
+	// runInitial=true renders immediately in the runner goroutine. Use a
+	// background parent so the render survives the HTTP request returning.
+	r.startRunner(context.Background(), inst, true)
+	log.Printf("[dashboards] render instance %s/%s of template %s", agent, inst.ID, templateID)
+	cp := *inst
+	return &cp, nil
+}
+
+// syncPrompt renders a prompt dashboard through the LLM tool-loop and persists
+// the Markdown. Templates that still have unresolved {{VAR}} placeholders are
+// skipped (they are rendered per-instance, not in place). Instances resolve
+// against the live template prompt when available, falling back to their own
+// snapshot.
+func (r *Registry) syncPrompt(ctx context.Context, agent, id string, d *Dashboard) {
+	isInstance := d.TemplateID != ""
+	prompt := d.Prompt
+	if isInstance {
+		if tmpl, ok := r.Get(agent, d.TemplateID); ok && strings.TrimSpace(tmpl.Prompt) != "" {
+			prompt = tmpl.Prompt
+		}
+		prompt = SubstitutePromptInputs(prompt, d.Inputs)
+	} else if len(PromptInputs(prompt)) > 0 {
+		// Template with declared inputs — rendered per-instance, not in place.
+		return
+	}
+
+	r.mu.RLock()
+	renderer := r.renderer
+	r.mu.RUnlock()
+	if renderer == nil {
+		return
+	}
+
+	md, err := renderer.RenderPrompt(ctx, agent, id, d.Name, prompt)
+	d.LastSync = time.Now().UTC().Format(time.RFC3339)
+	if err != nil {
+		d.LastError = err.Error()
+	} else {
+		d.Markdown = strings.TrimSpace(md)
+		d.LastError = ""
+	}
+	r.mu.Lock()
+	r.items[key(agent, id)] = d
+	r.mu.Unlock()
+	if perr := r.persist(d); perr != nil {
+		log.Printf("[dashboards] persist %s/%s failed: %v", agent, id, perr)
+	}
+}

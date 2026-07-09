@@ -1958,6 +1958,10 @@
     function populateDashboards(list) {
       for (const k of Object.keys(AGENT_DASHBOARDS)) delete AGENT_DASHBOARDS[k];
       (list || []).forEach(d => {
+        // Rendered prompt-dashboard instances (template_id set) are reachable
+        // from their template's page — keep the agent card to templates and
+        // source dashboards so per-tenant instances don't multiply the chips.
+        if (d.template_id) return;
         if (!AGENT_DASHBOARDS[d.agent]) AGENT_DASHBOARDS[d.agent] = [];
         AGENT_DASHBOARDS[d.agent].push(d);
       });

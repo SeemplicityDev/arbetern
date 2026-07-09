@@ -341,10 +341,10 @@ httpRoute:
 
 resources:
   requests:
-    cpu: 250m
+    cpu: 500m
     memory: 1Gi
   limits:
-    cpu: "1"
+    cpu: "2"
     memory: 2Gi
 
 # Go runtime memory tuning — should be sized in relation to resources.limits.memory above.
@@ -358,15 +358,19 @@ livenessProbe:
   httpGet:
     path: /healthz
     port: http
-  initialDelaySeconds: 5
-  periodSeconds: 30
+  initialDelaySeconds: 15
+  periodSeconds: 60
+  timeoutSeconds: 5
+  failureThreshold: 5
 
 readinessProbe:
   httpGet:
     path: /healthz
     port: http
-  initialDelaySeconds: 3
-  periodSeconds: 10
+  initialDelaySeconds: 10
+  periodSeconds: 20
+  timeoutSeconds: 5
+  failureThreshold: 5
 
 autoscaling:
   enabled: false

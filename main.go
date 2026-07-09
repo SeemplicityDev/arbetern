@@ -592,6 +592,20 @@ func (e *workflowExecutor) Run(ctx context.Context, w *workflows.Workflow, promp
 	return r.RunWorkflow(ctx, w.CreatedBy, w.ID, name, w.Model, prompt)
 }
 
+// dashboardPromptRenderer implements dashboards.PromptRenderer by dispatching
+// to the owning agent's Router.RunDashboardPrompt (headless LLM tool loop).
+type dashboardPromptRenderer struct {
+	routers map[string]*commands.Router
+}
+
+func (e *dashboardPromptRenderer) RenderPrompt(ctx context.Context, agent, dashboardID, dashboardName, prompt string) (string, error) {
+	r, ok := e.routers[agent]
+	if !ok {
+		return "", fmt.Errorf("no router for agent %q", agent)
+	}
+	return r.RunDashboardPrompt(ctx, "", dashboardID, dashboardName, prompt)
+}
+
 // extractIntroLine returns the second non-empty line from an intro prompt,
 // which is typically a one-sentence description of what the agent does.
 func extractIntroLine(intro string) string {
@@ -1811,6 +1825,12 @@ func main() {
 	// tick goroutines for every workflow that was loaded from disk.
 	wfRegistry.SetExecutor(&workflowExecutor{routers: routers})
 	wfRegistry.StartAllEnabled(context.Background())
+
+	// Wire the dashboard prompt renderer now that routers are built. Prompt
+	// dashboards (and their per-input instances) render through the owning
+	// agent's LLM tool-loop; their sync tickers were started at boot but
+	// no-op until this is set.
+	dashRegistry.SetPromptRenderer(&dashboardPromptRenderer{routers: routers})
 
 	// Optional GitOps sync: reconcile remote workflow descriptors into the
 	// registry when WORKFLOWS_GITOPS_REPO is set. See docs/WORKFLOWS_GITOPS.md.

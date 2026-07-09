@@ -32,9 +32,10 @@ const flushInterval = 15 * time.Second
 
 // Source labels the entry path that produced a turn.
 const (
-	SourceSlack    = "slack"
-	SourceWorkflow = "workflow"
-	SourceChat     = "chat"
+	SourceSlack     = "slack"
+	SourceWorkflow  = "workflow"
+	SourceChat      = "chat"
+	SourceDashboard = "dashboard"
 )
 
 // Event is one billable LLM turn. Cost is derived from Model + token counts at

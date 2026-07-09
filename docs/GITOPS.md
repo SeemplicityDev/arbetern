@@ -136,7 +136,7 @@ before.
 ### Dashboards
 
 Dashboard files have the dashboards-registry shape, with runtime fields
-(`data`, `last_sync`, `last_error`, `account`) ignored on read.
+(`data`, `last_sync`, `last_error`, `markdown`) ignored on read.
 
 ```json
 {
@@ -162,9 +162,20 @@ Dashboard files have the dashboards-registry shape, with runtime fields
 | `name`          | yes         | Human-readable title.                                                              |
 | `short_name`    | optional    | Slugified from `name` when omitted.                                                |
 | `description`   | optional    | One-line description for the UI.                                                   |
-| `kind`          | optional    | `"sources"` (default) or `"account"` for account-health dashboards.                |
-| `sync_interval` | optional    | Go duration (`5m`, `15m`, `1h`, …). Defaults to the registry default.              |
-| `sources`       | yes         | Array of `{name, type, args}` data sources to refresh on every sync.               |
+| `kind`          | optional    | `"sources"` (default) or `"prompt"` for a prompt-driven dashboard.                 |
+| `sync_interval` | optional    | Go duration (`5m`, `15m`, `1h`, …). For `prompt` instances this is the auto-refresh cadence. Defaults to the registry default. |
+| `sources`       | yes\*       | `sources` dashboards only: array of `{name, type, args}` refreshed on every sync.  |
+| `prompt`        | yes\*       | `prompt` dashboards only: the report prompt. `\*` `sources` OR (`prompt`/`prompt_path`) is required for its kind. |
+| `prompt_path`   | optional    | `prompt` dashboards: load the prompt from a companion file (relative to the descriptor). Wins over `prompt`. |
+
+**Prompt dashboards (`kind: "prompt"`)** are defined like a workflow. Any
+`{{VAR}}` placeholder in the `prompt` (e.g. `{{TENANT}}`) becomes a declared
+**input**. The GitOps descriptor is a *template*: it is not rendered itself.
+From the dashboard's page in the management UI a user fills in the inputs and
+presses **▶ render**, which substitutes the values, runs the prompt through the
+owning agent's LLM tool-loop, and stores the Markdown output as a per-input
+**instance** under `/<agent>/dashboard/<id>-<slug>`. Instances (and
+placeholder-free prompt dashboards) **auto-refresh** on their `sync_interval`.
 
 ## Reconcile semantics
 

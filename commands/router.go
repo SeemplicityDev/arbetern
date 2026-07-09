@@ -141,16 +141,6 @@ func (r *Router) Handle(channelID, userID, text, responseURL string) {
 		sess = r.sessions.Lookup(channelID, auditTS)
 	}
 
-	// First-class account dashboard subcommand: `dashboard <account> [--refresh]`.
-	// Skips the LLM, runs a deterministic pipeline, and posts a Block Kit reply.
-	// Gated on having the registry + Salesforce configured — resolving the
-	// account by name requires Salesforce.
-	if account, refresh, ok := parseDashboardSubcommand(text); ok && r.dashboards != nil && r.sfClient != nil && r.sfClient.Ready() {
-		log.Printf("[agent=%s user=%s channel=%s] routed to: account dashboard", r.agentID, userID, channelID)
-		r.handleAccountDashboard(channelID, userID, responseURL, auditTS, account, refresh)
-		return
-	}
-
 	lower := strings.ToLower(text)
 
 	switch {
@@ -376,6 +366,30 @@ func (r *Router) RunWorkflow(ctx context.Context, userID, workflowID, workflowNa
 	h.billingWorkflowID = workflowID
 	h.billingWorkflowName = workflowName
 	h.modelOverride = model
+	return h.ExecuteHeadless(ctx, userID, prompt)
+}
+
+// RunDashboardPrompt renders a prompt-driven dashboard: it runs a fully
+// substituted prompt through this agent's headless LLM tool-loop and returns
+// the model's final Markdown report. It mirrors RunWorkflow (no Slack thread,
+// no requesting user identity injected into the model) but is billed under the
+// dashboard source and does not itself post to Slack — the caller persists the
+// Markdown to the dashboard registry and posts the summary.
+func (r *Router) RunDashboardPrompt(ctx context.Context, userID, dashboardID, dashboardName, prompt string) (string, error) {
+	if strings.TrimSpace(prompt) == "" {
+		return "", fmt.Errorf("dashboard prompt is empty")
+	}
+	// Same identity guard as RunWorkflow: a dashboard render has no requesting
+	// user, so no Slack ID is placed in the model-visible user context.
+	userContext := fmt.Sprintf("Dashboard render (agent=%s). There is NO interactive or requesting user — this was triggered to build a read-only summary dashboard, not by a person speaking. "+
+		"The words \"me\", \"my\", \"I\", and \"mine\" have no referent here; do NOT attribute anything to a current or session user. "+
+		"Resolve every person named in output from the underlying work item's own data, never from the run or requesting identity. "+
+		"Produce the requested report and RETURN it as your final message — do NOT call post_slack_message or any mutating tool.", r.agentID)
+	h := r.newGeneralHandler(userContext, nil)
+	h.headless = true
+	h.billingSource = billing.SourceDashboard
+	h.billingWorkflowID = dashboardID
+	h.billingWorkflowName = dashboardName
 	return h.ExecuteHeadless(ctx, userID, prompt)
 }
 

@@ -502,48 +502,36 @@ get a single list of every active dashboard across every agent, with clickable v
 links. No agent slash-command or LLM round-trip is involved — it reads straight from
 the registry.
 
-## Account Health Dashboards (`/<agent> dashboard <name>`)
+## Prompt-Driven Dashboards (templates + inputs)
 
-In addition to LLM-composed source dashboards, any agent with Salesforce configured
-gets a **first-class `dashboard` subcommand** that runs a fixed, deterministic
-pipeline and replies with a Block Kit summary + a link to the full HTML view:
+In addition to LLM-composed source dashboards, an agent can own a **prompt
+dashboard template** — defined like a workflow, with a natural-language prompt
+describing how the report is assembled. Any `{{VAR}}` placeholder in the prompt
+becomes a declared **input** (e.g. `{{TENANT}}`). The template is registered via
+GitOps at `arbetern/dashboards/<agent>/<id>.json` with `kind: "prompt"`.
 
-```
-/pulse dashboard Sprout Social
-/pulse dashboard Sprout Social --refresh
-```
+Rendering is driven from the management UI (there is no slash command):
 
-Pipeline on each invocation:
+1. Open the template's dashboard page. It shows a **Render** form — one field per
+   detected `{{VAR}}` input, plus an optional refresh interval — and a list of
+   previously rendered instances.
+2. Fill in the inputs and press **▶ render**. The server substitutes the values,
+   runs the prompt through the agent's headless LLM tool-loop (same tools as a
+   normal command — Jira, Freshdesk, …), and stores the model's **Markdown**
+   report as a per-input **instance** at a slug-stable URL
+   (`/<agent>/dashboard/<template-id>-<slug>`).
+3. The instance page renders the Markdown (headings, tables, lists, links) and
+   **auto-refreshes** on its schedule (the template's `sync_interval`, or the
+   per-instance override entered in the form), re-running the prompt each tick.
 
-1. **Resolve** the account via fuzzy Salesforce `LIKE` search (exact match > prefix > contains).
-2. **Fan out in parallel** to every configured integration — Salesforce opps, Jira
-   open tickets mentioning the account, Chorus engagements (last 45d, filtered by
-   account email domain when derivable from `Account.Website`), Datadog monitors
-   tagged for the account or currently alerting.
-3. **Compute a weighted health score** (0–100) from the signals below.
-4. **Persist** a Kind=`account` dashboard under a slug-stable URL
-   (`/<agent>/dashboard/acct-<slug>`) and cache the snapshot at
-   `<DASHBOARDS_DIR>/_cache/account/<slug>.json`.
-5. **Reply** with a Slack Block Kit summary: score badge, top 3 risks, top 3 action
-   items, signal breakdown, and an **Open full dashboard →** button.
+Rendering is fire-and-forget (like the workflow **run now** button): the render
+endpoint returns immediately and the instance page polls until the first report
+lands. A prompt dashboard with **no** `{{VAR}}` placeholders is self-contained
+and renders in place on its schedule.
 
-**Caching:** the first request of the day fetches fresh data and caches it for 24h.
-Subsequent requests serve from cache unless `--refresh` (or `-r`) is passed.
-
-**Score bands:** `80+` green · `60–79` yellow · `40–59` orange · `<40` red.
-
-**Signal weights** (sum to 100):
-
-| Signal | Weight | Key penalties |
-|---|---|---|
-| Ticket Health | 25 | Open P0/P1 (-15 ea), stale >14d (-10 ea), unassigned (-5 ea) |
-| Infra Stability | 20 | Monitor in ALERT (-20 ea), WARN (-10 ea) |
-| Engagement (Chorus) | 20 | No calls 30d (-20), competitor mentions (-10 ea), overdue items (-5 ea) |
-| Comms (Slack/Email) | 15 | *Not yet instrumented — full credit in v1.* |
-| License & Commercial | 20 | Renewal <60d with no open opp (-30) |
-
-The HTML view renders a bar chart of signal score-vs-weight via Chart.js (loaded
-from CDN), a coloured score badge, and the full source-panel tables underneath.
+Because the report is produced by the LLM, its exact structure and the
+integrations it consults live entirely in the external prompt — no per-tenant
+logic is baked into the binary.
 
 ## Example `create_dashboard` Prompts per Agent
 

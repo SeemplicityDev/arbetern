@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"strings"
 
 	"github.com/justmike1/arbetern/dashboards"
@@ -54,7 +55,12 @@ type fileSpec struct {
 	Kind         string                  `json:"kind"`
 	SyncInterval string                  `json:"sync_interval"`
 	Sources      []dashboards.DataSource `json:"sources"`
-	CreatedBy    string                  `json:"created_by"`
+	Prompt       string                  `json:"prompt"`
+	// PromptPath, when set, loads the prompt from a companion file via the
+	// gitops fetcher (mirrors the workflow descriptor convention). Used by
+	// kind:"prompt" dashboards.
+	PromptPath string `json:"prompt_path"`
+	CreatedBy  string `json:"created_by"`
 }
 
 func (b *backend) Parse(ctx context.Context, dirAgent, repoPath string, body []byte, fetch core.FetchFunc) (string, string, core.UpsertFunc, error) {
@@ -66,6 +72,16 @@ func (b *backend) Parse(ctx context.Context, dirAgent, repoPath string, body []b
 	if strings.TrimSpace(spec.ID) == "" {
 		return "", "", nil, nil
 	}
+	if pp := strings.TrimSpace(spec.PromptPath); pp != "" {
+		if strings.TrimSpace(spec.Prompt) != "" {
+			log.Printf("[gitopssync] %s: both 'prompt' and 'prompt_path' set — prompt_path wins", repoPath)
+		}
+		content, err := fetch(ctx, pp)
+		if err != nil {
+			return "", "", nil, fmt.Errorf("resolve prompt_path %q: %w", pp, err)
+		}
+		spec.Prompt = content
+	}
 	upsert := func(ctx context.Context, sourceRef string) (bool, error) {
 		_, changed, err := b.reg.UpsertFromSpec(ctx, dashboards.UpsertSpec{
 			ID:           spec.ID,
@@ -76,6 +92,7 @@ func (b *backend) Parse(ctx context.Context, dirAgent, repoPath string, body []b
 			Kind:         spec.Kind,
 			SyncInterval: spec.SyncInterval,
 			Sources:      spec.Sources,
+			Prompt:       spec.Prompt,
 			CreatedBy:    spec.CreatedBy,
 			Source:       SourceMarker,
 			SourceRef:    sourceRef,

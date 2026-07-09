@@ -163,10 +163,13 @@ type chatMessagesResponse struct {
 
 // CRMSearchResult is one hit from the CRM global search.
 type CRMSearchResult struct {
-	ID    int64  `json:"id"`
-	Name  string `json:"name"`
-	Type  string `json:"type"`
-	Email string `json:"email"`
+	// ID is a flexString because Freshworks returns it as a JSON number for
+	// some entity types (contact, deal) and a JSON string for others
+	// (sales_account) — decoding into int64 previously failed the whole search.
+	ID    flexString `json:"id"`
+	Name  string     `json:"name"`
+	Type  string     `json:"type"`
+	Email string     `json:"email"`
 }
 
 // CRMContact is a Freshworks CRM contact (subset of fields).
