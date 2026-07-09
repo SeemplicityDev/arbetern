@@ -250,6 +250,24 @@ func (d *DeskClient) SearchTickets(ctx context.Context, query string) ([]Ticket,
 	return resp.Results, resp.Total, nil
 }
 
+// ListTicketFields returns the Freshdesk ticket fields (system + custom). Custom
+// fields (Default=false) carry a cf_-prefixed Name usable in a ticket search as
+// `cf_<name>:'value'` — this is how to scope tickets by a custom attribute such
+// as "Customer Name".
+func (d *DeskClient) ListTicketFields(ctx context.Context) ([]TicketField, error) {
+	if !d.Ready() {
+		return nil, fmt.Errorf("freshdesk not configured")
+	}
+	var fields []TicketField
+	if err := d.get(ctx, "/api/v2/admin/ticket_fields", nil, &fields); err != nil {
+		// Older/limited API scopes expose the non-admin path; fall back once.
+		if err2 := d.get(ctx, "/api/v2/ticket_fields", nil, &fields); err2 != nil {
+			return nil, err
+		}
+	}
+	return fields, nil
+}
+
 // ChatClient talks to the Freshchat v2 API. Auth is a Bearer JWT.
 type ChatClient struct {
 	baseURL    string // includes the trailing /v2

@@ -35,6 +35,7 @@ work.
 | `freshdesk_get_ticket` | Freshdesk | Get one ticket by ID, optionally with its conversation thread |
 | `freshdesk_search_tickets` | Freshdesk | Search tickets with the Freshdesk filter query syntax (e.g. `priority:4 AND status:2`, `agent_id:123`, `company_id:99`). Valid fields only: status, priority, type, tag, agent_id, group_id, company_id, created_at, updated_at, due_by, fr_due_by, cf_<custom> — there is no free-text/`company`/`subject` search |
 | `freshdesk_find_agent` | Freshdesk | Resolve an agent's `agent_id` by email or name (for `agent_id:<id>` searches of assigned tickets) |
+| `freshdesk_list_ticket_fields` | Freshdesk | List ticket fields (system + custom); use it to find a custom attribute's exact `cf_<name>` key (e.g. "Customer Name" → `cf_customer_name`) to scope a search by customer |
 | `freshchat_get_conversation` | Freshchat | Get a conversation header by conversation ID |
 | `freshchat_get_conversation_messages` | Freshchat | Get the messages in a conversation |
 | `freshworks_crm_search` | CRM | Search contacts, deals and accounts by term |

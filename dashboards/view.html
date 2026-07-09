@@ -343,11 +343,18 @@
     return s;
   }
   function renderMarkdown(md){
-    const src = escapeHtml(String(md || ''));
+    let src = escapeHtml(String(md || ''));
+    // Normalize Slack-style links <url|label> and <url> to Markdown [label](url)
+    // BEFORE table parsing, so the '|' inside a link is not mistaken for a table
+    // column delimiter and the link still renders (the model sometimes emits
+    // Slack mrkdwn links even though we ask for Markdown).
+    src = src.replace(/&lt;(https?:\/\/[^|\s&<>]+)\|([^&<>]+)&gt;/g, '[$2]($1)');
+    src = src.replace(/&lt;(https?:\/\/[^|\s&<>]+)&gt;/g, '[$1]($1)');
     const lines = src.split('\n');
     let html = '', i = 0;
     const isTableSep = s => /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)+\|?\s*$/.test(s);
-    const splitRow = s => s.replace(/^\s*\|/, '').replace(/\|\s*$/, '').split('|').map(c => c.trim());
+    // Split a table row on unescaped '|' only, then unescape '\|' inside cells.
+    const splitRow = s => s.replace(/^\s*\|/, '').replace(/\|\s*$/, '').split(/(?<!\\)\|/).map(c => c.trim().replace(/\\\|/g, '|'));
     while (i < lines.length){
       const line = lines[i];
       if (/^\s*```/.test(line)){                       // fenced code block
@@ -367,7 +374,17 @@
         let t = '<table class="md-table"><thead><tr>';
         head.forEach(c => t += '<th>'+mdInline(c)+'</th>');
         t += '</tr></thead><tbody>';
-        rows.forEach(r => { t += '<tr>'; for (let k=0;k<head.length;k++) t += '<td>'+mdInline(r[k]||'')+'</td>'; t += '</tr>'; });
+        rows.forEach(r => {
+          t += '<tr>';
+          const n = head.length;
+          for (let k=0;k<n;k++){
+            // If a row has more cells than the header (an unescaped '|' inside a
+            // value), fold the overflow into the last column rather than dropping it.
+            const val = (k === n-1 && r.length > n) ? r.slice(k).join(' | ') : (r[k] || '');
+            t += '<td>'+mdInline(val)+'</td>';
+          }
+          t += '</tr>';
+        });
         t += '</tbody></table>'; html += t; continue;
       }
       if (/^\s*>\s?/.test(line)){                        // blockquote

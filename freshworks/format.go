@@ -128,6 +128,46 @@ func FormatAgents(agents []Agent) string {
 	return sb.String()
 }
 
+// FormatTicketFields renders the Freshdesk ticket fields, separating custom
+// fields (queryable as cf_<name>:'value') from built-in system fields, so the
+// model can pick the right key to scope tickets by a custom attribute.
+func FormatTicketFields(fields []TicketField) string {
+	var custom, system []TicketField
+	for _, f := range fields {
+		if f.Default {
+			system = append(system, f)
+		} else {
+			custom = append(custom, f)
+		}
+	}
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "*Freshdesk ticket fields — %d custom, %d system*\n", len(custom), len(system))
+	if len(custom) == 0 {
+		sb.WriteString("_No custom fields — scope by company_id or requester email instead._\n")
+	} else {
+		sb.WriteString("*Custom fields* (query as `cf_<name>:'value'` in freshdesk_search_tickets):\n")
+		for _, f := range custom {
+			label := strings.TrimSpace(f.Label)
+			if label == "" {
+				label = f.Name
+			}
+			fmt.Fprintf(&sb, "• `%s` — %s", f.Name, label)
+			if f.Type != "" {
+				fmt.Fprintf(&sb, " (%s)", f.Type)
+			}
+			sb.WriteString("\n")
+		}
+	}
+	if len(system) > 0 {
+		names := make([]string, 0, len(system))
+		for _, f := range system {
+			names = append(names, f.Name)
+		}
+		fmt.Fprintf(&sb, "_System fields: %s._\n", strings.Join(names, ", "))
+	}
+	return sb.String()
+}
+
 func formatConversations(convs []TicketConversation) string {
 	var sb strings.Builder
 	limit := len(convs)

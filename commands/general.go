@@ -2092,11 +2092,11 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 					Type: "function",
 					Function: llm.ToolFunction{
 						Name:        ToolFreshdeskSearchTickets,
-						Description: "Search Freshdesk tickets using the Freshdesk filter query syntax, e.g. \"priority:4 AND status:2\" for urgent open tickets, or \"agent_id:123\" or \"tag:'escalated'\". Do NOT wrap the query in quotes yourself. ONLY these fields are valid: status, priority, type, tag, agent_id, group_id, company_id, created_at, updated_at, due_by, fr_due_by (plus custom fields as cf_<name>). Free-text search and fields like 'company', 'subject', 'description', 'email' or 'name' are NOT supported and return HTTP 400 — do not guess them. To scope to a customer/company you need its numeric company_id (query 'company_id:<id>'); to find tickets from one person use freshdesk_list_tickets with their exact requester email instead. Returns matching tickets with status and priority.",
+						Description: "Search Freshdesk tickets using the Freshdesk filter query syntax, e.g. \"priority:4 AND status:2\" for urgent open tickets, or \"agent_id:123\" or \"tag:'escalated'\". Do NOT wrap the query in quotes yourself. ONLY these fields are valid: status, priority, type, tag, agent_id, group_id, company_id, created_at, updated_at, due_by, fr_due_by, plus CUSTOM fields as cf_<name>. Free-text search and fields like 'company', 'subject', 'description', 'email' or 'name' are NOT supported and return HTTP 400 — do not guess them. To scope tickets to a customer, the reliable way is a customer custom field: call freshdesk_list_ticket_fields to get its exact cf_<name> (e.g. a 'Customer Name' field → cf_customer_name), then query cf_<name>:'<Customer>'. Alternatively use a numeric company_id ('company_id:<id>'), or freshdesk_list_tickets with an exact requester email. Returns matching tickets with status and priority.",
 						Parameters: json.RawMessage(`{
 							"type":"object",
 							"properties":{
-								"query":{"type":"string","description":"Freshdesk filter query, e.g. 'priority:4 AND status:2' or 'company_id:1234'. Valid fields ONLY: status, priority, type, tag, agent_id, group_id, company_id, created_at, updated_at, due_by, fr_due_by, cf_<custom>. No free-text; no 'company'/'subject'/'email'/'name' fields."}
+								"query":{"type":"string","description":"Freshdesk filter query, e.g. 'priority:4 AND status:2', 'company_id:1234', or a custom-field scope like \"cf_customer_name:'Acme'\". Valid fields ONLY: status, priority, type, tag, agent_id, group_id, company_id, created_at, updated_at, due_by, fr_due_by, cf_<custom>. No free-text; no 'company'/'subject'/'email'/'name' fields."}
 							},
 							"required":["query"]
 						}`),
@@ -2114,6 +2114,14 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 								"name":{"type":"string","description":"Agent full or partial name (case-insensitive substring match). Used only when email is not provided."}
 							}
 						}`),
+					},
+				},
+				llm.Tool{
+					Type: "function",
+					Function: llm.ToolFunction{
+						Name:        ToolFreshdeskListTicketFields,
+						Description: "List Freshdesk ticket fields (system + custom). Use this to discover the exact cf_<name> key for a custom attribute (e.g. a 'Customer Name' field) so you can scope a ticket search with freshdesk_search_tickets query cf_<name>:'<value>'. Takes no arguments.",
+						Parameters:  json.RawMessage(`{"type":"object","properties":{}}`),
 					},
 				},
 			)
@@ -4937,6 +4945,17 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		}
 		log.Printf("[user=%s channel=%s] freshdesk_find_agent (matches=%d)", userID, channelID, len(agents))
 		return freshworks.FormatAgents(agents)
+
+	case ToolFreshdeskListTicketFields:
+		if h.freshworksClient == nil || !h.freshworksClient.Desk.Ready() {
+			return preconditionErrf("Error: Freshdesk integration is not connected.")
+		}
+		fields, err := h.freshworksClient.Desk.ListTicketFields(ctx)
+		if err != nil {
+			return fmt.Sprintf("Error listing Freshdesk ticket fields: %v", err)
+		}
+		log.Printf("[user=%s channel=%s] freshdesk_list_ticket_fields (count=%d)", userID, channelID, len(fields))
+		return freshworks.FormatTicketFields(fields)
 
 	case ToolFreshchatGetConversation:
 		if h.freshworksClient == nil || !h.freshworksClient.Chat.Ready() {

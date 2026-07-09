@@ -66,6 +66,18 @@ type ticketSearchResponse struct {
 	Total   int      `json:"total"`
 }
 
+// TicketField is a Freshdesk ticket field (system or custom). Custom fields have
+// Default=false and a cf_-prefixed Name that is used directly in the search /
+// filter query as cf_<name>:'value' (e.g. a "Customer Name" custom field with
+// Name "cf_customer_name" is queried as cf_customer_name:'Acme').
+type TicketField struct {
+	ID      int64  `json:"id"`
+	Name    string `json:"name"`
+	Label   string `json:"label"`
+	Type    string `json:"type"`
+	Default bool   `json:"default"` // true for built-in system fields
+}
+
 // Agent is a Freshdesk agent. The display name and email live on the nested
 // contact object.
 type Agent struct {
