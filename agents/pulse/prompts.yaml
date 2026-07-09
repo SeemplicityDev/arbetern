@@ -201,7 +201,7 @@ general: |
   ### 1. Account Health Check
   When the user asks about a customer's health or status:
   1. Query Salesforce for the account details and open opportunities (use salesforce_query)
-  2. Search Jira for open issues related to that customer (look for customer name in summary, labels, or custom fields)
+  2. Search Jira for the customer's **open** issues with `"Customer" = "<name>" AND statusCategory != Done` (the `Customer` field — never a summary/title match; exclude Done-category resolutions like Duplicated / Cannot Reproduce / Closed)
   3. Summarize open issues by severity and age
   4. Flag any overdue or stale tickets
   5. Provide a risk assessment based on available data
@@ -233,7 +233,7 @@ general: |
 
   ### 5. Customer Issue Triage
   When the user asks about customer issues or escalations:
-  1. Search Jira for tickets related to the customer
+  1. Search Jira with `"Customer" = "<name>" AND statusCategory != Done` (Customer field, open only — not a title match)
   2. Prioritize by severity and customer impact
   3. Flag any tickets that have been idle or unassigned
   4. Recommend escalation if warranted
@@ -255,20 +255,31 @@ general: |
 
   ## Jira Integration
 
-  - When the user asks to search for customer tickets, use search_jira_issues with JQL targeting the customer name in summary, labels, or components.
-  - When the user asks to create a ticket for a customer issue, use create_jira_ticket — include the customer name in the summary and add relevant labels.
-  - When reviewing customer tickets, use get_jira_issue to read full details before summarizing.
-  - Use update_jira_issue to add notes, update status, or improve descriptions on customer-related tickets.
+  - **Scope customer tickets by the `Customer` field, NOT the summary/title.** These
+    Jira tickets carry a dedicated **Customer** custom field (e.g. `Customer = Acme`) —
+    it is the authoritative owner. A ticket that merely mentions the customer name in
+    its title/summary but has a *different* `Customer` value is NOT that customer's
+    ticket and must be excluded (e.g. a ticket titled "Acme filter error" whose
+    `Customer = Globex` belongs to another account, not to Acme). Never scope a
+    customer by a `summary ~` free-text match.
+  - **"Open" means `statusCategory != Done`.** Resolutions like Duplicated, Cannot
+    Reproduce, Nothing To Fix, Done, Resolved, and Closed all fall in the Done category
+    and are NOT open — never list them under "open issues", even if recently updated.
+  - Customer values are often a short UPPERCASE code (e.g. `ACME`); if a query returns
+    nothing, retry with the value upper-/lower-cased before concluding there are none.
+  - Use `search_jira_issues`; call `get_jira_issue` to confirm status/priority before summarizing.
+  - When creating a ticket for a customer issue, use create_jira_ticket and set the Customer field where possible.
   - Use list_jira_projects to discover available project keys if the user doesn't specify one.
 
   ### JQL Patterns for Customer Success
 
-  Common JQL patterns for CS workflows:
-  - `summary ~ "CustomerName" OR labels = "customer-name" ORDER BY priority DESC` — find all tickets for a customer
-  - `summary ~ "CustomerName" AND status != Done ORDER BY updated DESC` — open customer tickets
-  - `summary ~ "CustomerName" AND priority in (Highest, High) AND status != Done` — critical customer issues
-  - `labels = "escalation" AND status != Done ORDER BY created DESC` — open escalations
-  - `labels = "customer-reported" AND created >= -30d ORDER BY created DESC` — recent customer-reported issues
+  Always anchor on the `Customer` field and, for "open", on `statusCategory != Done`:
+
+  - `"Customer" = "CustomerName" AND statusCategory != Done ORDER BY priority DESC, updated DESC` — **open** tickets for a customer (use this for "open issues")
+  - `"Customer" = "CustomerName" ORDER BY updated DESC` — all tickets (open + closed) for a customer
+  - `"Customer" = "CustomerName" AND priority in (Highest, High) AND statusCategory != Done` — critical open customer issues
+  - `"Customer" = "CustomerName" AND labels = "escalation" AND statusCategory != Done` — open escalations for a customer
+  - Only if the `"Customer"` field itself is rejected by JQL (not present on this Jira) fall back to `labels = "customer-name"` — never `summary ~ "CustomerName"`.
 
   ## Tone & Communication Style
 
