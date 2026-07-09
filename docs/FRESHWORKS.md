@@ -33,7 +33,7 @@ work.
 |---|---|---|
 | `freshdesk_list_tickets` | Freshdesk | List recent tickets (newest-updated first), optionally filtered by `updated_since` or by requester email |
 | `freshdesk_get_ticket` | Freshdesk | Get one ticket by ID, optionally with its conversation thread |
-| `freshdesk_search_tickets` | Freshdesk | Search tickets with the Freshdesk filter query syntax (e.g. `priority:4 AND status:2`, `agent_id:123`) |
+| `freshdesk_search_tickets` | Freshdesk | Search tickets with the Freshdesk filter query syntax (e.g. `priority:4 AND status:2`, `agent_id:123`, `company_id:99`). Valid fields only: status, priority, type, tag, agent_id, group_id, company_id, created_at, updated_at, due_by, fr_due_by, cf_<custom> — there is no free-text/`company`/`subject` search |
 | `freshdesk_find_agent` | Freshdesk | Resolve an agent's `agent_id` by email or name (for `agent_id:<id>` searches of assigned tickets) |
 | `freshchat_get_conversation` | Freshchat | Get a conversation header by conversation ID |
 | `freshchat_get_conversation_messages` | Freshchat | Get the messages in a conversation |

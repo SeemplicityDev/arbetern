@@ -373,8 +373,8 @@ func (r *Router) RunWorkflow(ctx context.Context, userID, workflowID, workflowNa
 // substituted prompt through this agent's headless LLM tool-loop and returns
 // the model's final Markdown report. It mirrors RunWorkflow (no Slack thread,
 // no requesting user identity injected into the model) but is billed under the
-// dashboard source and does not itself post to Slack — the caller persists the
-// Markdown to the dashboard registry and posts the summary.
+// dashboard source and does not post to Slack — the dashboards registry stores
+// the returned Markdown on the instance and the HTML view renders it.
 func (r *Router) RunDashboardPrompt(ctx context.Context, userID, dashboardID, dashboardName, prompt string) (string, error) {
 	if strings.TrimSpace(prompt) == "" {
 		return "", fmt.Errorf("dashboard prompt is empty")

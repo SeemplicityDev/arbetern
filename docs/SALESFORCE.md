@@ -1,8 +1,8 @@
 # Salesforce Integration
 
 Arbetern reads from Salesforce via the SOQL Query API, primarily to power the
-**Pulse** agent's Customer Success workflows (account health dashboards,
-opportunity tracking, renewal-signal surfacing). Authentication uses the
+**Pulse** agent's Customer Success workflows (account summaries, opportunity
+tracking, renewal-signal surfacing). Authentication uses the
 **OAuth 2.0 client credentials** flow against a Connected App — no user
 interaction, no refresh tokens, no password.
 
