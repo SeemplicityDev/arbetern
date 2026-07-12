@@ -2,11 +2,18 @@ package commands
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 
 	"github.com/justmike1/arbetern/github"
 )
+
+// ErrDuplicateOpenPR is returned by CommitAndPR when the duplicate guard
+// finds an equivalent open PR. No branch, commit, or PR was created, so
+// callers should treat it as a recoverable no-op (reuse the existing PR)
+// rather than a failed mutation.
+var ErrDuplicateOpenPR = errors.New("duplicate guard: a similar open PR already exists")
 
 // BranchManager handles the branch/commit/PR lifecycle for file modification
 // tools. It ensures that multiple file changes targeting the same repository
@@ -105,7 +112,8 @@ func (bm *BranchManager) CommitAndPR(
 		return nil, fmt.Errorf("checking for similar open pull requests: %w", err)
 	} else if existing != nil {
 		return nil, fmt.Errorf(
-			"duplicate guard: a similar open PR already exists (%s, title %q). Reuse that PR instead of opening a new one",
+			"%w (%s, title %q). Reuse that PR instead of opening a new one",
+			ErrDuplicateOpenPR,
 			existing.URL,
 			existing.Title,
 		)

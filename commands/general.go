@@ -2627,7 +2627,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 				return h.ghClient.UpdateFile(ctx, owner, args.Repo, args.Path, branch, commitMsg, []byte(updatedContent), fileSHA)
 			})
 		if err != nil {
-			return fmt.Sprintf("Error: %v", err)
+			return commitErrResult(err)
 		}
 		log.Printf("[user=%s channel=%s] modify_file: PR %s (new=%t)", userID, channelID, result.PrURL, result.IsNew)
 		if result.IsNew {
@@ -2661,7 +2661,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 				return h.ghClient.CreateFile(ctx, owner, args.Repo, args.Path, branch, commitMsg, []byte(args.Content))
 			})
 		if err != nil {
-			return fmt.Sprintf("Error: %v", err)
+			return commitErrResult(err)
 		}
 		log.Printf("[user=%s channel=%s] create_file: PR %s (new=%t)", userID, channelID, result.PrURL, result.IsNew)
 		if result.IsNew {
@@ -2714,7 +2714,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 				return h.ghClient.UpdateFile(ctx, owner, args.Repo, args.Path, branch, commitMsg, []byte(updatedContent), fileSHA)
 			})
 		if err != nil {
-			return fmt.Sprintf("Error: %v", err)
+			return commitErrResult(err)
 		}
 		log.Printf("[user=%s channel=%s] regex_replace_file: PR %s (new=%t, matches=%d)", userID, channelID, result.PrURL, result.IsNew, matches)
 		if result.IsNew {

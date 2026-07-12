@@ -3,6 +3,7 @@ package commands
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -222,6 +223,17 @@ func isPreconditionErr(s string) bool {
 // result is safe to pass back to the LLM.
 func stripPreconditionPrefix(s string) string {
 	return strings.TrimPrefix(s, preconditionErrPrefix)
+}
+
+// commitErrResult formats a CommitAndPR error for a write tool. A duplicate
+// guard hit means no branch, commit, or PR was created, so it is surfaced as
+// a precondition rejection: the workflow tick loop then treats it as a
+// recoverable no-op (reuse the existing PR) rather than a failed mutation.
+func commitErrResult(err error) string {
+	if errors.Is(err, ErrDuplicateOpenPR) {
+		return preconditionErrf("Error: %v", err)
+	}
+	return fmt.Sprintf("Error: %v", err)
 }
 
 // agentPatchBranchRE matches branches produced by github.GenerateBranchName
