@@ -706,10 +706,11 @@ type CommitSummary struct {
 }
 
 // ListCommits returns commits for a repo, optionally restricted to a branch
-// (sha) and an author/time window. since and until may be zero to omit.
-// limit caps the number of commits returned (GitHub default PerPage=30;
-// paginates up to 'limit', max 300).
-func (c *Client) ListCommits(ctx context.Context, owner, repo, branch, author string, since, until time.Time, limit int) ([]CommitSummary, error) {
+// (sha), a path, and an author/time window. since and until may be zero to
+// omit. When path is non-empty, only commits that touched that file or
+// directory are returned. limit caps the number of commits returned (GitHub
+// default PerPage=30; paginates up to 'limit', max 300).
+func (c *Client) ListCommits(ctx context.Context, owner, repo, branch, author, path string, since, until time.Time, limit int) ([]CommitSummary, error) {
 	if limit <= 0 {
 		limit = 30
 	}
@@ -722,6 +723,7 @@ func (c *Client) ListCommits(ctx context.Context, owner, repo, branch, author st
 	}
 	opts := &gh.CommitsListOptions{
 		SHA:    branch,
+		Path:   path,
 		Author: author,
 		ListOptions: gh.ListOptions{
 			PerPage: perPage,

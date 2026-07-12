@@ -1793,7 +1793,7 @@ func main() {
 			http.Error(w, "GitHub integration not configured", http.StatusServiceUnavailable)
 			return
 		}
-		commits, err := ghClient.ListCommits(r.Context(), changelogOwner, changelogRepo, "", "", time.Time{}, time.Time{}, 20)
+		commits, err := ghClient.ListCommits(r.Context(), changelogOwner, changelogRepo, "", "", "", time.Time{}, time.Time{}, 20)
 		if err != nil {
 			http.Error(w, fmt.Sprintf("failed to fetch commits: %v", err), http.StatusInternalServerError)
 			return

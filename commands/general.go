@@ -1016,12 +1016,13 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 			Type: "function",
 			Function: llm.ToolFunction{
 				Name:        ToolListCommits,
-				Description: "List commits in a repository, optionally filtered by branch, author, and a time window. Use this for daily/weekly activity digests (pass since=YYYY-MM-DDT00:00:00Z and until=YYYY-MM-DDT23:59:59Z for one UTC day), or to find the commit that introduced a specific change. Returns SHA, first line of commit message, author login, author date, and commit URL. If 'branch' is omitted, the repo's default branch is used — so this captures direct-to-default pushes that never went through a PR, in addition to merge/squash commits from merged PRs.",
+				Description: "List commits in a repository, optionally filtered by branch, path, author, and a time window. Use this for daily/weekly activity digests (pass since=YYYY-MM-DDT00:00:00Z and until=YYYY-MM-DDT23:59:59Z for one UTC day), or to find the latest/most recent commit that touched a specific file or directory (pass 'path' and limit=1). Returns the full 40-char SHA, first line of commit message, author login, author date, and commit URL. If 'branch' is omitted, the repo's default branch is used — so this captures direct-to-default pushes that never went through a PR, in addition to merge/squash commits from merged PRs. This uses the authenticated GitHub integration, so it works on private repositories (unlike http_get).",
 				Parameters: json.RawMessage(`{
 					"type":"object",
 					"properties":{
 						"repo":{"type":"string","description":"Repository name (without owner)."},
 						"branch":{"type":"string","description":"Branch, tag, or SHA to list commits from. Defaults to the repo's default branch."},
+						"path":{"type":"string","description":"Only return commits that touched this file or directory path (e.g. 'src/api' or 'config/settings.yaml'). Combine with limit=1 to get the latest commit affecting that path."},
 						"author":{"type":"string","description":"GitHub login or email to filter by author."},
 						"since":{"type":"string","description":"ISO-8601 timestamp (e.g. '2026-04-21T00:00:00Z'). Only commits on or after this moment are returned."},
 						"until":{"type":"string","description":"ISO-8601 timestamp. Only commits on or before this moment are returned."},
@@ -2787,6 +2788,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		args, errMsg := parseToolArgs[struct {
 			Repo   string `json:"repo"`
 			Branch string `json:"branch"`
+			Path   string `json:"path"`
 			Author string `json:"author"`
 			Since  string `json:"since"`
 			Until  string `json:"until"`
@@ -2817,21 +2819,17 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		if err != nil {
 			return fmt.Sprintf("Error resolving owner: %v", err)
 		}
-		commits, err := h.ghClient.ListCommits(ctx, owner, args.Repo, args.Branch, args.Author, since, until, args.Limit)
+		commits, err := h.ghClient.ListCommits(ctx, owner, args.Repo, args.Branch, args.Author, args.Path, since, until, args.Limit)
 		if err != nil {
 			return fmt.Sprintf("Error listing commits: %v", err)
 		}
 		if len(commits) == 0 {
-			return fmt.Sprintf("No commits found in %s (branch=%q, author=%q, since=%q, until=%q).", args.Repo, args.Branch, args.Author, args.Since, args.Until)
+			return fmt.Sprintf("No commits found in %s (branch=%q, path=%q, author=%q, since=%q, until=%q).", args.Repo, args.Branch, args.Path, args.Author, args.Since, args.Until)
 		}
 		var sb strings.Builder
 		fmt.Fprintf(&sb, "Commits in %s (%d):\n", args.Repo, len(commits))
 		for _, cm := range commits {
-			sha := cm.SHA
-			if len(sha) > 7 {
-				sha = sha[:7]
-			}
-			fmt.Fprintf(&sb, "  • %s %s — @%s (%s) %s\n", sha, cm.Message, cm.Author, cm.Date.UTC().Format(time.RFC3339), cm.URL)
+			fmt.Fprintf(&sb, "  • %s %s — @%s (%s) %s\n", cm.SHA, cm.Message, cm.Author, cm.Date.UTC().Format(time.RFC3339), cm.URL)
 		}
 		log.Printf("[user=%s channel=%s] listed %d commits in %s", userID, channelID, len(commits), args.Repo)
 		return sb.String()
