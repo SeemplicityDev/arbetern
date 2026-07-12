@@ -48,6 +48,7 @@ so a compression outage never breaks an LLM call.
 | Environment Variable | Required | Description |
 |---|---|---|
 | `HEADROOM_PROXY_URL` | no | Base URL of a Headroom compression sidecar (e.g. `http://localhost:8787`). When set, each conversation is compressed via `<HEADROOM_PROXY_URL>/v1/compress` before every LLM call. Empty disables compression. Applies to **all** backends. |
+| `HEADROOM_COMPRESS_TIMEOUT` | no | Go duration bounding a single `/v1/compress` round-trip before the app gives up and sends the conversation **uncompressed** (fail-open). Default `90s`. Raise it for very large contexts that the sidecar can't compress in time (log symptom: `headroom compress unavailable, sending uncompressed: ... context deadline exceeded`). |
 
 When deployed via Helm with `headroom.enabled: true`, `HEADROOM_PROXY_URL` is
 injected automatically (pointing at the loopback sidecar); you do **not** set it

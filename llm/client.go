@@ -36,6 +36,20 @@ const anthropicMaxTokens = 8192
 // unexpectedly large upstream responses (10 MB).
 const maxResponseBody = 10 << 20
 
+// maxCompressResponseBody caps the Headroom /v1/compress response read. The
+// reply echoes back the entire (compressed) conversation, so on long
+// tool-loops it can dwarf a normal chat completion. A too-small cap truncates
+// the JSON, the unmarshal fails, and the round silently falls back to
+// uncompressed — so this is set well above maxResponseBody (64 MiB).
+const maxCompressResponseBody = 64 << 20
+
+// defaultCompressTimeout bounds the Headroom compression round-trip when no
+// explicit timeout is configured. Compressing a large context (dozens of tool
+// outputs, generated-code blobs) can take tens of seconds, especially the
+// first pass over a freshly grown conversation, so this is generous relative
+// to the old 30s cap. Override per-deployment via HEADROOM_COMPRESS_TIMEOUT.
+const defaultCompressTimeout = 90 * time.Second
+
 // maxRetries is the number of additional attempts for retryable HTTP errors.
 // Anthropic 429s are fairly common on long tool-loops (workflow ticks with
 // dozens of search_code_org / modify_file rounds). Three retries was too
@@ -87,6 +101,10 @@ type Client struct {
 	// backend call. Applies to all backends.
 	compressURL string
 
+	// compressTimeout bounds a single /v1/compress round-trip. Zero means use
+	// defaultCompressTimeout. Set via SetCompressionTimeout.
+	compressTimeout time.Duration
+
 	// Azure OpenAI fields (empty when using GitHub Models).
 	azureEndpoint string
 	azureAPIKey   string
@@ -111,6 +129,16 @@ func NewClient(token, model string) *Client {
 // (empty disables it). See compressMessages for behaviour.
 func (c *Client) SetCompressionURL(u string) {
 	c.compressURL = strings.TrimRight(u, "/")
+}
+
+// SetCompressionTimeout overrides how long a single /v1/compress round-trip may
+// take before it is abandoned (fail-open) and the messages are sent
+// uncompressed. Non-positive values reset to defaultCompressTimeout.
+func (c *Client) SetCompressionTimeout(d time.Duration) {
+	if d <= 0 {
+		d = 0 // fall back to defaultCompressTimeout in compressMessages
+	}
+	c.compressTimeout = d
 }
 
 // NewAzureClient creates an LLM client backed by Azure OpenAI.
@@ -278,7 +306,11 @@ func (c *Client) compressMessages(ctx context.Context, messages []ChatMessage) (
 	}
 
 	// Bound the compression round-trip independently of the 120s LLM timeout.
-	cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	timeout := c.compressTimeout
+	if timeout <= 0 {
+		timeout = defaultCompressTimeout
+	}
+	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(cctx, http.MethodPost, c.compressURL+"/v1/compress", bytes.NewReader(payload))
@@ -294,7 +326,7 @@ func (c *Client) compressMessages(ctx context.Context, messages []ChatMessage) (
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxCompressResponseBody))
 	if err != nil {
 		return messages, CompressionStats{}
 	}

@@ -1234,7 +1234,13 @@ func main() {
 	if cfg.HeadroomURL != "" {
 		modelsClient.SetCompressionURL(cfg.HeadroomURL)
 		codeModelsClient.SetCompressionURL(cfg.HeadroomURL)
-		log.Printf("Headroom compression enabled via %s (applies to all backends)", cfg.HeadroomURL)
+		if cfg.HeadroomTimeout > 0 {
+			modelsClient.SetCompressionTimeout(cfg.HeadroomTimeout)
+			codeModelsClient.SetCompressionTimeout(cfg.HeadroomTimeout)
+			log.Printf("Headroom compression enabled via %s (applies to all backends, timeout %s)", cfg.HeadroomURL, cfg.HeadroomTimeout)
+		} else {
+			log.Printf("Headroom compression enabled via %s (applies to all backends)", cfg.HeadroomURL)
+		}
 	}
 
 	var jiraClient *atlassian.Client

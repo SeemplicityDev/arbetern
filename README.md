@@ -93,6 +93,7 @@ The core variables you'll set on day one:
 | `UI_ALLOWED_CIDRS` | Comma-separated CIDRs allowed to access the UI |
 | `UI_HEADER` | Custom header text for the web UI (default `arbetern`) |
 | `HEADROOM_PROXY_URL` | Base URL of a [Headroom](docs/HEADROOM.md) compression sidecar (e.g. `http://localhost:8787`). When set, each conversation is compressed via its `/v1/compress` endpoint before every LLM call — cutting tokens across **all** backends (GitHub Models, Azure OpenAI, Azure Foundry/Claude). Set automatically by Helm when `headroom.enabled: true` |
+| `HEADROOM_COMPRESS_TIMEOUT` | Go duration bounding a single `/v1/compress` round-trip before the app falls back to sending the conversation uncompressed (fail-open). Default `90s`; raise for very large contexts. Set via Helm `headroom.compressTimeout` |
 
 </details>
 

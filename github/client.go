@@ -770,7 +770,66 @@ func (c *Client) ListCommits(ctx context.Context, owner, repo, branch, author, p
 	return out, nil
 }
 
-// ListPullRequests returns recent PRs for a repo.
+// CommitFileChange describes one file touched by a commit, including its diff.
+type CommitFileChange struct {
+	Filename  string `json:"filename"`
+	Status    string `json:"status"` // added, modified, removed, renamed, …
+	Additions int    `json:"additions"`
+	Deletions int    `json:"deletions"`
+	Patch     string `json:"patch"` // unified diff; may be empty for binary/large files
+}
+
+// CommitDetail holds a single commit plus its per-file changes (diffs).
+type CommitDetail struct {
+	SHA            string             `json:"sha"`
+	Message        string             `json:"message"` // full commit message
+	Author         string             `json:"author"`
+	Date           time.Time          `json:"date"`
+	URL            string             `json:"url"`
+	TotalAdditions int                `json:"total_additions"`
+	TotalDeletions int                `json:"total_deletions"`
+	Files          []CommitFileChange `json:"files"`
+}
+
+// GetCommit returns the details of a single commit, including the per-file
+// diffs (patches). When pathFilter is non-empty, only files whose path equals
+// or is nested under pathFilter are returned (the totals still reflect the
+// whole commit). This uses the authenticated GitHub API, so it works on
+// private repositories.
+func (c *Client) GetCommit(ctx context.Context, owner, repo, sha, pathFilter string) (*CommitDetail, error) {
+	rc, _, err := c.api.Repositories.GetCommit(ctx, owner, repo, sha, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get commit %s for %s/%s: %w", sha, owner, repo, err)
+	}
+	author := rc.GetAuthor().GetLogin()
+	if author == "" {
+		author = rc.GetCommit().GetAuthor().GetName()
+	}
+	detail := &CommitDetail{
+		SHA:            rc.GetSHA(),
+		Message:        rc.GetCommit().GetMessage(),
+		Author:         author,
+		Date:           rc.GetCommit().GetAuthor().GetDate().Time,
+		URL:            rc.GetHTMLURL(),
+		TotalAdditions: rc.GetStats().GetAdditions(),
+		TotalDeletions: rc.GetStats().GetDeletions(),
+	}
+	prefix := strings.TrimSuffix(pathFilter, "/")
+	for _, f := range rc.Files {
+		name := f.GetFilename()
+		if prefix != "" && name != prefix && !strings.HasPrefix(name, prefix+"/") {
+			continue
+		}
+		detail.Files = append(detail.Files, CommitFileChange{
+			Filename:  name,
+			Status:    f.GetStatus(),
+			Additions: f.GetAdditions(),
+			Deletions: f.GetDeletions(),
+			Patch:     f.GetPatch(),
+		})
+	}
+	return detail, nil
+}
 func (c *Client) ListPullRequests(ctx context.Context, owner, repo, state string, limit int) ([]PRSummary, error) {
 	if state == "" {
 		state = "all"

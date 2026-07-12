@@ -1035,6 +1035,22 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 		{
 			Type: "function",
 			Function: llm.ToolFunction{
+				Name:        ToolGetCommit,
+				Description: "Get the details of a single commit by SHA, including the per-file diffs (patches), file statuses (added/modified/removed/renamed), and per-file and total addition/deletion counts. Use this after list_commits when you need to see WHAT changed in a commit — e.g. to summarize a diff. Optionally pass 'path' to return only the changes to a specific file or directory (the totals still reflect the whole commit). This uses the authenticated GitHub integration, so it works on private repositories (unlike http_get).",
+				Parameters: json.RawMessage(`{
+					"type":"object",
+					"properties":{
+						"repo":{"type":"string","description":"Repository name (without owner)."},
+						"sha":{"type":"string","description":"The commit SHA (full or abbreviated) to fetch."},
+						"path":{"type":"string","description":"Optional. Return only files at or under this path (e.g. 'terragrunt/modules/aws/roles/github.tf'). Omit to return every file in the commit."}
+					},
+					"required":["repo","sha"]
+				}`),
+			},
+		},
+		{
+			Type: "function",
+			Function: llm.ToolFunction{
 				Name:        ToolSearchCode,
 				Description: "Search for code content within a GitHub repository. Unlike search_files (which matches file names/paths), this searches inside file contents. Use this to find usages of functions, classes, patterns, imports, or any code string across the entire repository. Returns matching files with code fragments showing the context around each match.",
 				Parameters: json.RawMessage(`{
@@ -2832,6 +2848,60 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 			fmt.Fprintf(&sb, "  • %s %s — @%s (%s) %s\n", cm.SHA, cm.Message, cm.Author, cm.Date.UTC().Format(time.RFC3339), cm.URL)
 		}
 		log.Printf("[user=%s channel=%s] listed %d commits in %s", userID, channelID, len(commits), args.Repo)
+		return sb.String()
+
+	case ToolGetCommit:
+		args, errMsg := parseToolArgs[struct {
+			Repo string `json:"repo"`
+			SHA  string `json:"sha"`
+			Path string `json:"path"`
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
+		}
+		if args.Repo == "" || args.SHA == "" {
+			return "Error: repo and sha are required."
+		}
+		owner, err := h.ghClient.ResolveOwner(ctx)
+		if err != nil {
+			return fmt.Sprintf("Error resolving owner: %v", err)
+		}
+		detail, err := h.ghClient.GetCommit(ctx, owner, args.Repo, args.SHA, args.Path)
+		if err != nil {
+			return fmt.Sprintf("Error getting commit: %v", err)
+		}
+		msg := detail.Message
+		if idx := strings.IndexByte(msg, '\n'); idx >= 0 {
+			msg = msg[:idx]
+		}
+		var sb strings.Builder
+		fmt.Fprintf(&sb, "Commit %s in %s\n", detail.SHA, args.Repo)
+		fmt.Fprintf(&sb, "Author: @%s  Date: %s\n", detail.Author, detail.Date.UTC().Format(time.RFC3339))
+		fmt.Fprintf(&sb, "URL: %s\n", detail.URL)
+		fmt.Fprintf(&sb, "Subject: %s\n", msg)
+		fmt.Fprintf(&sb, "Totals: +%d / -%d across the whole commit\n", detail.TotalAdditions, detail.TotalDeletions)
+		if args.Path != "" {
+			fmt.Fprintf(&sb, "Files (filtered to path %q): %d\n", args.Path, len(detail.Files))
+		} else {
+			fmt.Fprintf(&sb, "Files: %d\n", len(detail.Files))
+		}
+		if len(detail.Files) == 0 {
+			sb.WriteString("(no matching files in this commit)\n")
+		}
+		for _, f := range detail.Files {
+			fmt.Fprintf(&sb, "\n• %s (%s) +%d / -%d\n", f.Filename, f.Status, f.Additions, f.Deletions)
+			if f.Patch != "" {
+				patch := f.Patch
+				const maxPatch = 6000
+				if len(patch) > maxPatch {
+					patch = patch[:maxPatch] + "\n… (patch truncated)"
+				}
+				fmt.Fprintf(&sb, "%s\n", patch)
+			} else {
+				sb.WriteString("(no textual diff available — binary or too large)\n")
+			}
+		}
+		log.Printf("[user=%s channel=%s] get_commit %s in %s (%d files)", userID, channelID, detail.SHA, args.Repo, len(detail.Files))
 		return sb.String()
 
 	case ToolSearchCode:

@@ -22,9 +22,11 @@ env:
 # (GitHub Models, Azure OpenAI, Azure Foundry/Claude). See docs/HEADROOM.md.
 # headroom:
 #   enabled: true
+#   # Raise if large contexts trip the compress timeout (default 90s).
+#   # compressTimeout: "3m"
 #   # resources:
-#   #   requests: { cpu: 100m, memory: 512Mi }
-#   #   limits:   { cpu: "1",  memory: 1Gi }
+#   #   requests: { cpu: 250m, memory: 1Gi }
+#   #   limits:   { cpu: "2",  memory: 4Gi }
 
 secretValues:
   github-token: "ghp_your_github_token"

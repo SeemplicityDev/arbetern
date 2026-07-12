@@ -133,6 +133,11 @@ type Config struct {
 	// disabled); set from HEADROOM_PROXY_URL. See llm.Client.compressMessages.
 	HeadroomURL string
 
+	// HeadroomTimeout bounds a single /v1/compress round-trip before the app
+	// gives up and sends the conversation uncompressed (fail-open). Set from
+	// HEADROOM_COMPRESS_TIMEOUT; zero uses the llm package default.
+	HeadroomTimeout time.Duration
+
 	// AWSRegion controls where Cost Explorer SigV4 calls are signed. Empty
 	// falls back to the aws package default (us-east-1, where the CE
 	// endpoint lives). Credentials are resolved via the standard AWS SDK
@@ -432,6 +437,14 @@ func Load() (*Config, error) {
 		}
 	} else {
 		cfg.ThreadSessionTTL = defaultThreadSessionTTL
+	}
+
+	if hcStr := os.Getenv("HEADROOM_COMPRESS_TIMEOUT"); hcStr != "" {
+		if d, err := time.ParseDuration(hcStr); err == nil && d > 0 {
+			cfg.HeadroomTimeout = d
+		} else {
+			return nil, fmt.Errorf("invalid HEADROOM_COMPRESS_TIMEOUT %q: must be a positive Go duration (e.g. 90s, 2m)", hcStr)
+		}
 	}
 
 	if retStr := os.Getenv("CHAT_RETENTION"); retStr != "" {

@@ -67,15 +67,27 @@ headroom:
   port: 8787
   # Anonymous telemetry is off by default (passes --no-telemetry). Set true to allow it.
   telemetry: false
+  # Bound for a single /v1/compress round-trip before the app gives up and sends
+  # the conversation uncompressed (fail-open). Injected as HEADROOM_COMPRESS_TIMEOUT.
+  # Empty uses the app default (90s). Raise for very large contexts that the
+  # sidecar can't compress in time (symptom in logs: "headroom compress
+  # unavailable, sending uncompressed: ... context deadline exceeded").
+  compressTimeout: ""
   # Extra CLI args appended to `headroom proxy`.
   extraArgs: []
   # Extra environment variables for the sidecar.
   env: {}
-  # Resource requests/limits for the sidecar. Compression models add memory;
-  # tune for your workload, e.g.:
-  #   requests: { cpu: 100m, memory: 512Mi }
-  #   limits:   { cpu: "1",  memory: 1Gi }
-  resources: {}
+  # Resource requests/limits for the sidecar. Compression holds the whole
+  # conversation in memory and the model working set adds more, so large
+  # contexts need real headroom — under-provisioning is a common cause of slow
+  # compressions that trip the timeout. Tune for your workload.
+  resources:
+    requests:
+      cpu: 250m
+      memory: 1Gi
+    limits:
+      cpu: "2"
+      memory: 4Gi
   # Must satisfy the pod-level runAsNonRoot policy (uid 65532).
   securityContext:
     runAsNonRoot: true

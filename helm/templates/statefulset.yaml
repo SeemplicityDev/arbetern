@@ -54,6 +54,10 @@ spec:
             {{- if .Values.headroom.enabled }}
             - name: HEADROOM_PROXY_URL
               value: "http://localhost:{{ .Values.headroom.port }}"
+            {{- with .Values.headroom.compressTimeout }}
+            - name: HEADROOM_COMPRESS_TIMEOUT
+              value: {{ . | quote }}
+            {{- end }}
             {{- end }}
             - name: SLACK_BOT_TOKEN
               valueFrom:
