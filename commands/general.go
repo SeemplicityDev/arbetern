@@ -379,17 +379,42 @@ func (h *GeneralHandler) Execute(channelID, userID, text, responseURL, auditTS s
 				continue
 			}
 
-			// Guardrail: if the model returned an empty response, retry once
-			// asking it to produce actual content. This can happen when the
-			// Responses API returns no output_text items.
+			// An empty final message (no text, no tool call) has two causes,
+			// told apart by finish reason: a truncated turn (hit the output
+			// ceiling) needs a "smaller step" nudge; a spurious empty reply just
+			// needs a retry. The empty assistant placeholder below preserves
+			// user/assistant alternation.
 			if strings.TrimSpace(choice.Message.Content) == "" && emptyResponseRetries < 2 {
 				emptyResponseRetries++
-				log.Printf("[user=%s channel=%s] model returned empty content (retry %d); nudging for a real response", userID, channelID, emptyResponseRetries)
+				var nudge string
+				if isTruncatedFinish(choice.FinishReason) {
+					log.Printf("[user=%s channel=%s] response truncated at output limit (finish=%q, retry %d); asking for a smaller step", userID, channelID, choice.FinishReason, emptyResponseRetries)
+					nudge = "Your previous response hit the output-length limit before it produced anything. Take ONE smaller step now: make a single tool call (e.g. modify one file), or give a brief answer. Keep the response concise so it fits within the limit."
+				} else {
+					log.Printf("[user=%s channel=%s] model returned empty content (retry %d); nudging for a real response", userID, channelID, emptyResponseRetries)
+					nudge = "Your previous response was empty. Please provide a complete answer to my original request. Use the available tools if needed."
+				}
 				messages = append(messages,
 					llm.NewChatMessage("assistant", ""),
-					llm.NewChatMessage("user", "Your previous response was empty. Please provide a complete answer to my original request. Use the available tools if needed."),
+					llm.NewChatMessage("user", nudge),
 				)
 				continue
+			}
+
+			// Retries exhausted and still empty. Never post an empty reply (that
+			// previously shipped just the usage stamp); surface a fallback.
+			if strings.TrimSpace(choice.Message.Content) == "" {
+				log.Printf("[user=%s channel=%s] general query ended with empty content after %d retries (finish=%q); replying with fallback", userID, channelID, emptyResponseRetries, choice.FinishReason)
+				fallback := "I couldn't complete this request — it looks like it was too large to finish in one pass (my response kept hitting the output limit). Try breaking it into smaller steps and I'll pick it up from there."
+				stamp := llm.FormatUsageStamp(&totalUsage, activeClient.Model())
+				if repliedInThread {
+					if stamp != "" {
+						_ = h.slackClient.PostThreadReply(channelID, auditTS, stamp)
+					}
+					return
+				}
+				h.replyDefault(channelID, responseURL, auditTS, fallback+stamp)
+				return
 			}
 
 			log.Printf("[user=%s channel=%s] general query completed successfully", userID, channelID)
@@ -573,6 +598,13 @@ func (h *GeneralHandler) ExecuteHeadless(ctx context.Context, userID, prompt str
 			preview = strings.ReplaceAll(preview, "\n", " ")
 			log.Printf("[workflow user=%s agent=%s] completed after %d rounds / %d tool calls; final (%d chars): %q",
 				userID, h.agentID, i+1, toolCallsMade, len(final), preview)
+			// A tick left empty by a truncated turn didn't finish its work —
+			// return an error so the registry counts it as failed, not an empty
+			// "success".
+			if final == "" && isTruncatedFinish(choice.FinishReason) {
+				log.Printf("[workflow user=%s agent=%s] tick ended with truncated, empty output (finish=%q) — output limit hit before a result", userID, h.agentID, choice.FinishReason)
+				return "", fmt.Errorf("workflow tick output was truncated at the model's output limit before producing a result")
+			}
 			if len(mutatingFailures) > 0 {
 				// At least one side-effect tool failed. The tick technically
 				// reached a final assistant message, but the intent of the
@@ -711,16 +743,28 @@ func (h *GeneralHandler) ExecuteChat(ctx context.Context, userID string, history
 
 		if len(choice.Message.ToolCalls) == 0 {
 			final := strings.TrimSpace(choice.Message.Content)
-			// Retry once or twice on an empty final response — the Responses
-			// API occasionally returns no output_text items.
+			// Retry on an empty final turn. Truncated turns (output ceiling) get
+			// a "smaller step" nudge; a spurious empty reply just retries.
 			if final == "" && emptyResponseRetries < 2 {
 				emptyResponseRetries++
-				log.Printf("[chat user=%s agent=%s] empty response (retry %d); nudging for content", userID, h.agentID, emptyResponseRetries)
+				var nudge string
+				if isTruncatedFinish(choice.FinishReason) {
+					log.Printf("[chat user=%s agent=%s] response truncated at output limit (finish=%q, retry %d); asking for a smaller step", userID, h.agentID, choice.FinishReason, emptyResponseRetries)
+					nudge = "Your previous response hit the output-length limit before it produced anything. Take one smaller step, or give a brief, concise answer that fits within the limit."
+				} else {
+					log.Printf("[chat user=%s agent=%s] empty response (retry %d); nudging for content", userID, h.agentID, emptyResponseRetries)
+					nudge = "Your previous response was empty. Please provide a complete answer to my request, using the available tools if needed."
+				}
 				messages = append(messages,
 					llm.NewChatMessage("assistant", ""),
-					llm.NewChatMessage("user", "Your previous response was empty. Please provide a complete answer to my request, using the available tools if needed."),
+					llm.NewChatMessage("user", nudge),
 				)
 				continue
+			}
+			// Never hand an empty string back to the UI — return a fallback.
+			if final == "" {
+				log.Printf("[chat user=%s agent=%s] ended with empty content after %d retries (finish=%q); returning fallback", userID, h.agentID, emptyResponseRetries, choice.FinishReason)
+				return "I couldn't complete this request — it may have been too large to finish in one pass (my response kept hitting the output limit). Try narrowing it and I'll pick it up from there.", nil
 			}
 			log.Printf("[chat user=%s agent=%s] completed after %d rounds", userID, h.agentID, i+1)
 			return final, nil
@@ -5209,4 +5253,18 @@ var preActionAckRe = regexp.MustCompile(`(?i)\b(on it|i(?:'|’)m\s+(checking|lo
 
 func isPreActionAck(text string) bool {
 	return preActionAckRe.MatchString(strings.TrimSpace(text))
+}
+
+// isTruncatedFinish reports whether a completion stopped because it hit the
+// output-token ceiling rather than finishing normally: Anthropic/Bedrock
+// "max_tokens", Chat Completions/Responses "length"/"max_output_tokens". Such a
+// turn often has no usable text or tool call, so callers handle it separately
+// from a spurious empty reply.
+func isTruncatedFinish(reason string) bool {
+	switch strings.ToLower(strings.TrimSpace(reason)) {
+	case "max_tokens", "length", "max_output_tokens":
+		return true
+	default:
+		return false
+	}
 }

@@ -18,7 +18,7 @@ var ExtensionsRaw string
 
 const (
 	defaultPort             = "8080"
-	defaultThreadSessionTTL = 3 * time.Minute
+	defaultThreadSessionTTL = 8 * time.Minute
 	// defaultChatRetention is how long a UI chat conversation is kept after
 	// its last activity before the background sweeper deletes it. One week by
 	// default; override with CHAT_RETENTION (Go duration).

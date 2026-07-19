@@ -7,8 +7,9 @@ import (
 	"time"
 )
 
-// DefaultSessionTTL is used when no custom TTL is provided.
-const DefaultSessionTTL = 3 * time.Minute
+// DefaultSessionTTL is used when no custom TTL is provided. Kept in sync with
+// config.defaultThreadSessionTTL.
+const DefaultSessionTTL = 8 * time.Minute
 
 // ActiveBranchInfo holds metadata about a branch+PR created during a session.
 // Exported so it can be shared between session and handler.

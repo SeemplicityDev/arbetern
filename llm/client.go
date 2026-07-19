@@ -26,11 +26,13 @@ const azureResponsesAPIVersion = "2025-04-01-preview"
 const anthropicAPIVersion = "2023-06-01"
 
 // anthropicMaxTokens bounds the completion length for Anthropic Messages API
-// calls (the API requires max_tokens and has no default). Set generously so a
-// long final message — e.g. a dashboard render with several ticket tables, or a
-// workflow summary — is not truncated mid-output. Claude Sonnet supports well
-// above this; it is a ceiling, not a target, so it does not add cost.
-const anthropicMaxTokens = 8192
+// calls (the API requires max_tokens and has no default). Kept high on purpose:
+// a too-small cap truncates a heavy turn (many tool_use blocks, a long final
+// message) before any block completes, which the tool loop then sees as an
+// empty response with stop_reason "max_tokens". It is a ceiling, not a target,
+// so it must clear a round's worth of tool calls plus a final message without
+// adding cost when unused.
+const anthropicMaxTokens = 16384
 
 // maxResponseBody is the upper bound on response body reads to prevent OOM from
 // unexpectedly large upstream responses (10 MB).

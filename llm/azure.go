@@ -119,7 +119,15 @@ type responsesResponse struct {
 	ID     string                `json:"id"`
 	Output []responsesOutputItem `json:"output"`
 	Usage  *Usage                `json:"usage,omitempty"`
-	Error  *struct {
+	// Status is the run status ("completed", "incomplete", "failed", …).
+	// IncompleteDetails.Reason explains an "incomplete" run — "max_output_tokens"
+	// means the turn was truncated at the output ceiling. Both are needed so a
+	// truncated turn is reported as such rather than as a normal "stop".
+	Status            string `json:"status,omitempty"`
+	IncompleteDetails *struct {
+		Reason string `json:"reason,omitempty"`
+	} `json:"incomplete_details,omitempty"`
+	Error *struct {
 		Message string `json:"message"`
 	} `json:"error,omitempty"`
 }
@@ -232,9 +240,14 @@ func responsesOutputToChatResponse(rr *responsesResponse) *ChatResponse {
 	}
 
 	choice.Message.Content = strings.Join(textParts, "")
-	if len(choice.Message.ToolCalls) > 0 {
+	switch {
+	case rr.Status == "incomplete" && rr.IncompleteDetails != nil && rr.IncompleteDetails.Reason != "":
+		// Cut short (e.g. "max_output_tokens"). Surface the real reason so the
+		// tool loop can react instead of mistaking it for a normal completion.
+		choice.FinishReason = rr.IncompleteDetails.Reason
+	case len(choice.Message.ToolCalls) > 0:
 		choice.FinishReason = "tool_calls"
-	} else {
+	default:
 		choice.FinishReason = "stop"
 	}
 
