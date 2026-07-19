@@ -86,6 +86,13 @@ spec:
                   name: {{ .Values.secretName }}
                   key: azure-api-key
             {{- end }}
+            {{- if index .Values.secretValues "bedrock-api-key" }}
+            - name: AWS_BEARER_TOKEN_BEDROCK
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: bedrock-api-key
+            {{- end }}
             {{- if index .Values.secretValues "atlassian-url" }}
             - name: ATLASSIAN_URL
               valueFrom:

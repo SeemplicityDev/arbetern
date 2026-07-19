@@ -1,6 +1,6 @@
 // Package llm provides the LLM inference client and shared tool/message types
-// used across all arbetern integrations. It supports both GitHub Models and
-// Azure OpenAI backends.
+// used across all arbetern integrations. It supports GitHub Models, Azure
+// OpenAI, and AWS Bedrock backends.
 package llm
 
 import (

@@ -88,9 +88,10 @@ func retryDelay(resp *http.Response, attempt int) time.Duration {
 	return d
 }
 
-// Client provides LLM inference through either GitHub Models or Azure OpenAI.
-// The backend is selected at construction time; the rest of the codebase uses
-// the same Complete / CompleteWithTools interface regardless of backend.
+// Client provides LLM inference through GitHub Models, Azure OpenAI, or AWS
+// Bedrock. The backend is selected at construction time; the rest of the
+// codebase uses the same Complete / CompleteWithTools interface regardless of
+// backend.
 type Client struct {
 	token      string
 	model      string
@@ -108,6 +109,10 @@ type Client struct {
 	// Azure OpenAI fields (empty when using GitHub Models).
 	azureEndpoint string
 	azureAPIKey   string
+
+	// bedrock holds AWS Bedrock transport state; non-nil selects the Bedrock
+	// backend (which also speaks the Anthropic Messages API). See bedrock.go.
+	bedrock *bedrockConfig
 }
 
 type chatRequest struct {
@@ -201,6 +206,17 @@ func (c *Client) Complete(ctx context.Context, systemPrompt, userPrompt string) 
 		{Role: "user", Content: userPrompt},
 	}
 
+	if c.useBedrock() {
+		resp, err := c.doBedrock(ctx, messages, nil)
+		if err != nil {
+			return "", nil, err
+		}
+		if len(resp.Choices) == 0 {
+			return "", nil, fmt.Errorf("bedrock API returned no output")
+		}
+		return resp.Choices[0].Message.Content, resp.Usage, nil
+	}
+
 	if c.isResponsesModel() {
 		resp, err := c.doResponses(ctx, messages, nil)
 		if err != nil {
@@ -243,6 +259,8 @@ func (c *Client) CompleteWithTools(ctx context.Context, messages []ChatMessage, 
 		err  error
 	)
 	switch {
+	case c.useBedrock():
+		resp, err = c.doBedrock(ctx, messages, tools)
 	case c.isResponsesModel():
 		resp, err = c.doResponses(ctx, messages, tools)
 	case c.useAzure() && isAnthropicModel(c.model):
@@ -281,6 +299,8 @@ type compressResponse struct {
 // deployment name. An explicit provider prefix keeps that lookup unambiguous.
 func (c *Client) compressModel() string {
 	switch {
+	case c.useBedrock():
+		return "bedrock/" + c.model
 	case isAnthropicModel(c.model):
 		return "anthropic/" + c.model
 	case c.useAzure():
@@ -370,14 +390,17 @@ func (c *Client) doChat(ctx context.Context, messages []ChatMessage, tools []Too
 		apiURL = modelsAPIURL
 	}
 
-	headers := map[string]string{"Content-Type": "application/json"}
-	if c.useAzure() {
-		headers["api-key"] = c.azureAPIKey
-	} else {
-		headers["Authorization"] = "Bearer " + c.token
+	authorize := func(r *http.Request) error {
+		r.Header.Set("Content-Type", "application/json")
+		if c.useAzure() {
+			r.Header.Set("api-key", c.azureAPIKey)
+		} else {
+			r.Header.Set("Authorization", "Bearer "+c.token)
+		}
+		return nil
 	}
 
-	body, statusCode, err := c.doPostWithRetry(ctx, apiURL, payload, headers, "chat")
+	body, statusCode, err := c.doPostWithRetry(ctx, apiURL, payload, authorize, "chat")
 	if err != nil {
 		return nil, err
 	}
@@ -401,13 +424,18 @@ func (c *Client) doChat(ctx context.Context, messages []ChatMessage, tools []Too
 // doPostWithRetry performs an HTTP POST with automatic retry on transient errors
 // (429, 5xx). It returns the response body, the final HTTP status code, and any
 // transport-level error. The label parameter is used in log messages.
-func (c *Client) doPostWithRetry(ctx context.Context, url string, payload []byte, headers map[string]string, label string) ([]byte, int, error) {
+//
+// authorize decorates each freshly-built request with its headers and any
+// signing. It runs once per attempt — not once overall — so time-sensitive
+// signatures (SigV4) are regenerated before every retry rather than replayed
+// stale.
+func (c *Client) doPostWithRetry(ctx context.Context, url string, payload []byte, authorize func(*http.Request) error, label string) ([]byte, int, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to create %s request: %w", label, err)
 	}
-	for k, v := range headers {
-		req.Header.Set(k, v)
+	if err := authorize(req); err != nil {
+		return nil, 0, fmt.Errorf("failed to authorize %s request: %w", label, err)
 	}
 
 	resp, err := c.httpClient.Do(req)
@@ -434,8 +462,8 @@ func (c *Client) doPostWithRetry(ctx context.Context, url string, payload []byte
 			if err != nil {
 				return nil, 0, fmt.Errorf("failed to create %s retry request: %w", label, err)
 			}
-			for k, v := range headers {
-				retryReq.Header.Set(k, v)
+			if err := authorize(retryReq); err != nil {
+				return nil, 0, fmt.Errorf("failed to authorize %s retry request: %w", label, err)
 			}
 			resp, err = c.httpClient.Do(retryReq)
 			if err != nil {
@@ -563,12 +591,13 @@ func (c *Client) doResponses(ctx context.Context, messages []ChatMessage, tools 
 	apiURL := fmt.Sprintf("%s/openai/responses?api-version=%s",
 		c.azureEndpoint, azureResponsesAPIVersion)
 
-	headers := map[string]string{
-		"Content-Type": "application/json",
-		"api-key":      c.azureAPIKey,
+	authorize := func(r *http.Request) error {
+		r.Header.Set("Content-Type", "application/json")
+		r.Header.Set("api-key", c.azureAPIKey)
+		return nil
 	}
 
-	body, statusCode, err := c.doPostWithRetry(ctx, apiURL, payload, headers, "responses")
+	body, statusCode, err := c.doPostWithRetry(ctx, apiURL, payload, authorize, "responses")
 	if err != nil {
 		return nil, err
 	}

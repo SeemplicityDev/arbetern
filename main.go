@@ -1003,29 +1003,57 @@ func refreshIntegrations(
 		})
 	}
 
-	// --- AWS (Cost Explorer) ---
+	// --- AWS (Bedrock LLM + Cost Explorer) ---
+	// One cloud-provider entry covering both services, mirroring the Azure
+	// entry (Azure OpenAI + Cost Management). Bedrock is the LLM backend;
+	// Cost Explorer is a tool source. Either can be configured independently.
 	{
 		awsConnected := awsClient != nil
-		awsPerms := []permission{
-			{Scope: "ce:GetCostAndUsage", Description: "Query daily / monthly cost and usage aggregates with optional group-by (SERVICE, LINKED_ACCOUNT, …)", Required: true, Granted: boolPtr(awsConnected)},
-			{Scope: "ce:GetCostForecast", Description: "Forecast upcoming cost (tomorrow through +30 days by default)", Required: true, Granted: boolPtr(awsConnected)},
-			{Scope: "ce:GetDimensionValues", Description: "Enumerate valid dimension values (service names, accounts, usage types) for filtering", Required: false, Granted: boolPtr(awsConnected)},
+		bedrockConnected := cfg.UseBedrock() && modelsClient != nil
+
+		awsPerms := []permission{}
+		if bedrockConnected {
+			awsPerms = append(awsPerms, permission{
+				Scope: "bedrock:InvokeModel", Description: "Invoke the configured Claude model / inference profile via the Bedrock runtime", Required: true, Granted: boolPtr(true),
+			})
 		}
-		activeRegion := map[string]string{}
+		awsPerms = append(awsPerms,
+			permission{Scope: "ce:GetCostAndUsage", Description: "Query daily / monthly cost and usage aggregates with optional group-by (SERVICE, LINKED_ACCOUNT, …)", Required: true, Granted: boolPtr(awsConnected)},
+			permission{Scope: "ce:GetCostForecast", Description: "Forecast upcoming cost (tomorrow through +30 days by default)", Required: true, Granted: boolPtr(awsConnected)},
+			permission{Scope: "ce:GetDimensionValues", Description: "Enumerate valid dimension values (service names, accounts, usage types) for filtering", Required: false, Granted: boolPtr(awsConnected)},
+		)
+
+		active := map[string]string{}
+		if bedrockConnected {
+			active["Bedrock region"] = cfg.BedrockRegion
+			active["General model"] = modelsClient.Model()
+			if cfg.CodeModelExplicit && codeModelsClient != nil {
+				active["Code model"] = codeModelsClient.Model()
+			}
+		}
 		if awsConnected {
-			activeRegion["Signing region"] = awsClient.Region()
+			active["Signing region"] = awsClient.Region()
 		}
-		authMode := ""
+
+		authModes := []string{}
+		if bedrockConnected {
+			if cfg.BedrockAPIKey != "" {
+				authModes = append(authModes, "API key (Bedrock)")
+			} else {
+				authModes = append(authModes, "SigV4 (AWS credential chain)")
+			}
+		}
 		if cfg.AWSConfigured() {
-			authMode = "SDK default credential chain (env / profile / IRSA / IMDS)"
+			authModes = append(authModes, "SDK default credential chain (Cost Explorer)")
 		}
+
 		result = append(result, integration{
 			ID:           "aws",
 			Name:         "AWS",
-			Configured:   awsConnected,
-			AuthMode:     authMode,
+			Configured:   awsConnected || bedrockConnected,
+			AuthMode:     strings.Join(authModes, " + "),
 			Permissions:  awsPerms,
-			ActiveModels: activeRegion,
+			ActiveModels: active,
 		})
 	}
 
@@ -1048,7 +1076,7 @@ func refreshIntegrations(
 				codeModel = codeModelsClient.Model()
 			}
 			activeScope["General model"] = generalModel
-			if codeModel != "" && codeModel != generalModel {
+			if cfg.CodeModelExplicit {
 				activeScope["Code model"] = codeModel
 			}
 		}
@@ -1216,18 +1244,35 @@ func main() {
 
 	var modelsClient *llm.Client
 	var codeModelsClient *llm.Client
-	if cfg.UseAzure() {
+	switch {
+	case cfg.UseBedrock():
+		modelsClient, err = llm.NewBedrockClient(context.Background(), cfg.BedrockRegion, cfg.GeneralModel, cfg.BedrockAPIKey)
+		if err != nil {
+			log.Fatalf("Bedrock backend init failed: %v", err)
+		}
+		bedrockAuth := "SigV4 (AWS credential chain)"
+		if cfg.BedrockAPIKey != "" {
+			bedrockAuth = "API key"
+		}
+		log.Printf("Using AWS Bedrock backend: region %s, auth %s (general: %s)", cfg.BedrockRegion, bedrockAuth, cfg.GeneralModel)
+		// The code client reuses the same credentials, signer, and connection
+		// pool via WithModel — no second AWS config load or credential probe.
+		codeModelsClient = modelsClient.WithModel(cfg.CodeModel)
+		if cfg.CodeModelExplicit {
+			log.Printf("Code model (Bedrock): %s", cfg.CodeModel)
+		}
+	case cfg.UseAzure():
 		modelsClient = llm.NewAzureClient(cfg.AzureEndpoint, cfg.AzureAPIKey, cfg.GeneralModel)
 		log.Printf("Using Azure OpenAI backend: %s (general: %s)", cfg.AzureEndpoint, cfg.GeneralModel)
 		codeModelsClient = llm.NewAzureClient(cfg.AzureEndpoint, cfg.AzureAPIKey, cfg.CodeModel)
-		if cfg.CodeModel != cfg.GeneralModel {
+		if cfg.CodeModelExplicit {
 			log.Printf("Code model (Azure): %s", cfg.CodeModel)
 		}
-	} else {
+	default:
 		modelsClient = llm.NewClient(cfg.GitHubToken, cfg.GeneralModel)
 		log.Printf("Using GitHub Models backend (general: %s)", cfg.GeneralModel)
 		codeModelsClient = llm.NewClient(cfg.GitHubToken, cfg.CodeModel)
-		if cfg.CodeModel != cfg.GeneralModel {
+		if cfg.CodeModelExplicit {
 			log.Printf("Code model (GitHub): %s", cfg.CodeModel)
 		}
 	}

@@ -34,6 +34,7 @@ env:
   PORT: "8080"
   GENERAL_MODEL: "openai/gpt-4o" # options: openai/gpt-4o, meta/llama-3.1-405b-instruct, etc.
   # CODE_MODEL: "openai/gpt-4o"  # Separate model for code-generation tasks (PRs, file edits). Defaults to GENERAL_MODEL.
+  # BEDROCK_REGION: "us-east-1"  # Selects AWS Bedrock as the LLM backend (takes precedence over Azure/GitHub). Set GENERAL_MODEL to a Bedrock model/inference-profile ID, e.g. "us.anthropic.claude-opus-4-8". Credentials resolve via the standard AWS chain (IRSA / env / profile).
   APP_URL: ""  # Public base URL of this app (e.g. "https://ai.dev.example.io"). Used for UI link in Jira stamps.
   # UI_ALLOWED_CIDRS: "10.0.0.0/8,203.0.113.10/32"  # Comma-separated CIDRs; empty = no restriction.
   # THREAD_SESSION_TTL: "3m"  # How long a thread session stays active (Go duration: 3m, 5m30s, etc.)
@@ -49,7 +50,8 @@ env:
 # which shrinks bloated tool outputs (JSON, logs, search results) and returns
 # the compressed messages. The app then calls its normal model provider with the
 # smaller payload — so compression works for EVERY backend (GitHub Models,
-# Azure OpenAI, and Azure Foundry / Claude) with no change to prompts or auth.
+# Azure OpenAI, Azure Foundry / Claude, and AWS Bedrock) with no change to
+# prompts or auth.
 #
 # Data flow when enabled:
 #   arbetern --(HEADROOM_PROXY_URL=http://localhost:<port>)--> headroom /v1/compress
@@ -198,6 +200,11 @@ secretValues:
   # Azure OpenAI credentials (optional – when set the app uses Azure instead of GitHub Models)
   azure-openai-endpoint: ""
   azure-api-key: ""
+  # AWS Bedrock API key (optional — bearer token, "ABSK..."). When set alongside
+  # env.BEDROCK_REGION, the app uses Bedrock and authenticates with this key
+  # instead of resolving SigV4 credentials. Leave empty to use the SigV4 chain
+  # (static keys / IRSA). Exported to the pod as AWS_BEARER_TOKEN_BEDROCK.
+  # bedrock-api-key: ""
   # Atlassian integration (optional — enables Jira tickets + Confluence page reading)
   atlassian-url: ""           # e.g. "https://yourorg.atlassian.net"
   atlassian-email: ""         # Atlassian account email (Basic Auth)

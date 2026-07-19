@@ -11,6 +11,15 @@ can work with them without leaving Slack:
 Both services reuse the standard SDK credential chain, so adding more
 services later (CloudWatch, EC2, …) reuses the same auth plumbing.
 
+> **Bedrock is separate.** AWS **Bedrock** can also serve the agents' underlying
+> LLM (Claude), but that is an *inference backend*, not one of the integration
+> tools above. It is enabled with `BEDROCK_REGION` and authenticates either with
+> a Bedrock API key (`AWS_BEARER_TOKEN_BEDROCK`) or, if that is unset, with this
+> same SigV4 credential chain (needing only `bedrock:InvokeModel`). See
+> [LLM backends](../README.md#llm-backends). The `AWS_REGION` and IAM
+> permissions documented here are for the cost/S3 tools; Bedrock uses its own
+> `BEDROCK_REGION`.
+
 ## Required Credentials
 
 Authentication is resolved by the [AWS SDK v2 default credential chain][chain],

@@ -34,13 +34,19 @@ import (
 	"strings"
 )
 
-// anthropicRequest is the wire body for POST /anthropic/v1/messages.
+// anthropicRequest is the wire body for the Anthropic Messages API. Two
+// backends speak it with slightly different envelopes: Azure Foundry carries the
+// model here (Model) and the version in a header, while AWS Bedrock omits Model
+// (it lives in the URL) and carries the version in the body (AnthropicVersion).
+// The omitempty tags let a single struct serve both — each transport sets only
+// the fields it needs (see messagesTransport.stampEnvelope).
 type anthropicRequest struct {
-	Model     string             `json:"model"`
-	MaxTokens int                `json:"max_tokens"`
-	System    interface{}        `json:"system,omitempty"`
-	Messages  []anthropicMessage `json:"messages"`
-	Tools     []anthropicTool    `json:"tools,omitempty"`
+	Model            string             `json:"model,omitempty"`
+	AnthropicVersion string             `json:"anthropic_version,omitempty"`
+	MaxTokens        int                `json:"max_tokens"`
+	System           interface{}        `json:"system,omitempty"`
+	Messages         []anthropicMessage `json:"messages"`
+	Tools            []anthropicTool    `json:"tools,omitempty"`
 }
 
 // anthropicMessage is a single turn. Content may be string or block array.
@@ -255,17 +261,40 @@ func anthropicResponseToChat(r *anthropicResponse) *ChatResponse {
 	return resp
 }
 
-// doAnthropic calls Foundry's Anthropic Messages API for Claude deployments.
-func (c *Client) doAnthropic(ctx context.Context, messages []ChatMessage, tools []Tool) (*ChatResponse, error) {
+// messagesTransport captures the wire-level differences between the two backends
+// that speak the Anthropic Messages API. The protocol itself — translating the
+// unified ChatMessage/Tool types, applying prompt-cache markers, and parsing the
+// reply — is shared (see buildAnthropicRequest / parseAnthropicResponse); a
+// transport contributes only the endpoint, the request-envelope fields, and the
+// authentication that Azure Foundry and AWS Bedrock differ on.
+type messagesTransport interface {
+	// name labels the backend in logs and error messages.
+	name() string
+	// endpoint is the POST target for a completion on model.
+	endpoint(model string) string
+	// stampEnvelope sets transport-specific request fields. Foundry keeps the
+	// model in the body; Bedrock moves it to the URL and adds anthropic_version.
+	stampEnvelope(req *anthropicRequest, model string)
+	// authorize sets every header the request needs (including Content-Type)
+	// and signs it. It runs on each attempt so signatures that embed a
+	// timestamp (SigV4) are regenerated on retries.
+	authorize(ctx context.Context, req *http.Request, body []byte) error
+}
+
+// buildAnthropicRequest translates the unified message/tool types into a Messages
+// API request and applies prompt-cache markers. The transport-specific envelope
+// fields (Model / AnthropicVersion) are left for stampEnvelope to fill.
+//
+// Prompt caching places breakpoints on the static prefix (tool schemas + system
+// prompt) and on the rolling conversation tail. In a tool-loop the same large
+// prefix is re-sent every round, so caching lets rounds 2..N read it at the
+// provider's ~0.1x cache-read rate instead of full price. This is
+// quality-neutral — the model sees identical input; only billing and latency
+// improve. Disable with LLM_PROMPT_CACHE=false.
+func (c *Client) buildAnthropicRequest(messages []ChatMessage, tools []Tool) anthropicRequest {
 	system, anthMessages := chatMessagesToAnthropic(messages)
 	anthTools := chatToolsToAnthropicTools(tools)
 
-	// Prompt caching: place breakpoints on the static prefix (tool schemas +
-	// system prompt) and on the rolling conversation tail. In a tool-loop the
-	// same large prefix is re-sent every round, so caching lets rounds 2..N
-	// read it at the provider's ~0.1x cache-read rate instead of full price.
-	// This is quality-neutral — the model sees identical input; only billing
-	// and latency improve. Disable with LLM_PROMPT_CACHE=false.
 	var systemField interface{}
 	if s := strings.TrimSpace(system); s != "" {
 		if promptCacheEnabled() {
@@ -281,36 +310,17 @@ func (c *Client) doAnthropic(ctx context.Context, messages []ChatMessage, tools 
 		markLastMessageCache(anthMessages)
 	}
 
-	reqBody := anthropicRequest{
-		Model:     c.model,
+	return anthropicRequest{
 		MaxTokens: anthropicMaxTokens,
 		System:    systemField,
 		Messages:  anthMessages,
 		Tools:     anthTools,
 	}
+}
 
-	payload, err := json.Marshal(reqBody)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal anthropic request: %w", err)
-	}
-
-	apiURL := fmt.Sprintf("%s/anthropic/v1/messages", c.azureServicesEndpoint())
-
-	headers := map[string]string{
-		"Content-Type":      "application/json",
-		"x-api-key":         c.azureAPIKey,
-		"anthropic-version": anthropicAPIVersion,
-	}
-
-	body, statusCode, err := c.doPostWithRetry(ctx, apiURL, payload, headers, "anthropic")
-	if err != nil {
-		return nil, err
-	}
-
-	if statusCode != http.StatusOK {
-		return nil, fmt.Errorf("anthropic API returned %d: %s", statusCode, extractAPIErrorMessage(body))
-	}
-
+// parseAnthropicResponse decodes a Messages API reply into the shared
+// ChatResponse shape, surfacing any API-level error.
+func parseAnthropicResponse(body []byte) (*ChatResponse, error) {
 	var anthResp anthropicResponse
 	if err := json.Unmarshal(bytes.TrimSpace(body), &anthResp); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal anthropic response: %w", err)
@@ -318,6 +328,54 @@ func (c *Client) doAnthropic(ctx context.Context, messages []ChatMessage, tools 
 	if anthResp.Error != nil {
 		return nil, fmt.Errorf("anthropic API error: %s", anthResp.Error.Message)
 	}
-
 	return anthropicResponseToChat(&anthResp), nil
+}
+
+// callMessages runs one Anthropic Messages request over the given transport:
+// build + stamp + marshal, POST with retry (re-authorizing each attempt), parse.
+func (c *Client) callMessages(ctx context.Context, t messagesTransport, messages []ChatMessage, tools []Tool) (*ChatResponse, error) {
+	req := c.buildAnthropicRequest(messages, tools)
+	t.stampEnvelope(&req, c.model)
+
+	payload, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal %s request: %w", t.name(), err)
+	}
+
+	body, statusCode, err := c.doPostWithRetry(ctx, t.endpoint(c.model), payload,
+		func(r *http.Request) error { return t.authorize(ctx, r, payload) }, t.name())
+	if err != nil {
+		return nil, err
+	}
+	if statusCode != http.StatusOK {
+		return nil, fmt.Errorf("%s API returned %d: %s", t.name(), statusCode, extractAPIErrorMessage(body))
+	}
+	return parseAnthropicResponse(body)
+}
+
+// foundryTransport speaks the Anthropic Messages API as hosted by Azure AI
+// Foundry: the model travels in the request body and auth is the Azure API key
+// sent as x-api-key, with the version in the anthropic-version header.
+type foundryTransport struct{ c *Client }
+
+func (t foundryTransport) name() string { return "anthropic" }
+
+func (t foundryTransport) endpoint(string) string {
+	return fmt.Sprintf("%s/anthropic/v1/messages", t.c.azureServicesEndpoint())
+}
+
+func (t foundryTransport) stampEnvelope(req *anthropicRequest, model string) {
+	req.Model = model
+}
+
+func (t foundryTransport) authorize(_ context.Context, r *http.Request, _ []byte) error {
+	r.Header.Set("Content-Type", "application/json")
+	r.Header.Set("x-api-key", t.c.azureAPIKey)
+	r.Header.Set("anthropic-version", anthropicAPIVersion)
+	return nil
+}
+
+// doAnthropic calls Foundry's Anthropic Messages API for Claude deployments.
+func (c *Client) doAnthropic(ctx context.Context, messages []ChatMessage, tools []Tool) (*ChatResponse, error) {
+	return c.callMessages(ctx, foundryTransport{c}, messages, tools)
 }

@@ -63,7 +63,7 @@ Bayes.
 - Go 1.26+
 - A Slack app with a slash command pointing to `/<agent>/webhook` (see [docs/SLACK_BOT.md](docs/SLACK_BOT.md))
 - A GitHub PAT with repo access (see [docs/GITHUB_PAT.md](docs/GITHUB_PAT.md))
-- (Optional) Azure OpenAI credentials for LLM inference
+- (Optional) Azure OpenAI credentials or an AWS Bedrock region for LLM inference
 
 ### Environment Variables
 
@@ -73,12 +73,41 @@ The core variables you'll set on day one:
 |---|---|---|
 | `SLACK_BOT_TOKEN` | yes | Slack bot OAuth token (`xoxb-...`) |
 | `SLACK_SIGNING_SECRET` | yes | Slack app signing secret |
-| `GITHUB_TOKEN` | yes\* | GitHub PAT (\*or use Azure OpenAI for inference) |
-| `GENERAL_MODEL` | no | General model ID (default: `openai/gpt-4o`) |
-| `CODE_MODEL` | no | Model used for code-related tasks (default: same as `GENERAL_MODEL`) |
+| `GITHUB_TOKEN` | yes\* | GitHub PAT (\*or use Azure OpenAI / AWS Bedrock for inference) |
+| `GENERAL_MODEL` | yes | Model ID for the active backend — e.g. `openai/gpt-4o` (GitHub), a deployment name (Azure), or a Bedrock model / inference-profile ID. **Required; there is no default** |
+| `CODE_MODEL` | no | Separate model for code-related tasks. Optional — falls back to `GENERAL_MODEL` when unset |
 | `AZURE_OPEN_AI_ENDPOINT` / `AZURE_API_KEY` | no | Azure OpenAI credentials (alternative to GitHub Models) |
+| `BEDROCK_REGION` | no | Selects **AWS Bedrock** as the LLM backend, e.g. `us-east-1` (see [LLM backends](#llm-backends)) |
 | `APP_URL` | no | Public app URL (used for Jira ticket stamps and Slack links) |
 | `PORT` | no | HTTP port (default: `8080`) |
+
+### LLM backends
+
+Arbetern speaks to one LLM backend at a time, selected by which credentials are
+present. When more than one is configured, precedence is **Bedrock → Azure OpenAI
+→ GitHub Models**:
+
+| Backend | Selected by | Model ID form (`GENERAL_MODEL` / `CODE_MODEL`) |
+|---|---|---|
+| **GitHub Models** (default) | `GITHUB_TOKEN` | `openai/gpt-4o`, `meta/llama-3.1-405b-instruct`, … |
+| **Azure OpenAI** | `AZURE_OPEN_AI_ENDPOINT` + `AZURE_API_KEY` | your deployment name (`gpt-4o`, `gpt-5.x`, `claude-*` for Foundry) |
+| **AWS Bedrock** | `BEDROCK_REGION` | Bedrock model / inference-profile ID, e.g. `anthropic.claude-opus-4-8` or the cross-region profile `us.anthropic.claude-opus-4-8` |
+
+**AWS Bedrock** serves Claude models through the same Anthropic Messages
+protocol the app already uses for Azure Foundry, so prompt caching
+(`LLM_PROMPT_CACHE`), usage/billing, and Headroom compression all work
+unchanged. Set `BEDROCK_REGION` to a region where the model is available and
+`GENERAL_MODEL` to its Bedrock ID (most accounts need the cross-region inference
+profile, e.g. `us.anthropic.claude-opus-4-8`). `BEDROCK_REGION` is independent
+of `AWS_REGION` (which only signs Cost Explorer calls).
+
+Authentication is one of two schemes, and the target principal/key needs
+`bedrock:InvokeModel` on the model or inference profile either way:
+
+| Auth | How to enable |
+|---|---|
+| **Bedrock API key** (bearer token, `ABSK…`) | Set `AWS_BEARER_TOKEN_BEDROCK` (chart secret `bedrock-api-key`). No AWS credential chain is consulted. |
+| **SigV4** (default) | Leave the API key unset; credentials resolve through the standard AWS SDK chain — static keys (`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`), `AWS_PROFILE`, or EKS IRSA (`AWS_WEB_IDENTITY_TOKEN_FILE` + `AWS_ROLE_ARN`) — the same chain the AWS cost tools use. |
 
 <details>
 <summary><b>Runtime tuning</b> — sessions, tool rounds, UI access</summary>
@@ -92,7 +121,7 @@ The core variables you'll set on day one:
 | `SHOW_USAGE_STAMP` | Append model/token usage metadata to Slack replies. Default `true` |
 | `UI_ALLOWED_CIDRS` | Comma-separated CIDRs allowed to access the UI |
 | `UI_HEADER` | Custom header text for the web UI (default `arbetern`) |
-| `HEADROOM_PROXY_URL` | Base URL of a [Headroom](docs/HEADROOM.md) compression sidecar (e.g. `http://localhost:8787`). When set, each conversation is compressed via its `/v1/compress` endpoint before every LLM call — cutting tokens across **all** backends (GitHub Models, Azure OpenAI, Azure Foundry/Claude). Set automatically by Helm when `headroom.enabled: true` |
+| `HEADROOM_PROXY_URL` | Base URL of a [Headroom](docs/HEADROOM.md) compression sidecar (e.g. `http://localhost:8787`). When set, each conversation is compressed via its `/v1/compress` endpoint before every LLM call — cutting tokens across **all** backends (GitHub Models, Azure OpenAI, Azure Foundry/Claude, AWS Bedrock). Set automatically by Helm when `headroom.enabled: true` |
 | `HEADROOM_COMPRESS_TIMEOUT` | Go duration bounding a single `/v1/compress` round-trip before the app falls back to sending the conversation uncompressed (fail-open). Default `90s`; raise for very large contexts. Set via Helm `headroom.compressTimeout` |
 
 </details>
@@ -895,7 +924,7 @@ agents/              # agent definitions (one directory per agent)
 commands/            # intent routing, debug/general handlers
 config/              # env var loading
 github/              # GitHub REST API client (repos, PRs, files, workflows)
-llm/                 # LLM inference client + tool types (Azure OpenAI, GitHub Models)
+llm/                 # LLM inference client + tool types (GitHub Models, Azure OpenAI, AWS Bedrock)
 atlassian/           # Atlassian Cloud REST API client (Jira + Confluence)
 nvd/                 # NVD (National Vulnerability Database) CVE API client
 salesforce/          # Salesforce REST API client (SOQL queries, OAuth 2.0)

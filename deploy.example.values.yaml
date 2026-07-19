@@ -13,13 +13,14 @@ env:
   APP_URL: "https://your-app-url.example.com"
   GENERAL_MODEL: "gpt-4o"
   # CODE_MODEL: "gpt-4o"  # Separate model for code tasks (search, file edits, PRs). Defaults to GENERAL_MODEL.
+  # BEDROCK_REGION: "us-east-1"  # Selects AWS Bedrock as the LLM backend (takes precedence over Azure/GitHub). With it set, GENERAL_MODEL is a Bedrock model/inference-profile ID, e.g. "us.anthropic.claude-opus-4-8". Credentials resolve via the AWS chain (IRSA / env / profile).
   # UI_ALLOWED_CIDRS: "0.0.0.0/0"
   # AWS_REGION: "us-east-1"   # Cost Explorer SigV4 signing region. CE is global; us-east-1 is the canonical choice.
 
 # Headroom context-compression sidecar (optional — cuts LLM token usage).
 # When enabled, arbetern compresses each conversation via the in-pod headroom
 # /v1/compress endpoint before calling the model — works with any backend
-# (GitHub Models, Azure OpenAI, Azure Foundry/Claude). See docs/HEADROOM.md.
+# (GitHub Models, Azure OpenAI, Azure Foundry/Claude, AWS Bedrock). See docs/HEADROOM.md.
 # headroom:
 #   enabled: true
 #   # Raise if large contexts trip the compress timeout (default 90s).

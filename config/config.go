@@ -18,8 +18,6 @@ var ExtensionsRaw string
 
 const (
 	defaultPort             = "8080"
-	defaultModel            = "openai/gpt-4o"
-	defaultAzureModel       = "gpt-4o"
 	defaultThreadSessionTTL = 3 * time.Minute
 	// defaultChatRetention is how long a UI chat conversation is kept after
 	// its last activity before the background sweeper deletes it. One week by
@@ -46,12 +44,17 @@ const (
 // overridden per agent" surface area obvious — anything in this struct
 // can be overridden, nothing outside it can.
 type Credentials struct {
-	SlackBotToken         string `cred:"slack-bot-token"`
-	SlackSigningSecret    string `cred:"slack-signing-secret"`
-	SlackAppToken         string `cred:"slack-app-token"`
-	GitHubToken           string `cred:"github-token"`
-	AzureEndpoint         string `cred:"azure-openai-endpoint"`
-	AzureAPIKey           string `cred:"azure-api-key"`
+	SlackBotToken      string `cred:"slack-bot-token"`
+	SlackSigningSecret string `cred:"slack-signing-secret"`
+	SlackAppToken      string `cred:"slack-app-token"`
+	GitHubToken        string `cred:"github-token"`
+	AzureEndpoint      string `cred:"azure-openai-endpoint"`
+	AzureAPIKey        string `cred:"azure-api-key"`
+	// BedrockAPIKey is an AWS Bedrock API key (bearer token). When set, the
+	// Bedrock backend authenticates with it instead of resolving SigV4
+	// credentials. Sourced from AWS_BEARER_TOKEN_BEDROCK. Requires
+	// BedrockRegion to select Bedrock.
+	BedrockAPIKey         string `cred:"bedrock-api-key"`
 	AtlassianURL          string `cred:"atlassian-url"`
 	AtlassianEmail        string `cred:"atlassian-email"`
 	AtlassianAPIToken     string `cred:"atlassian-api-token"`
@@ -121,13 +124,17 @@ type Credentials struct {
 type Config struct {
 	Credentials
 
-	GeneralModel     string // Default model/deployment for general queries.
-	CodeModel        string // Separate model/deployment for code-generation tasks (PRs, modify_file).
-	Port             string
-	UIAllowedCIDRs   string
-	AppURL           string
-	ThreadSessionTTL time.Duration
-	MaxToolRounds    int
+	GeneralModel string // Required model/deployment for general queries.
+	CodeModel    string // Model/deployment for code-generation tasks (PRs, modify_file). Falls back to GeneralModel when unset.
+	// CodeModelExplicit is true when CODE_MODEL was set explicitly (before the
+	// fall-back to GeneralModel is applied), so callers can surface a distinct
+	// code model only when the operator actually configured one.
+	CodeModelExplicit bool
+	Port              string
+	UIAllowedCIDRs    string
+	AppURL            string
+	ThreadSessionTTL  time.Duration
+	MaxToolRounds     int
 
 	// HeadroomURL is the base URL of a Headroom compression proxy (empty =
 	// disabled); set from HEADROOM_PROXY_URL. See llm.Client.compressMessages.
@@ -146,6 +153,14 @@ type Config struct {
 	// (AWS_WEB_IDENTITY_TOKEN_FILE + AWS_ROLE_ARN) all work.
 	AWSRegion  string
 	AWSEnabled bool // set true when AWS credentials appear present (enables the cost-explorer tools).
+
+	// BedrockRegion selects Amazon Bedrock as the LLM backend when set (e.g.
+	// "us-east-1"). It is deliberately separate from AWSRegion (which signs
+	// Cost Explorer calls): Bedrock model / inference-profile availability is
+	// region-specific, and setting it is the explicit opt-in that distinguishes
+	// "use Bedrock for inference" from "AWS creds happen to be present for the
+	// cost tools". Credentials resolve through the same AWS SDK chain.
+	BedrockRegion string
 
 	// Sovereign-cloud overrides for Azure Cost Management. Default to the
 	// public-cloud endpoints when unset. Not per-agent overridable — these
@@ -186,6 +201,13 @@ type Config struct {
 // UseAzure returns true when Azure OpenAI credentials are configured.
 func (c *Config) UseAzure() bool {
 	return c.AzureEndpoint != "" && c.AzureAPIKey != ""
+}
+
+// UseBedrock returns true when Amazon Bedrock is selected as the LLM backend
+// (BEDROCK_REGION is set). Bedrock takes precedence over Azure OpenAI and
+// GitHub Models when more than one is configured.
+func (c *Config) UseBedrock() bool {
+	return c.BedrockRegion != ""
 }
 
 // AtlassianConfigured returns true when Atlassian credentials are present.
@@ -300,6 +322,7 @@ func Load() (*Config, error) {
 			GitHubToken:            os.Getenv("GITHUB_TOKEN"),
 			AzureEndpoint:          os.Getenv("AZURE_OPEN_AI_ENDPOINT"),
 			AzureAPIKey:            os.Getenv("AZURE_API_KEY"),
+			BedrockAPIKey:          os.Getenv("AWS_BEARER_TOKEN_BEDROCK"),
 			AtlassianURL:           os.Getenv("ATLASSIAN_URL"),
 			AtlassianEmail:         os.Getenv("ATLASSIAN_EMAIL"),
 			AtlassianAPIToken:      os.Getenv("ATLASSIAN_API_TOKEN"),
@@ -349,6 +372,7 @@ func Load() (*Config, error) {
 		AppURL:              os.Getenv("APP_URL"),
 		HeadroomURL:         strings.TrimRight(strings.TrimSpace(os.Getenv("HEADROOM_PROXY_URL")), "/"),
 		AWSRegion:           os.Getenv("AWS_REGION"),
+		BedrockRegion:       strings.TrimSpace(os.Getenv("BEDROCK_REGION")),
 		AzureAuthorityHost:  os.Getenv("AZURE_AUTHORITY_HOST"),
 		AzureManagementHost: os.Getenv("AZURE_MANAGEMENT_HOST"),
 		DashboardsDir:       os.Getenv("DASHBOARDS_DIR"),
@@ -398,23 +422,24 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("SLACK_SIGNING_SECRET is required")
 	}
 
-	// Either GitHub token or Azure credentials are required for LLM access.
-	if cfg.GitHubToken == "" && !cfg.UseAzure() {
-		return nil, fmt.Errorf("GITHUB_TOKEN is required (or set AZURE_OPEN_AI_ENDPOINT and AZURE_API_KEY)")
+	// A GitHub token, Azure credentials, or a Bedrock region is required for
+	// LLM access.
+	if cfg.GitHubToken == "" && !cfg.UseAzure() && !cfg.UseBedrock() {
+		return nil, fmt.Errorf("GITHUB_TOKEN is required (or set AZURE_OPEN_AI_ENDPOINT and AZURE_API_KEY, or BEDROCK_REGION)")
 	}
 
+	// GENERAL_MODEL is required for every backend — there is no default model,
+	// so an unset value never silently ships a wrong provider's model ID.
 	if cfg.GeneralModel == "" {
-		if cfg.UseAzure() {
-			cfg.GeneralModel = defaultAzureModel
-		} else {
-			cfg.GeneralModel = defaultModel
-		}
+		return nil, fmt.Errorf("GENERAL_MODEL is required")
 	}
 	if cfg.Port == "" {
 		cfg.Port = defaultPort
 	}
 
-	// CODE_MODEL defaults to the general model when not explicitly set.
+	// CODE_MODEL is optional and falls back to the general model when unset.
+	// Record whether it was set explicitly before applying the fall-back.
+	cfg.CodeModelExplicit = cfg.CodeModel != ""
 	if cfg.CodeModel == "" {
 		cfg.CodeModel = cfg.GeneralModel
 	}
