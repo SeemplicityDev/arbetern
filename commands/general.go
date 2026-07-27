@@ -323,6 +323,7 @@ func (h *GeneralHandler) Execute(channelID, userID, text, responseURL, auditTS s
 	toolCallsMade := false
 	blockedPreActionAcks := 0
 	emptyResponseRetries := 0
+	truncatedToolRounds := 0
 
 	// Track cumulative token usage and compression savings across all LLM rounds.
 	var totalUsage llm.Usage
@@ -362,7 +363,30 @@ func (h *GeneralHandler) Execute(channelID, userID, text, responseURL, auditTS s
 
 		choice := resp.Choices[0]
 
-		if len(choice.Message.ToolCalls) == 0 {
+		// A turn cut off at the output ceiling can still carry a half-written
+		// tool call whose trailing arguments are silently empty. Never execute
+		// that one — a write tool would commit a real diff behind a titleless,
+		// bodyless PR.
+		toolCalls, truncatedCall := splitTruncatedToolCalls(choice.FinishReason, choice.Message.ToolCalls)
+		if truncatedCall != nil {
+			truncatedToolRounds++
+			log.Printf("[user=%s channel=%s] discarded truncated %s call (finish=%q, round %d/%d); kept %d complete call(s)",
+				userID, channelID, truncatedCall.Function.Name, choice.FinishReason, truncatedToolRounds, maxTruncatedToolRounds, len(toolCalls))
+			if truncatedToolRounds > maxTruncatedToolRounds {
+				fallback := "I stopped here: my tool calls kept getting cut off at the output limit, and I won't run a half-written change (that is how a PR ends up with no title or description). Try narrowing the request — one file or one change at a time."
+				stamp := llm.FormatUsageStamp(&totalUsage, activeClient.Model())
+				if repliedInThread {
+					if stamp != "" {
+						_ = h.slackClient.PostThreadReply(channelID, auditTS, stamp)
+					}
+					return
+				}
+				h.replyDefault(channelID, responseURL, auditTS, fallback+stamp)
+				return
+			}
+		}
+
+		if len(toolCalls) == 0 && truncatedCall == nil {
 			// Guardrail: prevent placeholder acknowledgements like "I'm checking..."
 			// from being posted for code/repo actions before any tool execution.
 			if !toolCallsMade && isCodeIntent(strings.ToLower(text)) && isPreActionAck(choice.Message.Content) {
@@ -382,8 +406,11 @@ func (h *GeneralHandler) Execute(channelID, userID, text, responseURL, auditTS s
 			// An empty final message (no text, no tool call) has two causes,
 			// told apart by finish reason: a truncated turn (hit the output
 			// ceiling) needs a "smaller step" nudge; a spurious empty reply just
-			// needs a retry. The empty assistant placeholder below preserves
-			// user/assistant alternation.
+			// needs a retry. The assistant placeholder below preserves
+			// user/assistant alternation; it carries emptyTurnPlaceholder rather
+			// than "" because the Anthropic Messages API rejects a non-final
+			// message with empty content, which would turn a recoverable empty
+			// turn into a hard 400.
 			if strings.TrimSpace(choice.Message.Content) == "" && emptyResponseRetries < 2 {
 				emptyResponseRetries++
 				var nudge string
@@ -395,7 +422,7 @@ func (h *GeneralHandler) Execute(channelID, userID, text, responseURL, auditTS s
 					nudge = "Your previous response was empty. Please provide a complete answer to my original request. Use the available tools if needed."
 				}
 				messages = append(messages,
-					llm.NewChatMessage("assistant", ""),
+					llm.NewChatMessage("assistant", emptyTurnPlaceholder),
 					llm.NewChatMessage("user", nudge),
 				)
 				continue
@@ -433,12 +460,14 @@ func (h *GeneralHandler) Execute(channelID, userID, text, responseURL, auditTS s
 			return
 		}
 
+		// The assistant message keeps every requested call — including the
+		// discarded one — so each tool_use still has a matching tool_result.
 		messages = append(messages, llm.ChatMessage{
 			Role:      "assistant",
 			ToolCalls: choice.Message.ToolCalls,
 		})
 
-		for _, tc := range choice.Message.ToolCalls {
+		for _, tc := range toolCalls {
 			log.Printf("[user=%s channel=%s] LLM called tool: %s(%s)", userID, channelID, tc.Function.Name, tc.Function.Arguments)
 			toolCallsMade = true
 			result := h.executeTool(ctx, channelID, userID, auditTS, tc.Function.Name, tc.Function.Arguments)
@@ -463,6 +492,9 @@ func (h *GeneralHandler) Execute(channelID, userID, text, responseURL, auditTS s
 				log.Printf("[user=%s channel=%s] switched to code model (%s) after %s call",
 					userID, channelID, h.codeModelsClient.Model(), tc.Function.Name)
 			}
+		}
+		if truncatedCall != nil {
+			messages = append(messages, llm.NewToolResultMessage(truncatedCall.ID, truncatedToolCallResult))
 		}
 	}
 
@@ -560,6 +592,7 @@ func (h *GeneralHandler) ExecuteHeadless(ctx context.Context, userID, prompt str
 		"call_workflow":      true,
 	}
 	var mutatingFailures []string
+	truncatedToolRounds := 0
 	var totalUsage llm.Usage
 	var totalCompression llm.CompressionStats
 	defer func() { h.recordUsage(activeClient.Model(), userID, totalUsage, totalCompression) }()
@@ -585,7 +618,20 @@ func (h *GeneralHandler) ExecuteHeadless(ctx context.Context, userID, prompt str
 			return "", fmt.Errorf("LLM returned no choices")
 		}
 		choice := resp.Choices[0]
-		if len(choice.Message.ToolCalls) == 0 {
+		// Never execute a tool call the model was still writing when it hit the
+		// output ceiling: its trailing arguments are empty, which for a write
+		// tool means a committed diff behind a contentless PR.
+		toolCalls, truncatedCall := splitTruncatedToolCalls(choice.FinishReason, choice.Message.ToolCalls)
+		if truncatedCall != nil {
+			truncatedToolRounds++
+			log.Printf("[workflow user=%s agent=%s] discarded truncated %s call (finish=%q, round %d/%d); kept %d complete call(s)",
+				userID, h.agentID, truncatedCall.Function.Name, choice.FinishReason, truncatedToolRounds, maxTruncatedToolRounds, len(toolCalls))
+			if truncatedToolRounds > maxTruncatedToolRounds {
+				return "", fmt.Errorf("workflow tick abandoned: %d tool calls were truncated at the model's output limit and discarded unexecuted (last: %s)",
+					truncatedToolRounds, truncatedCall.Function.Name)
+			}
+		}
+		if len(toolCalls) == 0 && truncatedCall == nil {
 			final := strings.TrimSpace(choice.Message.Content)
 			// Make headless completion visible in the operator log. Without
 			// this, a tick that silently ends with "I was unable to…" (or
@@ -617,11 +663,13 @@ func (h *GeneralHandler) ExecuteHeadless(ctx context.Context, userID, prompt str
 			}
 			return final, nil
 		}
+		// Every requested call stays on the assistant message — including the
+		// discarded one — so each tool_use keeps a matching tool_result.
 		messages = append(messages, llm.ChatMessage{
 			Role:      "assistant",
 			ToolCalls: choice.Message.ToolCalls,
 		})
-		for _, tc := range choice.Message.ToolCalls {
+		for _, tc := range toolCalls {
 			toolCallsMade++
 			log.Printf("[workflow user=%s agent=%s] tool: %s(%s)", userID, h.agentID, tc.Function.Name, tc.Function.Arguments)
 			result := h.executeTool(ctx, "", userID, "", tc.Function.Name, tc.Function.Arguments)
@@ -664,6 +712,9 @@ func (h *GeneralHandler) ExecuteHeadless(ctx context.Context, userID, prompt str
 			if codeTools[tc.Function.Name] && activeClient != codeClient {
 				activeClient = codeClient
 			}
+		}
+		if truncatedCall != nil {
+			messages = append(messages, llm.NewToolResultMessage(truncatedCall.ID, truncatedToolCallResult))
 		}
 	}
 	log.Printf("[workflow user=%s agent=%s] exceeded max tool rounds (%d); %d tool calls made",
@@ -713,6 +764,7 @@ func (h *GeneralHandler) ExecuteChat(ctx context.Context, userID string, history
 		rounds = 50
 	}
 	emptyResponseRetries := 0
+	truncatedToolRounds := 0
 	var totalUsage llm.Usage
 	var totalCompression llm.CompressionStats
 	defer func() { h.recordUsage(activeClient.Model(), userID, totalUsage, totalCompression) }()
@@ -741,7 +793,19 @@ func (h *GeneralHandler) ExecuteChat(ctx context.Context, userID string, history
 		}
 		choice := resp.Choices[0]
 
-		if len(choice.Message.ToolCalls) == 0 {
+		// A tool call the model was still writing when it hit the output ceiling
+		// arrives with its trailing arguments empty — dropped, never executed.
+		toolCalls, truncatedCall := splitTruncatedToolCalls(choice.FinishReason, choice.Message.ToolCalls)
+		if truncatedCall != nil {
+			truncatedToolRounds++
+			log.Printf("[chat user=%s agent=%s] discarded truncated %s call (finish=%q, round %d/%d); kept %d complete call(s)",
+				userID, h.agentID, truncatedCall.Function.Name, choice.FinishReason, truncatedToolRounds, maxTruncatedToolRounds, len(toolCalls))
+			if truncatedToolRounds > maxTruncatedToolRounds {
+				return "I stopped here: my tool calls kept getting cut off at the output limit, and I won't run a half-written change. Try narrowing the request — one file or one change at a time.", nil
+			}
+		}
+
+		if len(toolCalls) == 0 && truncatedCall == nil {
 			final := strings.TrimSpace(choice.Message.Content)
 			// Retry on an empty final turn. Truncated turns (output ceiling) get
 			// a "smaller step" nudge; a spurious empty reply just retries.
@@ -756,7 +820,7 @@ func (h *GeneralHandler) ExecuteChat(ctx context.Context, userID string, history
 					nudge = "Your previous response was empty. Please provide a complete answer to my request, using the available tools if needed."
 				}
 				messages = append(messages,
-					llm.NewChatMessage("assistant", ""),
+					llm.NewChatMessage("assistant", emptyTurnPlaceholder),
 					llm.NewChatMessage("user", nudge),
 				)
 				continue
@@ -770,11 +834,13 @@ func (h *GeneralHandler) ExecuteChat(ctx context.Context, userID string, history
 			return final, nil
 		}
 
+		// Every requested call stays on the assistant message — including the
+		// discarded one — so each tool_use keeps a matching tool_result.
 		messages = append(messages, llm.ChatMessage{
 			Role:      "assistant",
 			ToolCalls: choice.Message.ToolCalls,
 		})
-		for _, tc := range choice.Message.ToolCalls {
+		for _, tc := range toolCalls {
 			log.Printf("[chat user=%s agent=%s] tool: %s(%s)", userID, h.agentID, tc.Function.Name, tc.Function.Arguments)
 			result := h.executeTool(ctx, "", userID, "", tc.Function.Name, tc.Function.Arguments)
 			result = stripPreconditionPrefix(result)
@@ -791,6 +857,9 @@ func (h *GeneralHandler) ExecuteChat(ctx context.Context, userID string, history
 				log.Printf("[chat user=%s agent=%s] switched to code model (%s) after %s call",
 					userID, h.agentID, h.codeModelsClient.Model(), tc.Function.Name)
 			}
+		}
+		if truncatedCall != nil {
+			messages = append(messages, llm.NewToolResultMessage(truncatedCall.ID, truncatedToolCallResult))
 		}
 	}
 	log.Printf("[chat user=%s agent=%s] exceeded max tool rounds (%d)", userID, h.agentID, rounds)
@@ -2650,6 +2719,9 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		if errMsg != "" {
 			return errMsg
 		}
+		if errMsg := requireDescription(args.Description); errMsg != "" {
+			return errMsg
+		}
 		owner, baseBranch, errMsg := resolveRepoBranch(ctx, h.ghClient, args.Repo, args.Branch)
 		if errMsg != "" {
 			return errMsg
@@ -2710,6 +2782,9 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		if errMsg != "" {
 			return errMsg
 		}
+		if errMsg := requireDescription(args.Description); errMsg != "" {
+			return errMsg
+		}
 		owner, baseBranch, errMsg := resolveRepoBranch(ctx, h.ghClient, args.Repo, args.Branch)
 		if errMsg != "" {
 			return errMsg
@@ -2743,6 +2818,9 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 			Branch      string `json:"branch"`
 		}](argsJSON)
 		if errMsg != "" {
+			return errMsg
+		}
+		if errMsg := requireDescription(args.Description); errMsg != "" {
 			return errMsg
 		}
 		re, err := regexp.Compile(args.Pattern)
@@ -5267,4 +5345,45 @@ func isTruncatedFinish(reason string) bool {
 	default:
 		return false
 	}
+}
+
+// emptyTurnPlaceholder stands in for an assistant turn that produced nothing,
+// keeping user/assistant alternation intact while the loop nudges for a real
+// response. It must not be the empty string: the Anthropic Messages API rejects
+// any non-final message whose content is empty, so an empty placeholder makes
+// the very next request fail with a 400 and converts a recoverable empty turn
+// into a dead run.
+const emptyTurnPlaceholder = "(no output — previous turn produced nothing)"
+
+// maxTruncatedToolRounds bounds how many rounds of a single run may end with a
+// discarded truncated tool call. Each discard costs a full round, so a model
+// that keeps emitting one oversized call would otherwise burn every remaining
+// round re-trying it.
+const maxTruncatedToolRounds = 3
+
+// truncatedToolCallResult is the tool_result fed back for a tool call the model
+// was still writing when it hit the output-token ceiling.
+//
+// A truncated turn is not always empty: the provider returns the unfinished
+// tool_use block with whatever arguments it managed to emit, and a cut-off
+// tool_use is NOT schema-validated — so the trailing arguments arrive as empty
+// strings even when the schema marks them required. For the write tools those
+// trailing arguments are exactly description / pr_body / pr_title, which is how
+// a long session ends up committing a real diff behind a PR titled
+// "<agent>:" with a body that stops at "Change:". Dropping the call and
+// reporting this instead keeps the side effect from happening at all.
+const truncatedToolCallResult = "Error: this call was DISCARDED and never executed — the response hit the output-token limit while the call was still being written, so its arguments were incomplete (the arguments declared last, e.g. description / pr_body / pr_title, arrived empty). Nothing was committed and no pull request was opened. Re-issue this single call on its own with every required argument filled in, keeping the large arguments (old_content / new_content / content) as small as possible."
+
+// splitTruncatedToolCalls separates the tool calls of a turn that stopped at
+// the output ceiling into the ones that are safe to run and the one that may be
+// half-written. Content blocks are generated sequentially, so only the final
+// block of a truncated turn can be cut off — the calls before it are complete
+// and still worth executing. A normal finish returns the calls unchanged and a
+// nil truncated call.
+func splitTruncatedToolCalls(finishReason string, calls []llm.ToolCall) ([]llm.ToolCall, *llm.ToolCall) {
+	if len(calls) == 0 || !isTruncatedFinish(finishReason) {
+		return calls, nil
+	}
+	last := calls[len(calls)-1]
+	return calls[:len(calls)-1], &last
 }

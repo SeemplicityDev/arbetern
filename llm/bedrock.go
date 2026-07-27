@@ -82,7 +82,7 @@ func NewBedrockClient(ctx context.Context, region, model, apiKey string) (*Clien
 	}
 	return &Client{
 		model:      model,
-		httpClient: &http.Client{Timeout: 120 * time.Second},
+		httpClient: &http.Client{Timeout: llmRequestTimeout},
 		bedrock:    bc,
 	}, nil
 }

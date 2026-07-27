@@ -66,6 +66,21 @@ func buildPRBody(userID, supplied, fallback string) string {
 	return supplied + "\n\n---\n_Automated via Slack by <@" + userID + ">_"
 }
 
+// requireDescription rejects a write-tool call that arrived with a blank
+// description. description becomes the commit message, the PR title (when
+// pr_title is absent), and part of the default PR body — so an empty one ships
+// a real diff behind a PR titled "<agent>:" with a body that stops at
+// "Change:". Every write tool declares it required, but a provider does not
+// schema-check a tool_use block that was cut off at the output ceiling, so the
+// argument can still arrive empty. Returns "" when the description is usable.
+func requireDescription(description string) string {
+	if strings.TrimSpace(description) == "" {
+		return preconditionErrf("Error: `description` is required and arrived empty, so nothing was committed and no pull request was opened. " +
+			"Re-issue the call with a short description of the change (it becomes the commit message and the PR title), and pass pr_body for the reviewer-facing context.")
+	}
+	return ""
+}
+
 // parseToolArgs unmarshals a JSON string into the target struct.
 // Returns a user-facing error string if parsing fails.
 func parseToolArgs[T any](argsJSON string) (T, string) {

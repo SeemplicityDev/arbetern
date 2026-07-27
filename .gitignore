@@ -8,6 +8,7 @@
 *.so
 *.dylib
 *.tgz
+*_test
 
 # ...
 .DS_Store

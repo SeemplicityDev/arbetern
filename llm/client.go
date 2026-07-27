@@ -29,10 +29,28 @@ const anthropicAPIVersion = "2023-06-01"
 // calls (the API requires max_tokens and has no default). Kept high on purpose:
 // a too-small cap truncates a heavy turn (many tool_use blocks, a long final
 // message) before any block completes, which the tool loop then sees as an
-// empty response with stop_reason "max_tokens". It is a ceiling, not a target,
-// so it must clear a round's worth of tool calls plus a final message without
-// adding cost when unused.
-const anthropicMaxTokens = 16384
+// empty response with stop_reason "max_tokens" — or, worse, as a tool_use block
+// whose trailing arguments are silently empty.
+//
+// max_tokens caps thinking AND response text together, and the Claude 5 family
+// runs adaptive thinking whenever the request omits the `thinking` field (which
+// this client does) — so a tool-heavy round spends part of this budget before it
+// writes its first tool_use block. 32k leaves room for that plus a round of tool
+// calls and a final message; the models allow up to 128k. It is a ceiling, not a
+// target, so it adds no cost when unused — but see llmRequestTimeout: a
+// non-streaming request must also finish generating within that window.
+const anthropicMaxTokens = 32768
+
+// llmRequestTimeout bounds a single non-streaming completion. Every backend here
+// buffers the whole reply (Bedrock /invoke, Foundry /messages, Chat Completions),
+// so wall-clock ≈ full generation time and this — not max_tokens — is what a long
+// turn actually hits first: at Claude output speeds 120s only cleared roughly a
+// third of the anthropicMaxTokens ceiling, and when it trips the entire turn is
+// lost with no partial to salvage. Sized to clear the ceiling instead.
+//
+// Retries (see doPostWithRetry) only fire on 429/5xx, which fail fast without
+// generating, so this does not multiply into a many-minute stall on a rate limit.
+const llmRequestTimeout = 600 * time.Second
 
 // maxResponseBody is the upper bound on response body reads to prevent OOM from
 // unexpectedly large upstream responses (10 MB).
@@ -128,7 +146,7 @@ func NewClient(token, model string) *Client {
 	return &Client{
 		token:      token,
 		model:      model,
-		httpClient: &http.Client{Timeout: 120 * time.Second},
+		httpClient: &http.Client{Timeout: llmRequestTimeout},
 	}
 }
 
@@ -154,7 +172,7 @@ func NewAzureClient(endpoint, apiKey, deployment string) *Client {
 	endpoint = strings.TrimRight(endpoint, "/")
 	return &Client{
 		model:         deployment,
-		httpClient:    &http.Client{Timeout: 120 * time.Second},
+		httpClient:    &http.Client{Timeout: llmRequestTimeout},
 		azureEndpoint: endpoint,
 		azureAPIKey:   apiKey,
 	}

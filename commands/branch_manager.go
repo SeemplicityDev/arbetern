@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strings"
 
 	"github.com/justmike1/arbetern/github"
 )
@@ -100,8 +101,16 @@ func (bm *BranchManager) CommitAndPR(
 		return &CommitResult{PrURL: active.PrURL, IsNew: false, Message: active.PrURL}, nil
 	}
 
-	prTitle := prTitleOverride
+	// Last line of defence before a PR is opened: with both the override and the
+	// description empty the title degrades to a bare "<agentID>:" and the body
+	// to a template with nothing filled in. Callers validate their own arguments
+	// (see requireDescription); this makes the failure impossible at the choke
+	// point rather than relying on every future caller to remember.
+	prTitle := strings.TrimSpace(prTitleOverride)
 	if prTitle == "" {
+		if strings.TrimSpace(description) == "" {
+			return nil, fmt.Errorf("refusing to open a pull request with no title: both pr_title and description are empty")
+		}
 		prTitle = fmt.Sprintf("%s: %s", bm.agentID, description)
 	}
 	if existing, err := bm.ghClient.FindSimilarOpenPullRequest(ctx, owner, repo, baseBranch, github.PRDuplicateCandidate{
