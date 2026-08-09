@@ -90,6 +90,21 @@ headroom:
     limits:
       cpu: "2"
       memory: 4Gi
+  # A busy sidecar stops answering /health mid-compression, so period x
+  # failureThreshold (150s) must stay above compressTimeout (default 90s) or
+  # routine compressions get killed as hangs. Set {} to disable.
+  livenessProbe:
+    httpGet:
+      path: /health
+      port: headroom
+    initialDelaySeconds: 15
+    periodSeconds: 30
+    timeoutSeconds: 5
+    failureThreshold: 5
+  # Off by default: readiness on any container gates the whole pod, so a slow
+  # compression would drop the app from the Service. Compression fails open,
+  # so it should never gate traffic. Set a probe spec to opt in.
+  readinessProbe: {}
   # Must satisfy the pod-level runAsNonRoot policy (uid 65532).
   securityContext:
     runAsNonRoot: true

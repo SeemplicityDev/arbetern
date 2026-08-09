@@ -507,18 +507,14 @@ spec:
             - name: {{ $key }}
               value: {{ $value | quote }}
             {{- end }}
+          {{- with .Values.headroom.livenessProbe }}
           livenessProbe:
-            httpGet:
-              path: /health
-              port: headroom
-            initialDelaySeconds: 15
-            periodSeconds: 30
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.headroom.readinessProbe }}
           readinessProbe:
-            httpGet:
-              path: /health
-              port: headroom
-            initialDelaySeconds: 5
-            periodSeconds: 10
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           {{- with .Values.headroom.resources }}
           resources:
             {{- toYaml . | nindent 12 }}

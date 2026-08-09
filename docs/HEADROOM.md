@@ -92,12 +92,39 @@ Full set of knobs:
 | `headroom.extraArgs` | `[]` | Extra args appended to `headroom proxy` |
 | `headroom.env` | `{}` | Extra environment variables for the sidecar |
 | `headroom.resources` | `{}` | Resource requests/limits for the sidecar |
+| `headroom.livenessProbe` | `/health`, period 30s, timeout 5s, threshold 5 | Liveness probe spec. Set `{}` to disable |
+| `headroom.readinessProbe` | `{}` (disabled) | Readiness probe spec. Leave empty unless you want sidecar health to gate pod traffic |
 | `headroom.securityContext` | non-root (uid 65532) | Must satisfy the pod-level `runAsNonRoot` policy |
 
 The sidecar runs `headroom proxy --host 0.0.0.0 --port <port>` with `HOME=/tmp`
-(so the non-root user has a writable cache directory) and liveness/readiness
-probes against `/health`. It is **compression-only** — it never calls the LLM,
+(so the non-root user has a writable cache directory) and a liveness probe
+against `/health`. It is **compression-only** — it never calls the LLM,
 so it needs no provider keys or upstream configuration.
+
+### Probe tuning
+
+While a large `/v1/compress` is in flight the sidecar is CPU-bound and stops
+answering `/health` promptly — busy, not broken. The Kubernetes probe defaults
+(`timeoutSeconds: 1`, `failureThreshold: 3`) can't tell those apart and SIGTERM
+it after ~90s. The symptom is a climbing restart count where every termination
+reads `Reason: Completed, Exit Code: 0` (graceful shutdown, **not** `OOMKilled`
+/ `137`), plus repeated:
+
+```
+Liveness probe failed: Get "http://<pod-ip>:8787/health": context deadline exceeded
+```
+
+Two rules keep it stable:
+
+1. **Liveness budget > compress budget.** `periodSeconds × failureThreshold`
+   must exceed `HEADROOM_COMPRESS_TIMEOUT` (default 90s). The chart ships
+   30s × 5 = 150s; raise it alongside any `compressTimeout` increase.
+2. **No readiness probe on the sidecar.** Readiness on any container marks the
+   whole pod NotReady and drops it from the Service. Compression fails open, so
+   sidecar health should never gate traffic.
+
+Under-provisioned CPU makes both worse — the tokenizer competes with the health
+handler for the same cores. Give the sidecar at least 2 cores for large contexts.
 
 ## Backend compatibility
 
