@@ -24,6 +24,11 @@ func FormatQueryResult(r *QueryResult) string {
 
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "*Databricks query — %d row(s)*\n", r.RowCount)
+	// Name the source workspace so a report spanning several of them can't
+	// attribute a result set to the wrong one.
+	if h := hostLabel(r.Host); h != "" {
+		fmt.Fprintf(&sb, "_workspace: %s_\n", h)
+	}
 	if r.Truncated {
 		sb.WriteString("_(result truncated — narrow the query or lower the row count)_\n")
 	}
@@ -72,6 +77,14 @@ func FormatQueryResult(r *QueryResult) string {
 		fmt.Fprintf(&sb, "_(showing first %d of %d rows — upload as a snippet for the full set)_\n", maxDisplayRows, len(r.Rows))
 	}
 	return sb.String()
+}
+
+// hostLabel strips the scheme off a workspace URL to keep the header short.
+func hostLabel(host string) string {
+	h := strings.TrimSpace(host)
+	h = strings.TrimPrefix(h, "https://")
+	h = strings.TrimPrefix(h, "http://")
+	return strings.TrimRight(h, "/")
 }
 
 // writeRow renders one padded, pipe-separated table row.

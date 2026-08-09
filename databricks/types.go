@@ -24,12 +24,22 @@ type QueryParam struct {
 	Type  string `json:"type,omitempty"`
 }
 
+// QueryOptions selects where a statement runs and how much comes back. Host
+// and WarehouseID override the client's defaults; empty means "use the
+// default". A Host override must be allow-listed (see Client.allowHost).
+type QueryOptions struct {
+	Host        string // workspace URL, e.g. "https://dbc-1234.cloud.databricks.com". Empty = configured default.
+	WarehouseID string // SQL warehouse ID within Host. Empty = configured default.
+	RowLimit    int    // max rows to return; <=0 or >maxRowLimit uses the default.
+}
+
 // QueryResult is the flattened, LLM-friendly result of a SQL statement.
 type QueryResult struct {
 	Columns     []Column   `json:"columns"`
 	Rows        [][]string `json:"rows"` // each cell is the string form of the value; SQL NULL is rendered as "NULL".
 	RowCount    int        `json:"row_count"`
 	Truncated   bool       `json:"truncated"`
+	Host        string     `json:"host"` // workspace the statement actually ran against.
 	WarehouseID string     `json:"warehouse_id"`
 	StatementID string     `json:"statement_id"`
 }
@@ -78,6 +88,18 @@ type schemaCol struct {
 	TypeName string `json:"type_name"`
 	TypeText string `json:"type_text"`
 	Position int    `json:"position"`
+}
+
+// warehousesResponse is returned by GET /api/2.0/sql/warehouses. Used to pick
+// a warehouse in a workspace whose ID was not configured.
+type warehousesResponse struct {
+	Warehouses []warehouseInfo `json:"warehouses"`
+}
+
+type warehouseInfo struct {
+	ID    string `json:"id"`
+	Name  string `json:"name"`
+	State string `json:"state"` // STARTING, RUNNING, STOPPING, STOPPED, DELETED.
 }
 
 // resultData is one chunk of inline (JSON_ARRAY) result data. Each value in

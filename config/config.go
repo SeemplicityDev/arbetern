@@ -85,10 +85,14 @@ type Credentials struct {
 	// Databricks SQL warehouse — OAuth 2.0 machine-to-machine (service
 	// principal) against the workspace token endpoint. The host is the
 	// workspace URL; the warehouse ID selects the compute that runs queries.
-	DatabricksHost         string `cred:"databricks-host"`          // Workspace URL, e.g. "https://dbc-1234.cloud.databricks.com".
+	DatabricksHost         string `cred:"databricks-host"`          // Default workspace URL, e.g. "https://dbc-1234.cloud.databricks.com".
 	DatabricksClientID     string `cred:"databricks-client-id"`     // Service-principal OAuth client ID.
 	DatabricksClientSecret string `cred:"databricks-client-secret"` // Service-principal OAuth client secret.
-	DatabricksWarehouseID  string `cred:"databricks-warehouse-id"`  // SQL warehouse ID that executes statements.
+	DatabricksWarehouseID  string `cred:"databricks-warehouse-id"`  // Default SQL warehouse ID that executes statements.
+	// Comma-separated extra workspace URLs a single query may be redirected to
+	// via databricks_query's host/warehouse_id arguments. Empty pins every
+	// query to DatabricksHost.
+	DatabricksAllowedHosts string `cred:"databricks-allowed-hosts"`
 
 	// ClickHouse Cloud billing — HTTP Basic auth against the Cloud API
 	// (https://api.clickhouse.cloud). The key ID/secret are generated in the
@@ -266,12 +270,45 @@ func (c *Config) AzureCostConfigured() bool {
 		c.AzureClientSecret != ""
 }
 
-// DatabricksConfigured returns true when the Databricks workspace host plus
-// the service-principal OAuth credentials and a SQL warehouse ID are all
-// present. The first real query is still the authoritative health check.
+// DatabricksConfigured returns true when the Databricks workspace host and the
+// service-principal OAuth credentials are present. DatabricksWarehouseID is
+// optional: when it is unset the client picks a warehouse the principal can use
+// in whichever workspace a query targets. The first real query is still the
+// authoritative health check.
 func (c *Config) DatabricksConfigured() bool {
 	return c.DatabricksHost != "" && c.DatabricksClientID != "" &&
-		c.DatabricksClientSecret != "" && c.DatabricksWarehouseID != ""
+		c.DatabricksClientSecret != ""
+}
+
+// DatabricksMissing names the credential keys DatabricksConfigured found
+// empty, so a partial configuration can report what it is waiting on instead
+// of failing silently.
+func (c *Config) DatabricksMissing() []string {
+	var missing []string
+	for _, f := range []struct {
+		key, value string
+	}{
+		{"databricks-host", c.DatabricksHost},
+		{"databricks-client-id", c.DatabricksClientID},
+		{"databricks-client-secret", c.DatabricksClientSecret},
+	} {
+		if strings.TrimSpace(f.value) == "" {
+			missing = append(missing, f.key)
+		}
+	}
+	return missing
+}
+
+// DatabricksAllowedHostList splits DatabricksAllowedHosts into individual
+// workspace URLs, dropping blanks. The client validates each before use.
+func (c *Config) DatabricksAllowedHostList() []string {
+	var out []string
+	for _, h := range strings.Split(c.DatabricksAllowedHosts, ",") {
+		if h = strings.TrimSpace(h); h != "" {
+			out = append(out, h)
+		}
+	}
+	return out
 }
 
 // ClickHouseConfigured returns true when the ClickHouse Cloud API key ID, key
@@ -352,6 +389,7 @@ func Load() (*Config, error) {
 			DatabricksClientID:      os.Getenv("DATABRICKS_CLIENT_ID"),
 			DatabricksClientSecret:  os.Getenv("DATABRICKS_CLIENT_SECRET"),
 			DatabricksWarehouseID:   os.Getenv("DATABRICKS_WAREHOUSE_ID"),
+			DatabricksAllowedHosts:  os.Getenv("DATABRICKS_ALLOWED_HOSTS"),
 
 			ClickHouseKeyID:          os.Getenv("CLICKHOUSE_KEY_ID"),
 			ClickHouseKeySecret:      os.Getenv("CLICKHOUSE_KEY_SECRET"),

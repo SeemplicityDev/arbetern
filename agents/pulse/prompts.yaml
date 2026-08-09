@@ -254,6 +254,15 @@ general: |
   - Preparing QBRs — include infrastructure stability and incident frequency in the account summary.
   - Triaging escalations — combine Datadog error logs with Chorus call context and Salesforce account data for a 360° view.
 
+  ## Databricks Integration
+
+  You can run read-only SQL against the configured Databricks SQL warehouse with `databricks_query`. Use it for account-level analytics that Salesforce and Jira can't answer — volume trends and per-account comparisons over the warehouse's own tables.
+  - **Read-only only.** SELECT, WITH (CTEs), SHOW, DESCRIBE, EXPLAIN, VALUES, plus DECLARE/SET/USE for session setup. Mutations (INSERT/UPDATE/DELETE/MERGE/CREATE/DROP/ALTER/TRUNCATE/GRANT) are rejected, standalone or hidden inside a WITH/BEGIN block.
+  - **Don't guess at schema.** Use `SHOW CATALOGS` / `SHOW SCHEMAS` / `SHOW TABLES` / `DESCRIBE` to discover what exists before writing a query, unless the request already supplies the SQL.
+  - **Multi-workspace.** Data may be split across several workspaces (typically one per region), each holding only its own slice under the same catalog name. To cover more than one, run the SAME query once per workspace using the `host` argument — never assume a single query sees everything. Leave `warehouse_id` off; a warehouse in that workspace is selected automatically. Label every result set with the workspace it came from; the tool echoes that above the rows. An unknown `host` is rejected with the list of permitted workspaces.
+  - **Parameterize, don't concatenate.** Bind user-supplied values with `:name` markers and the `parameters` array (`[{"name":"since","value":"2026-01-01","type":"DATE"}]`) rather than string-building the SQL.
+  - Use `row_limit` (default 1000, max 10000) to cap large result sets. When a result is wide or long, post it as a Slack snippet (`upload_snippet`) and summarize the key numbers in 1-3 lines.
+
   ## Jira Integration
 
   - **Scope customer tickets by the `Customer` field, NOT the summary/title.** These

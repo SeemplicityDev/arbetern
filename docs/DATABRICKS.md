@@ -1,18 +1,19 @@
 # Databricks Integration
 
 Arbetern integrates with the **Databricks SQL Statement Execution API** so the
-**ovad** agent can run read-only SQL against a Databricks SQL warehouse and
+**ovad** and **pulse** agents can run read-only SQL against a Databricks SQL warehouse and
 return the results as a table — ad-hoc analytics over Unity Catalog tables and
 Databricks system tables (cost/DBU reporting from `system.billing.usage`, job
 run history, lineage, etc.).
 
-> **Scope: this integration is restricted to the `ovad` agent only.** The
-> `databricks_query` tool is advertised exclusively to ovad and the dispatch
+> **Scope: this integration is restricted to the `ovad` and `pulse` agents.**
+> The `databricks_query` tool is advertised only to those two and the dispatch
 > layer rejects the call from any other agent, even if its model fabricates
 > the tool name. The allowlist lives in one place —
 > `restrictedIntegrations` in [`commands/helpers.go`](../commands/helpers.go)
-> (`"databricks": {"ovad"}`). To expose Databricks to additional agents, add
-> their IDs there; both tool registration and dispatch read the same map.
+> (`"databricks": {"ovad", "pulse"}`). To expose Databricks to additional
+> agents, add their IDs there; both tool registration and dispatch read the
+> same map.
 
 Each call runs **read-only SQL** on the warehouse. The `sql` may be a single
 statement or a script of several `;`-separated statements (e.g. `DECLARE`/`SET`
@@ -34,12 +35,13 @@ expose:
 
 | Environment Variable | Required | Description |
 |---|---|---|
-| `DATABRICKS_HOST` | yes | Workspace URL, e.g. `https://dbc-1234abcd-5678.cloud.databricks.com`. A bare hostname is accepted and normalised to `https://` |
+| `DATABRICKS_HOST` | yes | Default workspace URL, e.g. `https://dbc-1234abcd-5678.cloud.databricks.com`. A bare hostname is accepted and normalised to `https://` |
 | `DATABRICKS_CLIENT_ID` | yes | Service principal OAuth client ID (its application ID) |
 | `DATABRICKS_CLIENT_SECRET` | yes | Service principal OAuth secret |
-| `DATABRICKS_WAREHOUSE_ID` | yes | SQL warehouse ID that executes statements (from the warehouse's **Connection details** tab) |
+| `DATABRICKS_WAREHOUSE_ID` | no | Default SQL warehouse ID (from the warehouse's **Connection details** tab). When unset, a warehouse the principal can use is selected automatically in whichever workspace a query targets |
+| `DATABRICKS_ALLOWED_HOSTS` | no | Comma-separated extra workspace URLs a single query may be redirected to. See [Querying several workspaces](#querying-several-workspaces) |
 
-Arbetern enables the `databricks_query` tool only when **all four** values are
+Arbetern enables the `databricks_query` tool only when **all three** required values are
 set. The OAuth token exchange is attempted in the background and retried, so
 the tool becomes available once the first handshake succeeds; until then it is
 not advertised to the model. Startup logs:
@@ -111,9 +113,11 @@ integration.
 
 ### Restricting to a single agent at deploy time
 
-Because the tool is already gated to ovad in code, the simplest production
-setup is to mount the Databricks credentials **only for ovad** via the chart's
-per-agent credential overlay, instead of the global secret:
+Because the tool is already gated to ovad/pulse in code, the simplest
+production setup is to mount the Databricks credentials **only for the agents
+that need them** via the chart's per-agent credential overlay, instead of the
+global secret. Each agent gets its own defaults and its own allowlist, so a
+reporting agent can be given a second workspace without widening ovad's reach:
 
 ```yaml
 createSecret: true
@@ -124,17 +128,78 @@ customCredentials:
     databricks-client-id: "00000000-0000-0000-0000-000000000000"
     databricks-client-secret: "dose..."
     databricks-warehouse-id: "1234567890abcdef"
+  pulse:
+    databricks-host: "https://dbc-eu-1234.cloud.databricks.com"
+    databricks-client-id: "00000000-0000-0000-0000-000000000000"
+    databricks-client-secret: "dose..."
+    # No warehouse ID: one value cannot serve both workspaces, so each query's
+    # warehouse is resolved in whichever workspace it targets. ovad above stays
+    # pinned to its single default because it has no allowlist.
+    databricks-allowed-hosts: "https://dbc-eu-1234.cloud.databricks.com,https://dbc-us-5678.cloud.databricks.com"
 ```
 
-This provisions `arbetern-ovad-secrets`, mounts it at
-`/etc/arbetern/agent-credentials/ovad/`, and the app overlays those keys on top
-of the global config for ovad only.
+This provisions `arbetern-<agent>-secrets`, mounts it at
+`/etc/arbetern/agent-credentials/<agent>/`, and the app overlays those keys on
+top of the global config for that agent only.
 
 ## Available Tool
 
 | Tool | Description |
 |---|---|
-| **databricks_query** | Run read-only SQL against the configured SQL warehouse and return the rows as a table. Accepts `sql` (required — one statement or a `;`-separated read-only script), an optional `parameters` array of `{name, value, type}` bound to `:name` markers, and an optional `row_limit` (default 1000, max 10000). Polls the statement to completion and walks result chunks up to `row_limit`. Mutating statements are rejected |
+| **databricks_query** | Run read-only SQL against a SQL warehouse and return the rows as a table. Accepts `sql` (required — one statement or a `;`-separated read-only script), an optional `parameters` array of `{name, value, type}` bound to `:name` markers, an optional `row_limit` (default 1000, max 10000), and optional `host` / `warehouse_id` overrides that redirect this one statement to another workspace. Polls the statement to completion and walks result chunks up to `row_limit`. Mutating statements are rejected |
+
+### Querying several workspaces
+
+`DATABRICKS_HOST` / `DATABRICKS_WAREHOUSE_ID` are **defaults, not a hard
+binding**. A single query may be redirected to another workspace by passing
+`host` to `databricks_query`, which is how one report covers data that is
+physically split across workspaces — most commonly one
+workspace per region, each holding only that region's rows under the same
+catalog name:
+
+```json
+{
+  "sql": "SELECT tenant, count(*) AS events FROM analytics.silver.events GROUP BY tenant",
+  "host": "https://dbc-us-5678.cloud.databricks.com",
+  "row_limit": 500
+}
+```
+
+Rules that make this safe and predictable:
+
+- **The same service principal must be a member of every workspace you
+  target.** There is one client ID/secret; the client-credentials grant is
+  exchanged separately at each workspace's own `{host}/oidc/v1/token`, and
+  tokens are cached per workspace. Grant the principal **CAN USE** on a
+  warehouse and the necessary Unity Catalog grants in each one.
+- **`host` alone is enough.** A warehouse ID exists inside exactly one
+  workspace, so the configured default is never reused against a different
+  host — a warehouse is discovered in the target workspace instead (preferring
+  a running one, cached per workspace, and logged when chosen). Pass
+  `warehouse_id` only to pin a specific one, and then only with its own `host`.
+- **Only allow-listed workspaces are reachable.** `host` must appear in
+  `DATABRICKS_ALLOWED_HOSTS` (the default host is always permitted). With
+  that variable unset, every host override is rejected and the integration
+  behaves exactly as before. Each entry must additionally be a bare `https`
+  origin on a Databricks-owned domain — no path, query string or userinfo.
+- **Readiness still tracks the default workspace only,** so an unreachable
+  secondary workspace never un-advertises the tool.
+
+The allowlist is a security boundary, not just validation: the
+service-principal secret is sent as HTTP Basic auth to `{host}/oidc/v1/token`,
+so an unchecked host taken from a prompt would be a credential-exfiltration
+path. Keep the list to the workspaces you actually report on.
+
+```yaml
+secretValues:
+  databricks-host: "https://dbc-eu-1234.cloud.databricks.com"
+  databricks-warehouse-id: "1234567890abcdef"
+  databricks-allowed-hosts: "https://dbc-eu-1234.cloud.databricks.com,https://dbc-us-5678.cloud.databricks.com"
+```
+
+Each query result is labelled with the workspace it ran on (rendered above
+the rows), so a report fanning out across regions can attribute every result
+set correctly.
 
 ### Parameters, not string concatenation
 

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/justmike1/arbetern/atlassian"
@@ -143,11 +144,17 @@ func buildAgentScopedClients(
 	if agentCfg.DatabricksHost != globalCfg.DatabricksHost ||
 		agentCfg.DatabricksClientID != globalCfg.DatabricksClientID ||
 		agentCfg.DatabricksClientSecret != globalCfg.DatabricksClientSecret ||
-		agentCfg.DatabricksWarehouseID != globalCfg.DatabricksWarehouseID {
+		agentCfg.DatabricksWarehouseID != globalCfg.DatabricksWarehouseID ||
+		agentCfg.DatabricksAllowedHosts != globalCfg.DatabricksAllowedHosts {
 		if agentCfg.DatabricksConfigured() {
-			out.databricks = databricks.NewClient(agentCfg.DatabricksHost, agentCfg.DatabricksClientID, agentCfg.DatabricksClientSecret, agentCfg.DatabricksWarehouseID)
+			out.databricks = databricks.NewClient(agentCfg.DatabricksHost, agentCfg.DatabricksClientID, agentCfg.DatabricksClientSecret, agentCfg.DatabricksWarehouseID, agentCfg.DatabricksAllowedHostList())
 			log.Printf("Databricks override for agent %q (host: %s, warehouse: %s)", agentID, out.databricks.Host(), out.databricks.WarehouseID())
 		} else {
+			// A partial override disables the integration for this agent. Say
+			// which value is missing — the failure otherwise surfaces only as a
+			// rejected tool call at run time, with nothing in the boot log.
+			log.Printf("Databricks override for agent %q is incomplete (missing %s) — integration disabled for this agent",
+				agentID, strings.Join(agentCfg.DatabricksMissing(), ", "))
 			out.databricks = nil
 		}
 	}

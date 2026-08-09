@@ -2106,11 +2106,13 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 			Type: "function",
 			Function: llm.ToolFunction{
 				Name:        ToolDatabricksQuery,
-				Description: "Run read-only SQL against the configured Databricks SQL warehouse and return the result rows as a table. Use for ad-hoc analytics over Unity Catalog tables and Databricks system tables (e.g. system.billing.usage for cost/DBU analysis), including SELECT, WITH (CTEs), SHOW, DESCRIBE, EXPLAIN and VALUES. You may send a script of several read-only statements separated by semicolons — e.g. one or more DECLARE/SET session variables followed by a final SELECT — and the warehouse returns the result of the LAST statement. EVERY statement must be read-only: INSERT/UPDATE/DELETE/MERGE/CREATE/DROP/ALTER/TRUNCATE/GRANT and other writes are rejected, whether standalone or hidden inside a WITH/BEGIN block. AI/ML SQL functions such as ai_forecast(), ai_query() and vector_search() are supported inside a SELECT/WITH. Still prefer named parameter markers (:name) supplied via the 'parameters' array for user-supplied values — e.g. SELECT * FROM t WHERE day >= :since with parameters [{\"name\":\"since\",\"value\":\"2024-01-01\",\"type\":\"DATE\"}] — since it avoids quoting/injection bugs; use DECLARE/SET only when you genuinely need session variables.",
+				Description: "Run read-only SQL against a Databricks SQL warehouse and return the result rows as a table. Use for ad-hoc analytics over Unity Catalog tables and Databricks system tables (e.g. system.billing.usage for cost/DBU analysis), including SELECT, WITH (CTEs), SHOW, DESCRIBE, EXPLAIN and VALUES. Runs against the default workspace unless you pass 'host' to target another allow-listed workspace — that is how one report covers several regional workspaces. Passing 'host' alone is enough; the warehouse is resolved for you. You may send a script of several read-only statements separated by semicolons — e.g. one or more DECLARE/SET session variables followed by a final SELECT — and the warehouse returns the result of the LAST statement. EVERY statement must be read-only: INSERT/UPDATE/DELETE/MERGE/CREATE/DROP/ALTER/TRUNCATE/GRANT and other writes are rejected, whether standalone or hidden inside a WITH/BEGIN block. AI/ML SQL functions such as ai_forecast(), ai_query() and vector_search() are supported inside a SELECT/WITH. Still prefer named parameter markers (:name) supplied via the 'parameters' array for user-supplied values — e.g. SELECT * FROM t WHERE day >= :since with parameters [{\"name\":\"since\",\"value\":\"2024-01-01\",\"type\":\"DATE\"}] — since it avoids quoting/injection bugs; use DECLARE/SET only when you genuinely need session variables.",
 				Parameters: json.RawMessage(`{
 					"type":"object",
 					"properties":{
 						"sql":{"type":"string","description":"Read-only SQL: a single statement, or a script of several read-only statements separated by semicolons (e.g. DECLARE/SET … ; WITH … SELECT …). Only SELECT / WITH / SHOW / DESCRIBE / EXPLAIN / VALUES plus DECLARE / SET / USE for session setup are allowed; mutations are rejected. Prefer :name markers for any user-supplied values and pass them via 'parameters'."},
+						"host":{"type":"string","description":"Optional workspace URL to run this statement against, e.g. 'https://dbc-1234.cloud.databricks.com'. Omit to use the default workspace. Only pre-approved workspaces are accepted — an unknown host is rejected and the error lists the permitted ones. Use this to query the same tables in a different region's workspace; pair it with 'warehouse_id' since a warehouse only exists inside one workspace."},
+						"warehouse_id":{"type":"string","description":"Optional SQL warehouse ID to execute on. Normally omit it: the default warehouse is used for the default workspace, and for any other 'host' a usable warehouse in that workspace is selected automatically. Only set this to pin a specific warehouse, and then only together with the 'host' it belongs to."},
 						"parameters":{
 							"type":"array",
 							"description":"Named query parameters bound to :name markers in the SQL. Prefer this over string-concatenating values into the SQL (prevents injection and quoting bugs).",
@@ -4980,7 +4982,9 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 				Value string `json:"value"`
 				Type  string `json:"type"`
 			} `json:"parameters"`
-			RowLimit int `json:"row_limit"`
+			Host        string  `json:"host"`
+			WarehouseID string  `json:"warehouse_id"`
+			RowLimit    flexInt `json:"row_limit"`
 		}](argsJSON)
 		if errMsg != "" {
 			return errMsg
@@ -4995,12 +4999,16 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 			}
 			params = append(params, databricks.QueryParam{Name: p.Name, Value: p.Value, Type: p.Type})
 		}
-		res, err := h.databricksClient.Query(ctx, args.SQL, params, args.RowLimit)
+		res, err := h.databricksClient.Query(ctx, args.SQL, params, databricks.QueryOptions{
+			Host:        args.Host,
+			WarehouseID: args.WarehouseID,
+			RowLimit:    int(args.RowLimit),
+		})
 		if err != nil {
 			return fmt.Sprintf("Error running Databricks query: %v", err)
 		}
-		log.Printf("[user=%s channel=%s] databricks_query (warehouse=%s, statement=%s, rows=%d, truncated=%t)",
-			userID, channelID, res.WarehouseID, res.StatementID, res.RowCount, res.Truncated)
+		log.Printf("[user=%s channel=%s] databricks_query (host=%s, warehouse=%s, statement=%s, rows=%d, truncated=%t)",
+			userID, channelID, res.Host, res.WarehouseID, res.StatementID, res.RowCount, res.Truncated)
 		return databricks.FormatQueryResult(res)
 
 	// ---- ClickHouse Cloud billing (ovad only) ----

@@ -1400,7 +1400,7 @@ func main() {
 	// warehouse ID are all present.
 	var databricksClient *databricks.Client
 	if cfg.DatabricksConfigured() {
-		databricksClient = databricks.NewClient(cfg.DatabricksHost, cfg.DatabricksClientID, cfg.DatabricksClientSecret, cfg.DatabricksWarehouseID)
+		databricksClient = databricks.NewClient(cfg.DatabricksHost, cfg.DatabricksClientID, cfg.DatabricksClientSecret, cfg.DatabricksWarehouseID, cfg.DatabricksAllowedHostList())
 		log.Printf("Databricks integration enabled (host: %s, warehouse: %s)", databricksClient.Host(), databricksClient.WarehouseID())
 	}
 

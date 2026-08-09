@@ -10,8 +10,10 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"reflect"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -81,6 +83,25 @@ func requireDescription(description string) string {
 	return ""
 }
 
+// flexInt is an int that also unmarshals from a JSON string ("500") or a
+// whole-valued float (500.0). Models routinely quote an integer-typed tool
+// argument; failing the whole call over the quoting costs a round-trip, and in
+// a headless workflow tick it just burns the run.
+type flexInt int
+
+func (f *flexInt) UnmarshalJSON(data []byte) error {
+	s := strings.Trim(strings.TrimSpace(string(data)), `"`)
+	if s == "" || s == "null" {
+		return nil // absent / explicit null — leave the zero value for the caller's default
+	}
+	n, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		return fmt.Errorf("expected an integer, got %s", string(data))
+	}
+	*f = flexInt(n)
+	return nil
+}
+
 // parseToolArgs unmarshals a JSON string into the target struct.
 // Returns a user-facing error string if parsing fails.
 func parseToolArgs[T any](argsJSON string) (T, string) {
@@ -93,11 +114,37 @@ func parseToolArgs[T any](argsJSON string) (T, string) {
 
 // requireReady checks that an OAuthClient is non-nil and ready.
 // Returns a user-facing error string if the client is not available.
+//
+// The two failures are reported differently on purpose. A missing client is a
+// deployment fact that no amount of waiting fixes, and saying "may still be
+// initializing" there sends the model into a retry loop and puts a misleading
+// line in whatever channel it reports to.
 func requireReady(name string, c OAuthClient) string {
-	if c == nil || !c.Ready() {
+	if isNilClient(c) {
+		return preconditionErrf("Error: %s is not configured for this agent, so the call was not attempted. This is a deployment setting — retrying will not help; report it as a configuration gap.", name)
+	}
+	if !c.Ready() {
 		return preconditionErrf("Error: %s integration is not connected. It may still be initializing — please try again shortly.", name)
 	}
 	return ""
+}
+
+// isNilClient reports whether c is unset, treating a typed-nil pointer as nil.
+// buildAgentScopedClients nils out an integration whose per-agent credentials
+// are incomplete, and that arrives here as a non-nil interface wrapping a nil
+// pointer — `c == nil` is false for it, so a bare check would call through and
+// panic. A model can name a tool that was never advertised, so this is reachable
+// whenever an agent is allowed an integration it has no working client for.
+func isNilClient(c OAuthClient) bool {
+	if c == nil {
+		return true
+	}
+	switch v := reflect.ValueOf(c); v.Kind() {
+	case reflect.Pointer, reflect.Interface, reflect.Map, reflect.Slice, reflect.Func, reflect.Chan:
+		return v.IsNil()
+	default:
+		return false
+	}
 }
 
 // Integration names used as keys in restrictedIntegrations / toolIntegration
@@ -150,8 +197,9 @@ var restrictedIntegrations = map[string][]string{
 	integrationDatadog: {"ovad", "pulse", "seihin"},
 	// AWS cost tooling is exposed to the DevOps/SRE agent only.
 	integrationAWS: {"ovad"},
-	// Databricks SQL is exposed to the DevOps/SRE agent only.
-	integrationDatabricks: {"ovad"},
+	// Databricks SQL: DevOps/SRE for platform analytics, customer-success for
+	// per-account reporting.
+	integrationDatabricks: {"ovad", "pulse"},
 	// ClickHouse Cloud billing is exposed to the DevOps/SRE agent only.
 	integrationClickHouse: {"ovad"},
 	// Freshworks (Freshdesk tickets, Freshchat conversations, CRM) is exposed

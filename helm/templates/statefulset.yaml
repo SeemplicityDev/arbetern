@@ -271,6 +271,13 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.secretName }}
                   key: databricks-warehouse-id
+            {{- if index .Values.secretValues "databricks-allowed-hosts" }}
+            - name: DATABRICKS_ALLOWED_HOSTS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: databricks-allowed-hosts
+            {{- end }}
             {{- end }}
             {{- if index .Values.secretValues "clickhouse-key-id" }}
             - name: CLICKHOUSE_KEY_ID

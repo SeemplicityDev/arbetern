@@ -17,6 +17,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -58,59 +59,84 @@ const (
 	userAgent = "arbetern/databricks-connector"
 )
 
-// Client talks to the Databricks SQL Statement Execution API for one
-// workspace. It is safe for concurrent use.
+// Client talks to the Databricks SQL Statement Execution API. It holds a
+// default workspace + warehouse; a single query may target another allow-listed
+// workspace via QueryOptions. It is safe for concurrent use.
 type Client struct {
-	host         string // normalized workspace base URL, e.g. "https://dbc-1234.cloud.databricks.com".
+	host         string // normalized default workspace base URL, e.g. "https://dbc-1234.cloud.databricks.com".
 	clientID     string
 	clientSecret string
-	warehouseID  string
+	warehouseID  string   // default SQL warehouse, used when a query names none.
+	allowedHosts []string // normalized workspace hosts a per-query override may target.
 	httpClient   *http.Client
 
-	mu          sync.Mutex
+	mu         sync.Mutex
+	tokens     map[string]*hostToken // OAuth token cache, keyed by workspace host.
+	warehouses map[string]string     // discovered warehouse ID, keyed by workspace host.
+	connected  bool                  // true once the DEFAULT host has yielded a token.
+}
+
+// hostToken is one workspace's cached bearer token. Tokens are per-workspace —
+// each is minted at that workspace's own {host}/oidc/v1/token and rejected by
+// any other.
+type hostToken struct {
 	accessToken string
-	tokenExpiry time.Time
-	connected   bool // true once at least one OAuth token has been acquired.
+	expiry      time.Time
 }
 
 // NewClient builds a Databricks client from a workspace URL and
 // service-principal OAuth credentials. host may be supplied with or without a
-// scheme/trailing slash. If the initial token fetch fails the client is still
-// returned in a disconnected state and a background goroutine retries every
-// 5 seconds until it succeeds, so the service never blocks on startup.
-func NewClient(host, clientID, clientSecret, warehouseID string) *Client {
+// scheme/trailing slash. allowedHosts are the extra workspaces a per-query
+// override may target; empty pins every query to host. If the initial token
+// fetch fails the client is still returned in a disconnected state and a
+// background goroutine retries every 5 seconds, so startup never blocks.
+func NewClient(host, clientID, clientSecret, warehouseID string, allowedHosts []string) *Client {
 	c := &Client{
 		host:         normalizeHost(host),
 		clientID:     strings.TrimSpace(clientID),
 		clientSecret: strings.TrimSpace(clientSecret),
 		warehouseID:  strings.TrimSpace(warehouseID),
+		allowedHosts: normalizeHosts(allowedHosts),
 		httpClient:   &http.Client{Timeout: httpTimeout},
+		tokens:       make(map[string]*hostToken),
+		warehouses:   make(map[string]string),
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if _, err := c.token(ctx); err != nil {
+	if _, err := c.token(ctx, c.host); err != nil {
 		log.Printf("[databricks] initial OAuth failed, will retry every 5s: %v", err)
 		go c.retryConnect()
 	} else {
 		log.Printf("[databricks] OAuth token acquired for %s (warehouse %s)", c.host, c.warehouseID)
 	}
+	if len(c.allowedHosts) > 0 {
+		log.Printf("[databricks] per-query workspace overrides allowed for: %s", strings.Join(c.allowedHosts, ", "))
+	}
 	return c
 }
 
-// Ready reports whether at least one OAuth token has been acquired. Mirrors
-// the OAuthClient interface the command layer uses to gate tools.
+// Ready reports whether the DEFAULT workspace has yielded an OAuth token, so
+// an unreachable override workspace never un-advertises the tool. Mirrors the
+// OAuthClient interface the command layer uses to gate tools.
 func (c *Client) Ready() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.connected
 }
 
-// Host returns the normalized workspace URL. Useful for integration-status panels.
+// Host returns the normalized default workspace URL.
 func (c *Client) Host() string { return c.host }
 
-// WarehouseID returns the configured SQL warehouse ID.
+// WarehouseID returns the default SQL warehouse ID.
 func (c *Client) WarehouseID() string { return c.warehouseID }
+
+// AllowedHosts returns the override targets, excluding the default host.
+func (c *Client) AllowedHosts() []string {
+	out := make([]string, len(c.allowedHosts))
+	copy(out, c.allowedHosts)
+	return out
+}
 
 // retryConnect attempts to acquire an OAuth token every 5 seconds until it succeeds.
 func (c *Client) retryConnect() {
@@ -118,7 +144,7 @@ func (c *Client) retryConnect() {
 	defer ticker.Stop()
 	for range ticker.C {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		_, err := c.token(ctx)
+		_, err := c.token(ctx, c.host)
 		cancel()
 		if err != nil {
 			log.Printf("[databricks] OAuth retry failed: %v", err)
@@ -129,33 +155,150 @@ func (c *Client) retryConnect() {
 	}
 }
 
+// resolveTarget picks the workspace and warehouse a query runs against. Only
+// the host is gated; the warehouse is resolved in three steps, because a
+// warehouse ID names compute inside ONE workspace and is meaningless in any
+// other: an explicit override wins, the configured default applies only to the
+// default workspace, and anything else is discovered from the target workspace.
+func (c *Client) resolveTarget(ctx context.Context, hostOverride, warehouseOverride string) (string, string, error) {
+	host := c.host
+	if h := normalizeHost(hostOverride); h != "" {
+		if err := c.allowHost(h); err != nil {
+			return "", "", err
+		}
+		host = c.canonicalHost(h)
+	}
+	if host == "" {
+		return "", "", fmt.Errorf("databricks host is not configured")
+	}
+
+	if w := strings.TrimSpace(warehouseOverride); w != "" {
+		return host, w, nil
+	}
+	if host == c.host && c.warehouseID != "" {
+		return host, c.warehouseID, nil
+	}
+	warehouse, err := c.discoverWarehouse(ctx, host)
+	if err != nil {
+		return "", "", err
+	}
+	return host, warehouse, nil
+}
+
+// discoverWarehouse picks a SQL warehouse in host that this principal can use,
+// so a query against a secondary workspace does not need its warehouse ID
+// hardcoded. Prefers a running warehouse, then falls back to the first by name
+// for a stable choice across ticks. Cached per workspace for the process
+// lifetime — the set of warehouses changes far more slowly than queries run.
+func (c *Client) discoverWarehouse(ctx context.Context, host string) (string, error) {
+	c.mu.Lock()
+	cached := c.warehouses[host]
+	c.mu.Unlock()
+	if cached != "" {
+		return cached, nil
+	}
+
+	var resp warehousesResponse
+	if err := c.doJSON(ctx, host, http.MethodGet, "/api/2.0/sql/warehouses", nil, &resp); err != nil {
+		return "", fmt.Errorf("no warehouse_id given and listing warehouses on %s failed: %w", hostLabel(host), err)
+	}
+	usable := make([]warehouseInfo, 0, len(resp.Warehouses))
+	for _, w := range resp.Warehouses {
+		if w.ID != "" && w.State != "DELETED" && w.State != "DELETING" {
+			usable = append(usable, w)
+		}
+	}
+	if len(usable) == 0 {
+		return "", fmt.Errorf("no warehouse_id given and this service principal can see no usable SQL warehouse on %s — grant it CAN USE on one, or pass warehouse_id", hostLabel(host))
+	}
+
+	sort.SliceStable(usable, func(i, j int) bool {
+		ri, rj := usable[i].State == "RUNNING", usable[j].State == "RUNNING"
+		if ri != rj {
+			return ri
+		}
+		return usable[i].Name < usable[j].Name
+	})
+	pick := usable[0]
+
+	c.mu.Lock()
+	if c.warehouses == nil {
+		c.warehouses = make(map[string]string)
+	}
+	c.warehouses[host] = pick.ID
+	c.mu.Unlock()
+	log.Printf("[databricks] using warehouse %q (%s, state=%s) on %s", pick.Name, pick.ID, pick.State, hostLabel(host))
+	return pick.ID, nil
+}
+
+// canonicalHost maps a permitted host onto its configured spelling so
+// token-cache keys don't fragment on case.
+func (c *Client) canonicalHost(host string) string {
+	if strings.EqualFold(host, c.host) {
+		return c.host
+	}
+	for _, h := range c.allowedHosts {
+		if strings.EqualFold(h, host) {
+			return h
+		}
+	}
+	return host
+}
+
+// allowHost reports whether an override may target host. The default is always
+// permitted; anything else must be allow-listed. This is a security boundary,
+// not validation: the client secret is Basic-auth'd to {host}/oidc/v1/token, so
+// an unchecked host would be a credential-exfiltration path.
+func (c *Client) allowHost(host string) error {
+	// Hostnames are case-insensitive; a differently-cased URL is still valid.
+	if strings.EqualFold(host, c.host) {
+		return nil
+	}
+	if len(c.allowedHosts) == 0 {
+		return fmt.Errorf("workspace override to %q is not permitted: no additional hosts are allow-listed (set databricks-allowed-hosts / DATABRICKS_ALLOWED_HOSTS to the workspaces this service principal may query)", host)
+	}
+	permitted := false
+	for _, h := range c.allowedHosts {
+		if strings.EqualFold(h, host) {
+			permitted = true
+			break
+		}
+	}
+	if !permitted {
+		return fmt.Errorf("workspace override to %q is not permitted; allow-listed workspaces are: %s", host, strings.Join(c.allowedHosts, ", "))
+	}
+	return validateWorkspaceHost(host)
+}
+
 // --------------------------------------------------------------------------
 // SQL statement execution
 // --------------------------------------------------------------------------
 
-// Query executes read-only SQL against the configured SQL warehouse and
-// returns the rows. sqlText may be a `;`-separated script (e.g. DECLARE/SET
-// then SELECT); the warehouse returns the final statement's result. params
-// bind `:name` markers; rowLimit caps the rows (<=0 uses the default). The call
-// blocks up to defaultWaitTimeout, then polls until terminal or maxPollDuration.
-// It rejects anything not clearly read-only (see validateReadOnlySQL).
-func (c *Client) Query(ctx context.Context, sqlText string, params []QueryParam, rowLimit int) (*QueryResult, error) {
+// Query executes read-only SQL against a SQL warehouse and returns the rows.
+// sqlText may be a `;`-separated script (e.g. DECLARE/SET then SELECT); the
+// warehouse returns the final statement's result. params bind `:name` markers.
+// opts selects the workspace/warehouse (empty = defaults) and caps the rows.
+// The call blocks up to defaultWaitTimeout, then polls until terminal or
+// maxPollDuration. It rejects anything not clearly read-only.
+func (c *Client) Query(ctx context.Context, sqlText string, params []QueryParam, opts QueryOptions) (*QueryResult, error) {
 	sqlText = strings.TrimSpace(sqlText)
 	if sqlText == "" {
 		return nil, fmt.Errorf("statement is required")
 	}
-	if c.warehouseID == "" {
-		return nil, fmt.Errorf("no SQL warehouse configured (set databricks-warehouse-id)")
+	host, warehouseID, err := c.resolveTarget(ctx, opts.Host, opts.WarehouseID)
+	if err != nil {
+		return nil, err
 	}
 	if err := validateReadOnlySQL(sqlText); err != nil {
 		return nil, err
 	}
+	rowLimit := opts.RowLimit
 	if rowLimit <= 0 || rowLimit > maxRowLimit {
 		rowLimit = defaultRowLimit
 	}
 
 	reqBody := map[string]any{
-		"warehouse_id":    c.warehouseID,
+		"warehouse_id":    warehouseID,
 		"statement":       sqlText,
 		"wait_timeout":    defaultWaitTimeout,
 		"on_wait_timeout": "CONTINUE",
@@ -183,7 +326,7 @@ func (c *Client) Query(ctx context.Context, sqlText string, params []QueryParam,
 
 	var resp statementResponse
 	// POST path must not have a trailing slash (a trailing slash returns 404).
-	if err := c.doJSON(ctx, http.MethodPost, "/api/2.0/sql/statements", reqBody, &resp); err != nil {
+	if err := c.doJSON(ctx, host, http.MethodPost, "/api/2.0/sql/statements", reqBody, &resp); err != nil {
 		return nil, err
 	}
 
@@ -193,7 +336,7 @@ func (c *Client) Query(ctx context.Context, sqlText string, params []QueryParam,
 		if time.Now().After(deadline) {
 			// Best-effort cancel so the warehouse isn't left running our query.
 			cctx, ccancel := context.WithTimeout(context.Background(), 10*time.Second)
-			_ = c.cancel(cctx, resp.StatementID)
+			_ = c.cancel(cctx, host, resp.StatementID)
 			ccancel()
 			return nil, fmt.Errorf("statement %s did not complete within %s", resp.StatementID, maxPollDuration)
 		}
@@ -203,7 +346,7 @@ func (c *Client) Query(ctx context.Context, sqlText string, params []QueryParam,
 		case <-time.After(pollInterval):
 		}
 		var polled statementResponse
-		if err := c.doJSON(ctx, http.MethodGet, "/api/2.0/sql/statements/"+url.PathEscape(resp.StatementID), nil, &polled); err != nil {
+		if err := c.doJSON(ctx, host, http.MethodGet, "/api/2.0/sql/statements/"+url.PathEscape(resp.StatementID), nil, &polled); err != nil {
 			return nil, err
 		}
 		resp = polled
@@ -222,7 +365,7 @@ func (c *Client) Query(ctx context.Context, sqlText string, params []QueryParam,
 		return nil, fmt.Errorf("unexpected statement state %q", resp.Status.State)
 	}
 
-	out := &QueryResult{WarehouseID: c.warehouseID, StatementID: resp.StatementID}
+	out := &QueryResult{Host: host, WarehouseID: warehouseID, StatementID: resp.StatementID}
 	if resp.Manifest != nil {
 		out.Truncated = resp.Manifest.Truncated
 		for _, col := range resp.Manifest.Schema.Columns {
@@ -258,7 +401,7 @@ collect:
 		}
 		var next resultData
 		path := fmt.Sprintf("/api/2.0/sql/statements/%s/result/chunks/%d", url.PathEscape(resp.StatementID), *chunk.NextChunkIndex)
-		if err := c.doJSON(ctx, http.MethodGet, path, nil, &next); err != nil {
+		if err := c.doJSON(ctx, host, http.MethodGet, path, nil, &next); err != nil {
 			return nil, err
 		}
 		chunk = &next
@@ -269,11 +412,11 @@ collect:
 }
 
 // cancel asks Databricks to stop executing a statement (best effort).
-func (c *Client) cancel(ctx context.Context, statementID string) error {
+func (c *Client) cancel(ctx context.Context, host, statementID string) error {
 	if statementID == "" {
 		return nil
 	}
-	return c.doJSON(ctx, http.MethodPost, "/api/2.0/sql/statements/"+url.PathEscape(statementID)+"/cancel", nil, nil)
+	return c.doJSON(ctx, host, http.MethodPost, "/api/2.0/sql/statements/"+url.PathEscape(statementID)+"/cancel", nil, nil)
 }
 
 // isPending reports whether a statement state is still in progress.
@@ -285,10 +428,12 @@ func isPending(state string) bool {
 // HTTP + auth helpers
 // --------------------------------------------------------------------------
 
-// doJSON performs an authenticated JSON request against the workspace. A nil
-// body sends no payload; a nil out discards the response.
-func (c *Client) doJSON(ctx context.Context, method, path string, body any, out any) error {
-	tok, err := c.token(ctx)
+// doJSON performs an authenticated JSON request against one workspace. A nil
+// body sends no payload; a nil out discards the response. host must already
+// have cleared resolveTarget, and every call of one Query must reuse it —
+// statement IDs are workspace-scoped.
+func (c *Client) doJSON(ctx context.Context, host, method, path string, body any, out any) error {
+	tok, err := c.token(ctx, host)
 	if err != nil {
 		return err
 	}
@@ -302,7 +447,7 @@ func (c *Client) doJSON(ctx context.Context, method, path string, body any, out 
 		reader = bytes.NewReader(b)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, method, c.host+path, reader)
+	req, err := http.NewRequestWithContext(ctx, method, host+path, reader)
 	if err != nil {
 		return err
 	}
@@ -334,17 +479,21 @@ func (c *Client) doJSON(ctx context.Context, method, path string, body any, out 
 	return nil
 }
 
-// token returns a cached OAuth access token, refreshing it when it is missing
-// or within 60s of expiry. Uses the workspace token endpoint with the
-// client-credentials grant and HTTP Basic auth (client ID / secret).
-func (c *Client) token(ctx context.Context) (string, error) {
+// token returns a cached OAuth access token for one workspace, refreshing it
+// when missing or within 60s of expiry. Uses that workspace's token endpoint
+// with the client-credentials grant and Basic auth, so the same service
+// principal must be a member of every workspace targeted.
+func (c *Client) token(ctx context.Context, host string) (string, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.accessToken != "" && time.Until(c.tokenExpiry) > 60*time.Second {
-		return c.accessToken, nil
-	}
-	if c.host == "" {
+	if host == "" {
 		return "", fmt.Errorf("databricks host is not configured")
+	}
+	if c.tokens == nil {
+		c.tokens = make(map[string]*hostToken)
+	}
+	if t := c.tokens[host]; t != nil && t.accessToken != "" && time.Until(t.expiry) > 60*time.Second {
+		return t.accessToken, nil
 	}
 	if c.clientID == "" || c.clientSecret == "" {
 		return "", fmt.Errorf("databricks client ID and client secret are required")
@@ -353,7 +502,7 @@ func (c *Client) token(ctx context.Context) (string, error) {
 	form := url.Values{}
 	form.Set("grant_type", "client_credentials")
 	form.Set("scope", oauthScope)
-	endpoint := c.host + "/oidc/v1/token"
+	endpoint := host + "/oidc/v1/token"
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(form.Encode()))
 	if err != nil {
@@ -387,14 +536,17 @@ func (c *Client) token(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("databricks token endpoint returned no access_token")
 	}
 
-	c.accessToken = tr.AccessToken
 	ttl := time.Duration(tr.ExpiresIn) * time.Second
 	if ttl <= 0 {
 		ttl = time.Hour
 	}
-	c.tokenExpiry = time.Now().Add(ttl)
-	c.connected = true
-	return c.accessToken, nil
+	c.tokens[host] = &hostToken{accessToken: tr.AccessToken, expiry: time.Now().Add(ttl)}
+	// Readiness tracks the DEFAULT workspace only: an override workspace that
+	// happens to authenticate must not mark an unreachable default as healthy.
+	if host == c.host {
+		c.connected = true
+	}
+	return tr.AccessToken, nil
 }
 
 // normalizeHost ensures the workspace URL has an https scheme and no trailing
@@ -409,6 +561,68 @@ func normalizeHost(raw string) string {
 		h = "https://" + h
 	}
 	return h
+}
+
+// normalizeHosts drops blanks, duplicates and unusable entries. A rejected
+// entry is logged, not fatal, so one bad allow-list value can't break boot.
+func normalizeHosts(raw []string) []string {
+	var out []string
+	seen := make(map[string]bool, len(raw))
+	for _, r := range raw {
+		h := normalizeHost(r)
+		if h == "" || seen[h] {
+			continue
+		}
+		if err := validateWorkspaceHost(h); err != nil {
+			log.Printf("[databricks] ignoring allow-listed host %q: %v", r, err)
+			continue
+		}
+		seen[h] = true
+		out = append(out, h)
+	}
+	return out
+}
+
+// databricksDomains are the parent domains Databricks serves workspaces on.
+var databricksDomains = []string{
+	".cloud.databricks.com",    // AWS
+	".gcp.databricks.com",      // GCP
+	".azuredatabricks.net",     // Azure
+	".databricks.com",          // vanity / account-level deployment names
+	".databricks.azure.us",     // Azure Government
+	".databricks.illinois.gov", // sovereign deployments
+}
+
+// validateWorkspaceHost checks that host is a bare https origin on a
+// Databricks-owned domain — no path, query or userinfo to redirect the token
+// exchange elsewhere.
+func validateWorkspaceHost(host string) error {
+	u, err := url.Parse(host)
+	if err != nil {
+		return fmt.Errorf("not a valid URL: %w", err)
+	}
+	if u.Scheme != "https" {
+		return fmt.Errorf("must use https")
+	}
+	// The account-console URL (https://<vanity>/?o=<workspace-id>) routes the
+	// browser to a workspace but is not a REST/OAuth host; it is the obvious
+	// thing to copy, so name the fix instead of just rejecting it.
+	if u.Query().Has("o") {
+		return fmt.Errorf("looks like an account-console URL; use the workspace's own URL instead (SQL warehouse → Connection details → Server hostname), not https://<host>/?o=<workspace-id>")
+	}
+	if u.User != nil || u.Path != "" || u.RawQuery != "" || u.Fragment != "" {
+		return fmt.Errorf("must be a bare workspace origin (https://<workspace-host>) with no path, query or credentials")
+	}
+	name := strings.ToLower(u.Hostname())
+	if name == "" {
+		return fmt.Errorf("missing hostname")
+	}
+	for _, d := range databricksDomains {
+		if strings.HasSuffix(name, d) {
+			return nil
+		}
+	}
+	return fmt.Errorf("not a Databricks workspace domain")
 }
 
 // readOnlyLeadKeywords are the statement-leading verbs we permit; anything
