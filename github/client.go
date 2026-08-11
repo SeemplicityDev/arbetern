@@ -2,7 +2,6 @@ package github
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -16,6 +15,8 @@ import (
 
 	gh "github.com/google/go-github/v60/github"
 	"golang.org/x/oauth2"
+
+	"github.com/justmike1/arbetern/internal/safego"
 )
 
 type Client struct {
@@ -71,19 +72,46 @@ func (c *Client) ResolveOwner(ctx context.Context) (string, error) {
 	return user.GetLogin(), nil
 }
 
+// maxDirEntriesInError bounds the sibling names listed in a "that path is a
+// directory" error, which is returned to the model as a tool result.
+const maxDirEntriesInError = 20
+
 func (c *Client) GetFileContent(ctx context.Context, owner, repo, path, branch string) (string, string, error) {
 	opts := &gh.RepositoryContentGetOptions{Ref: branch}
-	file, _, _, err := c.api.Repositories.GetContents(ctx, owner, repo, path, opts)
+	file, dir, _, err := c.api.Repositories.GetContents(ctx, owner, repo, path, opts)
 	if err != nil {
 		return "", "", fmt.Errorf("failed to get file %s: %w", path, err)
 	}
 
-	content, err := base64.StdEncoding.DecodeString(*file.Content)
-	if err != nil {
-		return "", "", fmt.Errorf("failed to decode file content: %w", err)
+	// GitHub does not treat a directory as an error: err is nil, file is nil, and
+	// the entries arrive in dir. Listing them lets the model retry with a real
+	// path instead of the same one.
+	if file == nil {
+		if len(dir) > 0 {
+			names := make([]string, 0, min(len(dir), maxDirEntriesInError))
+			for _, e := range dir[:min(len(dir), maxDirEntriesInError)] {
+				names = append(names, e.GetName())
+			}
+			more := ""
+			if len(dir) > maxDirEntriesInError {
+				more = fmt.Sprintf(" (+%d more)", len(dir)-maxDirEntriesInError)
+			}
+			return "", "", fmt.Errorf("%s is a directory, not a file; it contains: %s%s — retry with one of these paths",
+				path, strings.Join(names, ", "), more)
+		}
+		return "", "", fmt.Errorf("failed to get file %s: GitHub returned no content for this path (it may be a submodule or a symlink)", path)
 	}
 
-	return string(content), file.GetSHA(), nil
+	// GetContent decodes per the response's own encoding rather than assuming
+	// base64: files over 1 MB arrive as encoding "none", where a hand-rolled
+	// decode silently yields "" instead of erroring — and the read-then-write
+	// tools would commit that emptiness over the real file.
+	content, err := file.GetContent()
+	if err != nil {
+		return "", "", fmt.Errorf("failed to read file content for %s: %w", path, err)
+	}
+
+	return content, file.GetSHA(), nil
 }
 
 func (c *Client) GetDefaultBranch(ctx context.Context, owner, repo string) (string, error) {
@@ -521,6 +549,8 @@ func (c *Client) GetFilesBulk(ctx context.Context, owner string, specs []FileFet
 		go func() {
 			defer wg.Done()
 			defer func() { <-sem }()
+			// Declared last so it runs first, before wg.Done releases Wait.
+			defer safego.Recover("github: bulk file fetch")
 			results[i] = FileFetchResult{Repo: spec.Repo, Path: spec.Path, Branch: spec.Branch}
 			if ctx.Err() != nil {
 				results[i].Error = ctx.Err().Error()
@@ -563,6 +593,7 @@ func (c *Client) ListReposTeamsBulk(ctx context.Context, owner string, repos []s
 		go func() {
 			defer wg.Done()
 			defer func() { <-sem }()
+			defer safego.Recover("github: bulk repo teams")
 			results[i] = RepoTeamsBulkResult{Repo: repo}
 			if ctx.Err() != nil {
 				results[i].Error = ctx.Err().Error()

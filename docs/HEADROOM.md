@@ -91,40 +91,59 @@ Full set of knobs:
 | `headroom.telemetry` | `false` | When `false`, passes `--no-telemetry` (anonymous telemetry off) |
 | `headroom.extraArgs` | `[]` | Extra args appended to `headroom proxy` |
 | `headroom.env` | `{}` | Extra environment variables for the sidecar |
-| `headroom.resources` | `{}` | Resource requests/limits for the sidecar |
-| `headroom.livenessProbe` | `/health`, period 30s, timeout 5s, threshold 5 | Liveness probe spec. Set `{}` to disable |
+| `headroom.resources` | requests = limits = 2 CPU / 4Gi | Resource requests/limits for the sidecar |
+| `headroom.livenessProbe` | `{}` (disabled) | Liveness probe spec. See Probe tuning below before enabling |
 | `headroom.readinessProbe` | `{}` (disabled) | Readiness probe spec. Leave empty unless you want sidecar health to gate pod traffic |
 | `headroom.securityContext` | non-root (uid 65532) | Must satisfy the pod-level `runAsNonRoot` policy |
 
 The sidecar runs `headroom proxy --host 0.0.0.0 --port <port>` with `HOME=/tmp`
-(so the non-root user has a writable cache directory) and a liveness probe
-against `/health`. It is **compression-only** — it never calls the LLM,
-so it needs no provider keys or upstream configuration.
+(so the non-root user has a writable cache directory) and no probes. It is
+**compression-only** — it never calls the LLM, so it needs no provider keys or
+upstream configuration.
 
 ### Probe tuning
 
+The chart ships **no probes on the sidecar**. Here is why.
+
 While a large `/v1/compress` is in flight the sidecar is CPU-bound and stops
-answering `/health` promptly — busy, not broken. The Kubernetes probe defaults
-(`timeoutSeconds: 1`, `failureThreshold: 3`) can't tell those apart and SIGTERM
-it after ~90s. The symptom is a climbing restart count where every termination
-reads `Reason: Completed, Exit Code: 0` (graceful shutdown, **not** `OOMKilled`
-/ `137`), plus repeated:
+answering `/health` — busy, not broken. A probe cannot tell those apart, so it
+kills healthy compressions. Compression fails open, so a wedged sidecar costs
+tokens and never correctness; there is nothing worth restarting for. Readiness
+is worse still: readiness on any container marks the whole pod NotReady and
+drops the app from the Service.
+
+If you enable a liveness probe anyway, do **not** size its budget against
+`HEADROOM_COMPRESS_TIMEOUT`. That timeout only cancels arbetern's HTTP request
+([`compressMessages`](../llm/client.go)); Headroom keeps compressing, and keeps
+ignoring `/health`, after the app has walked away. Nothing on the arbetern side
+bounds how long the sidecar stays busy, so `periodSeconds × failureThreshold`
+must exceed the worst-case *compression*, not the client's patience. There is no
+backoff either: the app re-POSTs on the next round with a larger conversation,
+so a sidecar that just restarted is immediately re-blocked.
+
+Two failure signatures, both distinguishable from memory pressure by the absence
+of `OOMKilled`:
 
 ```
 Liveness probe failed: Get "http://<pod-ip>:8787/health": context deadline exceeded
 ```
 
-Two rules keep it stable:
+- `Reason: Completed, Exit Code: 0` — graceful shutdown after SIGTERM.
+- `Reason: Error, Exit Code: 137` — SIGKILL, because the sidecar was too busy to
+  process SIGTERM before `terminationGracePeriodSeconds` ran out.
 
-1. **Liveness budget > compress budget.** `periodSeconds × failureThreshold`
-   must exceed `HEADROOM_COMPRESS_TIMEOUT` (default 90s). The chart ships
-   30s × 5 = 150s; raise it alongside any `compressTimeout` increase.
-2. **No readiness probe on the sidecar.** Readiness on any container marks the
-   whole pod NotReady and drops it from the Service. Compression fails open, so
-   sidecar health should never gate traffic.
+A container whose lifetime is consistently ~3m (15s initial delay + 5 × 30s of
+failing probes + 30s grace) is being killed by its probe, not by memory.
 
-Under-provisioned CPU makes both worse — the tokenizer competes with the health
-handler for the same cores. Give the sidecar at least 2 cores for large contexts.
+Removing a probe through an override file needs `null`, not `{}` — Helm merges
+maps from `-f` rather than replacing them, so an empty map silently leaves the
+spec in place. Confirm with `helm template`.
+
+Under-provisioned CPU makes all of this worse — the tokenizer competes with the
+health handler for the same cores. The chart sets `requests.cpu` equal to
+`limits.cpu` (2) deliberately: requests are what the scheduler and CFS
+guarantee, so a request below the limit lets node contention stretch a
+compression out.
 
 ## Backend compatibility
 

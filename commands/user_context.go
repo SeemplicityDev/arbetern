@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/justmike1/arbetern/internal/safego"
 )
 
 // UserContextStore persists a small rolling log of per-user / per-agent
@@ -187,10 +189,11 @@ func (s *UserContextStore) StartGC(ctx context.Context, interval time.Duration) 
 	if interval <= 0 {
 		interval = time.Hour
 	}
-	go func() {
+	sweep := func() { safego.Run("user context: sweep", s.sweep) }
+	safego.Go("user context: sweep loop", func() {
 		// Run once at startup so stale files are cleared even if the
 		// process restarts before the first tick.
-		s.sweep()
+		sweep()
 		t := time.NewTicker(interval)
 		defer t.Stop()
 		for {
@@ -198,10 +201,10 @@ func (s *UserContextStore) StartGC(ctx context.Context, interval time.Duration) 
 			case <-ctx.Done():
 				return
 			case <-t.C:
-				s.sweep()
+				sweep()
 			}
 		}
-	}()
+	})
 }
 
 // sweep removes context.txt files older than the TTL and prunes empty dirs.

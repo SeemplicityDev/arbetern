@@ -45,6 +45,8 @@ import (
 
 	"github.com/justmike1/arbetern/internal/store"
 	"github.com/robfig/cron/v3"
+
+	"github.com/justmike1/arbetern/internal/safego"
 )
 
 const (
@@ -913,6 +915,7 @@ func (r *Registry) startRunner(w *Workflow, runInitial bool) {
 
 	go func() {
 		defer close(run.done)
+		defer safego.Recover("workflows: runner " + agent + "/" + id)
 
 		// Catch-up on fresh create or server boot: if there's no LastRun
 		// (fresh create) OR the most recent expected fire has been missed
@@ -935,7 +938,11 @@ func (r *Registry) startRunner(w *Workflow, runInitial bool) {
 			}
 			if shouldCatchup {
 				log.Printf("[workflows] %s/%s cron catchup: %s", agent, id, reason)
-				_, _ = r.runOnce(ctx, agent, id, "schedule:catchup")
+				// Guarded separately from the runner: this call is inline, so a
+				// panic here would abandon the schedule loop below.
+				safego.Run("workflows: catchup "+agent+"/"+id, func() {
+					_, _ = r.runOnce(ctx, agent, id, "schedule:catchup")
+				})
 			}
 		}
 
@@ -958,9 +965,9 @@ func (r *Registry) startRunner(w *Workflow, runInitial bool) {
 			// has its own startRunner goroutine). runOnce uses the per-
 			// workflow `busy` try-lock so an overlapping tick is skipped
 			// rather than run concurrently.
-			go func() {
+			safego.Go("workflows: tick "+agent+"/"+id, func() {
 				_, _ = r.runOnce(ctx, agent, id, "schedule")
-			}()
+			})
 		}
 	}()
 }
@@ -1153,13 +1160,14 @@ func (r *Registry) fireListeners(parent context.Context, srcAgent, srcID string,
 	}
 	r.mu.RUnlock()
 	for _, l := range listeners {
-		go func(agent, id string) {
+		agent, id := l.agent, l.id
+		safego.Go("workflows: listener "+agent+"/"+id, func() {
 			// Decouple from the parent tick context so listener cancellation
 			// does not cascade; use a fresh timeout-bounded context.
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 			defer cancel()
 			_, _ = r.runOnce(ctx, agent, id, wantType+":"+ref)
-		}(l.agent, l.id)
+		})
 	}
 	_ = parent
 }

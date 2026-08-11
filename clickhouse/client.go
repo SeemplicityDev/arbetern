@@ -15,6 +15,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/justmike1/arbetern/internal/safego"
 )
 
 const (
@@ -81,7 +83,7 @@ func NewClient(keyID, keySecret, organizationID, queryEndpoint, queryUser, query
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		if err := c.ping(ctx); err != nil {
 			log.Printf("[clickhouse] initial connectivity check failed, will retry every 5s: %v", err)
-			go c.retryConnect()
+			safego.Go("clickhouse: connect retry", c.retryConnect)
 		} else {
 			log.Printf("[clickhouse] connected for organization %s", c.organizationID)
 		}
@@ -92,7 +94,7 @@ func NewClient(keyID, keySecret, organizationID, queryEndpoint, queryUser, query
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		if err := c.pingQuery(ctx); err != nil {
 			log.Printf("[clickhouse] initial SQL query check failed, will retry every 5s: %v", err)
-			go c.retryQueryConnect()
+			safego.Go("clickhouse: query connect retry", c.retryQueryConnect)
 		} else {
 			log.Printf("[clickhouse] SQL query interface connected (%s)", c.queryEndpoint)
 		}

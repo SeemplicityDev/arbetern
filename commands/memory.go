@@ -7,6 +7,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/justmike1/arbetern/internal/safego"
 )
 
 const (
@@ -113,7 +115,7 @@ func (cm *ConversationMemory) StartGC(ctx context.Context, interval time.Duratio
 	if interval <= 0 {
 		interval = conversationTTL
 	}
-	go func() {
+	safego.Go("memory: sweep loop", func() {
 		t := time.NewTicker(interval)
 		defer t.Stop()
 		for {
@@ -121,10 +123,10 @@ func (cm *ConversationMemory) StartGC(ctx context.Context, interval time.Duratio
 			case <-ctx.Done():
 				return
 			case <-t.C:
-				cm.sweep()
+				safego.Run("memory: sweep", cm.sweep)
 			}
 		}
-	}()
+	})
 }
 
 func (cm *ConversationMemory) sweep() {

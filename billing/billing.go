@@ -18,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/justmike1/arbetern/internal/safego"
 	"github.com/justmike1/arbetern/internal/store"
 )
 
@@ -220,19 +221,20 @@ func (s *Store) Record(e Event) {
 // StartFlusher persists dirty aggregates on a timer until ctx is done. Call
 // once at startup.
 func (s *Store) StartFlusher(stop <-chan struct{}) {
-	go func() {
+	flush := func() { safego.Run("billing: flush", s.flush) }
+	safego.Go("billing: flush loop", func() {
 		t := time.NewTicker(flushInterval)
 		defer t.Stop()
 		for {
 			select {
 			case <-stop:
-				s.flush()
+				flush()
 				return
 			case <-t.C:
-				s.flush()
+				flush()
 			}
 		}
-	}()
+	})
 }
 
 func (s *Store) flush() {

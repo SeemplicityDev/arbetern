@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/justmike1/arbetern/internal/safego"
 )
 
 // Price is the cost of a model in US dollars per one million tokens, split
@@ -101,8 +103,9 @@ func StartPriceSync(stop <-chan struct{}) {
 		priceSrcErr = ""
 		log.Printf("billing: synced %d model prices from %s", len(f), url)
 	}
-	go func() {
-		refresh()
+	guarded := func() { safego.Run("billing: price sync", refresh) }
+	safego.Go("billing: price sync loop", func() {
+		guarded()
 		t := time.NewTicker(24 * time.Hour)
 		defer t.Stop()
 		for {
@@ -110,10 +113,10 @@ func StartPriceSync(stop <-chan struct{}) {
 			case <-stop:
 				return
 			case <-t.C:
-				refresh()
+				guarded()
 			}
 		}
-	}()
+	})
 }
 
 // fetchPrices pulls the source-of-truth file (per-token USD) and converts to

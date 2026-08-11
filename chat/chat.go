@@ -26,6 +26,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/justmike1/arbetern/internal/safego"
 	"github.com/justmike1/arbetern/internal/store"
 )
 
@@ -261,19 +262,22 @@ func (r *Registry) StartRetention(ctx context.Context, retention, interval time.
 	if interval <= 0 {
 		interval = time.Hour
 	}
-	go func() {
+	purge := func() {
+		safego.Run("chat: purge expired", func() { r.purgeExpired(retention) })
+	}
+	safego.Go("chat: purge loop", func() {
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
-		r.purgeExpired(retention)
+		purge()
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				r.purgeExpired(retention)
+				purge()
 			}
 		}
-	}()
+	})
 }
 
 // purgeExpired deletes every conversation (for every agent) whose UpdatedAt is

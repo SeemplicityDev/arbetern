@@ -9,6 +9,8 @@ import (
 	slacklib "github.com/slack-go/slack"
 	"github.com/slack-go/slack/slackevents"
 	"github.com/slack-go/slack/socketmode"
+
+	"github.com/justmike1/arbetern/internal/safego"
 )
 
 // ThreadReplyHandler is called when a user sends a message in a tracked thread.
@@ -73,7 +75,7 @@ func NewSocketListener(appToken, botToken, botUserID string, handler ThreadReply
 // Start connects to Slack and begins listening for events in a blocking loop.
 // Run this in a goroutine. It reconnects automatically on disconnection.
 func (sl *SocketListener) Start() {
-	go sl.handleEvents()
+	safego.Go("slack: socket event loop", sl.handleEvents)
 
 	log.Printf("[socket-mode] connecting to Slack (debug=%v)...", sl.debug)
 	if err := sl.smClient.Run(); err != nil {
@@ -81,89 +83,98 @@ func (sl *SocketListener) Start() {
 	}
 }
 
-// handleEvents processes incoming Socket Mode events.
+// handleEvents processes incoming Socket Mode events. Each event is guarded
+// individually rather than at the goroutine boundary: dispatchEvent runs
+// handleEventsAPI inline, so recovering outside this loop would leave the
+// process up but deaf to Slack.
 func (sl *SocketListener) handleEvents() {
 	for evt := range sl.smClient.Events {
 		sl.eventCount.Add(1)
-
-		switch evt.Type {
-		case socketmode.EventTypeConnecting:
-			// Only log if we were previously connected (suppress initial spam).
-			if sl.connected.Load() {
-				log.Printf("[socket-mode] reconnecting...")
-			}
-
-		case socketmode.EventTypeConnected:
-			wasConnected := sl.connected.Swap(true)
-			if !wasConnected {
-				log.Printf("[socket-mode] connected (events processed: %d)", sl.eventCount.Load())
-			}
-
-		case socketmode.EventTypeConnectionError:
-			sl.connected.Store(false)
-			log.Printf("[socket-mode] connection error, will retry...")
-
-		case socketmode.EventTypeHello:
-			log.Printf("[socket-mode] received hello from Slack")
-
-		case socketmode.EventTypeEventsAPI:
-			eventsAPIEvent, ok := evt.Data.(slackevents.EventsAPIEvent)
-			if !ok {
-				log.Printf("[socket-mode] WARNING: EventsAPI event data is %T (expected slackevents.EventsAPIEvent), skipping",
-					evt.Data)
-				if evt.Request != nil {
-					sl.smClient.Ack(*evt.Request)
-				}
-				continue
-			}
-
-			// Acknowledge the event immediately to prevent Slack retries.
-			if evt.Request != nil {
-				sl.smClient.Ack(*evt.Request)
-			}
-
-			sl.handleEventsAPI(eventsAPIEvent)
-
-		case socketmode.EventTypeInteractive:
-			log.Printf("[socket-mode] interactive event received (ignoring)")
-			if evt.Request != nil {
-				sl.smClient.Ack(*evt.Request)
-			}
-
-		case socketmode.EventTypeSlashCommand:
-			cmd, ok := evt.Data.(slacklib.SlashCommand)
-			if !ok {
-				log.Printf("[socket-mode] WARNING: slash command data is %T (expected slack.SlashCommand), skipping", evt.Data)
-				if evt.Request != nil {
-					sl.smClient.Ack(*evt.Request)
-				}
-				continue
-			}
-
-			// Acknowledge immediately so Slack doesn't show a timeout error.
-			if evt.Request != nil {
-				sl.smClient.Ack(*evt.Request, map[string]interface{}{
-					"text": "Processing your request...",
-				})
-			}
-
-			log.Printf("[socket-mode] slash command: command=%s channel=%s user=%s text=%q",
-				cmd.Command, cmd.ChannelID, cmd.UserID, truncate(cmd.Text, 80))
-
-			if sl.slashCommandHandler != nil {
-				go sl.slashCommandHandler(cmd.Command, cmd.ChannelID, cmd.UserID, cmd.Text, cmd.ResponseURL)
-			}
-
-		default:
-			log.Printf("[socket-mode] unhandled event type: %s (data type: %T)",
-				evt.Type, evt.Data)
-			// Acknowledge unknown event types to avoid retries.
-			if evt.Request != nil {
-				sl.smClient.Ack(*evt.Request)
-			}
-		}
+		safego.Run("slack: socket event "+string(evt.Type), func() { sl.dispatchEvent(evt) })
 	}
 	log.Printf("[socket-mode] event channel closed — listener stopped")
+}
+
+// dispatchEvent routes a single Socket Mode event.
+func (sl *SocketListener) dispatchEvent(evt socketmode.Event) {
+	switch evt.Type {
+	case socketmode.EventTypeConnecting:
+		// Only log if we were previously connected (suppress initial spam).
+		if sl.connected.Load() {
+			log.Printf("[socket-mode] reconnecting...")
+		}
+
+	case socketmode.EventTypeConnected:
+		wasConnected := sl.connected.Swap(true)
+		if !wasConnected {
+			log.Printf("[socket-mode] connected (events processed: %d)", sl.eventCount.Load())
+		}
+
+	case socketmode.EventTypeConnectionError:
+		sl.connected.Store(false)
+		log.Printf("[socket-mode] connection error, will retry...")
+
+	case socketmode.EventTypeHello:
+		log.Printf("[socket-mode] received hello from Slack")
+
+	case socketmode.EventTypeEventsAPI:
+		eventsAPIEvent, ok := evt.Data.(slackevents.EventsAPIEvent)
+		if !ok {
+			log.Printf("[socket-mode] WARNING: EventsAPI event data is %T (expected slackevents.EventsAPIEvent), skipping",
+				evt.Data)
+			if evt.Request != nil {
+				_ = sl.smClient.Ack(*evt.Request)
+			}
+			return
+		}
+
+		// Acknowledge the event immediately to prevent Slack retries.
+		if evt.Request != nil {
+			_ = sl.smClient.Ack(*evt.Request)
+		}
+
+		sl.handleEventsAPI(eventsAPIEvent)
+
+	case socketmode.EventTypeInteractive:
+		log.Printf("[socket-mode] interactive event received (ignoring)")
+		if evt.Request != nil {
+			_ = sl.smClient.Ack(*evt.Request)
+		}
+
+	case socketmode.EventTypeSlashCommand:
+		cmd, ok := evt.Data.(slacklib.SlashCommand)
+		if !ok {
+			log.Printf("[socket-mode] WARNING: slash command data is %T (expected slack.SlashCommand), skipping", evt.Data)
+			if evt.Request != nil {
+				_ = sl.smClient.Ack(*evt.Request)
+			}
+			return
+		}
+
+		// Acknowledge immediately so Slack doesn't show a timeout error.
+		if evt.Request != nil {
+			_ = sl.smClient.Ack(*evt.Request, map[string]interface{}{
+				"text": "Processing your request...",
+			})
+		}
+
+		log.Printf("[socket-mode] slash command: command=%s channel=%s user=%s text=%q",
+			cmd.Command, cmd.ChannelID, cmd.UserID, truncate(cmd.Text, 80))
+
+		if sl.slashCommandHandler != nil {
+			safego.Go("slack: slash command "+cmd.Command, func() {
+				sl.slashCommandHandler(cmd.Command, cmd.ChannelID, cmd.UserID, cmd.Text, cmd.ResponseURL)
+			})
+		}
+
+	default:
+		log.Printf("[socket-mode] unhandled event type: %s (data type: %T)",
+			evt.Type, evt.Data)
+		// Acknowledge unknown event types to avoid retries.
+		if evt.Request != nil {
+			_ = sl.smClient.Ack(*evt.Request)
+		}
+	}
 }
 
 // handleEventsAPI processes Events API payloads delivered via Socket Mode.
@@ -218,7 +229,9 @@ func (sl *SocketListener) handleMessage(ev *slackevents.MessageEvent) {
 	log.Printf("[socket-mode] thread reply: channel=%s thread=%s user=%s",
 		ev.Channel, ev.ThreadTimeStamp, ev.User)
 
-	go sl.threadReplyHandler(ev.Channel, ev.ThreadTimeStamp, ev.User, ev.Text)
+	safego.Go("slack: thread reply", func() {
+		sl.threadReplyHandler(ev.Channel, ev.ThreadTimeStamp, ev.User, ev.Text)
+	})
 }
 
 func truncate(s string, max int) string {

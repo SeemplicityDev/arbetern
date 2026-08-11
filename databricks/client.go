@@ -21,6 +21,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/justmike1/arbetern/internal/safego"
 )
 
 const (
@@ -106,7 +108,7 @@ func NewClient(host, clientID, clientSecret, warehouseID string, allowedHosts []
 	defer cancel()
 	if _, err := c.token(ctx, c.host); err != nil {
 		log.Printf("[databricks] initial OAuth failed, will retry every 5s: %v", err)
-		go c.retryConnect()
+		safego.Go("databricks: connect retry", c.retryConnect)
 	} else {
 		log.Printf("[databricks] OAuth token acquired for %s (warehouse %s)", c.host, c.warehouseID)
 	}

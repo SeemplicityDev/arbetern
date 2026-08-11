@@ -27,6 +27,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/justmike1/arbetern/internal/safego"
 	"github.com/justmike1/arbetern/internal/store"
 )
 
@@ -594,14 +595,21 @@ func (r *Registry) startRunner(parent context.Context, d *Dashboard, runInitial 
 	id := d.ID
 	interval := d.interval()
 
+	// Guarded per sync, not per goroutine: a panicking refresh must not end the
+	// ticker and leave this dashboard permanently stale.
+	sync := func() {
+		safego.Run("dashboards: sync "+agent+"/"+id, func() { r.syncOne(ctx, agent, id) })
+	}
+
 	go func() {
 		defer close(run.done)
+		defer safego.Recover("dashboards: runner " + agent + "/" + id)
 		// runInitial=true is the create / explicit-refresh path and should
 		// populate the dashboard so the first view has data. runInitial=false
 		// is the server-boot path — we trust whatever is already on disk and
 		// wait for the next tick.
 		if runInitial {
-			r.syncOne(ctx, agent, id)
+			sync()
 		}
 
 		ticker := time.NewTicker(interval)
@@ -611,7 +619,7 @@ func (r *Registry) startRunner(parent context.Context, d *Dashboard, runInitial 
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				r.syncOne(ctx, agent, id)
+				sync()
 			}
 		}
 	}()

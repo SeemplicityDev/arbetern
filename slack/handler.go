@@ -6,6 +6,8 @@ import (
 	"net/http"
 
 	slacklib "github.com/slack-go/slack"
+
+	"github.com/justmike1/arbetern/internal/safego"
 )
 
 type CommandHandler func(channelID, userID, text, responseURL string)
@@ -53,7 +55,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte("Processing your request..."))
 
-	go func() {
+	// Outside net/http's handler recovery: this goroutine carries the whole
+	// command path, so an unguarded panic here would take the process down.
+	safego.Go("slack: slash command "+cmd.Command, func() {
 		h.commandHandler(cmd.ChannelID, cmd.UserID, cmd.Text, cmd.ResponseURL)
-	}()
+	})
 }

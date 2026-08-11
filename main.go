@@ -31,6 +31,7 @@ import (
 	"github.com/justmike1/arbetern/datadog"
 	"github.com/justmike1/arbetern/freshworks"
 	"github.com/justmike1/arbetern/github"
+	"github.com/justmike1/arbetern/internal/safego"
 	"github.com/justmike1/arbetern/llm"
 	"github.com/justmike1/arbetern/nvd"
 	"github.com/justmike1/arbetern/prompts"
@@ -1220,13 +1221,16 @@ func startIntegrationsRefresher(
 ) {
 	refreshIntegrations(cfg, slackClient, ghClient, jiraClient, sfClient, chorusClient, datadogClients, awsClient, azureClient, databricksClient, clickhouseClient, freshworksClient, modelsClient, codeModelsClient)
 
-	go func() {
+	safego.Go("integrations: refresh loop", func() {
 		ticker := time.NewTicker(1 * time.Hour)
 		defer ticker.Stop()
 		for range ticker.C {
-			refreshIntegrations(cfg, slackClient, ghClient, jiraClient, sfClient, chorusClient, datadogClients, awsClient, azureClient, databricksClient, clickhouseClient, freshworksClient, modelsClient, codeModelsClient)
+			// Guarded per tick so one bad refresh cannot end the loop.
+			safego.Run("integrations: refresh", func() {
+				refreshIntegrations(cfg, slackClient, ghClient, jiraClient, sfClient, chorusClient, datadogClients, awsClient, azureClient, databricksClient, clickhouseClient, freshworksClient, modelsClient, codeModelsClient)
+			})
 		}
-	}()
+	})
 }
 
 func main() {
@@ -1751,7 +1755,7 @@ func main() {
 				router.Handle(channelID, userID, text, responseURL)
 			},
 		)
-		go socketListener.Start()
+		safego.Go("slack: socket listener", socketListener.Start)
 		log.Printf("Socket Mode enabled — listening for thread replies")
 	} else {
 		log.Printf("Warning: SLACK_APP_TOKEN not set — thread session follow-ups disabled")

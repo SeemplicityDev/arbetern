@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/justmike1/arbetern/internal/safego"
 )
 
 // authMode controls how API requests are authenticated.
@@ -94,7 +96,7 @@ func NewOAuthClient(baseURL, clientID, clientSecret, defaultProject string) *Cli
 
 	if err := c.connectOAuth(); err != nil {
 		log.Printf("[atlassian] initial OAuth failed, will retry every 5s: %v", err)
-		go c.retryConnect()
+		safego.Go("atlassian: connect retry", c.retryConnect)
 	}
 
 	return c

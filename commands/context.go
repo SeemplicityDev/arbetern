@@ -11,6 +11,8 @@ import (
 	"time"
 
 	slacklib "github.com/slack-go/slack"
+
+	"github.com/justmike1/arbetern/internal/safego"
 )
 
 const (
@@ -106,7 +108,7 @@ func (cp *ContextProvider) StartGC(ctx context.Context, interval time.Duration) 
 			interval = defaultContextCacheTTL
 		}
 	}
-	go func() {
+	safego.Go("context cache: sweep loop", func() {
 		t := time.NewTicker(interval)
 		defer t.Stop()
 		for {
@@ -114,10 +116,10 @@ func (cp *ContextProvider) StartGC(ctx context.Context, interval time.Duration) 
 			case <-ctx.Done():
 				return
 			case <-t.C:
-				cp.sweep()
+				safego.Run("context cache: sweep", cp.sweep)
 			}
 		}
-	}()
+	})
 }
 
 func (cp *ContextProvider) sweep() {

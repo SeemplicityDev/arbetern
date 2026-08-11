@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/justmike1/arbetern/internal/safego"
 )
 
 const (
@@ -58,7 +60,7 @@ func NewClient(consumerKey, consumerSecret, loginURL string) *Client {
 
 	if err := c.refreshToken(); err != nil {
 		log.Printf("[salesforce] initial OAuth failed, will retry every 5s: %v", err)
-		go c.retryConnect()
+		safego.Go("salesforce: connect retry", c.retryConnect)
 	} else {
 		c.tokenMu.Lock()
 		c.connected = true

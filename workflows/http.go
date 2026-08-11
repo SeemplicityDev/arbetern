@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/justmike1/arbetern/internal/crud"
+	"github.com/justmike1/arbetern/internal/safego"
 )
 
 //go:embed view.html
@@ -69,11 +70,11 @@ func (r *Registry) handleCustom(w http.ResponseWriter, req *http.Request, agent,
 		// /data.json to see results in run history. The per-workflow busy
 		// try-lock inside runOnce still prevents concurrent runs of the
 		// same workflow.
-		go func() {
+		safego.Go("workflows: manual run "+agent+"/"+id, func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 			defer cancel()
 			_, _ = r.RunOnce(ctx, agent, id, "manual:api")
-		}()
+		})
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusAccepted)
 		_ = json.NewEncoder(w).Encode(map[string]any{
