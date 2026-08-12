@@ -2729,7 +2729,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 			return errMsg
 		}
 
-		readBranch := h.branchMgr.ReadBranch(owner, args.Repo, baseBranch)
+		readBranch := h.branchMgr.ReadBranch(ctx, owner, args.Repo, baseBranch)
 		fullContent, fileSHA, err := h.ghClient.GetFileContent(ctx, owner, args.Repo, args.Path, readBranch)
 		if err != nil {
 			return preconditionErrf("Error reading current file: %v", err)
@@ -2834,7 +2834,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 			return errMsg
 		}
 
-		readBranch := h.branchMgr.ReadBranch(owner, args.Repo, baseBranch)
+		readBranch := h.branchMgr.ReadBranch(ctx, owner, args.Repo, baseBranch)
 		fullContent, fileSHA, err := h.ghClient.GetFileContent(ctx, owner, args.Repo, args.Path, readBranch)
 		if err != nil {
 			return preconditionErrf("Error reading current file: %v", err)

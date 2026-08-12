@@ -56,11 +56,49 @@ func (bm *BranchManager) ActiveBranch(owner, repo string) *ActiveBranchInfo {
 
 // ReadBranch returns the branch to read files from — the active branch if one
 // exists for this repo, otherwise the base branch.
-func (bm *BranchManager) ReadBranch(owner, repo, baseBranch string) string {
-	if active := bm.ActiveBranch(owner, repo); active != nil {
+func (bm *BranchManager) ReadBranch(ctx context.Context, owner, repo, baseBranch string) string {
+	if active := bm.resolveActiveBranch(ctx, owner, repo); active != nil {
 		return active.BranchName
 	}
 	return baseBranch
+}
+
+// resolveActiveBranch returns the active branch for a repo, first dropping it
+// if it no longer exists upstream. A thread session outlives the PR it opened,
+// and merging that PR deletes its head branch — without this check every
+// later read and commit in the thread retries against a branch GitHub has
+// already removed and fails identically each time. Forgetting it here lets the
+// caller fall back to opening a fresh branch and PR.
+func (bm *BranchManager) resolveActiveBranch(ctx context.Context, owner, repo string) *ActiveBranchInfo {
+	active := bm.ActiveBranch(owner, repo)
+	if active == nil {
+		return nil
+	}
+	exists, err := bm.ghClient.BranchExists(ctx, owner, repo, active.BranchName)
+	if err != nil {
+		// Inconclusive: keep the branch. A commit against a branch that really
+		// is gone still recovers via the not-found fallback in CommitAndPR.
+		log.Printf("[branch-manager] could not verify branch %s, assuming it exists: %v", active.BranchName, err)
+		return active
+	}
+	if exists {
+		return active
+	}
+	log.Printf("[branch-manager] active branch %s no longer exists (PR likely merged); a new branch will be created", active.BranchName)
+	bm.forget(owner + "/" + repo)
+	return nil
+}
+
+// forget drops a repo's active branch from the manager and the thread session
+// so the next write starts a new branch instead of reusing a dead one.
+func (bm *BranchManager) forget(repoKey string) {
+	delete(bm.activeBranches, repoKey)
+	if bm.session == nil {
+		return
+	}
+	bm.session.mu.Lock()
+	defer bm.session.mu.Unlock()
+	delete(bm.session.ActiveBranches, repoKey)
 }
 
 // CommitResult is returned by CommitAndPR with the outcome of the operation.
@@ -88,17 +126,22 @@ func (bm *BranchManager) CommitAndPR(
 	commitFn func(branch string) error,
 ) (*CommitResult, error) {
 	repoKey := owner + "/" + repo
-	active := bm.activeBranches[repoKey]
 
-	if active != nil {
+	if active := bm.resolveActiveBranch(ctx, owner, repo); active != nil {
 		// Commit to existing branch.
-		commitMsg := fmt.Sprintf("%s: %s", bm.agentID, description)
-		_ = commitMsg // commitFn handles the commit message externally
-		if err := commitFn(active.BranchName); err != nil {
+		err := commitFn(active.BranchName)
+		switch {
+		case err == nil:
+			log.Printf("[branch-manager] additional commit to branch %s for PR: %s", active.BranchName, active.PrURL)
+			return &CommitResult{PrURL: active.PrURL, IsNew: false, Message: active.PrURL}, nil
+		case github.IsMissingBranchError(err):
+			// Deleted between the existence check and the commit — fall through
+			// to the new branch/PR path rather than failing the whole request.
+			log.Printf("[branch-manager] branch %s vanished mid-commit; falling back to a new branch", active.BranchName)
+			bm.forget(repoKey)
+		default:
 			return nil, fmt.Errorf("committing to existing branch: %w", err)
 		}
-		log.Printf("[branch-manager] additional commit to branch %s for PR: %s", active.BranchName, active.PrURL)
-		return &CommitResult{PrURL: active.PrURL, IsNew: false, Message: active.PrURL}, nil
 	}
 
 	// Last line of defence before a PR is opened: with both the override and the

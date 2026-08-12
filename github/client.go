@@ -3,6 +3,7 @@ package github
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -120,6 +121,38 @@ func (c *Client) GetDefaultBranch(ctx context.Context, owner, repo string) (stri
 		return "", fmt.Errorf("failed to get repository %s/%s: %w", owner, repo, err)
 	}
 	return r.GetDefaultBranch(), nil
+}
+
+// BranchExists reports whether a branch still exists. A branch that is gone is
+// an expected state rather than a failure — GitHub deletes merged PR head
+// branches — so a 404 returns (false, nil) and only genuine API failures error.
+func (c *Client) BranchExists(ctx context.Context, owner, repo, branch string) (bool, error) {
+	_, resp, err := c.api.Git.GetRef(ctx, owner, repo, "refs/heads/"+branch)
+	if err != nil {
+		if resp != nil && resp.StatusCode == http.StatusNotFound {
+			return false, nil
+		}
+		return false, fmt.Errorf("failed to check branch %s: %w", branch, err)
+	}
+	return true, nil
+}
+
+// IsMissingBranchError reports whether err is GitHub rejecting a write because
+// the target branch does not exist. The status code alone is not enough: a 404
+// from the contents API also covers a missing repo or path, so the branch has
+// to be named in the message.
+func IsMissingBranchError(err error) bool {
+	var ghErr *gh.ErrorResponse
+	if !errors.As(err, &ghErr) {
+		return false
+	}
+	if ghErr.Response != nil &&
+		ghErr.Response.StatusCode != http.StatusNotFound &&
+		ghErr.Response.StatusCode != http.StatusUnprocessableEntity {
+		return false
+	}
+	msg := strings.ToLower(ghErr.Message)
+	return strings.Contains(msg, "branch") && strings.Contains(msg, "not found")
 }
 
 func (c *Client) CreateBranch(ctx context.Context, owner, repo, baseBranch, newBranch string) error {
