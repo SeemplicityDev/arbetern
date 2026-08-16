@@ -14,6 +14,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"sync"
 	"time"
@@ -154,6 +155,11 @@ func (s *Store) Dir() string { return s.dir }
 func monthKey(t time.Time) string { return t.UTC().Format("2006-01") }
 func dayKey(t time.Time) string   { return t.UTC().Format("2006-01-02") }
 
+// monthRe validates a month key read back from disk. Keys become the variable
+// part of the usage-<month>.json filename on the next flush, so a hand-edited
+// descriptor must not be able to steer that write elsewhere.
+var monthRe = regexp.MustCompile(`^\d{4}-\d{2}$`)
+
 func bucket(m map[string]*Counts, k string) *Counts {
 	c := m[k]
 	if c == nil {
@@ -255,12 +261,12 @@ func (s *Store) flush() {
 	s.mu.Unlock()
 
 	for k, m := range snaps {
-		if err := store.WriteJSONAt(filepath.Join(s.dir, "usage-"+k+".json"), m); err != nil {
+		if err := store.WriteJSONAt(s.dir, filepath.Join(s.dir, "usage-"+k+".json"), m); err != nil {
 			log.Printf("[billing] persist %s failed: %v", k, err)
 		}
 	}
 	if recent != nil {
-		if err := store.WriteJSONAt(filepath.Join(s.dir, "recent.json"), recent); err != nil {
+		if err := store.WriteJSONAt(s.dir, filepath.Join(s.dir, "recent.json"), recent); err != nil {
 			log.Printf("[billing] persist recent failed: %v", err)
 		}
 	}
@@ -270,7 +276,7 @@ func (s *Store) load() {
 	entries, _ := filepath.Glob(filepath.Join(s.dir, "usage-*.json"))
 	for _, p := range entries {
 		m, err := store.ReadJSON[monthData](p, nil)
-		if err != nil || m == nil || m.Month == "" {
+		if err != nil || m == nil || !monthRe.MatchString(m.Month) {
 			continue
 		}
 		if m.Days == nil {

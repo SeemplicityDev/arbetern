@@ -16,6 +16,8 @@ package dashboards
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -395,7 +397,10 @@ func (r *Registry) Delete(agent, id string) error {
 		case <-time.After(2 * time.Second):
 		}
 	}
-	path := r.pathFor(d)
+	path, err := r.pathFor(d)
+	if err != nil {
+		return err
+	}
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("remove dashboard file: %w", err)
 	}
@@ -684,7 +689,7 @@ func (r *Registry) persist(d *Dashboard) error {
 	return store.WriteJSON(r.dir, d.Agent, d.ID, d)
 }
 
-func (r *Registry) pathFor(d *Dashboard) string {
+func (r *Registry) pathFor(d *Dashboard) (string, error) {
 	return store.PathFor(r.dir, d.Agent, d.ID)
 }
 
@@ -759,6 +764,27 @@ func InstanceSlug(inputs map[string]string) string {
 	return strings.Join(parts, "-")
 }
 
+// instanceID composes a rendered instance's id from its template id and input
+// slug. The slug is derived from request-supplied values, so the result is
+// capped at store.MaxSegment: an over-long id is rejected by the store on
+// write, and any that slipped through would be dropped as an invalid
+// descriptor on the next load. Truncated ids are disambiguated with a hash of
+// the full slug so distinct inputs keep distinct — and stable — instances.
+func instanceID(templateID, slug string) string {
+	id := templateID + "-" + slug
+	if len(id) <= store.MaxSegment {
+		return id
+	}
+	sum := sha256.Sum256([]byte(slug))
+	suffix := "-" + hex.EncodeToString(sum[:4])
+	head := templateID + "-"
+	if len(head)+len(suffix) > store.MaxSegment {
+		head = head[:store.MaxSegment-len(suffix)]
+	}
+	keep := store.MaxSegment - len(head) - len(suffix)
+	return strings.TrimRight(head+slug[:keep], "-") + suffix
+}
+
 // buildPromptInstance builds a rendered-instance shell for a prompt template
 // with the given input values. Markdown is empty — it is populated by the
 // first sync. The ID is slug-derived so re-rendering the same inputs
@@ -771,7 +797,7 @@ func buildPromptInstance(tmpl *Dashboard, inputs map[string]string, createdBy st
 		name = tmpl.Name + " — " + label
 	}
 	inst := &Dashboard{
-		ID:           tmpl.ID + "-" + InstanceSlug(inputs),
+		ID:           instanceID(tmpl.ID, InstanceSlug(inputs)),
 		Agent:        tmpl.Agent,
 		Name:         name,
 		ShortName:    tmpl.ShortName,

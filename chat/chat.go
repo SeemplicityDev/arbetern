@@ -165,7 +165,11 @@ func (r *Registry) userFor(req *http.Request) string {
 func (r *Registry) ListConversations(agent string) ([]ConversationSummary, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	entries, err := os.ReadDir(store.AgentDir(r.root, agent))
+	dir, err := store.AgentDir(r.root, agent)
+	if err != nil {
+		return nil, err
+	}
+	entries, err := os.ReadDir(dir)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return []ConversationSummary{}, nil
@@ -227,11 +231,14 @@ func (r *Registry) Conversation(agent, id string) (*transcript, error) {
 func (r *Registry) DeleteConversation(agent, id string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	err := os.Remove(store.PathFor(r.root, agent, id))
-	if os.IsNotExist(err) {
-		return nil
+	path, err := store.PathFor(r.root, agent, id)
+	if err != nil {
+		return err
 	}
-	return err
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
 }
 
 // RenameConversation sets a conversation's title. Returns nil when the
@@ -301,7 +308,12 @@ func (r *Registry) purgeExpired(retention time.Duration) {
 			continue
 		}
 		agent := ad.Name()
-		entries, err := os.ReadDir(store.AgentDir(r.root, agent))
+		dir, err := store.AgentDir(r.root, agent)
+		if err != nil {
+			log.Printf("chat retention: skip agent dir %q: %v", agent, err)
+			continue
+		}
+		entries, err := os.ReadDir(dir)
 		if err != nil {
 			log.Printf("chat retention: read agent dir %q: %v", agent, err)
 			continue
@@ -317,7 +329,12 @@ func (r *Registry) purgeExpired(retention time.Duration) {
 				continue
 			}
 			if t.UpdatedAt.Before(cutoff) {
-				if err := os.Remove(store.PathFor(r.root, agent, id)); err != nil && !os.IsNotExist(err) {
+				path, err := store.PathFor(r.root, agent, id)
+				if err != nil {
+					log.Printf("chat retention: skip %s/%s: %v", agent, id, err)
+					continue
+				}
+				if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 					log.Printf("chat retention: delete %s/%s: %v", agent, id, err)
 					continue
 				}
@@ -334,7 +351,11 @@ func (r *Registry) purgeExpired(retention time.Duration) {
 // partial record (e.g. the pre-multi-conversation single history.json) so
 // callers always receive a complete transcript. Callers must hold r.mu.
 func (r *Registry) readLocked(agent, id string) (*transcript, error) {
-	t, err := store.ReadJSON[transcript](store.PathFor(r.root, agent, id), nil)
+	path, err := store.PathFor(r.root, agent, id)
+	if err != nil {
+		return nil, err
+	}
+	t, err := store.ReadJSON[transcript](path, nil)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil

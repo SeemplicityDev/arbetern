@@ -832,7 +832,10 @@ func (r *Registry) Delete(agent, id string) error {
 		case <-time.After(2 * time.Second):
 		}
 	}
-	path := r.pathFor(w)
+	path, err := r.pathFor(w)
+	if err != nil {
+		return err
+	}
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("remove workflow file: %w", err)
 	}
@@ -1204,7 +1207,7 @@ func (r *Registry) persist(w *Workflow) error {
 	return store.WriteJSON(r.dir, w.Agent, w.ID, w)
 }
 
-func (r *Registry) pathFor(w *Workflow) string {
+func (r *Registry) pathFor(w *Workflow) (string, error) {
 	return store.PathFor(r.dir, w.Agent, w.ID)
 }
 

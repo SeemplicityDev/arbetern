@@ -14,7 +14,7 @@ import (
 	"sync"
 	"time"
 
-	gh "github.com/google/go-github/v60/github"
+	gh "github.com/google/go-github/v85/github"
 	"golang.org/x/oauth2"
 
 	"github.com/justmike1/arbetern/internal/safego"
@@ -161,12 +161,10 @@ func (c *Client) CreateBranch(ctx context.Context, owner, repo, baseBranch, newB
 		return fmt.Errorf("failed to get ref for %s: %w", baseBranch, err)
 	}
 
-	newRef := &gh.Reference{
-		Ref:    gh.String("refs/heads/" + newBranch),
-		Object: ref.Object,
-	}
-
-	_, _, err = c.api.Git.CreateRef(ctx, owner, repo, newRef)
+	_, _, err = c.api.Git.CreateRef(ctx, owner, repo, gh.CreateRef{
+		Ref: "refs/heads/" + newBranch,
+		SHA: ref.GetObject().GetSHA(),
+	})
 	if err != nil {
 		return fmt.Errorf("failed to create branch %s: %w", newBranch, err)
 	}

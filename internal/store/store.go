@@ -10,6 +10,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -24,6 +25,30 @@ var (
 	AgentRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
 	IDRe    = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
 )
+
+// MaxSegment is the longest agent/id accepted by AgentRe and IDRe. Callers
+// that derive an id from user input (e.g. dashboard prompt instances) must
+// keep the result within this bound or the descriptor will be rejected here
+// and, if it were written anyway, dropped on the next load.
+const MaxSegment = 63
+
+// ErrUnsafePath is returned when an agent or id would resolve to a path
+// outside its root directory, or is otherwise not a legal path segment.
+var ErrUnsafePath = errors.New("unsafe descriptor path")
+
+// contained returns the cleaned form of p when it lies inside root, and
+// ErrUnsafePath otherwise. Agent and id values reach the store from HTTP
+// routes, GitOps YAML and LLM tool calls, so containment is enforced here at
+// the filesystem sink rather than trusting every caller to have validated
+// first (CWE-22, path traversal).
+func contained(root, p string) (string, error) {
+	cleanRoot := filepath.Clean(root)
+	clean := filepath.Clean(p)
+	if clean != cleanRoot && !strings.HasPrefix(clean, cleanRoot+string(os.PathSeparator)) {
+		return "", fmt.Errorf("%w: %q escapes %q", ErrUnsafePath, clean, cleanRoot)
+	}
+	return clean, nil
+}
 
 // NewID returns an 8-byte hex identifier (16 chars). Suitable for both
 // workflows and dashboards.
@@ -54,24 +79,40 @@ func Slugify(s, fallback string) string {
 }
 
 // PathFor returns the on-disk path for a descriptor at <root>/<agent>/<id>.json.
-func PathFor(root, agent, id string) string {
-	return filepath.Join(root, agent, id+".json")
+// It rejects any agent or id that is not a legal path segment, or that would
+// resolve outside root.
+func PathFor(root, agent, id string) (string, error) {
+	dir, err := AgentDir(root, agent)
+	if err != nil {
+		return "", err
+	}
+	if !IDRe.MatchString(id) {
+		return "", fmt.Errorf("%w: invalid id %q", ErrUnsafePath, id)
+	}
+	return contained(root, filepath.Join(dir, id+".json"))
 }
 
 // AgentDir returns the directory holding an agent's descriptors: <root>/<agent>.
-func AgentDir(root, agent string) string {
-	return filepath.Join(root, agent)
+// It rejects any agent that is not a legal path segment, or that would resolve
+// outside root.
+func AgentDir(root, agent string) (string, error) {
+	if !AgentRe.MatchString(agent) {
+		return "", fmt.Errorf("%w: invalid agent %q", ErrUnsafePath, agent)
+	}
+	return contained(root, filepath.Join(root, agent))
 }
 
 // WriteJSON atomically writes v as indented JSON to <root>/<agent>/<id>.json,
 // creating the agent directory as needed. The write goes to <path>.tmp first
 // and is renamed into place so concurrent readers always see a complete file.
 func WriteJSON(root, agent, id string, v any) error {
-	dir := filepath.Join(root, agent)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	path, err := PathFor(root, agent, id)
+	if err != nil {
 		return err
 	}
-	path := PathFor(root, agent, id)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
 	tmp := path + ".tmp"
 	body, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
@@ -83,9 +124,14 @@ func WriteJSON(root, agent, id string, v any) error {
 	return os.Rename(tmp, path)
 }
 
-// WriteJSONAt atomically writes v to an arbitrary path. Used by callers
-// (e.g. the account-dashboard cache) whose layout is not <root>/<agent>/<id>.
-func WriteJSONAt(path string, v any) error {
+// WriteJSONAt atomically writes v to a path under root. Used by callers
+// (e.g. the account-dashboard cache) whose layout is not <root>/<agent>/<id>;
+// root is the directory the caller owns, and path must resolve inside it.
+func WriteJSONAt(root, path string, v any) error {
+	path, err := contained(root, path)
+	if err != nil {
+		return err
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
