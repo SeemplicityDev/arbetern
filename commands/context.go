@@ -331,15 +331,16 @@ func ParseSlackThreadURL(rawURL string) (channelID, threadTS string, err error) 
 	return channelID, threadTS, nil
 }
 
-// expandSlackLinks replaces Slack mrkdwn links like <https://url|label> with "label: https://url"
-// and bare <https://url> with just the URL, so workflow-run URLs become visible for extraction.
+// expandSlackLinks strips the angle brackets from bare <https://url> links so the
+// URL is visible for extraction. Labeled links (<https://url|label>) are returned
+// verbatim: the URL is already extractable inside the brackets, and rewriting them
+// made a scheduled run that re-reads its own prior post echo the de-linked form
+// back into its next post.
 func expandSlackLinks(text string) string {
 	return slackLinkRe.ReplaceAllStringFunc(text, func(match string) string {
 		inner := match[1 : len(match)-1] // strip < >
-		if idx := strings.Index(inner, "|"); idx >= 0 {
-			url := inner[:idx]
-			label := inner[idx+1:]
-			return label + ": " + url
+		if strings.Contains(inner, "|") {
+			return match
 		}
 		return inner
 	})
