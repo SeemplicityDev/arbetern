@@ -55,17 +55,40 @@ func neutralizeUserPing(text, userID string) (string, bool) {
 	return re.ReplaceAllString(text, "an unresolved user"), true
 }
 
+// slackAttribution renders the requesting Slack user for a GitHub-facing PR
+// body: the human name followed by the raw mention token, e.g.
+// "Jane Doe (<@U123>)". GitHub does not resolve <@U123>, so a reviewer looking
+// at the PR sees only an opaque ID; the name is what tells them who actually
+// asked for the change. The ID stays because it is the stable key back to the
+// Slack profile. userName is best-effort — it falls back to the bare mention
+// when the profile lookup found no name, and to a neutral phrase when there is
+// no Slack identity at all (a web-chat turn), rather than emitting "<@>".
+func slackAttribution(userID, userName string) string {
+	userID = strings.TrimSpace(userID)
+	userName = strings.TrimSpace(userName)
+	switch {
+	case userID == "" && userName == "":
+		return "an unresolved user"
+	case userID == "":
+		return userName
+	case userName == "":
+		return "<@" + userID + ">"
+	default:
+		return userName + " (<@" + userID + ">)"
+	}
+}
+
 // buildPRBody returns the PR body for a write-tool call. When the caller
 // supplied pr_body (trimmed non-empty) we use it verbatim and append a
 // one-line Slack attribution footer so reviewers still know which user /
 // workflow originated the change. Otherwise we fall back to the generic
 // template the tool historically used.
-func buildPRBody(userID, supplied, fallback string) string {
+func buildPRBody(userID, userName, supplied, fallback string) string {
 	supplied = strings.TrimSpace(supplied)
 	if supplied == "" {
 		return fallback
 	}
-	return supplied + "\n\n---\n_Automated via Slack by <@" + userID + ">_"
+	return supplied + "\n\n---\n_Automated via Slack by " + slackAttribution(userID, userName) + "_"
 }
 
 // requireDescription rejects a write-tool call that arrived with a blank

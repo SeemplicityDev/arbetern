@@ -117,6 +117,14 @@ type GeneralHandler struct {
 	// Slack commands and scheduled workflows. Used to attribute a created Jira
 	// ticket's Reporter to the requester when there is no Slack identity.
 	requesterEmail string
+	// requesterName caches the requesting Slack user's human name for PR
+	// attribution so a turn that opens several PRs makes one users.info call
+	// instead of one per write tool; requesterNameLookedUp marks the lookup as
+	// attempted so a user with no resolvable name is not refetched. The userID
+	// is constant for the life of a handler (one per command/tick), so a single
+	// slot is enough. Per-run state, like aggregateCache.
+	requesterName         string
+	requesterNameLookedUp bool
 }
 
 // cachedAggregate is one datadog_logs_aggregate result retained for the
@@ -2425,6 +2433,34 @@ func (h *GeneralHandler) resolveRequesterReporter(userID string) (accountID, dis
 	return "", ""
 }
 
+// slackUserName returns the requesting Slack user's human-readable name —
+// real name first, then the profile display name — for PR attribution, so a
+// GitHub reviewer sees who asked for the change rather than only an opaque
+// Slack ID. It returns "" when there is no Slack identity (a web-chat turn) or
+// the profile lookup fails; callers fall back to the bare <@ID> mention.
+func (h *GeneralHandler) slackUserName(userID string) string {
+	userID = strings.TrimSpace(userID)
+	if userID == "" || h.slackClient == nil {
+		return ""
+	}
+	if h.requesterNameLookedUp {
+		return h.requesterName
+	}
+	h.requesterNameLookedUp = true
+	user, err := h.slackClient.GetUserInfo(userID)
+	if err != nil {
+		log.Printf("[user=%s] PR attribution: Slack users.info lookup failed: %v", userID, err)
+		return ""
+	}
+	for _, candidate := range []string{user.RealName, user.Profile.RealName, user.Profile.DisplayName} {
+		if name := strings.TrimSpace(candidate); name != "" {
+			h.requesterName = name
+			break
+		}
+	}
+	return h.requesterName
+}
+
 func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, auditTS, name, argsJSON string) string {
 	if out, handled := h.executeDashboardTool(ctx, userID, channelID, name, argsJSON); handled {
 		return out
@@ -2755,7 +2791,8 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 				"Re-read the file with get_file_content, then submit a modify_file with a substantive content difference.")
 		}
 
-		prBody := buildPRBody(userID, args.PRBody, fmt.Sprintf("Automated change requested via Slack by <@%s>.\n\nChange: %s", userID, args.Description))
+		userName := h.slackUserName(userID)
+		prBody := buildPRBody(userID, userName, args.PRBody, fmt.Sprintf("Automated change requested via Slack by %s.\n\nChange: %s", slackAttribution(userID, userName), args.Description))
 		result, err := h.branchMgr.CommitAndPR(ctx, owner, args.Repo, baseBranch, userID, args.Description, prBody, args.BranchName, args.PRTitle, []string{args.Path},
 			func(branch string) error {
 				commitMsg := fmt.Sprintf("%s: %s", h.agentID, args.Description)
@@ -2792,7 +2829,8 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 			return errMsg
 		}
 
-		prBody := buildPRBody(userID, args.PRBody, fmt.Sprintf("Automated file creation requested via Slack by <@%s>.\n\nChange: %s\nNew file: `%s`", userID, args.Description, args.Path))
+		userName := h.slackUserName(userID)
+		prBody := buildPRBody(userID, userName, args.PRBody, fmt.Sprintf("Automated file creation requested via Slack by %s.\n\nChange: %s\nNew file: `%s`", slackAttribution(userID, userName), args.Description, args.Path))
 		result, err := h.branchMgr.CommitAndPR(ctx, owner, args.Repo, baseBranch, userID, args.Description, prBody, args.BranchName, args.PRTitle, []string{args.Path},
 			func(branch string) error {
 				commitMsg := fmt.Sprintf("%s: %s", h.agentID, args.Description)
@@ -2848,7 +2886,8 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		log.Printf("[user=%s channel=%s] regex_replace_file: %d matches of %q in %s/%s",
 			userID, channelID, matches, args.Pattern, args.Repo, args.Path)
 
-		prBody := buildPRBody(userID, args.PRBody, fmt.Sprintf("Automated regex replacement requested via Slack by <@%s>.\n\nChange: %s\nPattern: `%s` → `%s`\nMatches replaced: %d", userID, args.Description, args.Pattern, args.Replacement, matches))
+		userName := h.slackUserName(userID)
+		prBody := buildPRBody(userID, userName, args.PRBody, fmt.Sprintf("Automated regex replacement requested via Slack by %s.\n\nChange: %s\nPattern: `%s` → `%s`\nMatches replaced: %d", slackAttribution(userID, userName), args.Description, args.Pattern, args.Replacement, matches))
 		result, err := h.branchMgr.CommitAndPR(ctx, owner, args.Repo, baseBranch, userID, args.Description, prBody, args.BranchName, args.PRTitle, []string{args.Path},
 			func(branch string) error {
 				commitMsg := fmt.Sprintf("%s: %s", h.agentID, args.Description)

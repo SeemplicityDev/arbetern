@@ -751,10 +751,16 @@ training cutoff.
 The `modify_file`, `create_file`, and `regex_replace_file` tools all accept
 an optional `pr_body` argument. When supplied, the LLM-authored Markdown is
 used verbatim as the PR description (with a single-line `_Automated via
-Slack by <@user>_` attribution footer appended); when omitted, a generic
-template is used as a fallback. Only the FIRST write call per repo per tick
-establishes the PR body — subsequent calls grouped into the same PR ignore
-their `pr_body` argument.
+Slack by Real Name (<@user>)_` attribution footer appended); when omitted, a
+generic template is used as a fallback. The name comes from the requester's
+Slack profile (`users.info`, real name first, then display name) and is
+resolved once per run — GitHub does not render `<@U123>`, so without the name
+a reviewer only sees an opaque ID. The raw mention stays alongside it as the
+stable key back to the Slack profile; when the lookup fails or there is no
+Slack identity (a web-chat turn), the footer degrades to the bare mention.
+
+Only the FIRST write call per repo per tick establishes the PR body —
+subsequent calls grouped into the same PR ignore their `pr_body` argument.
 
 The same three tools also accept optional `branch_name` and `pr_title`
 arguments for prompts that need to enforce a naming convention (e.g.
