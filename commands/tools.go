@@ -30,6 +30,7 @@ const (
 	ToolRegexReplaceFile     = "regex_replace_file"
 	ToolGetPullRequest       = "get_pull_request"
 	ToolListPullRequests     = "list_pull_requests"
+	ToolSearchPullRequests   = "search_pull_requests"
 	ToolListCommits          = "list_commits"
 	ToolGetCommit            = "get_commit"
 	ToolSearchCode           = "search_code"
@@ -167,6 +168,7 @@ var toolIntegration = map[string]string{
 	ToolListPullRequests:     integrationGitHub,
 	ToolListCommits:          integrationGitHub,
 	ToolGetCommit:            integrationGitHub,
+	ToolSearchPullRequests:   integrationGitHub,
 	ToolSearchCode:           integrationGitHub,
 	ToolSearchCodeOrg:        integrationGitHub,
 	ToolGetWorkflowRun:       integrationGitHub,

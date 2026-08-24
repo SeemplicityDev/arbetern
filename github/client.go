@@ -673,9 +673,16 @@ func ParsePRURL(rawURL string) (owner, repo string, number int, err error) {
 
 // PRSummary holds essential information about a pull request.
 type PRSummary struct {
-	Number    int
-	Title     string
-	State     string
+	Number int
+	Title  string
+	// State is GitHub's own state field, which is "closed" for both a merged
+	// PR and an abandoned one. Merged tells the two apart; callers deciding
+	// whether prior work landed must read it rather than inferring from State.
+	State  string
+	Merged bool
+	// Repo is the "owner/name" the PR belongs to. Only set by searches that
+	// span more than one repository, where the caller cannot infer it.
+	Repo      string
 	Author    string
 	URL       string
 	BaseRef   string
@@ -696,6 +703,7 @@ func (c *Client) GetPullRequest(ctx context.Context, owner, repo string, number 
 		Number:  number,
 		Title:   pr.GetTitle(),
 		State:   pr.GetState(),
+		Merged:  pr.GetMerged(),
 		Author:  pr.GetUser().GetLogin(),
 		URL:     pr.GetHTMLURL(),
 		BaseRef: pr.GetBase().GetRef(),
@@ -729,11 +737,24 @@ func (c *Client) GetPullRequest(ctx context.Context, owner, repo string, number 
 	return summary, nil
 }
 
+// PRStateLabel renders a PR's state so merged and abandoned work are never
+// conflated. GitHub reports both as "closed", and the difference decides
+// whether prior work on a ticket actually landed.
+func PRStateLabel(s *PRSummary) string {
+	if s.Merged {
+		return "merged"
+	}
+	if s.State == "closed" {
+		return "closed (not merged)"
+	}
+	return s.State
+}
+
 // FormatPRSummary turns a PRSummary into a readable string.
 func FormatPRSummary(s *PRSummary) string {
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "PR #%d: %s\n", s.Number, s.Title)
-	fmt.Fprintf(&sb, "Author: %s | State: %s\n", s.Author, s.State)
+	fmt.Fprintf(&sb, "Author: %s | State: %s\n", s.Author, PRStateLabel(s))
 	fmt.Fprintf(&sb, "URL: %s\n", s.URL)
 	if s.Body != "" {
 		body := s.Body
@@ -922,9 +943,12 @@ func (c *Client) ListPullRequests(ctx context.Context, owner, repo, state string
 		}
 		for _, pr := range prs {
 			summaries = append(summaries, PRSummary{
-				Number:  pr.GetNumber(),
-				Title:   pr.GetTitle(),
-				State:   pr.GetState(),
+				Number: pr.GetNumber(),
+				Title:  pr.GetTitle(),
+				State:  pr.GetState(),
+				// The list endpoint omits the `merged` boolean that Get
+				// returns, so merged-ness comes from merged_at being set.
+				Merged:  !pr.GetMergedAt().IsZero(),
 				Author:  pr.GetUser().GetLogin(),
 				URL:     pr.GetHTMLURL(),
 				BaseRef: pr.GetBase().GetRef(),
@@ -1105,6 +1129,76 @@ func normalizePRTitle(s string) string {
 	return strings.Join(strings.Fields(strings.ToLower(strings.TrimSpace(s))), " ")
 }
 
+// maxSearchPages bounds code-search pagination. The search API serves at most
+// 1000 results, which is 10 pages at PerPage=100; the cap makes that a local
+// invariant rather than a property we trust the remote NextPage to respect.
+const maxSearchPages = 10
+
+// searchRateLimitRetries is the number of extra attempts a single search page
+// gets after a rate-limit rejection. The code-search endpoint has its own
+// low per-minute quota plus a secondary abuse limit, and a workflow tick that
+// searches for a dozen symbols in a row trips it routinely. Without a retry
+// the rejection reaches the model as an error on an otherwise-valid query,
+// which reads as "this code does not exist" — the wrong conclusion entirely.
+const searchRateLimitRetries = 3
+
+// searchRateLimitDelay is the fallback wait when a rate-limit error carries no
+// usable reset time of its own.
+const searchRateLimitDelay = 10 * time.Second
+
+// searchRateLimitWait returns how long to wait before retrying a rate-limited
+// search request, and whether the error is a rate limit at all. GitHub reports
+// the two limits differently: the primary one as a RateLimitError carrying a
+// reset timestamp, the secondary one as an AbuseRateLimitError carrying a
+// retry-after duration.
+func searchRateLimitWait(err error) (time.Duration, bool) {
+	var abuse *gh.AbuseRateLimitError
+	if errors.As(err, &abuse) {
+		if abuse.RetryAfter != nil && *abuse.RetryAfter > 0 {
+			return *abuse.RetryAfter, true
+		}
+		return searchRateLimitDelay, true
+	}
+	var rl *gh.RateLimitError
+	if errors.As(err, &rl) {
+		if d := time.Until(rl.Rate.Reset.Time); d > 0 {
+			return d, true
+		}
+		return searchRateLimitDelay, true
+	}
+	return 0, false
+}
+
+// searchCodePage fetches one page of code-search results, retrying on the
+// endpoint's rate limits. Waits longer than searchRateLimitCeiling are not
+// slept through — the caller is inside a request with its own deadline, so a
+// multi-minute quota reset is surfaced as an error instead.
+func (c *Client) searchCodePage(ctx context.Context, q string, opts *gh.SearchOptions) (*gh.CodeSearchResult, *gh.Response, error) {
+	const searchRateLimitCeiling = 60 * time.Second
+
+	var lastErr error
+	for attempt := 0; attempt <= searchRateLimitRetries; attempt++ {
+		results, resp, err := c.api.Search.Code(ctx, q, opts)
+		if err == nil {
+			return results, resp, nil
+		}
+		lastErr = err
+
+		wait, isRateLimit := searchRateLimitWait(err)
+		if !isRateLimit || wait > searchRateLimitCeiling || attempt == searchRateLimitRetries {
+			return nil, resp, err
+		}
+		log.Printf("[github] code search rate-limited (attempt %d/%d), waiting %s: %v",
+			attempt+1, searchRateLimitRetries, wait.Round(time.Second), err)
+		select {
+		case <-ctx.Done():
+			return nil, resp, ctx.Err()
+		case <-time.After(wait):
+		}
+	}
+	return nil, nil, lastErr
+}
+
 // SearchCode searches for code content in a repository using the GitHub code search API.
 // Paginates through all results (up to GitHub's 1000-result limit) and requests text-match fragments.
 func (c *Client) SearchCode(ctx context.Context, owner, repo, query string) ([]CodeSearchResult, error) {
@@ -1116,8 +1210,8 @@ func (c *Client) SearchCode(ctx context.Context, owner, repo, query string) ([]C
 		ListOptions: gh.ListOptions{PerPage: 100},
 	}
 
-	for {
-		results, resp, err := c.api.Search.Code(ctx, q, opts)
+	for page := 0; page < maxSearchPages; page++ {
+		results, resp, err := c.searchCodePage(ctx, q, opts)
 		if err != nil {
 			// If we already have some results and hit a secondary rate limit, return what we have.
 			if len(allMatches) > 0 {
@@ -1160,8 +1254,8 @@ func (c *Client) SearchCodeOrg(ctx context.Context, org, query string) ([]CodeSe
 		ListOptions: gh.ListOptions{PerPage: 100},
 	}
 
-	for {
-		results, resp, err := c.api.Search.Code(ctx, q, opts)
+	for page := 0; page < maxSearchPages; page++ {
+		results, resp, err := c.searchCodePage(ctx, q, opts)
 		if err != nil {
 			if len(allMatches) > 0 {
 				break
@@ -1414,4 +1508,62 @@ func (c *Client) RerunWorkflow(ctx context.Context, owner, repo string, runID in
 		return fmt.Errorf("failed to rerun workflow run %d: %w", runID, err)
 	}
 	return nil
+}
+
+// maxPRSearchResults bounds a single SearchPullRequests call. A ticket-key
+// query matches a handful of PRs; anything past this is a query too broad to
+// answer the "has this work already been attempted?" question it exists for.
+const maxPRSearchResults = 50
+
+// SearchPullRequests finds pull requests across every repository in an
+// organization whose title or body matches text, newest-updated first.
+//
+// This exists because the per-repo ListPullRequests path cannot answer the
+// question callers actually have — "is there already a PR for this work item?".
+// That question is org-wide (the code for one item may live in any repo) and
+// unbounded in time (an attempt from weeks ago still counts), whereas a
+// per-repo listing has to guess the repo up front and only sees a recent
+// window of it. It also matches on body text, which a listing does not carry.
+func (c *Client) SearchPullRequests(ctx context.Context, org, text, state string) ([]PRSummary, error) {
+	q := fmt.Sprintf("%s type:pr org:%s", text, org)
+	switch state {
+	case "open", "closed":
+		q += " state:" + state
+	case "merged":
+		q += " is:merged"
+	}
+
+	opts := &gh.SearchOptions{
+		Sort:        "updated",
+		Order:       "desc",
+		ListOptions: gh.ListOptions{PerPage: 100},
+	}
+	results, _, err := c.api.Search.Issues(ctx, q, opts)
+	if err != nil {
+		return nil, fmt.Errorf("failed to search pull requests: %w", err)
+	}
+
+	summaries := make([]PRSummary, 0, len(results.Issues))
+	for _, issue := range results.Issues {
+		if len(summaries) >= maxPRSearchResults {
+			break
+		}
+		owner, repo, number, err := ParsePRURL(issue.GetHTMLURL())
+		if err != nil {
+			continue
+		}
+		summaries = append(summaries, PRSummary{
+			Number: number,
+			Title:  issue.GetTitle(),
+			State:  issue.GetState(),
+			// The issue-search representation of a PR reports merged-ness only
+			// through the nested pull_request object's merged_at.
+			Merged: issue.PullRequestLinks != nil && !issue.PullRequestLinks.GetMergedAt().IsZero(),
+			Author: issue.GetUser().GetLogin(),
+			URL:    issue.GetHTMLURL(),
+			Body:   issue.GetBody(),
+			Repo:   fmt.Sprintf("%s/%s", owner, repo),
+		})
+	}
+	return summaries, nil
 }

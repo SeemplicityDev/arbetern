@@ -496,3 +496,64 @@ func doHTTPGet(ctx context.Context, rawURL, accept string, maxBytes int, userID,
 	)
 	return header + string(body)
 }
+
+// fileWindowContext is the number of lines added on either side of a requested
+// line range. A ticket or stack trace names an approximate line, and the code
+// that matters is the enclosing function — so a bare one-line request still
+// returns something interpretable.
+const fileWindowContext = 30
+
+// maxFileWindowLines caps a single windowed read so a start_line=1,
+// end_line=99999 request degrades into a large-but-bounded slice rather than
+// re-dumping the whole file the window exists to avoid.
+const maxFileWindowLines = 800
+
+// sliceFileLines returns the 1-indexed, inclusive [start,end] line range of
+// content, padded by fileWindowContext on each side and prefixed with line
+// numbers. Out-of-range bounds are clamped rather than rejected: callers derive
+// them from stack traces and ticket text, where the cited line is frequently
+// stale by a few revisions, and a clamped window is far more useful than an
+// error the caller reads as "the code is not there".
+func sliceFileLines(path, content string, start, end int) string {
+	lines := strings.Split(content, "\n")
+	total := len(lines)
+
+	if start <= 0 {
+		start = 1
+	}
+	if end <= 0 || end < start {
+		end = start
+	}
+	if start > total {
+		return fmt.Sprintf("%s has %d lines; requested start_line %d is past the end of the file. "+
+			"The line number is likely stale — re-read without start_line/end_line, or use search_code to find the symbol.",
+			path, total, start)
+	}
+
+	from := max(1, start-fileWindowContext)
+	to := min(total, end+fileWindowContext)
+	if to-from+1 > maxFileWindowLines {
+		to = from + maxFileWindowLines - 1
+	}
+
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "%s — lines %d-%d of %d (requested %d-%d, padded by %d lines of context):\n",
+		path, from, to, total, start, end, fileWindowContext)
+	for i := from; i <= to; i++ {
+		fmt.Fprintf(&sb, "%6d\t%s\n", i, lines[i-1])
+	}
+	if to < total {
+		fmt.Fprintf(&sb, "... (%d more lines below; request a later range to continue)\n", total-to)
+	}
+	return sb.String()
+}
+
+// stateSuffix renders an optional PR-state filter for inclusion in a tool
+// result, so the model can tell "nothing matched" from "nothing matched in
+// this state" — the second is not evidence that no PR exists.
+func stateSuffix(state string) string {
+	if state == "" {
+		return ""
+	}
+	return fmt.Sprintf(" (state: %s)", state)
+}

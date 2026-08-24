@@ -954,13 +954,15 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 			Type: "function",
 			Function: llm.ToolFunction{
 				Name:        ToolGetFileContent,
-				Description: "Read the content of a file from a GitHub repository.",
+				Description: "Read the content of a file from a GitHub repository. A whole-file read is truncated at 32000 chars, so when you already know roughly WHERE in the file to look — a stack-trace frame, a 'file.py:235' reference, a symbol you located with search_code — pass start_line/end_line to read that window instead. The window is padded with surrounding context and line-numbered, and it reaches regions past the truncation cut that a whole-file read cannot show.",
 				Parameters: json.RawMessage(`{
 					"type":"object",
 					"properties":{
 						"repo":{"type":"string","description":"Repository name (without owner)"},
 						"path":{"type":"string","description":"File path within the repository"},
-						"branch":{"type":"string","description":"Branch name (optional, uses default branch if empty)"}
+						"branch":{"type":"string","description":"Branch name (optional, uses default branch if empty)"},
+						"start_line":{"type":"integer","description":"Optional 1-indexed first line to return. When set, only this window is returned (padded with ~30 lines of context on each side and line-numbered) instead of the file head. Use this for a cited line number; a stale line number is clamped, not rejected."},
+						"end_line":{"type":"integer","description":"Optional 1-indexed last line to return (inclusive). Defaults to start_line when omitted. The returned window is capped at 800 lines."}
 					},
 					"required":["repo","path"]
 				}`),
@@ -1121,15 +1123,30 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 			Type: "function",
 			Function: llm.ToolFunction{
 				Name:        ToolListPullRequests,
-				Description: "List recent pull requests in a repository. Useful for finding relevant PRs by title, discovering recent changes, or identifying the PR that introduced a particular change.",
+				Description: "List recent pull requests in a repository, newest-updated first. Useful for browsing recent activity in a repo you already know. Do NOT use this to answer 'does a PR for <ticket/issue key> already exist?' — the default limit only covers the most recent handful of PRs in one repo, and it does not match on PR body text. Use search_pull_requests for that.",
 				Parameters: json.RawMessage(`{
 					"type":"object",
 					"properties":{
 						"repo":{"type":"string","description":"Repository name (without owner)"},
 						"state":{"type":"string","description":"Filter by state: 'open', 'closed', or 'all' (default: 'all')"},
-						"limit":{"type":"integer","description":"Maximum number of PRs to return (default: 10, max: 200)"}
+						"limit":{"type":"integer","description":"Maximum number of PRs to return (default: 10, max: 200). The default is a small recent window — raise it when you are looking for something older than the last few PRs."}
 					},
 					"required":["repo"]
+				}`),
+			},
+		},
+		{
+			Type: "function",
+			Function: llm.ToolFunction{
+				Name:        ToolSearchPullRequests,
+				Description: "Search pull requests across ALL repositories in the GitHub organization by text in their title or body, in a single call. This is the right tool for 'has a PR already been opened for this ticket/issue?': pass the ticket key (e.g. 'ABC-1234') and it finds the PR wherever it lives and however long ago it was opened, which list_pull_requests cannot do (it needs the repo up front and only sees a recent window of it). Each result reports merged separately from state, so a merged PR is never confused with an abandoned one.",
+				Parameters: json.RawMessage(`{
+					"type":"object",
+					"properties":{
+						"text":{"type":"string","description":"Text to match in the PR title or body — typically a ticket key or a distinctive phrase. Supports GitHub search qualifiers (e.g. 'in:title', 'repo:name', 'author:login')."},
+						"state":{"type":"string","description":"Optional filter: 'open', 'closed', 'merged', or omit for all states."}
+					},
+					"required":["text"]
 				}`),
 			},
 		},
@@ -2627,9 +2644,11 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 
 	case ToolGetFileContent:
 		args, errMsg := parseToolArgs[struct {
-			Repo   string `json:"repo"`
-			Path   string `json:"path"`
-			Branch string `json:"branch"`
+			Repo      string `json:"repo"`
+			Path      string `json:"path"`
+			Branch    string `json:"branch"`
+			StartLine int    `json:"start_line"`
+			EndLine   int    `json:"end_line"`
 		}](argsJSON)
 		if errMsg != "" {
 			return errMsg
@@ -2646,13 +2665,18 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 			}
 			return fmt.Sprintf("Error reading file: %v.%s", err, hint)
 		}
+		if args.StartLine > 0 || args.EndLine > 0 {
+			return sliceFileLines(args.Path, content, args.StartLine, args.EndLine)
+		}
 		if len(content) > maxFileContentLen {
 			totalLen := len(content)
 			content = content[:maxFileContentLen] + fmt.Sprintf(
-				"\n... (TRUNCATED — showing %d of %d chars, %.0f%% of file hidden. "+
-					"If you need to modify content beyond this point, use modify_file with a smaller, "+
-					"known anchor from the visible portion, or ask the user for the exact text to change.)",
-				maxFileContentLen, totalLen, float64(totalLen-maxFileContentLen)/float64(totalLen)*100)
+				"\n... (TRUNCATED — showing %d of %d chars, %.0f%% of file hidden, %d lines total. "+
+					"To read the hidden part, call get_file_content again on this same path with "+
+					"start_line/end_line covering the region you need — do NOT conclude the code is absent "+
+					"just because it is past this cut.)",
+				maxFileContentLen, totalLen, float64(totalLen-maxFileContentLen)/float64(totalLen)*100,
+				strings.Count(content, "\n")+1)
 		}
 		return content
 
@@ -2957,10 +2981,44 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		}
 		var sb strings.Builder
 		fmt.Fprintf(&sb, "Pull Requests in %s (%d):\n", args.Repo, len(prs))
-		for _, pr := range prs {
-			fmt.Fprintf(&sb, "  • #%d %s (%s) by %s — %s\n", pr.Number, pr.Title, pr.State, pr.Author, pr.URL)
+		for i := range prs {
+			pr := &prs[i]
+			fmt.Fprintf(&sb, "  • #%d %s (%s) by %s — %s\n", pr.Number, pr.Title, github.PRStateLabel(pr), pr.Author, pr.URL)
 		}
 		log.Printf("[user=%s channel=%s] listed %d PRs in %s", userID, channelID, len(prs), args.Repo)
+		return sb.String()
+
+	case ToolSearchPullRequests:
+		args, errMsg := parseToolArgs[struct {
+			Text  string `json:"text"`
+			State string `json:"state"`
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
+		}
+		if strings.TrimSpace(args.Text) == "" {
+			return "Error: text is required."
+		}
+		owner, err := h.ghClient.ResolveOwner(ctx)
+		if err != nil {
+			return fmt.Sprintf("Error resolving owner: %v", err)
+		}
+		prs, err := h.ghClient.SearchPullRequests(ctx, owner, args.Text, args.State)
+		if err != nil {
+			return fmt.Sprintf("Error searching pull requests: %v", err)
+		}
+		if len(prs) == 0 {
+			return fmt.Sprintf("No pull requests in org '%s' match %q%s. No prior PR exists for this text.",
+				owner, args.Text, stateSuffix(args.State))
+		}
+		var sb strings.Builder
+		fmt.Fprintf(&sb, "Pull requests matching %q across org '%s'%s (%d):\n", args.Text, owner, stateSuffix(args.State), len(prs))
+		for i := range prs {
+			pr := &prs[i]
+			fmt.Fprintf(&sb, "  • %s#%d %s — %s — by %s — %s\n",
+				pr.Repo, pr.Number, pr.Title, github.PRStateLabel(pr), pr.Author, pr.URL)
+		}
+		log.Printf("[user=%s channel=%s] searched PRs in org '%s' for %q (%d matches)", userID, channelID, owner, args.Text, len(prs))
 		return sb.String()
 
 	case ToolListCommits:
