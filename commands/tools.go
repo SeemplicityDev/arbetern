@@ -129,6 +129,14 @@ const (
 	ToolFreshworksCRMGetContact          = "freshworks_crm_get_contact"
 	ToolFreshworksCRMGetDeal             = "freshworks_crm_get_deal"
 
+	// Google Drive / Sheets.
+	ToolSheetsAppendRow  = "sheets_append_row"
+	ToolSheetsReadRange  = "sheets_read_range"
+	ToolSheetsGetInfo    = "sheets_get_spreadsheet_info"
+	ToolDriveFindFile    = "drive_find_file"
+	ToolDriveListFolders = "drive_list_folders"
+	ToolDriveReadFile    = "drive_read_file"
+
 	// Universal utility (no integration card).
 	ToolHTTPGet = "http_get"
 )
@@ -264,4 +272,12 @@ var toolIntegration = map[string]string{
 	ToolFreshworksCRMSearch:              integrationFreshworks,
 	ToolFreshworksCRMGetContact:          integrationFreshworks,
 	ToolFreshworksCRMGetDeal:             integrationFreshworks,
+
+	// Google Drive / Sheets.
+	ToolSheetsAppendRow:  integrationGoogle,
+	ToolSheetsReadRange:  integrationGoogle,
+	ToolSheetsGetInfo:    integrationGoogle,
+	ToolDriveFindFile:    integrationGoogle,
+	ToolDriveListFolders: integrationGoogle,
+	ToolDriveReadFile:    integrationGoogle,
 }

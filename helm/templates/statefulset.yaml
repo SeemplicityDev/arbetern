@@ -349,6 +349,27 @@ spec:
                   name: {{ .Values.secretName }}
                   key: freshworks-crm-api-key
             {{- end }}
+            {{- if index .Values.secretValues "google-credentials-json" }}
+            - name: GOOGLE_CREDENTIALS_JSON
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: google-credentials-json
+            {{- end }}
+            {{- if index .Values.secretValues "google-drive-folder-ids" }}
+            - name: GOOGLE_DRIVE_FOLDER_IDS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: google-drive-folder-ids
+            {{- end }}
+            {{- if index .Values.secretValues "google-scopes" }}
+            - name: GOOGLE_SCOPES
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: google-scopes
+            {{- end }}
             - name: GOMEMLIMIT
               value: {{ .Values.goRuntime.goMemLimit | quote }}
             - name: GOGC

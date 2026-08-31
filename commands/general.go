@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/csv"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"regexp"
@@ -23,6 +24,7 @@ import (
 	"github.com/justmike1/arbetern/datadog"
 	"github.com/justmike1/arbetern/freshworks"
 	"github.com/justmike1/arbetern/github"
+	"github.com/justmike1/arbetern/google"
 	"github.com/justmike1/arbetern/llm"
 	"github.com/justmike1/arbetern/nvd"
 	"github.com/justmike1/arbetern/salesforce"
@@ -68,6 +70,7 @@ type GeneralHandler struct {
 	databricksClient *databricks.Client
 	clickhouseClient *clickhouse.Client
 	freshworksClient *freshworks.Client
+	googleClient     *google.Client
 	dashboards       *dashboards.Registry
 	workflows        *workflows.Registry
 	contextProvider  *ContextProvider
@@ -476,7 +479,7 @@ func (h *GeneralHandler) Execute(channelID, userID, text, responseURL, auditTS s
 		})
 
 		for _, tc := range toolCalls {
-			log.Printf("[user=%s channel=%s] LLM called tool: %s(%s)", userID, channelID, tc.Function.Name, tc.Function.Arguments)
+			log.Printf("[user=%s channel=%s] LLM called tool: %s(%s)", userID, channelID, tc.Function.Name, redactToolArgsForLog(tc.Function.Name, tc.Function.Arguments))
 			toolCallsMade = true
 			result := h.executeTool(ctx, channelID, userID, auditTS, tc.Function.Name, tc.Function.Arguments)
 			result = stripPreconditionPrefix(result)
@@ -679,7 +682,7 @@ func (h *GeneralHandler) ExecuteHeadless(ctx context.Context, userID, prompt str
 		})
 		for _, tc := range toolCalls {
 			toolCallsMade++
-			log.Printf("[workflow user=%s agent=%s] tool: %s(%s)", userID, h.agentID, tc.Function.Name, tc.Function.Arguments)
+			log.Printf("[workflow user=%s agent=%s] tool: %s(%s)", userID, h.agentID, tc.Function.Name, redactToolArgsForLog(tc.Function.Name, tc.Function.Arguments))
 			result := h.executeTool(ctx, "", userID, "", tc.Function.Name, tc.Function.Arguments)
 			// Precondition errors mean the tool rejected the call BEFORE any
 			// side effect was attempted (missing args, content guards, etc.).
@@ -849,7 +852,7 @@ func (h *GeneralHandler) ExecuteChat(ctx context.Context, userID string, history
 			ToolCalls: choice.Message.ToolCalls,
 		})
 		for _, tc := range toolCalls {
-			log.Printf("[chat user=%s agent=%s] tool: %s(%s)", userID, h.agentID, tc.Function.Name, tc.Function.Arguments)
+			log.Printf("[chat user=%s agent=%s] tool: %s(%s)", userID, h.agentID, tc.Function.Name, redactToolArgsForLog(tc.Function.Name, tc.Function.Arguments))
 			result := h.executeTool(ctx, "", userID, "", tc.Function.Name, tc.Function.Arguments)
 			result = stripPreconditionPrefix(result)
 			messages = append(messages, llm.NewToolResultMessage(tc.ID, result))
@@ -2363,6 +2366,119 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 				},
 			)
 		}
+	}
+
+	// Google Drive / Sheets — gated to the customer-success agent
+	// (restrictedIntegrations: pulse) AND to the service account having
+	// authenticated at least once, so the tools never advertise themselves when
+	// the key is unusable.
+	//
+	// Scope is whatever has been shared with the service account: the client
+	// discovers those folders and shared drives itself, so a newly shared folder
+	// becomes usable with no redeploy. Anything not shared is refused before the
+	// call is sent.
+	if h.canUseIntegration(integrationGoogle) && h.googleClient != nil && h.googleClient.Ready() {
+		tools = append(tools,
+			llm.Tool{
+				Type: "function",
+				Function: llm.ToolFunction{
+					Name:        ToolDriveListFolders,
+					Description: "List the Google Drive folders and shared drives this connector can reach — everything that has been shared with its service account. Takes no arguments. If exactly ONE folder is listed, that is the working folder and you must use it silently: never ask the user which folder to use. If SEVERAL are listed, searches already span all of them, so only pass a folder_id to drive_find_file when the user named a specific one or a search returned ambiguous matches across folders. Call this when a search finds nothing (to confirm what is actually shared) or when the user asks what you have access to.",
+					Parameters:  json.RawMessage(`{"type":"object","properties":{}}`),
+				},
+			},
+			llm.Tool{
+				Type: "function",
+				Function: llm.ToolFunction{
+					Name:        ToolDriveFindFile,
+					Description: "Find files by name in the Google Drive folders shared with this connector, and return each file's ID. Call this FIRST to turn a human file name into the ID the other tools need — never guess an ID or lift one from a URL. Searches every shared folder and its subfolders by default, so you do NOT need to know or ask which folder a file is in. Resolve every name you need in ONE call by passing the whole list in 'names' — the lookup is batched. Use 'name_contains' when you only know part of the name, and omit both to list everything available. Returns spreadsheets, documents, CSVs, PDFs and uploads alike; set 'spreadsheets_only' when you specifically need a Google Sheet to append to.",
+					Parameters: json.RawMessage(`{
+						"type":"object",
+						"properties":{
+							"names":{"type":"array","items":{"type":"string"},"description":"Exact file names to resolve, e.g. [\"Q3 Renewals\",\"Acme Account Plan\"]. Pass every name you need in one call. Matching is exact and case-sensitive — use name_contains when unsure."},
+							"name_contains":{"type":"string","description":"Substring of the file name, used only when 'names' is omitted. Case-insensitive. Prefer this over an exact name when the user's phrasing may not match the file name character for character."},
+							"folder_id":{"type":"string","description":"Optional. Restrict the search to one folder (from drive_list_folders). Omit to search every shared folder — which is almost always what you want."},
+							"spreadsheets_only":{"type":"boolean","description":"Only return Google Sheets files. Set true when looking for a spreadsheet to read or append to. Defaults to false, which returns every file type."},
+							"recursive":{"type":"boolean","description":"Also search subfolders. Defaults to true. Set false to search only the top level of each shared folder."},
+							"limit":{"type":"integer","description":"Maximum files to return (1..200). Defaults to 200."}
+						}
+					}`),
+				},
+			},
+			llm.Tool{
+				Type: "function",
+				Function: llm.ToolFunction{
+					Name:        ToolDriveReadFile,
+					Description: "Read the contents of a file in a shared Google Drive folder. Handles both uploaded files (CSV, TXT, JSON, YAML, Markdown, logs) and Google-native files, which are converted automatically — a Google Doc arrives as Markdown, a Google Sheet as CSV, Slides as text. The file is streamed and a bounded window is returned; when the result says it was truncated, continue by passing 'offset_bytes' from the message rather than re-reading from the start. Genuinely binary files (PDF, images, .xlsx, archives) return a note naming the type instead of content, because arbetern does not extract text from them — do not guess at their contents; share the link with the user or ask for a Docs/Sheets conversion. To read a Google Sheet as structured cells with tab and range control, prefer sheets_read_range; use this tool for whole-file text.",
+					Parameters: json.RawMessage(`{
+						"type":"object",
+						"properties":{
+							"file_id":{"type":"string","description":"File ID, as returned by drive_find_file."},
+							"max_bytes":{"type":"integer","description":"Cap on the content returned (1..1048576). Defaults to 200000. Larger files are truncated with a marker."},
+							"offset_bytes":{"type":"integer","description":"Skip this many bytes before reading, to continue a truncated read. Use the value the previous result told you to continue from."},
+							"export_as":{"type":"string","description":"Optional conversion target for a Google-native file. Google Docs accept 'text/markdown' or 'text/plain'; Google Sheets accept 'text/csv'. Omit to use the best text format for the file type."}
+						},
+						"required":["file_id"]
+					}`),
+				},
+			},
+			llm.Tool{
+				Type: "function",
+				Function: llm.ToolFunction{
+					Name:        ToolSheetsGetInfo,
+					Description: "List a Google spreadsheet's title and its tabs (with row and column counts). Use this when you know the spreadsheet but not the exact tab name, before calling sheets_append_row — an append to a tab that does not exist fails, and tab names are case- and space-sensitive.",
+					Parameters: json.RawMessage(`{
+						"type":"object",
+						"properties":{
+							"spreadsheet_id":{"type":"string","description":"Spreadsheet ID, as returned by drive_find_file."}
+						},
+						"required":["spreadsheet_id"]
+					}`),
+				},
+			},
+			llm.Tool{
+				Type: "function",
+				Function: llm.ToolFunction{
+					Name:        ToolSheetsReadRange,
+					Description: "Read cell values from a Google spreadsheet in a shared folder. Pass several ranges in 'ranges' to read them all in ONE request. A range is A1 notation — 'Sheet1!A1:D50' for a block, or a bare tab name like 'Renewals' for everything on that tab. Returns rows as a table. Read before you append when you need to know the existing columns or avoid writing a duplicate row.",
+					Parameters: json.RawMessage(`{
+						"type":"object",
+						"properties":{
+							"spreadsheet_id":{"type":"string","description":"Spreadsheet ID, as returned by drive_find_file."},
+							"range":{"type":"string","description":"A single A1 range, e.g. 'Renewals!A1:F100' or a bare tab name 'Renewals'. Use 'ranges' instead to read several at once."},
+							"ranges":{"type":"array","items":{"type":"string"},"description":"Several A1 ranges read in one request (max 50). Prefer this over repeated calls."},
+							"formatted":{"type":"boolean","description":"Return values as they are displayed in the sheet (currency symbols, date formats, percentages) rather than raw. Defaults to false (raw)."}
+						},
+						"required":["spreadsheet_id"]
+					}`),
+				},
+			},
+			llm.Tool{
+				Type: "function",
+				Function: llm.ToolFunction{
+					Name:        ToolSheetsAppendRow,
+					Description: "Append rows to a tab of one or more Google spreadsheets in a shared folder. THIS TOOL IS BATCHED — send every row you intend to write in a SINGLE call, never one call per row or per spreadsheet. All rows bound for the same (spreadsheet, tab) travel in one API request, so 50 rows across 15 spreadsheets is one tool call and 15 requests, comfortably inside the Sheets write quota; rate-limited responses are retried automatically. Two shapes: for one destination pass spreadsheet_id + tab + rows; for several pass 'targets', an array of {spreadsheet_id, tab, rows}. Each row is an array of cell values, left to right, matching the tab's existing column order — read the header first with sheets_read_range if you are unsure. Rows are added after the existing data and never overwrite it. Resolve every spreadsheet_id with drive_find_file first; a file that has not been shared with this connector is refused before anything is written. A target that fails does not prevent the others from being written — the result names each target's outcome.",
+					Parameters: json.RawMessage(`{
+						"type":"object",
+						"properties":{
+							"spreadsheet_id":{"type":"string","description":"Single-destination form: the spreadsheet to append to (from drive_find_file). Ignored when 'targets' is given."},
+							"tab":{"type":"string","description":"Single-destination form: the exact tab (sheet) name to append to, e.g. 'Renewals'. Case- and space-sensitive; discover it with sheets_get_spreadsheet_info."},
+							"rows":{"type":"array","items":{"type":"array","items":{"type":"string"}},"description":"Single-destination form: rows to append. Each row is an array of cell values in column order, e.g. [[\"Acme\",\"2026-03-01\",\"120000\"],[\"Globex\",\"2026-04-15\",\"90000\"]]. Send all rows in one call."},
+							"targets":{"type":"array","description":"Batch form: several destinations in one call. Use this whenever more than one spreadsheet or tab is involved.","items":{
+								"type":"object",
+								"properties":{
+									"spreadsheet_id":{"type":"string","description":"Spreadsheet ID from drive_find_file."},
+									"tab":{"type":"string","description":"Exact tab name to append to."},
+									"rows":{"type":"array","items":{"type":"array","items":{"type":"string"}},"description":"Rows for this destination, each an array of cell values in column order."}
+								},
+								"required":["spreadsheet_id","tab","rows"]
+							}},
+							"raw":{"type":"boolean","description":"Write values literally instead of letting Sheets parse them the way typed input is parsed (so '=SUM(A1:A2)' stays text and '1/2' stays a string, not a date). Defaults to false."}
+						}
+					}`),
+				},
+			},
+		)
 	}
 
 	// http_get: read-only outbound HTTP for workflows that need upstream
@@ -5354,6 +5470,176 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		log.Printf("[user=%s channel=%s] freshworks_crm_get_deal (id=%d)", userID, channelID, args.DealID)
 		return freshworks.FormatCRMDeal(deal)
 
+	// ---- Google Drive / Sheets (pulse only) ----
+
+	case ToolDriveListFolders:
+		if errMsg := requireReady("Google Drive", h.googleClient); errMsg != "" {
+			return errMsg
+		}
+		roots, err := h.googleClient.Roots(ctx)
+		if err != nil {
+			return googleToolErr("listing the shared Drive folders", userID, channelID, err)
+		}
+		log.Printf("[user=%s channel=%s] drive_list_folders (roots=%d, pinned=%t)",
+			userID, channelID, len(roots), len(h.googleClient.PinnedFolders()) > 0)
+		return google.FormatRoots(roots, h.googleClient.ServiceAccountEmail(), len(h.googleClient.PinnedFolders()) > 0)
+
+	case ToolDriveFindFile:
+		if errMsg := requireReady("Google Drive", h.googleClient); errMsg != "" {
+			return errMsg
+		}
+		args, errMsg := parseToolArgs[struct {
+			Names            []string `json:"names"`
+			NameContains     string   `json:"name_contains"`
+			FolderID         string   `json:"folder_id"`
+			SpreadsheetsOnly bool     `json:"spreadsheets_only"`
+			Recursive        *bool    `json:"recursive"`
+			Limit            flexInt  `json:"limit"`
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
+		}
+		opts := google.FindFilesOptions{
+			Names:            args.Names,
+			NameContains:     args.NameContains,
+			FolderID:         args.FolderID,
+			SpreadsheetsOnly: args.SpreadsheetsOnly,
+			Recursive:        true,
+			Limit:            int(args.Limit),
+		}
+		if args.Recursive != nil {
+			opts.Recursive = *args.Recursive
+		}
+		res, err := h.googleClient.FindFiles(ctx, opts)
+		if err != nil {
+			return googleToolErr("searching the shared Drive folders", userID, channelID, err)
+		}
+		log.Printf("[user=%s channel=%s] drive_find_file (roots=%d, folders=%d, matches=%d)",
+			userID, channelID, len(res.Roots), res.Folders, len(res.Files))
+		return google.FormatFindResult(res)
+
+	case ToolDriveReadFile:
+		if errMsg := requireReady("Google Drive", h.googleClient); errMsg != "" {
+			return errMsg
+		}
+		args, errMsg := parseToolArgs[struct {
+			FileID      string  `json:"file_id"`
+			MaxBytes    flexInt `json:"max_bytes"`
+			OffsetBytes flexInt `json:"offset_bytes"`
+			ExportAs    string  `json:"export_as"`
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
+		}
+		if strings.TrimSpace(args.FileID) == "" {
+			return preconditionErrf("Error: file_id is required. Resolve it with drive_find_file first.")
+		}
+		res, err := h.googleClient.ReadFile(ctx, args.FileID, google.ReadFileOptions{
+			MaxBytes:    int(args.MaxBytes),
+			OffsetBytes: int(args.OffsetBytes),
+			ExportMIME:  args.ExportAs,
+		})
+		if err != nil {
+			return googleToolErr("reading the Drive file", userID, channelID, err)
+		}
+		log.Printf("[user=%s channel=%s] drive_read_file (id=%s, type=%s, bytes=%d, offset=%d, truncated=%t, binary=%t)",
+			userID, channelID, args.FileID, res.ContentType, res.BytesRead, res.OffsetBytes, res.Truncated, res.IsBinary)
+		return google.FormatFileContent(res)
+
+	case ToolSheetsGetInfo:
+		if errMsg := requireReady("Google Sheets", h.googleClient); errMsg != "" {
+			return errMsg
+		}
+		args, errMsg := parseToolArgs[struct {
+			SpreadsheetID string `json:"spreadsheet_id"`
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
+		}
+		if strings.TrimSpace(args.SpreadsheetID) == "" {
+			return preconditionErrf("Error: spreadsheet_id is required. Resolve it with drive_find_file first.")
+		}
+		info, err := h.googleClient.GetSpreadsheetInfo(ctx, args.SpreadsheetID)
+		if err != nil {
+			return googleToolErr("reading spreadsheet metadata", userID, channelID, err)
+		}
+		log.Printf("[user=%s channel=%s] sheets_get_spreadsheet_info (id=%s, tabs=%d)",
+			userID, channelID, args.SpreadsheetID, len(info.Tabs))
+		return google.FormatSpreadsheetInfo(info)
+
+	case ToolSheetsReadRange:
+		if errMsg := requireReady("Google Sheets", h.googleClient); errMsg != "" {
+			return errMsg
+		}
+		args, errMsg := parseToolArgs[struct {
+			SpreadsheetID string   `json:"spreadsheet_id"`
+			Range         string   `json:"range"`
+			Ranges        []string `json:"ranges"`
+			Formatted     bool     `json:"formatted"`
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
+		}
+		if strings.TrimSpace(args.SpreadsheetID) == "" {
+			return preconditionErrf("Error: spreadsheet_id is required. Resolve it with drive_find_file first.")
+		}
+		ranges := args.Ranges
+		if r := strings.TrimSpace(args.Range); r != "" {
+			ranges = append(ranges, r)
+		}
+		if len(ranges) == 0 {
+			return preconditionErrf("Error: pass 'range' (a single A1 range or a bare tab name) or 'ranges' (several).")
+		}
+		res, err := h.googleClient.BatchRead(ctx, args.SpreadsheetID, ranges, args.Formatted)
+		if err != nil {
+			return googleToolErr("reading the spreadsheet range", userID, channelID, err)
+		}
+		rows := 0
+		for _, rv := range res.Ranges {
+			rows += rv.Rows
+		}
+		log.Printf("[user=%s channel=%s] sheets_read_range (id=%s, ranges=%d, rows=%d)",
+			userID, channelID, args.SpreadsheetID, len(res.Ranges), rows)
+		return google.FormatReadResult(res)
+
+	case ToolSheetsAppendRow:
+		if errMsg := requireReady("Google Sheets", h.googleClient); errMsg != "" {
+			return errMsg
+		}
+		args, errMsg := parseToolArgs[struct {
+			SpreadsheetID string                `json:"spreadsheet_id"`
+			Tab           string                `json:"tab"`
+			Rows          [][]string            `json:"rows"`
+			Targets       []google.AppendTarget `json:"targets"`
+			Raw           bool                  `json:"raw"`
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
+		}
+		targets := args.Targets
+		// The single-destination form is just a one-element batch. Accept both
+		// in the same call: a model that fills in targets AND the flat fields
+		// means both, and dropping either would silently lose rows.
+		if strings.TrimSpace(args.SpreadsheetID) != "" || len(args.Rows) > 0 {
+			targets = append(targets, google.AppendTarget{
+				SpreadsheetID: args.SpreadsheetID,
+				Tab:           args.Tab,
+				Rows:          args.Rows,
+			})
+		}
+		if len(targets) == 0 {
+			return preconditionErrf("Error: nothing to append. Pass spreadsheet_id + tab + rows for one destination, or 'targets' for several. Nothing was written.")
+		}
+		res, err := h.googleClient.BatchAppend(ctx, targets, args.Raw)
+		if err != nil {
+			// BatchAppend only returns a top-level error for malformed input,
+			// before any write is attempted.
+			return preconditionErrf("Error: %v", err)
+		}
+		log.Printf("[user=%s channel=%s] sheets_append_row (targets=%d, requests=%d, rows=%d, failed=%d)",
+			userID, channelID, len(res.Outcomes), res.Requests, res.RowsAppended, res.Failed)
+		return google.FormatAppendResult(res)
+
 	case ToolHTTPGet:
 		args, errMsg := parseToolArgs[struct {
 			URL      string `json:"url"`
@@ -5368,6 +5654,30 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 	default:
 		return fmt.Sprintf("Unknown tool: %s", name)
 	}
+}
+
+// googleToolErr formats a Google connector error for a tool result.
+//
+// Two things happen here, and the split is the point. The FULL diagnostic —
+// Google's own message, which names the real fault — goes to the log, where an
+// operator can act on it. Only the sanitized form reaches the tool result, and
+// therefore the Slack channel: raw API text like "Invalid field selection
+// sharedWithMe" tells a user nothing, reads as a broken product, and invites the
+// model to editorialise about internals it cannot fix.
+//
+// An out-of-scope target is reported as a precondition rejection: the call was
+// refused before it left the process, so the workflow tick loop treats it as a
+// recoverable argument mistake (resolve the ID with drive_find_file and retry)
+// rather than a failed mutation.
+func googleToolErr(action, userID, channelID string, err error) string {
+	if detail := google.ErrorDetail(err); detail != "" {
+		log.Printf("[user=%s channel=%s] google error while %s: %s", userID, channelID, action, detail)
+	}
+	var scope *google.ErrOutOfScope
+	if errors.As(err, &scope) {
+		return preconditionErrf("Error %s: %v", action, err)
+	}
+	return fmt.Sprintf("Error %s: %v", action, err)
 }
 
 func (h *GeneralHandler) fetchWorkflowLogs(ctx context.Context, text, userID, channelID string) string {

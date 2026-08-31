@@ -296,6 +296,18 @@ secretValues:
   # freshchat-api-token: ""          # Freshchat API token (Bearer JWT, Admin → API Tokens)
   # freshworks-crm-domain: ""        # Freshworks CRM host, e.g. acme.myfreshworks.com
   # freshworks-crm-api-key: ""       # Freshworks CRM API key (Settings → API Settings)
+  # Google Drive / Sheets (optional — enables the drive_* and sheets_* tools for the pulse
+  # agent only). Auth is a service-account key (JWT bearer grant — arbetern is headless, so
+  # there is no interactive OAuth flow and no domain-wide delegation).
+  # Access is granted by SHARING: share a Drive folder with the service account's email
+  # address and the connector discovers it automatically — no config change, no restart
+  # needed beyond the 5-minute discovery cache. Only the key is required.
+  # See docs/GOOGLE.md.
+  # google-credentials-json: ""       # Service-account key file, base64-encoded: `base64 -w0 < key.json`
+  # Optional — confine the connector to specific folders even when the service account can
+  # see more. Comma-separated folder IDs. Leave unset to use every shared folder.
+  # google-drive-folder-ids: ""
+  # google-scopes: ""                 # Optional. Defaults to spreadsheets + drive.readonly
 
 # Optional OAuth2 authentication proxy (oauth2-proxy subchart). Disabled by
 # default; values are passed straight through to the subchart

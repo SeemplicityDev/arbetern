@@ -31,6 +31,7 @@ import (
 	"github.com/justmike1/arbetern/datadog"
 	"github.com/justmike1/arbetern/freshworks"
 	"github.com/justmike1/arbetern/github"
+	"github.com/justmike1/arbetern/google"
 	"github.com/justmike1/arbetern/internal/safego"
 	"github.com/justmike1/arbetern/llm"
 	"github.com/justmike1/arbetern/nvd"
@@ -675,6 +676,7 @@ func refreshIntegrations(
 	databricksClient *databricks.Client,
 	clickhouseClient *clickhouse.Client,
 	freshworksClient *freshworks.Client,
+	googleClient *google.Client,
 	modelsClient *llm.Client,
 	codeModelsClient *llm.Client,
 ) {
@@ -1190,6 +1192,58 @@ func refreshIntegrations(
 		})
 	}
 
+	// --- Google Drive / Sheets ---
+	{
+		gConnected := googleClient != nil && googleClient.Ready()
+		gPerms := []permission{
+			{Scope: "drive.readonly (shared folders)", Description: "Discover and search the Drive folders shared with the service account", Required: true, Granted: boolPtr(gConnected)},
+			{Scope: "drive.files.download", Description: "Stream and read file contents (CSV/text raw, Docs and Sheets exported to text)", Required: true, Granted: boolPtr(gConnected)},
+			{Scope: "spreadsheets.read", Description: "Read cell ranges from a spreadsheet in a shared folder", Required: true, Granted: boolPtr(gConnected)},
+			{Scope: "spreadsheets.write", Description: "Append rows to a tab of a spreadsheet in a shared folder (batched)", Required: true, Granted: boolPtr(gConnected)},
+		}
+		activeG := map[string]string{}
+		if googleClient != nil {
+			if e := googleClient.ServiceAccountEmail(); e != "" {
+				activeG["Service account"] = e
+			}
+			if p := googleClient.ProjectID(); p != "" {
+				activeG["Project"] = p
+			}
+			if pinned := googleClient.PinnedFolders(); len(pinned) > 0 {
+				activeG["Scope"] = fmt.Sprintf("pinned to %d folder(s)", len(pinned))
+			} else {
+				activeG["Scope"] = "all folders shared with the service account"
+			}
+			// Best-effort: shows the operator what the connector actually sees
+			// without making the panel refresh depend on a Drive round-trip.
+			if gConnected {
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				if roots, rerr := googleClient.Roots(ctx); rerr == nil {
+					names := make([]string, 0, len(roots))
+					for _, r := range roots {
+						names = append(names, r.Name)
+					}
+					activeG["Reachable folders"] = fmt.Sprintf("%d", len(roots))
+					if len(names) > 0 && len(names) <= 8 {
+						activeG["Folders"] = strings.Join(names, ", ")
+					}
+				}
+				cancel()
+			}
+			if sc := googleClient.Scopes(); sc != "" {
+				activeG["Scopes"] = sc
+			}
+		}
+		result = append(result, integration{
+			ID:           "google",
+			Name:         "Google Drive / Sheets",
+			Configured:   cfg.GoogleConfigured(),
+			AuthMode:     "Service account (JWT bearer)",
+			Permissions:  gPerms,
+			ActiveModels: activeG,
+		})
+	}
+
 	// Populate each integration's tool list for the home page "Tools" tab.
 	for i := range result {
 		result[i].Tools = integrationToolNames(result[i].ID)
@@ -1216,10 +1270,11 @@ func startIntegrationsRefresher(
 	databricksClient *databricks.Client,
 	clickhouseClient *clickhouse.Client,
 	freshworksClient *freshworks.Client,
+	googleClient *google.Client,
 	modelsClient *llm.Client,
 	codeModelsClient *llm.Client,
 ) {
-	refreshIntegrations(cfg, slackClient, ghClient, jiraClient, sfClient, chorusClient, datadogClients, awsClient, azureClient, databricksClient, clickhouseClient, freshworksClient, modelsClient, codeModelsClient)
+	refreshIntegrations(cfg, slackClient, ghClient, jiraClient, sfClient, chorusClient, datadogClients, awsClient, azureClient, databricksClient, clickhouseClient, freshworksClient, googleClient, modelsClient, codeModelsClient)
 
 	safego.Go("integrations: refresh loop", func() {
 		ticker := time.NewTicker(1 * time.Hour)
@@ -1227,7 +1282,7 @@ func startIntegrationsRefresher(
 		for range ticker.C {
 			// Guarded per tick so one bad refresh cannot end the loop.
 			safego.Run("integrations: refresh", func() {
-				refreshIntegrations(cfg, slackClient, ghClient, jiraClient, sfClient, chorusClient, datadogClients, awsClient, azureClient, databricksClient, clickhouseClient, freshworksClient, modelsClient, codeModelsClient)
+				refreshIntegrations(cfg, slackClient, ghClient, jiraClient, sfClient, chorusClient, datadogClients, awsClient, azureClient, databricksClient, clickhouseClient, freshworksClient, googleClient, modelsClient, codeModelsClient)
 			})
 		}
 	})
@@ -1436,6 +1491,50 @@ func main() {
 		log.Printf("Freshworks integration enabled (products: %v)", freshworksClient.Products())
 	}
 
+	// Google Drive / Sheets client — a service account authenticating with the
+	// JWT-bearer grant. Scope is the Drive share itself: the client discovers
+	// every folder and shared drive that has been shared with the account and
+	// works across all of them, so granting access is a Drive share with no
+	// redeploy. google-drive-folder-ids optionally confines it to specific
+	// folders instead.
+	//
+	// NewClient fails only on an unusable key (a deployment mistake worth logging
+	// loudly); a failed first token exchange leaves the client disconnected and
+	// retrying in the background, so the tools become available once it connects.
+	// Reachable folders are resolved once at boot so a deployment where nothing
+	// was shared with the service account says so in the logs rather than
+	// surfacing as a puzzling empty search on the first workflow tick.
+	var googleClient *google.Client
+	if cfg.GoogleConfigured() {
+		googleClient, err = google.NewClient(cfg.GoogleCredentialsJSON, cfg.GoogleDriveFolderIDs, cfg.GoogleScopes)
+		if err != nil {
+			log.Printf("Google integration misconfigured (tools will be unavailable): %v", err)
+			googleClient = nil
+		} else {
+			scope := "all folders shared with the account"
+			if pinned := googleClient.PinnedFolders(); len(pinned) > 0 {
+				scope = "pinned to " + strings.Join(pinned, ", ")
+			}
+			log.Printf("Google integration enabled (service account: %s, scope: %s)", googleClient.ServiceAccountEmail(), scope)
+
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			roots, verr := googleClient.VerifyAccess(ctx)
+			cancel()
+			switch {
+			case verr != nil:
+				log.Printf("Google Drive access check failed — %v", verr)
+			case len(roots) == 1:
+				log.Printf("Google Drive: 1 folder reachable (%q, %s) — it will be used automatically", roots[0].Name, roots[0].ID)
+			default:
+				names := make([]string, 0, len(roots))
+				for _, r := range roots {
+					names = append(names, fmt.Sprintf("%q", r.Name))
+				}
+				log.Printf("Google Drive: %d locations reachable: %s", len(roots), strings.Join(names, ", "))
+			}
+		}
+	}
+
 	// Discover agents and register per-agent webhook routes (/<agent>/webhook).
 	agents, err := prompts.DiscoverAgents("")
 	if err != nil {
@@ -1446,7 +1545,7 @@ func main() {
 	}
 
 	// Start background integration permission refresher (runs once now, then every hour).
-	startIntegrationsRefresher(cfg, slackClient, ghClient, jiraClient, sfClient, chorusClient, datadogClients, awsClient, azureClient, databricksClient, clickhouseClient, freshworksClient, modelsClient, codeModelsClient)
+	startIntegrationsRefresher(cfg, slackClient, ghClient, jiraClient, sfClient, chorusClient, datadogClients, awsClient, azureClient, databricksClient, clickhouseClient, freshworksClient, googleClient, modelsClient, codeModelsClient)
 
 	// Thread session store — enables follow-up replies in threads without /commands.
 	sessions := commands.NewSessionStore(cfg.ThreadSessionTTL)
@@ -1560,9 +1659,10 @@ func main() {
 			databricks: databricksClient,
 			clickhouse: clickhouseClient,
 			freshworks: freshworksClient,
+			google:     googleClient,
 		})
 
-		router := commands.NewRouter(slackClient, ghClient, modelsClient, codeModelsClient, agentClients.jira, agentClients.nvd, agentClients.sf, agentClients.chorus, agentClients.datadog, agentClients.aws, agentClients.azure, agentClients.databricks, agentClients.clickhouse, agentClients.freshworks, dashRegistry, wfRegistry, ap, agent.ID, cfg.AppURL, sessions, cfg.MaxToolRounds, userContextStore, billingStore)
+		router := commands.NewRouter(slackClient, ghClient, modelsClient, codeModelsClient, agentClients.jira, agentClients.nvd, agentClients.sf, agentClients.chorus, agentClients.datadog, agentClients.aws, agentClients.azure, agentClients.databricks, agentClients.clickhouse, agentClients.freshworks, agentClients.google, dashRegistry, wfRegistry, ap, agent.ID, cfg.AppURL, sessions, cfg.MaxToolRounds, userContextStore, billingStore)
 		routers[agent.ID] = router
 
 		// Background sweepers for the per-router in-memory caches so

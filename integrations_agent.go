@@ -15,6 +15,7 @@ import (
 	"github.com/justmike1/arbetern/databricks"
 	"github.com/justmike1/arbetern/datadog"
 	"github.com/justmike1/arbetern/freshworks"
+	"github.com/justmike1/arbetern/google"
 	"github.com/justmike1/arbetern/nvd"
 	"github.com/justmike1/arbetern/salesforce"
 )
@@ -34,6 +35,7 @@ type agentIntegrationClients struct {
 	databricks *databricks.Client
 	clickhouse *clickhouse.Client
 	freshworks *freshworks.Client
+	google     *google.Client
 }
 
 // buildAgentScopedClients returns a set of integration clients tailored for a
@@ -184,6 +186,25 @@ func buildAgentScopedClients(
 			log.Printf("Freshworks override for agent %q (products: %v)", agentID, out.freshworks.Products())
 		} else {
 			out.freshworks = nil
+		}
+	}
+
+	if agentCfg.GoogleCredentialsJSON != globalCfg.GoogleCredentialsJSON ||
+		agentCfg.GoogleDriveFolderIDs != globalCfg.GoogleDriveFolderIDs ||
+		agentCfg.GoogleScopes != globalCfg.GoogleScopes {
+		if !agentCfg.GoogleConfigured() {
+			log.Printf("Google override for agent %q has no service-account key — integration disabled for this agent", agentID)
+			out.google = nil
+		} else if c, err := google.NewClient(agentCfg.GoogleCredentialsJSON, agentCfg.GoogleDriveFolderIDs, agentCfg.GoogleScopes); err != nil {
+			log.Printf("Google override for agent %q is invalid — integration disabled for this agent: %v", agentID, err)
+			out.google = nil
+		} else {
+			out.google = c
+			scope := "all folders shared with the account"
+			if pinned := c.PinnedFolders(); len(pinned) > 0 {
+				scope = "pinned to " + strings.Join(pinned, ", ")
+			}
+			log.Printf("Google override for agent %q (service account: %s, scope: %s)", agentID, c.ServiceAccountEmail(), scope)
 		}
 	}
 

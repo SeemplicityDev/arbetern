@@ -119,6 +119,20 @@ type Credentials struct {
 	FreshchatAPIToken   string `cred:"freshchat-api-token"`    // Freshchat API token (Bearer JWT).
 	FreshworksCRMDomain string `cred:"freshworks-crm-domain"`  // Freshworks CRM host, e.g. "acme.myfreshworks.com".
 	FreshworksCRMAPIKey string `cred:"freshworks-crm-api-key"` // Freshworks CRM API key.
+
+	// Google Drive / Sheets — a service-account key with the JWT-bearer grant
+	// (arbetern is headless, so there is no interactive OAuth flow and no
+	// domain-wide delegation; the account acts as itself).
+	//
+	// Scope comes from the Drive share itself: the connector discovers every
+	// folder and shared drive that has been shared with the service account and
+	// works across all of them, so granting access is a Drive share with no
+	// config change. GoogleDriveFolderIDs is an OPTIONAL tightening — set it to
+	// confine the connector to specific folders even when the account can see
+	// more.
+	GoogleCredentialsJSON string `cred:"google-credentials-json"` // Service-account key file, base64-encoded (or raw JSON).
+	GoogleDriveFolderIDs  string `cred:"google-drive-folder-ids"` // Optional. Comma-separated folder IDs to confine the connector to.
+	GoogleScopes          string `cred:"google-scopes"`           // Optional. Defaults to spreadsheets + drive.readonly.
 }
 
 // Config bundles every runtime setting the app reads on startup. Credential
@@ -350,6 +364,20 @@ func (c *Config) FreshworksConfigured() bool {
 	return c.FreshdeskConfigured() || c.FreshchatConfigured() || c.FreshworksCRMConfigured()
 }
 
+// GoogleConfigured returns true when the service-account key is present. The
+// folder IDs are optional: with none set, the connector adopts whatever has been
+// shared with the service account, which is the intended way to run it. The
+// first real Drive call is the authoritative health check.
+func (c *Config) GoogleConfigured() bool {
+	return strings.TrimSpace(c.GoogleCredentialsJSON) != ""
+}
+
+// GoogleFolderPinned returns true when the deployment confines the connector to
+// an explicit folder list rather than discovering its own scope.
+func (c *Config) GoogleFolderPinned() bool {
+	return strings.TrimSpace(c.GoogleDriveFolderIDs) != ""
+}
+
 func Load() (*Config, error) {
 	cfg := &Config{
 		Credentials: Credentials{
@@ -401,6 +429,10 @@ func Load() (*Config, error) {
 			FreshchatAPIToken:   os.Getenv("FRESHCHAT_API_TOKEN"),
 			FreshworksCRMDomain: os.Getenv("FRESHWORKS_CRM_DOMAIN"),
 			FreshworksCRMAPIKey: os.Getenv("FRESHWORKS_CRM_API_KEY"),
+
+			GoogleCredentialsJSON: os.Getenv("GOOGLE_CREDENTIALS_JSON"),
+			GoogleDriveFolderIDs:  os.Getenv("GOOGLE_DRIVE_FOLDER_IDS"),
+			GoogleScopes:          os.Getenv("GOOGLE_SCOPES"),
 		},
 
 		GeneralModel:        os.Getenv("GENERAL_MODEL"),

@@ -187,6 +187,7 @@ const (
 	integrationDatabricks = "databricks"
 	integrationClickHouse = "clickhouse"
 	integrationFreshworks = "freshworks"
+	integrationGoogle     = "google" // Google Drive + Sheets (shared service-account client).
 	integrationGitHub     = "github"
 	integrationSlack      = "slack"
 	integrationAzure      = "azure"
@@ -228,6 +229,11 @@ var restrictedIntegrations = map[string][]string{
 	// Freshworks (Freshdesk tickets, Freshchat conversations, CRM) is exposed
 	// to the customer-success and product-management agents.
 	integrationFreshworks: {"pulse", "seihin"},
+	// Google Drive / Sheets is exposed to the customer-success agent only. The
+	// shared folder holds commercial and customer data, so the blast radius of
+	// a wider grant is much larger than the folder itself — keep this list at
+	// one agent unless there is a concrete reason to widen it.
+	integrationGoogle: {"pulse"},
 }
 
 // ToolsForIntegration returns the sorted tool names owned by the given
@@ -277,6 +283,92 @@ func (h *GeneralHandler) canUseIntegration(integration string) bool {
 func (h *GeneralHandler) toolDenied(name string) bool {
 	integration, gated := toolIntegration[name]
 	return gated && !h.canUseIntegration(integration)
+}
+
+// ── Tool-argument log redaction ────────────────────────────────────────────
+
+// sensitiveArgTools maps a tool name to the argument keys whose VALUES must
+// never reach a log line, because they carry third-party content rather than
+// control data: spreadsheet cell values, file names, search terms, cell ranges.
+//
+// The tool loop logs every call's raw arguments, which is the right default for
+// control-shaped arguments (a repo name, a ticket ID, a date window) and the
+// wrong one here. A single sheets_append_row batch can carry customer names,
+// contract values and renewal dates for dozens of accounts; writing those to
+// the pod log copies commercial data into whatever ships logs off the cluster,
+// where it lives outside the Drive ACL that is supposed to govern it.
+//
+// Redaction keeps the SHAPE — how many targets, how many rows, which
+// spreadsheet — so the log still answers "what did the model do" without
+// answering "what did it say".
+var sensitiveArgTools = map[string][]string{
+	ToolSheetsAppendRow: {"rows", "targets"},
+	ToolSheetsReadRange: {"range", "ranges"},
+	ToolDriveFindFile:   {"names", "name_contains"},
+}
+
+// redactToolArgsForLog renders a tool call's arguments for a log line, replacing
+// the values of content-bearing keys with a count or a shape marker. Tools with
+// no entry in sensitiveArgTools are logged verbatim, preserving the existing
+// behaviour for every other connector.
+//
+// On a parse failure it returns a marker rather than the raw JSON: the reason
+// the arguments did not parse is usually that they were truncated mid-value, and
+// dumping a half-written payload is exactly what this exists to prevent.
+func redactToolArgsForLog(name, argsJSON string) string {
+	keys, sensitive := sensitiveArgTools[name]
+	if !sensitive {
+		return argsJSON
+	}
+	var raw map[string]any
+	if err := json.Unmarshal([]byte(argsJSON), &raw); err != nil {
+		return fmt.Sprintf("<%d bytes, unparsed>", len(argsJSON))
+	}
+	for _, k := range keys {
+		v, ok := raw[k]
+		if !ok {
+			continue
+		}
+		raw[k] = summarizeArgValue(k, v)
+	}
+	// A plain json.Marshal HTML-escapes the < > in the redaction markers, which
+	// turns a log line into \u003c noise.
+	var buf strings.Builder
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(raw); err != nil {
+		return fmt.Sprintf("<%d bytes, unrenderable>", len(argsJSON))
+	}
+	return strings.TrimRight(buf.String(), "\n")
+}
+
+// summarizeArgValue replaces a value with a shape description. Nested rows are
+// counted rather than described so a batch across spreadsheets still shows its
+// size in the log.
+func summarizeArgValue(key string, v any) string {
+	switch t := v.(type) {
+	case []any:
+		if key == "targets" {
+			rows := 0
+			for _, el := range t {
+				m, ok := el.(map[string]any)
+				if !ok {
+					continue
+				}
+				if r, ok := m["rows"].([]any); ok {
+					rows += len(r)
+				}
+			}
+			return fmt.Sprintf("<%d targets, %d rows redacted>", len(t), rows)
+		}
+		return fmt.Sprintf("<%d items redacted>", len(t))
+	case string:
+		return fmt.Sprintf("<%d chars redacted>", len(t))
+	case nil:
+		return "<null>"
+	default:
+		return "<redacted>"
+	}
 }
 
 // preconditionErrPrefix tags tool-result strings whose error happened

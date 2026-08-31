@@ -111,6 +111,23 @@ secretValues:
   # freshchat-api-token: "your-freshchat-api-token"             # Admin → API Tokens (Bearer JWT)
   # freshworks-crm-domain: "acme.myfreshworks.com"              # Freshworks CRM host
   # freshworks-crm-api-key: "your-freshworks-crm-api-key"       # Settings → API Settings
+  # Google Drive / Sheets (optional — enables drive_list_folders / drive_find_file /
+  # drive_read_file / sheets_get_spreadsheet_info / sheets_read_range / sheets_append_row
+  # for the pulse agent only).
+  # Auth is a Google service-account key. arbetern runs headless, so there is no interactive
+  # OAuth flow — the JWT-bearer grant is used and there is NO domain-wide delegation: the
+  # account acts as itself.
+  # Access is granted by SHARING, not by config: share a Drive folder with the service
+  # account's email address (Editor to allow appends, Viewer for read-only) and the
+  # connector discovers it on its own. Share several and it works across all of them; share
+  # exactly one and the agent uses it without ever asking which folder to use.
+  # These folders typically hold commercial and customer data, so prefer mounting the key
+  # under customCredentials.pulse below rather than globally. See docs/GOOGLE.md.
+  # google-credentials-json: "PASTE_BASE64_OF_SERVICE_ACCOUNT_KEY_JSON"   # base64 -w0 < key.json
+  # Optional — confine the connector to specific folders even when the service account can
+  # see more. Comma-separated folder IDs from each folder's URL. Leave unset to use all.
+  # google-drive-folder-ids: "1AbCdEfGhIjKlMnOpQrStUvWxYz0123456,1ZyXwVu9876543210"
+  # google-scopes: ""   # optional; defaults to spreadsheets + drive.readonly
 
 # ingress:
 #   enabled: true
@@ -209,6 +226,13 @@ secretValues:
 #     freshchat-api-token: "REPLACE_ME"
 #     freshworks-crm-domain: "acme.myfreshworks.com"
 #     freshworks-crm-api-key: "REPLACE_ME"
+#     # Google Drive / Sheets is gated to pulse in code; mounting it here keeps
+#     # the credentials off every other agent, which matters because the shared
+#     # folders hold commercial and customer data. Only the key is needed — the
+#     # connector discovers whichever folders are shared with the service
+#     # account. See docs/GOOGLE.md.
+#     google-credentials-json: "REPLACE_ME"   # base64 -w0 < service-account-key.json
+#     # google-drive-folder-ids: "1AbCd...,1ZyXw..."   # optional: confine pulse to these folders
 
 # Dashboards + workflows share a single persistent data directory.
 # Enable the PVC to keep state across pod restarts; leave disabled for
