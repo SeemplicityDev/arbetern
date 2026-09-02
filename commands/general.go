@@ -2479,6 +2479,30 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 				},
 			},
 		)
+
+		// drive_copy_file is advertised only when the credentials carry a
+		// writable Drive scope: files.copy needs one, the default Drive scope is
+		// read-only, and a tool that can only ever fail is worse than an absent
+		// one.
+		if h.googleClient.CanCopyFiles() {
+			tools = append(tools, llm.Tool{
+				Type: "function",
+				Function: llm.ToolFunction{
+					Name:        ToolDriveCopyFile,
+					Description: "Copy a file in a shared Google Drive folder under a new name, and return the new file's ID. This is how a sheet is PROVISIONED from a template: the copy inherits the template's tabs, headers and formatting exactly, which is what keeps every sheet the same shape. Name the template in 'source' — a file NAME, matched exactly inside the shared folders, never an ID lifted from a URL — and the copy's name in 'new_name'. The copy lands in 'folder_id', or in the single shared folder when only one is reachable. If a file of that name ALREADY EXISTS in the destination, nothing is copied and the result says so: that is the expected answer when the sheet was already provisioned, so treat it as done rather than retrying or picking another name. Use this only when asked to provision or set up a new sheet — never to recover from a lookup that found nothing, because a name that came from a typo would create a second sheet and split that account's history in half. Report the miss instead.",
+					Parameters: json.RawMessage(`{
+						"type":"object",
+						"properties":{
+							"source":{"type":"string","description":"Exact name of the file to copy, e.g. the template's name. Matched exactly and case-sensitively inside the shared folders — confirm it with drive_find_file first if you are unsure."},
+							"new_name":{"type":"string","description":"Name for the copy. Must not already exist in the destination folder."},
+							"folder_id":{"type":"string","description":"Optional. Destination folder (from drive_list_folders). Omit when exactly one folder is shared — it is used automatically."},
+							"source_folder_id":{"type":"string","description":"Optional. Folder the template is in, needed only when several files share the template's name and the copy is refused as ambiguous."}
+						},
+						"required":["source","new_name"]
+					}`),
+				},
+			})
+		}
 	}
 
 	// http_get: read-only outbound HTTP for workflows that need upstream
@@ -5545,6 +5569,44 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		log.Printf("[user=%s channel=%s] drive_read_file (id=%s, type=%s, bytes=%d, offset=%d, truncated=%t, binary=%t)",
 			userID, channelID, args.FileID, res.ContentType, res.BytesRead, res.OffsetBytes, res.Truncated, res.IsBinary)
 		return google.FormatFileContent(res)
+
+	case ToolDriveCopyFile:
+		if errMsg := requireReady("Google Drive", h.googleClient); errMsg != "" {
+			return errMsg
+		}
+		args, errMsg := parseToolArgs[struct {
+			Source         string `json:"source"`
+			NewName        string `json:"new_name"`
+			FolderID       string `json:"folder_id"`
+			SourceFolderID string `json:"source_folder_id"`
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
+		}
+		if strings.TrimSpace(args.Source) == "" || strings.TrimSpace(args.NewName) == "" {
+			return preconditionErrf("Error: 'source' (the name of the file to copy) and 'new_name' are both required. Nothing was copied.")
+		}
+		res, err := h.googleClient.CopyFile(ctx, google.CopyFileOptions{
+			SourceName:     args.Source,
+			SourceFolderID: args.SourceFolderID,
+			NewName:        args.NewName,
+			FolderID:       args.FolderID,
+		})
+		if err != nil {
+			// A name already taken in the destination is the expected outcome of
+			// re-running a provisioning job, so it is logged as a skip and
+			// reported as a precondition rather than a failed mutation.
+			var taken *google.ErrNameTaken
+			if errors.As(err, &taken) {
+				log.Printf("[user=%s channel=%s] drive_copy_file skipped (folder=%s, existing=%s)",
+					userID, channelID, taken.FolderID, taken.FileID)
+				return preconditionErrf("Error: %v", err)
+			}
+			return googleToolErr("copying the Drive file", userID, channelID, err)
+		}
+		log.Printf("[user=%s channel=%s] drive_copy_file (source=%s, folder=%s, new=%s)",
+			userID, channelID, res.Source.ID, res.FolderID, res.File.ID)
+		return google.FormatCopyResult(res)
 
 	case ToolSheetsGetInfo:
 		if errMsg := requireReady("Google Sheets", h.googleClient); errMsg != "" {

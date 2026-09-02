@@ -204,6 +204,33 @@ func FormatRoots(roots []Root, serviceAccount string, pinned bool) string {
 	return sb.String()
 }
 
+// FormatCopyResult renders a completed copy. The new file's ID leads, because
+// that is what a provisioning caller needs to write to next.
+func FormatCopyResult(r *CopyFileResult) string {
+	if r == nil {
+		return "No copy was made."
+	}
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "*Copied* `%s` *to* `%s`\n\n", r.Source.Name, r.File.Name)
+
+	folder := r.FolderName
+	if folder == "" || folder == r.FolderID {
+		folder = r.FolderID
+	} else {
+		folder = fmt.Sprintf("%s (%s)", folder, r.FolderID)
+	}
+	writeTable(&sb, nil, [][]string{
+		{"New file ID", r.File.ID},
+		{"Type", fileKind(r.File)},
+		{"Folder", truncate(folder, maxColWidth)},
+		{"Copied from", r.Source.ID},
+	})
+	if r.File.WebViewLink != "" {
+		fmt.Fprintf(&sb, "%s\n", r.File.WebViewLink)
+	}
+	return sb.String()
+}
+
 // FormatFileContent renders a file read: a header identifying the file and the
 // window that was returned, then the content in a code block.
 func FormatFileContent(f *FileContent) string {

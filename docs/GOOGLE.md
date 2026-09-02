@@ -9,8 +9,11 @@ agent can:
   Docs/Sheets/Slides converted to text on the fly (`drive_read_file`);
 - inspect a spreadsheet's tabs before writing to it
   (`sheets_get_spreadsheet_info`);
-- read cell ranges (`sheets_read_range`); and
-- **append batches of rows** to a tab (`sheets_append_row`).
+- read cell ranges (`sheets_read_range`);
+- **append batches of rows** to a tab (`sheets_append_row`); and
+- **copy a file** so a new sheet is provisioned from a template instead of being
+  hand-built (`drive_copy_file`) — off unless the credentials carry a writable
+  Drive scope.
 
 > **Scope: this integration is restricted to the `pulse` agent only.** Its tools
 > are advertised exclusively to pulse and the dispatch layer rejects the call
@@ -69,14 +72,17 @@ Either way, the outer boundary is the same one Google enforces: **nothing is
 reachable unless someone shared it with the service account.** Verdicts are
 cached for 10 minutes so a batch write does not re-walk every target's ancestry.
 
-### Two constraints that do not change
+### Two constraints worth stating plainly
 
 - **No domain-wide delegation.** The account acts as **itself**, never
   impersonating a Workspace user. Nothing here can read a person's Drive, mail or
   calendar.
-- **Drive is read-only; only Sheets values are writable.** The connector cannot
-  create, rename, move, delete or re-share any file. See
-  [Limitations](#limitations).
+- **Drive is read-only unless it is deliberately widened.** On the default
+  scopes only Sheets *values* are writable — the connector cannot create,
+  rename, move, delete or re-share a file. Widening the Drive scope adds exactly
+  one write path, `drive_copy_file`, and nothing else. See
+  [Provisioning a sheet from a template](#provisioning-a-sheet-from-a-template)
+  and [Limitations](#limitations).
 
 ## What the connector does not disclose
 
@@ -241,11 +247,23 @@ enumerate the contents of a folder that was shared with the account**, so
 scope, and it is not as broad as it reads: the service account has no Drive of
 its own and no visibility beyond the shared folder, so "read every file you can
 see" means "read the shared folder". Write access is confined to
-`spreadsheets` — the connector cannot create, move, delete or re-share any Drive
-file.
+`spreadsheets` — on these scopes the connector cannot create, move, delete or
+re-share any Drive file.
 
 Override with `GOOGLE_SCOPES` (comma- or space-separated) if your Workspace
-policy requires something different.
+policy requires something different, or to enable copying:
+
+```
+GOOGLE_SCOPES=https://www.googleapis.com/auth/spreadsheets,https://www.googleapis.com/auth/drive
+```
+
+`drive_copy_file` needs `.../auth/drive` and is **not advertised to the model
+without it** — a tool that can only ever fail is worse than an absent one.
+`drive.file` does not work here either: it authorises only files this connector
+created, so it cannot see the shared template. That scope is broad on paper, so
+weigh it against the alternative of hand-building each sheet; the connector
+itself still implements no delete, move or re-share path, and every target is
+checked against the shared folders first.
 
 ## Reading files
 
@@ -283,6 +301,47 @@ separates a CSV from an image.
 |---|---|
 | Content returned per call | 200 KB default, 1 MiB ceiling (`max_bytes`) |
 | Bytes pulled off the wire per call | 64 MiB hard cap |
+
+## Provisioning a sheet from a template
+
+`drive_copy_file` exists so that adding an account does not require somebody to
+hand-build a spreadsheet first. It copies a template that is already in the
+shared folder and returns the new file's ID.
+
+**Why a copy rather than a fresh spreadsheet.** A workflow that appends to these
+sheets reads each tab's header row to learn the column order — deliberately, so
+that inserting a column does not silently shift the data. The cost of that choice
+is that two sheets whose headers differ produce differently shaped data from the
+same writer, and nothing errors. A copy cannot drift: the tabs, the headers and
+their order all come from one template, which is also where a person can see and
+edit them.
+
+**A duplicate name is refused, not suffixed.** Copy to a name that already
+exists in the destination and Drive would produce a second file with the same
+name, after which resolving that name returns whichever copy comes back first
+and the account's history quietly splits in two. The tool refuses instead, and
+reports it as "already provisioned" rather than as a failure — which is what
+makes a provisioning job idempotent: it can run daily and create only what is
+missing.
+
+**Both ends are checked before the request is sent.** The source must resolve
+inside the shared folders and the destination must be one of them, using the
+same guard every other call goes through.
+
+**The source is a name, not an ID.** It is resolved exactly the way
+`drive_find_file` resolves anything, so a template is named in configuration by
+something stable and readable rather than by an ID pasted out of a URL. When a
+name occurs more than once the copy is refused as ambiguous and
+`source_folder_id` says which one to use.
+
+A provisioning workflow therefore needs nothing else: read the list of sheets
+that should exist, batch-resolve their names with `drive_find_file`, and copy the
+template for the ones that came back empty.
+
+**Nothing provisions on a lookup miss.** A miss caused by a typo would create a
+second sheet for something that already has one, and its history would split in
+half with nothing to notice it. The model is instructed to report the miss
+instead, so provisioning stays a separate, deliberate step.
 
 ## Batching and rate limits
 
@@ -409,6 +468,7 @@ Google override for agent "pulse" (service account: arbetern-pulse-sheets@…, s
 | **sheets_get_spreadsheet_info** | List a spreadsheet's title and tabs with row/column counts. Use it to get the exact tab name before appending — tab names are case- and space-sensitive |
 | **sheets_read_range** | Read cell values. Accepts `range` (one A1 range or a bare tab name) or `ranges` (up to 50, read in one request), plus `formatted` to return displayed values rather than raw |
 | **sheets_append_row** | Append rows to a tab of one or more spreadsheets. Single form: `spreadsheet_id` + `tab` + `rows`. Batch form: `targets` — an array of `{spreadsheet_id, tab, rows}`. Each row is an array of cell values in column order. `raw` writes values literally |
+| **drive_copy_file** | Copy a file under a new name and return the new file's ID. `source` is the template's *name*, `new_name` the copy's; `folder_id` is the destination (implicit when one folder is shared) and `source_folder_id` disambiguates a template name that occurs more than once. Refuses a name that already exists in the destination. Only advertised when the Drive scope permits writing |
 
 Every tool refuses a target outside what has been shared with the service
 account, and every file ID should come from `drive_find_file` rather than being
@@ -434,6 +494,7 @@ guessed or carried in from elsewhere.
 /pulse read the "FY26 Renewal Playbook" doc and tell me the escalation steps
 /pulse append this quarter's at-risk accounts to the Renewals tab of the Q3 Renewals sheet
 /pulse for each account with a renewal in the next 60 days, add a row to its account-plan sheet
+/pulse set up a signal sheet for a new account by copying the template
 ```
 
 A scheduled pulse workflow can call these tools directly inside its tool-loop —
@@ -442,10 +503,14 @@ then write one batch of rows per account sheet in a single tick.
 
 ## Limitations
 
-- **Drive is read-only; only Sheets values are writable.** The connector can list
-  folders, read any file, and append rows to a spreadsheet tab. It cannot create,
-  rename, move, delete or re-share a file, create a spreadsheet or a tab, edit an
-  existing row in place, or change formatting. The write scope is `spreadsheets`.
+- **The only Drive write is a copy, and it is opt-in.** The connector can list
+  folders, read any file, and append rows to a spreadsheet tab. With
+  `.../auth/drive` configured it can also copy an existing file under a new name.
+  It cannot rename, move, delete or re-share a file, create a spreadsheet from
+  scratch, add a tab, edit an existing row in place, or change formatting.
+- **A copy is refused when the name is taken.** There is no overwrite and no
+  automatic suffix. Renaming or removing the existing file is a human action in
+  Drive.
 - **No text extraction from binary formats.** PDFs, images, `.xlsx`/`.docx` and
   archives return a type-and-size note, not content. Converting the file to a
   Google Doc or Sheet in Drive (Open with → Google Docs/Sheets) makes it readable.

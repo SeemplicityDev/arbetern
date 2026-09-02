@@ -136,6 +136,7 @@ const (
 	ToolDriveFindFile    = "drive_find_file"
 	ToolDriveListFolders = "drive_list_folders"
 	ToolDriveReadFile    = "drive_read_file"
+	ToolDriveCopyFile    = "drive_copy_file"
 
 	// Universal utility (no integration card).
 	ToolHTTPGet = "http_get"
@@ -280,4 +281,5 @@ var toolIntegration = map[string]string{
 	ToolDriveFindFile:    integrationGoogle,
 	ToolDriveListFolders: integrationGoogle,
 	ToolDriveReadFile:    integrationGoogle,
+	ToolDriveCopyFile:    integrationGoogle,
 }

@@ -307,7 +307,10 @@ secretValues:
   # Optional — confine the connector to specific folders even when the service account can
   # see more. Comma-separated folder IDs. Leave unset to use every shared folder.
   # google-drive-folder-ids: ""
-  # google-scopes: ""                 # Optional. Defaults to spreadsheets + drive.readonly
+  # Optional. Defaults to spreadsheets + drive.readonly. Add
+  # https://www.googleapis.com/auth/drive to also enable drive_copy_file (provisioning a
+  # sheet from a template); without it that tool is not offered to the agent.
+  # google-scopes: ""
 
 # Optional OAuth2 authentication proxy (oauth2-proxy subchart). Disabled by
 # default; values are passed straight through to the subchart

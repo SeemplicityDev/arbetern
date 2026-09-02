@@ -127,7 +127,10 @@ secretValues:
   # Optional — confine the connector to specific folders even when the service account can
   # see more. Comma-separated folder IDs from each folder's URL. Leave unset to use all.
   # google-drive-folder-ids: "1AbCdEfGhIjKlMnOpQrStUvWxYz0123456,1ZyXwVu9876543210"
-  # google-scopes: ""   # optional; defaults to spreadsheets + drive.readonly
+  # Optional; defaults to spreadsheets + drive.readonly. Adding
+  # https://www.googleapis.com/auth/drive also enables drive_copy_file, which provisions a
+  # sheet by copying a template — without it that tool is not offered to the agent at all.
+  # google-scopes: ""
 
 # ingress:
 #   enabled: true

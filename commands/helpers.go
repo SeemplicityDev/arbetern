@@ -305,6 +305,7 @@ var sensitiveArgTools = map[string][]string{
 	ToolSheetsAppendRow: {"rows", "targets"},
 	ToolSheetsReadRange: {"range", "ranges"},
 	ToolDriveFindFile:   {"names", "name_contains"},
+	ToolDriveCopyFile:   {"source", "new_name"},
 }
 
 // redactToolArgsForLog renders a tool call's arguments for a log line, replacing
