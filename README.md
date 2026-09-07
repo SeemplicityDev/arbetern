@@ -760,8 +760,8 @@ a reviewer only sees an opaque ID. The raw mention stays alongside it as the
 stable key back to the Slack profile; when the lookup fails or there is no
 Slack identity (a web-chat turn), the footer degrades to the bare mention.
 
-Only the FIRST write call per repo per tick establishes the PR body —
-subsequent calls grouped into the same PR ignore their `pr_body` argument.
+Only the write call that opens a PR establishes its body — later calls
+grouped into that same PR ignore their `pr_body` argument.
 
 The same three tools also accept optional `branch_name` and `pr_title`
 arguments for prompts that need to enforce a naming convention (e.g.
@@ -770,9 +770,16 @@ titles for ticket-driven workflows). When omitted (the default), the
 platform auto-generates a unique head branch (`<agent-id>/patch-<unix-ts>`)
 and uses `<agent-id>: <description>` as the PR title — unchanged from prior
 behavior. When provided, both values are used VERBATIM (no agent-name
-prefix is added). They are only honored on the FIRST write call per repo
-per tick — the one that creates the branch and opens the PR; subsequent
-calls grouped into the same PR ignore them.
+prefix is added). They are only honored on the call that opens a PR;
+later calls grouped into that same PR ignore them.
+
+`branch_name` is also what controls grouping. Writes that omit it are added
+to the PR most recently opened for that repo, so a change spanning several
+files lands in one PR. A write that names a *different* branch opens its own
+branch and PR instead, cut fresh from the base — that is how a workflow
+fixing several unrelated issues in one repo ships one reviewable PR per fix
+rather than a single PR for the whole tick. Files belonging to one fix must
+therefore be written consecutively, before the next fix's branch is started.
 
 Every PR opened by these tools also requests **GitHub Copilot as a reviewer**
 best-effort: a REST attempt with the magic `Copilot` login, falling back to

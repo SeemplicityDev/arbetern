@@ -17,9 +17,9 @@ import (
 var ErrDuplicateOpenPR = errors.New("duplicate guard: a similar open PR already exists")
 
 // BranchManager handles the branch/commit/PR lifecycle for file modification
-// tools. It ensures that multiple file changes targeting the same repository
-// within a single handler execution (or thread session) are grouped into a
-// single pull request.
+// tools. Multiple file changes targeting the same repository within a single
+// handler execution (or thread session) are grouped into a single pull
+// request, unless a write names its own branch — see groupingBranch.
 type BranchManager struct {
 	ghClient       *github.Client
 	agentID        string
@@ -54,13 +54,33 @@ func (bm *BranchManager) ActiveBranch(owner, repo string) *ActiveBranchInfo {
 	return bm.activeBranches[owner+"/"+repo]
 }
 
-// ReadBranch returns the branch to read files from — the active branch if one
-// exists for this repo, otherwise the base branch.
-func (bm *BranchManager) ReadBranch(ctx context.Context, owner, repo, baseBranch string) string {
-	if active := bm.resolveActiveBranch(ctx, owner, repo); active != nil {
+// ReadBranch returns the branch to read files from — the branch this write
+// will group into if there is one, otherwise the base branch. requestedBranch
+// is the caller's branch_name argument, so a write that starts its own branch
+// reads from the base rather than from an unrelated PR's branch.
+func (bm *BranchManager) ReadBranch(ctx context.Context, owner, repo, baseBranch, requestedBranch string) string {
+	if active := bm.groupingBranch(ctx, owner, repo, requestedBranch); active != nil {
 		return active.BranchName
 	}
 	return baseBranch
+}
+
+// groupingBranch returns the active branch this write should be added to, or
+// nil when it should open a new branch and PR. Writes that leave the branch
+// name empty group into the repo's active PR, which is what a multi-file
+// change wants. Naming a branch other than the active one is an explicit
+// request for a separate PR, so it does not group: a caller fixing several
+// unrelated issues in one repo gives each fix its own branch name and gets one
+// reviewable PR per fix.
+func (bm *BranchManager) groupingBranch(ctx context.Context, owner, repo, requestedBranch string) *ActiveBranchInfo {
+	active := bm.resolveActiveBranch(ctx, owner, repo)
+	if active == nil {
+		return nil
+	}
+	if requested := strings.TrimSpace(requestedBranch); requested != "" && requested != active.BranchName {
+		return nil
+	}
+	return active
 }
 
 // resolveActiveBranch returns the active branch for a repo, first dropping it
@@ -115,10 +135,10 @@ type CommitResult struct {
 //
 // branchOverride and prTitleOverride are optional. When non-empty, they are
 // used in place of the auto-generated branch name and the default
-// "<agentID>: <description>" PR title. Both are only consulted when a new
-// branch/PR is being created for this repo in the current run; subsequent
-// write calls for the same repo group into the existing PR and the
-// overrides are ignored.
+// "<agentID>: <description>" PR title. They apply to the branch/PR this call
+// opens; a later write that omits branchOverride, or repeats the active
+// branch name, groups into that PR and ignores both overrides. A later write
+// naming a different branch opens its own PR (see groupingBranch).
 func (bm *BranchManager) CommitAndPR(
 	ctx context.Context,
 	owner, repo, baseBranch, userID, description, prBody, branchOverride, prTitleOverride string,
@@ -127,7 +147,7 @@ func (bm *BranchManager) CommitAndPR(
 ) (*CommitResult, error) {
 	repoKey := owner + "/" + repo
 
-	if active := bm.resolveActiveBranch(ctx, owner, repo); active != nil {
+	if active := bm.groupingBranch(ctx, owner, repo, branchOverride); active != nil {
 		// Commit to existing branch.
 		err := commitFn(active.BranchName)
 		switch {

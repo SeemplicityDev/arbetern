@@ -1045,7 +1045,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 			Type: "function",
 			Function: llm.ToolFunction{
 				Name:        ToolModifyFile,
-				Description: "Modify a file in a GitHub repository using a safe find-and-replace approach. Provide the exact text to find (old_content) and the replacement text (new_content). The tool reads the FULL file from GitHub, performs the replacement, then creates a branch, commits, and opens a PR. Multiple modify_file calls for the SAME repository are automatically grouped into a SINGLE pull request — so when implementing a change that touches several files, just call modify_file for each file and all changes will land in one PR. IMPORTANT: old_content must be an exact substring of the current file — include enough surrounding lines (3-5) will ensure a unique match. Only the matched section is replaced; the rest of the file is preserved.",
+				Description: "Modify a file in a GitHub repository using a safe find-and-replace approach. Provide the exact text to find (old_content) and the replacement text (new_content). The tool reads the FULL file from GitHub, performs the replacement, then creates a branch, commits, and opens a PR. Multiple modify_file calls for the SAME repository are grouped into a SINGLE pull request as long as they omit branch_name — so a change that touches several files lands in one PR. To open a SEPARATE PR for each independent fix in the same repository, pass a distinct branch_name (with its own pr_title and pr_body) on the first call of each fix; see branch_name. IMPORTANT: old_content must be an exact substring of the current file — include enough surrounding lines (3-5) will ensure a unique match. Only the matched section is replaced; the rest of the file is preserved.",
 				Parameters: json.RawMessage(`{
 					"type":"object",
 					"properties":{
@@ -1054,9 +1054,9 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 						"old_content":{"type":"string","description":"The exact text in the current file to find and replace. Include 3-5 surrounding context lines to ensure a unique match."},
 						"new_content":{"type":"string","description":"The replacement text that will replace old_content."},
 						"description":{"type":"string","description":"Short description of what was changed (used as commit message and as the PR title when pr_title is not provided)"},
-						"pr_body":{"type":"string","description":"OPTIONAL full Markdown body for the pull request. Use this to give reviewers real context (Jira/ticket link, summary of the change, testing notes, applicable skills). Only the FIRST modify_file/create_file/regex_replace_file call per repo per tick establishes the PR body — subsequent calls that group into the same PR are ignored. When omitted, a short generic attribution line is used."},
-						"pr_title":{"type":"string","description":"OPTIONAL full PR title. When provided, used VERBATIM as the PR title (no agent-name prefix is added). Only honored on the FIRST write call per repo per tick (the one that opens the PR); subsequent grouped calls are ignored. Leave empty to use the default '<agent-id>: <description>' title."},
-						"branch_name":{"type":"string","description":"OPTIONAL custom HEAD branch name to create for the PR (e.g. 'ENG-33153/ovad-fix-foo'). Only honored on the FIRST write call per repo per tick (the one that creates the branch); subsequent grouped calls reuse the already-created branch. Leave empty to use the platform's auto-generated unique branch name. Must be a valid git branch name and must not already exist on the remote."},
+						"pr_body":{"type":"string","description":"OPTIONAL full Markdown body for the pull request. Use this to give reviewers real context (Jira/ticket link, summary of the change, testing notes, applicable skills). Only the call that OPENS a PR establishes its body — later calls that group into that same PR ignore pr_body. Pass a fresh pr_body on the first call of each new branch_name. When omitted, a short generic attribution line is used."},
+						"pr_title":{"type":"string","description":"OPTIONAL full PR title. When provided, used VERBATIM as the PR title (no agent-name prefix is added). Only honored on the call that OPENS a PR; later calls that group into that same PR ignore it. Pass a fresh pr_title on the first call of each new branch_name. Leave empty to use the default '<agent-id>: <description>' title."},
+						"branch_name":{"type":"string","description":"OPTIONAL custom HEAD branch name for the PR (e.g. 'ENG-1234/fix-timeout'). This argument controls PR grouping. Omit it, or repeat the branch name of the MOST RECENT PR opened for this repo, to add this file to that PR. Pass a NEW distinct name to open a separate branch and PR instead — that is how you ship one PR per independent fix in a single repo. Each new branch is cut from the base branch, so separate fixes never stack on one another. Write all files of one fix consecutively before starting the next fix's branch — you cannot go back and add a file to an earlier PR. Leave empty on every call to use the platform's auto-generated unique branch name. Must be a valid git branch name and must not already exist on the remote."},
 						"branch":{"type":"string","description":"BASE branch the PR should be opened against (typically the repo's default branch — main/master). LEAVE EMPTY in almost all cases; the platform auto-resolves the default branch AND auto-generates a unique head branch per run. Only set this if you specifically need to target a long-lived non-default base like 'develop' or 'release/*'. Never pass a head branch from list_pull_requests or a prior PR — those are auto-generated per-tick and will be ignored."}
 					},
 					"required":["repo","path","old_content","new_content","description"]
@@ -1067,7 +1067,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 			Type: "function",
 			Function: llm.ToolFunction{
 				Name:        ToolCreateFile,
-				Description: "Create a NEW file in a GitHub repository. Use this when you need to add a file that does not yet exist (e.g. a new YAML config, a new workflow, a new script). The tool creates a branch, commits the new file, and opens a PR. Multiple create_file and modify_file calls for the SAME repository are automatically grouped into a SINGLE pull request. Do NOT use this for files that already exist — use modify_file instead.",
+				Description: "Create a NEW file in a GitHub repository. Use this when you need to add a file that does not yet exist (e.g. a new YAML config, a new workflow, a new script). The tool creates a branch, commits the new file, and opens a PR. Multiple create_file and modify_file calls for the SAME repository are grouped into a SINGLE pull request as long as they omit branch_name; pass a distinct branch_name to open a separate PR per independent fix (see branch_name). Do NOT use this for files that already exist — use modify_file instead.",
 				Parameters: json.RawMessage(`{
 					"type":"object",
 					"properties":{
@@ -1075,9 +1075,9 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 						"path":{"type":"string","description":"File path to create within the repository (e.g. 'maintenance/db-maintenance.yaml', '.github/workflows/db-maintenance.yml')"},
 						"content":{"type":"string","description":"The full content of the new file."},
 						"description":{"type":"string","description":"Short description of what was added (used as commit message and as the PR title when pr_title is not provided)"},
-						"pr_body":{"type":"string","description":"OPTIONAL full Markdown body for the pull request. Use this to give reviewers real context (Jira/ticket link, summary, testing notes). Only the FIRST write call per repo per tick establishes the PR body; subsequent calls that group into the same PR are ignored."},
-						"pr_title":{"type":"string","description":"OPTIONAL full PR title. When provided, used VERBATIM as the PR title (no agent-name prefix is added). Only honored on the FIRST write call per repo per tick. Leave empty to use the default '<agent-id>: <description>' title."},
-						"branch_name":{"type":"string","description":"OPTIONAL custom HEAD branch name to create for the PR. Only honored on the FIRST write call per repo per tick (the one that creates the branch). Leave empty to use the platform's auto-generated unique branch name. Must be a valid git branch name and must not already exist on the remote."},
+						"pr_body":{"type":"string","description":"OPTIONAL full Markdown body for the pull request. Use this to give reviewers real context (Jira/ticket link, summary, testing notes). Only the call that OPENS a PR establishes its body; later calls that group into that same PR ignore pr_body. Pass a fresh pr_body on the first call of each new branch_name."},
+						"pr_title":{"type":"string","description":"OPTIONAL full PR title. When provided, used VERBATIM as the PR title (no agent-name prefix is added). Only honored on the call that OPENS a PR; later calls that group into that same PR ignore it. Pass a fresh pr_title on the first call of each new branch_name. Leave empty to use the default '<agent-id>: <description>' title."},
+						"branch_name":{"type":"string","description":"OPTIONAL custom HEAD branch name for the PR. This argument controls PR grouping. Omit it, or repeat the branch name of the MOST RECENT PR opened for this repo, to add this file to that PR. Pass a NEW distinct name to open a separate branch and PR instead — that is how you ship one PR per independent fix in a single repo. Each new branch is cut from the base branch. Write all files of one fix consecutively before starting the next fix's branch — you cannot go back and add a file to an earlier PR. Leave empty on every call to use the platform's auto-generated unique branch name. Must be a valid git branch name and must not already exist on the remote."},
 						"branch":{"type":"string","description":"BASE branch the PR should target. LEAVE EMPTY in almost all cases — the platform resolves the repo default branch and auto-generates the head branch. Do not pass an existing PR head branch here."}
 					},
 					"required":["repo","path","content","description"]
@@ -1088,7 +1088,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 			Type: "function",
 			Function: llm.ToolFunction{
 				Name:        ToolRegexReplaceFile,
-				Description: "Bulk-replace all matches of a SIMPLE regex pattern in a file. Best for uniform single-line replacements across a whole file (e.g. 'change all image.tag to latest'). Do NOT use for scoped/structural changes in a specific section — use modify_file instead for those. Keep patterns short and per-line. Avoid complex multi-line regex with (?:.|\\n)*? or lookaheads — if you need those, use modify_file. The tool reads the FULL file from GitHub, applies a Go RE2 regex replacement on ALL matches, creates a branch, commits, and opens a PR. Multiple calls for the same repo are grouped into a SINGLE PR. Replacement supports $1, $2 for captured groups.",
+				Description: "Bulk-replace all matches of a SIMPLE regex pattern in a file. Best for uniform single-line replacements across a whole file (e.g. 'change all image.tag to latest'). Do NOT use for scoped/structural changes in a specific section — use modify_file instead for those. Keep patterns short and per-line. Avoid complex multi-line regex with (?:.|\\n)*? or lookaheads — if you need those, use modify_file. The tool reads the FULL file from GitHub, applies a Go RE2 regex replacement on ALL matches, creates a branch, commits, and opens a PR. Multiple calls for the same repo are grouped into a SINGLE PR as long as they omit branch_name; pass a distinct branch_name to open a separate PR per independent fix (see branch_name). Replacement supports $1, $2 for captured groups.",
 				Parameters: json.RawMessage(`{
 					"type":"object",
 					"properties":{
@@ -1097,9 +1097,9 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 						"pattern":{"type":"string","description":"Go (RE2) regular expression to match. Use capturing groups for partial replacements (e.g. '(tag:\\s*)\\S+' to capture the 'tag: ' prefix)."},
 						"replacement":{"type":"string","description":"Replacement string. Use $1, $2, etc. to reference captured groups (e.g. '${1}latest')."},
 						"description":{"type":"string","description":"Short description of what was changed (used as commit message and as the PR title when pr_title is not provided)"},
-						"pr_body":{"type":"string","description":"OPTIONAL full Markdown body for the pull request. Use this to give reviewers real context. Only the FIRST write call per repo per tick establishes the PR body; subsequent calls that group into the same PR are ignored."},
-						"pr_title":{"type":"string","description":"OPTIONAL full PR title. When provided, used VERBATIM as the PR title (no agent-name prefix is added). Only honored on the FIRST write call per repo per tick. Leave empty to use the default '<agent-id>: <description>' title."},
-						"branch_name":{"type":"string","description":"OPTIONAL custom HEAD branch name to create for the PR. Only honored on the FIRST write call per repo per tick (the one that creates the branch). Leave empty to use the platform's auto-generated unique branch name. Must be a valid git branch name and must not already exist on the remote."},
+						"pr_body":{"type":"string","description":"OPTIONAL full Markdown body for the pull request. Use this to give reviewers real context. Only the call that OPENS a PR establishes its body; later calls that group into that same PR ignore pr_body. Pass a fresh pr_body on the first call of each new branch_name."},
+						"pr_title":{"type":"string","description":"OPTIONAL full PR title. When provided, used VERBATIM as the PR title (no agent-name prefix is added). Only honored on the call that OPENS a PR; later calls that group into that same PR ignore it. Pass a fresh pr_title on the first call of each new branch_name. Leave empty to use the default '<agent-id>: <description>' title."},
+						"branch_name":{"type":"string","description":"OPTIONAL custom HEAD branch name for the PR. This argument controls PR grouping. Omit it, or repeat the branch name of the MOST RECENT PR opened for this repo, to add this file to that PR. Pass a NEW distinct name to open a separate branch and PR instead — that is how you ship one PR per independent fix in a single repo. Each new branch is cut from the base branch. Write all files of one fix consecutively before starting the next fix's branch — you cannot go back and add a file to an earlier PR. Leave empty on every call to use the platform's auto-generated unique branch name. Must be a valid git branch name and must not already exist on the remote."},
 						"branch":{"type":"string","description":"BASE branch the PR should target. LEAVE EMPTY in almost all cases — the platform resolves the repo default branch and auto-generates the head branch. Do not pass an existing PR head branch here."}
 					},
 					"required":["repo","path","pattern","replacement","description"]
@@ -2929,7 +2929,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 			return errMsg
 		}
 
-		readBranch := h.branchMgr.ReadBranch(ctx, owner, args.Repo, baseBranch)
+		readBranch := h.branchMgr.ReadBranch(ctx, owner, args.Repo, baseBranch, args.BranchName)
 		fullContent, fileSHA, err := h.ghClient.GetFileContent(ctx, owner, args.Repo, args.Path, readBranch)
 		if err != nil {
 			return preconditionErrf("Error reading current file: %v", err)
@@ -3036,7 +3036,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 			return errMsg
 		}
 
-		readBranch := h.branchMgr.ReadBranch(ctx, owner, args.Repo, baseBranch)
+		readBranch := h.branchMgr.ReadBranch(ctx, owner, args.Repo, baseBranch, args.BranchName)
 		fullContent, fileSHA, err := h.ghClient.GetFileContent(ctx, owner, args.Repo, args.Path, readBranch)
 		if err != nil {
 			return preconditionErrf("Error reading current file: %v", err)
