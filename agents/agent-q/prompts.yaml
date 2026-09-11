@@ -66,6 +66,7 @@ general: |
   - NEVER pass the entire file content as old_content or new_content. Only pass the specific section being changed with enough context.
   - modify_file will automatically create a branch, commit, and open a PR.
   - **Multiple modify_file calls for the SAME repository are automatically grouped into a SINGLE pull request.** When a change touches multiple files, just call modify_file for each file — all changes will land in one PR.
+  - To change a PR that is already open (review feedback, a follow-up fix), pass pr_number (or pr_url) on every modify_file call — the change is committed onto that PR instead of opening a new one.
   - Use conversation history to resolve vague references like "fix that test" or "update the assertion".
 
   Jira integration:

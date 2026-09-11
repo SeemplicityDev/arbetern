@@ -115,7 +115,7 @@ Authentication is one of two schemes, and the target principal/key needs
 | Variable | Description |
 |---|---|
 | `SLACK_APP_TOKEN` | Slack app-level token (`xapp-...`) for Socket Mode — enables thread follow-ups without slash commands (see [docs/SLACK_BOT.md](docs/SLACK_BOT.md#socket-mode-thread-follow-ups)) |
-| `THREAD_SESSION_TTL` | Duration a thread session stays active (default `3m`, Go duration). Also controls the channel-context cache TTL |
+| `THREAD_SESSION_TTL` | Duration a thread session stays active (default `7m`, Go duration). Also controls the channel-context cache TTL |
 | `MAX_TOOL_ROUNDS` | Max LLM tool-call rounds per request (default `200`) |
 | `LLM_PROMPT_CACHE` | Enable Anthropic prompt caching of the static prefix (tool schemas + system prompt) and the rolling conversation tail, so long tool-loops re-read shared context at the provider's ~0.1x cache rate instead of full price. Quality-neutral. Default `true`; set `false` as a kill-switch |
 | `SHOW_USAGE_STAMP` | Append model/token usage metadata to Slack replies. Default `true` |
@@ -275,7 +275,7 @@ Every Slack-driven request — DMs, channel mentions, slash commands, and in-thr
 | --- | --- | --- | --- |
 | **Agent prompt** | Per agent, static | File on disk (read-only) | Whatever you author in `agents/<id>/prompts.yaml` (+ `CUSTOM_PROMPTS_DIR` overrides) |
 | **Slack user profile** | Per request | Refetched every turn via `users.info` | A few hundred bytes (Slack ID, real name, display name, email, title) |
-| **Channel context** | Per channel/DM | In-memory cache, TTL = `THREAD_SESSION_TTL` (default 3m). Background sweeper evicts stale entries; hard cap of 4096 channels with oldest-first eviction | Up to 50 most recent Slack messages (no per-message char cap) |
+| **Channel context** | Per channel/DM | In-memory cache, TTL = `THREAD_SESSION_TTL` (default 7m). Background sweeper evicts stale entries; hard cap of 4096 channels with oldest-first eviction | Up to 50 most recent Slack messages (no per-message char cap) |
 | **Conversation memory** | Per `(channel, user)` | In-memory, 10-minute TTL on inactivity. Background sweeper runs every minute; hard cap of 8192 pairs | Up to 10 turns (no per-turn char cap) |
 | **User context (persistent)** | Per `(agent, user)`, shared across DMs and channels | File on disk at `<USER_CONTEXT_DIR>/<agent>/<user>/context.txt`. 30-day TTL on inactivity (refreshed on every append). PVC-backed in the Helm chart when `userContext.enabled` is true | Up to 50 entries (oldest dropped first), each capped at 800 chars (question) + 1200 chars (answer) + ~30 chars overhead, with a hard 96 KiB file ceiling |
 
@@ -780,6 +780,22 @@ branch and PR instead, cut fresh from the base — that is how a workflow
 fixing several unrelated issues in one repo ships one reviewable PR per fix
 rather than a single PR for the whole tick. Files belonging to one fix must
 therefore be written consecutively, before the next fix's branch is started.
+
+To change a pull request that is **already open** — review feedback, requested
+changes, a follow-up ask — the same three tools take `pr_number` (or `pr_url`).
+The write is read from and committed onto that PR's head branch, so each round
+of feedback updates the existing PR instead of opening another one. The PR must
+still be open; a merged or closed one is rejected with the instruction to open a
+new PR. Naming an existing remote branch in `branch_name` does the same thing:
+the branch is committed onto rather than cut again, and its open PR (if any) is
+adopted as the repo's active PR for the rest of the run. This works from any
+entry point — a later Slack thread, a web-chat turn, or a scheduled tick — since
+it reads the branch and PR from GitHub rather than from in-process state, which
+only ever covered PRs opened in the same run or live thread session.
+
+The duplicate guard reinforces this: when a write would open a PR equivalent to
+one already open, it is refused with that PR's number and head branch so the
+model can retry the same write onto it.
 
 Every PR opened by these tools also requests **GitHub Copilot as a reviewer**
 best-effort: a REST attempt with the magic `Copilot` login, falling back to

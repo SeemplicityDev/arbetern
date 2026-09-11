@@ -37,7 +37,7 @@ env:
   # BEDROCK_REGION: "us-east-1"  # Selects AWS Bedrock as the LLM backend (takes precedence over Azure/GitHub). Set GENERAL_MODEL to a Bedrock model/inference-profile ID, e.g. "us.anthropic.claude-opus-4-8". Credentials resolve via the standard AWS chain (IRSA / env / profile).
   APP_URL: ""  # Public base URL of this app (e.g. "https://ai.dev.example.io"). Used for UI link in Jira stamps.
   # UI_ALLOWED_CIDRS: "10.0.0.0/8,203.0.113.10/32"  # Comma-separated CIDRs; empty = no restriction.
-  # THREAD_SESSION_TTL: "3m"  # How long a thread session stays active (Go duration: 3m, 5m30s, etc.)
+  # THREAD_SESSION_TTL: "7m"  # How long a thread session stays active (Go duration: 7m, 5m30s, etc.). Default 7m.
   # CHAT_RETENTION: "168h"  # How long an idle UI chat conversation is kept before auto-deletion (Go duration). Default 168h (1 week).
   # MAX_TOOL_ROUNDS: "200"  # Max LLM tool-call rounds per request. Default 200; raise for very long multi-step workflows.
   # AWS_REGION: "us-east-1"   # Region used to sign Cost Explorer SigV4 calls. CE is global; leave as us-east-1 unless you have a reason not to.

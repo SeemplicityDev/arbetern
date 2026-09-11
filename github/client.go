@@ -692,6 +692,27 @@ type PRSummary struct {
 	FileNames []string
 }
 
+// GetPullRequestRefs fetches a PR's identity and refs without its file list or
+// diff. Writes that target an existing PR only need its head branch and whether
+// it is still open, and a large PR's diff costs several extra API calls.
+func (c *Client) GetPullRequestRefs(ctx context.Context, owner, repo string, number int) (*PRSummary, error) {
+	pr, _, err := c.api.PullRequests.Get(ctx, owner, repo, number)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get PR #%d: %w", number, err)
+	}
+	return &PRSummary{
+		Number:  number,
+		Title:   pr.GetTitle(),
+		State:   pr.GetState(),
+		Merged:  pr.GetMerged(),
+		Author:  pr.GetUser().GetLogin(),
+		URL:     pr.GetHTMLURL(),
+		BaseRef: pr.GetBase().GetRef(),
+		HeadRef: pr.GetHead().GetRef(),
+		Body:    pr.GetBody(),
+	}, nil
+}
+
 // GetPullRequest fetches a PR's details and diff.
 func (c *Client) GetPullRequest(ctx context.Context, owner, repo string, number int) (*PRSummary, error) {
 	pr, _, err := c.api.PullRequests.Get(ctx, owner, repo, number)
@@ -755,6 +776,11 @@ func FormatPRSummary(s *PRSummary) string {
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "PR #%d: %s\n", s.Number, s.Title)
 	fmt.Fprintf(&sb, "Author: %s | State: %s\n", s.Author, PRStateLabel(s))
+	if s.HeadRef != "" {
+		// The head branch is what a follow-up write targets to land on this PR
+		// instead of opening a new one, so it has to survive into the model's view.
+		fmt.Fprintf(&sb, "Head branch: %s -> base: %s\n", s.HeadRef, s.BaseRef)
+	}
 	fmt.Fprintf(&sb, "URL: %s\n", s.URL)
 	if s.Body != "" {
 		body := s.Body
@@ -1056,6 +1082,38 @@ func (c *Client) FindSimilarOpenPullRequest(ctx context.Context, owner, repo, ba
 		opts.Page = resp.NextPage
 	}
 
+	return nil, nil
+}
+
+// FindOpenPullRequestByHead returns the open pull request whose head is the
+// given branch, or nil when the branch has none. A branch carries at most one
+// open PR, so the first match is the answer. It is how a follow-up change is
+// routed onto a PR that already exists instead of opening another one.
+func (c *Client) FindOpenPullRequestByHead(ctx context.Context, owner, repo, branch string) (*PRSummary, error) {
+	opts := &gh.PullRequestListOptions{
+		State:       "open",
+		Head:        owner + ":" + branch,
+		ListOptions: gh.ListOptions{PerPage: 10},
+	}
+	prs, _, err := c.api.PullRequests.List(ctx, owner, repo, opts)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list open PRs for head %s: %w", branch, err)
+	}
+	for _, pr := range prs {
+		if pr.GetHead().GetRef() != branch {
+			continue
+		}
+		return &PRSummary{
+			Number:  pr.GetNumber(),
+			Title:   pr.GetTitle(),
+			State:   pr.GetState(),
+			Author:  pr.GetUser().GetLogin(),
+			URL:     pr.GetHTMLURL(),
+			BaseRef: pr.GetBase().GetRef(),
+			HeadRef: pr.GetHead().GetRef(),
+			Body:    pr.GetBody(),
+		}, nil
+	}
 	return nil, nil
 }
 

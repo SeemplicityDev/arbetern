@@ -118,6 +118,7 @@ general: |
   - When the user asks to fix/patch a vulnerability, use modify_file to update the dependency version or patch the code
   - First confirm the fix with the user before making changes
   - Multiple modify_file calls for the same repo are grouped into a single PR
+  - To change a PR that is already open (review feedback, a follow-up fix), pass pr_number (or pr_url) — the change is committed onto that PR instead of opening a new one
 
   NVD integration:
   - You have access to lookup_cve and search_cve tools that query the NVD (National Vulnerability Database) in real time

@@ -1045,7 +1045,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 			Type: "function",
 			Function: llm.ToolFunction{
 				Name:        ToolModifyFile,
-				Description: "Modify a file in a GitHub repository using a safe find-and-replace approach. Provide the exact text to find (old_content) and the replacement text (new_content). The tool reads the FULL file from GitHub, performs the replacement, then creates a branch, commits, and opens a PR. Multiple modify_file calls for the SAME repository are grouped into a SINGLE pull request as long as they omit branch_name — so a change that touches several files lands in one PR. To open a SEPARATE PR for each independent fix in the same repository, pass a distinct branch_name (with its own pr_title and pr_body) on the first call of each fix; see branch_name. IMPORTANT: old_content must be an exact substring of the current file — include enough surrounding lines (3-5) will ensure a unique match. Only the matched section is replaced; the rest of the file is preserved.",
+				Description: "Modify a file in a GitHub repository using a safe find-and-replace approach. Provide the exact text to find (old_content) and the replacement text (new_content). The tool reads the FULL file from GitHub, performs the replacement, then commits the change and opens a PR for it. To change a pull request that is ALREADY open (review feedback, requested changes, a follow-up fix), pass pr_number or pr_url — the commit lands on that PR's branch and NO new PR is opened. Multiple modify_file calls for the SAME repository are grouped into a SINGLE pull request as long as they omit branch_name — so a change that touches several files lands in one PR. To open a SEPARATE PR for each independent fix in the same repository, pass a distinct branch_name (with its own pr_title and pr_body) on the first call of each fix; see branch_name. IMPORTANT: old_content must be an exact substring of the current file — include enough surrounding lines (3-5) will ensure a unique match. Only the matched section is replaced; the rest of the file is preserved.",
 				Parameters: json.RawMessage(`{
 					"type":"object",
 					"properties":{
@@ -1056,7 +1056,9 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 						"description":{"type":"string","description":"Short description of what was changed (used as commit message and as the PR title when pr_title is not provided)"},
 						"pr_body":{"type":"string","description":"OPTIONAL full Markdown body for the pull request. Use this to give reviewers real context (Jira/ticket link, summary of the change, testing notes, applicable skills). Only the call that OPENS a PR establishes its body — later calls that group into that same PR ignore pr_body. Pass a fresh pr_body on the first call of each new branch_name. When omitted, a short generic attribution line is used."},
 						"pr_title":{"type":"string","description":"OPTIONAL full PR title. When provided, used VERBATIM as the PR title (no agent-name prefix is added). Only honored on the call that OPENS a PR; later calls that group into that same PR ignore it. Pass a fresh pr_title on the first call of each new branch_name. Leave empty to use the default '<agent-id>: <description>' title."},
-						"branch_name":{"type":"string","description":"OPTIONAL custom HEAD branch name for the PR (e.g. 'ENG-1234/fix-timeout'). This argument controls PR grouping. Omit it, or repeat the branch name of the MOST RECENT PR opened for this repo, to add this file to that PR. Pass a NEW distinct name to open a separate branch and PR instead — that is how you ship one PR per independent fix in a single repo. Each new branch is cut from the base branch, so separate fixes never stack on one another. Write all files of one fix consecutively before starting the next fix's branch — you cannot go back and add a file to an earlier PR. Leave empty on every call to use the platform's auto-generated unique branch name. Must be a valid git branch name and must not already exist on the remote."},
+						"pr_number":{"type":"integer","description":"OPTIONAL number of an EXISTING open pull request to commit this change onto (its head branch). Use this for every follow-up round on a PR that is already open — review feedback, requested changes, CI fixes, 'also change X' — so the change lands on that PR instead of opening another one. The file is read from the PR's branch, so old_content must match the PR's current version of the file. Leave empty only when this change should start a NEW pull request."},
+						"pr_url":{"type":"string","description":"OPTIONAL full URL of an existing open pull request (https://github.com/<owner>/<repo>/pull/<n>) — the same targeting as pr_number, for when you have the URL rather than the number. Pass only one of pr_number / pr_url. The PR must belong to the repo being changed and must still be open."},
+						"branch_name":{"type":"string","description":"OPTIONAL custom HEAD branch name for the PR (e.g. 'ENG-1234/fix-timeout'). This argument controls PR grouping. Omit it, or repeat the branch name of the MOST RECENT PR opened for this repo, to add this file to that PR. Pass a NEW distinct name to open a separate branch and PR instead — that is how you ship one PR per independent fix in a single repo. Each new branch is cut from the base branch, so separate fixes never stack on one another. Write all files of one fix consecutively before starting the next fix's branch — you cannot go back and add a file to an earlier PR. Leave empty on every call to use the platform's auto-generated unique branch name. Must be a valid git branch name. Naming a branch that ALREADY exists on the remote commits onto it instead of creating it — that is another way to add a change to an open PR (use pr_number when you have the PR)."},
 						"branch":{"type":"string","description":"BASE branch the PR should be opened against (typically the repo's default branch — main/master). LEAVE EMPTY in almost all cases; the platform auto-resolves the default branch AND auto-generates a unique head branch per run. Only set this if you specifically need to target a long-lived non-default base like 'develop' or 'release/*'. Never pass a head branch from list_pull_requests or a prior PR — those are auto-generated per-tick and will be ignored."}
 					},
 					"required":["repo","path","old_content","new_content","description"]
@@ -1067,7 +1069,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 			Type: "function",
 			Function: llm.ToolFunction{
 				Name:        ToolCreateFile,
-				Description: "Create a NEW file in a GitHub repository. Use this when you need to add a file that does not yet exist (e.g. a new YAML config, a new workflow, a new script). The tool creates a branch, commits the new file, and opens a PR. Multiple create_file and modify_file calls for the SAME repository are grouped into a SINGLE pull request as long as they omit branch_name; pass a distinct branch_name to open a separate PR per independent fix (see branch_name). Do NOT use this for files that already exist — use modify_file instead.",
+				Description: "Create a NEW file in a GitHub repository. Use this when you need to add a file that does not yet exist (e.g. a new YAML config, a new workflow, a new script). The tool commits the new file and opens a PR for it; pass pr_number or pr_url to add the file to a pull request that is already open instead of opening another one. Multiple create_file and modify_file calls for the SAME repository are grouped into a SINGLE pull request as long as they omit branch_name; pass a distinct branch_name to open a separate PR per independent fix (see branch_name). Do NOT use this for files that already exist — use modify_file instead.",
 				Parameters: json.RawMessage(`{
 					"type":"object",
 					"properties":{
@@ -1077,7 +1079,9 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 						"description":{"type":"string","description":"Short description of what was added (used as commit message and as the PR title when pr_title is not provided)"},
 						"pr_body":{"type":"string","description":"OPTIONAL full Markdown body for the pull request. Use this to give reviewers real context (Jira/ticket link, summary, testing notes). Only the call that OPENS a PR establishes its body; later calls that group into that same PR ignore pr_body. Pass a fresh pr_body on the first call of each new branch_name."},
 						"pr_title":{"type":"string","description":"OPTIONAL full PR title. When provided, used VERBATIM as the PR title (no agent-name prefix is added). Only honored on the call that OPENS a PR; later calls that group into that same PR ignore it. Pass a fresh pr_title on the first call of each new branch_name. Leave empty to use the default '<agent-id>: <description>' title."},
-						"branch_name":{"type":"string","description":"OPTIONAL custom HEAD branch name for the PR. This argument controls PR grouping. Omit it, or repeat the branch name of the MOST RECENT PR opened for this repo, to add this file to that PR. Pass a NEW distinct name to open a separate branch and PR instead — that is how you ship one PR per independent fix in a single repo. Each new branch is cut from the base branch. Write all files of one fix consecutively before starting the next fix's branch — you cannot go back and add a file to an earlier PR. Leave empty on every call to use the platform's auto-generated unique branch name. Must be a valid git branch name and must not already exist on the remote."},
+						"pr_number":{"type":"integer","description":"OPTIONAL number of an EXISTING open pull request to commit this change onto (its head branch). Use this for every follow-up round on a PR that is already open — review feedback, requested changes, CI fixes, 'also change X' — so the change lands on that PR instead of opening another one. The file is committed onto the PR's branch, so it must not already exist there. Leave empty only when this change should start a NEW pull request."},
+						"pr_url":{"type":"string","description":"OPTIONAL full URL of an existing open pull request (https://github.com/<owner>/<repo>/pull/<n>) — the same targeting as pr_number, for when you have the URL rather than the number. Pass only one of pr_number / pr_url. The PR must belong to the repo being changed and must still be open."},
+						"branch_name":{"type":"string","description":"OPTIONAL custom HEAD branch name for the PR. This argument controls PR grouping. Omit it, or repeat the branch name of the MOST RECENT PR opened for this repo, to add this file to that PR. Pass a NEW distinct name to open a separate branch and PR instead — that is how you ship one PR per independent fix in a single repo. Each new branch is cut from the base branch. Write all files of one fix consecutively before starting the next fix's branch — you cannot go back and add a file to an earlier PR. Leave empty on every call to use the platform's auto-generated unique branch name. Must be a valid git branch name. Naming a branch that ALREADY exists on the remote commits onto it instead of creating it — that is another way to add a change to an open PR (use pr_number when you have the PR)."},
 						"branch":{"type":"string","description":"BASE branch the PR should target. LEAVE EMPTY in almost all cases — the platform resolves the repo default branch and auto-generates the head branch. Do not pass an existing PR head branch here."}
 					},
 					"required":["repo","path","content","description"]
@@ -1088,7 +1092,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 			Type: "function",
 			Function: llm.ToolFunction{
 				Name:        ToolRegexReplaceFile,
-				Description: "Bulk-replace all matches of a SIMPLE regex pattern in a file. Best for uniform single-line replacements across a whole file (e.g. 'change all image.tag to latest'). Do NOT use for scoped/structural changes in a specific section — use modify_file instead for those. Keep patterns short and per-line. Avoid complex multi-line regex with (?:.|\\n)*? or lookaheads — if you need those, use modify_file. The tool reads the FULL file from GitHub, applies a Go RE2 regex replacement on ALL matches, creates a branch, commits, and opens a PR. Multiple calls for the same repo are grouped into a SINGLE PR as long as they omit branch_name; pass a distinct branch_name to open a separate PR per independent fix (see branch_name). Replacement supports $1, $2 for captured groups.",
+				Description: "Bulk-replace all matches of a SIMPLE regex pattern in a file. Best for uniform single-line replacements across a whole file (e.g. 'change all image.tag to latest'). Do NOT use for scoped/structural changes in a specific section — use modify_file instead for those. Keep patterns short and per-line. Avoid complex multi-line regex with (?:.|\\n)*? or lookaheads — if you need those, use modify_file. The tool reads the FULL file from GitHub, applies a Go RE2 regex replacement on ALL matches, commits, and opens a PR; pass pr_number or pr_url to commit onto a pull request that is already open instead of opening another one. Multiple calls for the same repo are grouped into a SINGLE PR as long as they omit branch_name; pass a distinct branch_name to open a separate PR per independent fix (see branch_name). Replacement supports $1, $2 for captured groups.",
 				Parameters: json.RawMessage(`{
 					"type":"object",
 					"properties":{
@@ -1099,7 +1103,9 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 						"description":{"type":"string","description":"Short description of what was changed (used as commit message and as the PR title when pr_title is not provided)"},
 						"pr_body":{"type":"string","description":"OPTIONAL full Markdown body for the pull request. Use this to give reviewers real context. Only the call that OPENS a PR establishes its body; later calls that group into that same PR ignore pr_body. Pass a fresh pr_body on the first call of each new branch_name."},
 						"pr_title":{"type":"string","description":"OPTIONAL full PR title. When provided, used VERBATIM as the PR title (no agent-name prefix is added). Only honored on the call that OPENS a PR; later calls that group into that same PR ignore it. Pass a fresh pr_title on the first call of each new branch_name. Leave empty to use the default '<agent-id>: <description>' title."},
-						"branch_name":{"type":"string","description":"OPTIONAL custom HEAD branch name for the PR. This argument controls PR grouping. Omit it, or repeat the branch name of the MOST RECENT PR opened for this repo, to add this file to that PR. Pass a NEW distinct name to open a separate branch and PR instead — that is how you ship one PR per independent fix in a single repo. Each new branch is cut from the base branch. Write all files of one fix consecutively before starting the next fix's branch — you cannot go back and add a file to an earlier PR. Leave empty on every call to use the platform's auto-generated unique branch name. Must be a valid git branch name and must not already exist on the remote."},
+						"pr_number":{"type":"integer","description":"OPTIONAL number of an EXISTING open pull request to commit this change onto (its head branch). Use this for every follow-up round on a PR that is already open — review feedback, requested changes, CI fixes, 'also change X' — so the change lands on that PR instead of opening another one. The file is read from the PR's branch, so old_content must match the PR's current version of the file. Leave empty only when this change should start a NEW pull request."},
+						"pr_url":{"type":"string","description":"OPTIONAL full URL of an existing open pull request (https://github.com/<owner>/<repo>/pull/<n>) — the same targeting as pr_number, for when you have the URL rather than the number. Pass only one of pr_number / pr_url. The PR must belong to the repo being changed and must still be open."},
+						"branch_name":{"type":"string","description":"OPTIONAL custom HEAD branch name for the PR. This argument controls PR grouping. Omit it, or repeat the branch name of the MOST RECENT PR opened for this repo, to add this file to that PR. Pass a NEW distinct name to open a separate branch and PR instead — that is how you ship one PR per independent fix in a single repo. Each new branch is cut from the base branch. Write all files of one fix consecutively before starting the next fix's branch — you cannot go back and add a file to an earlier PR. Leave empty on every call to use the platform's auto-generated unique branch name. Must be a valid git branch name. Naming a branch that ALREADY exists on the remote commits onto it instead of creating it — that is another way to add a change to an open PR (use pr_number when you have the PR)."},
 						"branch":{"type":"string","description":"BASE branch the PR should target. LEAVE EMPTY in almost all cases — the platform resolves the repo default branch and auto-generates the head branch. Do not pass an existing PR head branch here."}
 					},
 					"required":["repo","path","pattern","replacement","description"]
@@ -2916,6 +2922,8 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 			PRBody      string `json:"pr_body"`
 			PRTitle     string `json:"pr_title"`
 			BranchName  string `json:"branch_name"`
+			PRNumber    int    `json:"pr_number"`
+			PRURL       string `json:"pr_url"`
 			Branch      string `json:"branch"`
 		}](argsJSON)
 		if errMsg != "" {
@@ -2928,8 +2936,12 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		if errMsg != "" {
 			return errMsg
 		}
+		targetBranch, errMsg := resolveWriteBranch(ctx, h.ghClient, owner, args.Repo, args.BranchName, args.PRNumber, args.PRURL)
+		if errMsg != "" {
+			return errMsg
+		}
 
-		readBranch := h.branchMgr.ReadBranch(ctx, owner, args.Repo, baseBranch, args.BranchName)
+		readBranch := h.branchMgr.ReadBranch(ctx, owner, args.Repo, baseBranch, targetBranch)
 		fullContent, fileSHA, err := h.ghClient.GetFileContent(ctx, owner, args.Repo, args.Path, readBranch)
 		if err != nil {
 			return preconditionErrf("Error reading current file: %v", err)
@@ -2957,7 +2969,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 
 		userName := h.slackUserName(userID)
 		prBody := buildPRBody(userID, userName, args.PRBody, fmt.Sprintf("Automated change requested via Slack by %s.\n\nChange: %s", slackAttribution(userID, userName), args.Description))
-		result, err := h.branchMgr.CommitAndPR(ctx, owner, args.Repo, baseBranch, userID, args.Description, prBody, args.BranchName, args.PRTitle, []string{args.Path},
+		result, err := h.branchMgr.CommitAndPR(ctx, owner, args.Repo, baseBranch, userID, args.Description, prBody, targetBranch, args.PRTitle, []string{args.Path},
 			func(branch string) error {
 				commitMsg := fmt.Sprintf("%s: %s", h.agentID, args.Description)
 				return h.ghClient.UpdateFile(ctx, owner, args.Repo, args.Path, branch, commitMsg, []byte(updatedContent), fileSHA)
@@ -2980,6 +2992,8 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 			PRBody      string `json:"pr_body"`
 			PRTitle     string `json:"pr_title"`
 			BranchName  string `json:"branch_name"`
+			PRNumber    int    `json:"pr_number"`
+			PRURL       string `json:"pr_url"`
 			Branch      string `json:"branch"`
 		}](argsJSON)
 		if errMsg != "" {
@@ -2992,10 +3006,14 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		if errMsg != "" {
 			return errMsg
 		}
+		targetBranch, errMsg := resolveWriteBranch(ctx, h.ghClient, owner, args.Repo, args.BranchName, args.PRNumber, args.PRURL)
+		if errMsg != "" {
+			return errMsg
+		}
 
 		userName := h.slackUserName(userID)
 		prBody := buildPRBody(userID, userName, args.PRBody, fmt.Sprintf("Automated file creation requested via Slack by %s.\n\nChange: %s\nNew file: `%s`", slackAttribution(userID, userName), args.Description, args.Path))
-		result, err := h.branchMgr.CommitAndPR(ctx, owner, args.Repo, baseBranch, userID, args.Description, prBody, args.BranchName, args.PRTitle, []string{args.Path},
+		result, err := h.branchMgr.CommitAndPR(ctx, owner, args.Repo, baseBranch, userID, args.Description, prBody, targetBranch, args.PRTitle, []string{args.Path},
 			func(branch string) error {
 				commitMsg := fmt.Sprintf("%s: %s", h.agentID, args.Description)
 				return h.ghClient.CreateFile(ctx, owner, args.Repo, args.Path, branch, commitMsg, []byte(args.Content))
@@ -3019,6 +3037,8 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 			PRBody      string `json:"pr_body"`
 			PRTitle     string `json:"pr_title"`
 			BranchName  string `json:"branch_name"`
+			PRNumber    int    `json:"pr_number"`
+			PRURL       string `json:"pr_url"`
 			Branch      string `json:"branch"`
 		}](argsJSON)
 		if errMsg != "" {
@@ -3035,8 +3055,12 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		if errMsg != "" {
 			return errMsg
 		}
+		targetBranch, errMsg := resolveWriteBranch(ctx, h.ghClient, owner, args.Repo, args.BranchName, args.PRNumber, args.PRURL)
+		if errMsg != "" {
+			return errMsg
+		}
 
-		readBranch := h.branchMgr.ReadBranch(ctx, owner, args.Repo, baseBranch, args.BranchName)
+		readBranch := h.branchMgr.ReadBranch(ctx, owner, args.Repo, baseBranch, targetBranch)
 		fullContent, fileSHA, err := h.ghClient.GetFileContent(ctx, owner, args.Repo, args.Path, readBranch)
 		if err != nil {
 			return preconditionErrf("Error reading current file: %v", err)
@@ -3052,7 +3076,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 
 		userName := h.slackUserName(userID)
 		prBody := buildPRBody(userID, userName, args.PRBody, fmt.Sprintf("Automated regex replacement requested via Slack by %s.\n\nChange: %s\nPattern: `%s` → `%s`\nMatches replaced: %d", slackAttribution(userID, userName), args.Description, args.Pattern, args.Replacement, matches))
-		result, err := h.branchMgr.CommitAndPR(ctx, owner, args.Repo, baseBranch, userID, args.Description, prBody, args.BranchName, args.PRTitle, []string{args.Path},
+		result, err := h.branchMgr.CommitAndPR(ctx, owner, args.Repo, baseBranch, userID, args.Description, prBody, targetBranch, args.PRTitle, []string{args.Path},
 			func(branch string) error {
 				commitMsg := fmt.Sprintf("%s: %s", h.agentID, args.Description)
 				return h.ghClient.UpdateFile(ctx, owner, args.Repo, args.Path, branch, commitMsg, []byte(updatedContent), fileSHA)

@@ -446,6 +446,46 @@ func resolveRepoBranch(ctx context.Context, ghClient *github.Client, repo, branc
 	return owner, branch, ""
 }
 
+// resolveWriteBranch decides which branch a file write commits onto. When the
+// caller named an existing pull request (pr_number or pr_url), the write goes to
+// that PR's head branch, which is how requested changes land on the PR under
+// review instead of opening one PR per round of feedback. With no PR named it
+// falls back to branch_name, leaving the normal grouping rules in charge.
+//
+// A merged or closed PR is rejected rather than silently reopened: its branch
+// may be gone, and new work on finished review threads belongs in its own PR.
+func resolveWriteBranch(ctx context.Context, ghClient *github.Client, owner, repo, branchName string, prNumber int, prURL string) (branch string, errMsg string) {
+	if strings.TrimSpace(prURL) != "" {
+		prOwner, prRepo, prNum, err := github.ParsePRURL(prURL)
+		if err != nil {
+			return "", preconditionErrf("Error parsing pr_url: %v", err)
+		}
+		if !strings.EqualFold(prOwner, owner) || !strings.EqualFold(prRepo, repo) {
+			return "", preconditionErrf("Error: pr_url points at %s/%s but this change targets %s/%s. Pass the pull request that belongs to the repo you are changing.", prOwner, prRepo, owner, repo)
+		}
+		prNumber = prNum
+	}
+	if prNumber <= 0 {
+		return branchName, ""
+	}
+
+	pr, err := ghClient.GetPullRequestRefs(ctx, owner, repo, prNumber)
+	if err != nil {
+		return "", preconditionErrf("Error reading pull request #%d: %v", prNumber, err)
+	}
+	if pr.State != "open" {
+		return "", preconditionErrf("Error: PR #%d in %s/%s is %s, so changes cannot be added to it. Open a new pull request instead (omit pr_number and pr_url).",
+			prNumber, owner, repo, github.PRStateLabel(pr))
+	}
+	if pr.HeadRef == "" {
+		return "", preconditionErrf("Error: PR #%d in %s/%s reports no head branch, so the change cannot be committed to it.", prNumber, owner, repo)
+	}
+	if requested := strings.TrimSpace(branchName); requested != "" && requested != pr.HeadRef {
+		return "", preconditionErrf("Error: branch_name %q conflicts with PR #%d, whose head branch is %q. Pass only one of them.", requested, prNumber, pr.HeadRef)
+	}
+	return pr.HeadRef, ""
+}
+
 // replyOrThread posts a message either as a thread reply (if auditTS is set)
 // or via the Slack response URL. Used by both DebugHandler and GeneralHandler.
 func replyOrThread(slackClient SlackClient, channelID, responseURL, auditTS, text string) {

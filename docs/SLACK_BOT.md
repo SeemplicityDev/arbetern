@@ -69,7 +69,7 @@ GENERAL_MODEL=openai/gpt-4o
 PORT=8080
 # Optional: enable thread follow-ups via Socket Mode (see below)
 SLACK_APP_TOKEN=xapp-1-...
-THREAD_SESSION_TTL=3m
+THREAD_SESSION_TTL=7m
 ```
 
 ## Step 7: Invite the Bot to Channels
@@ -112,7 +112,7 @@ Once configured, use the agent's slash command in any channel the bot has been i
 
 ## Socket Mode: Thread Follow-ups
 
-Socket Mode lets users reply directly in a thread instead of typing another `/command`. The bot keeps a session open for each thread (default: 3 minutes, refreshed on every reply).
+Socket Mode lets users reply directly in a thread instead of typing another `/command`. The bot keeps a session open for each thread (default: 7 minutes, refreshed on every reply).
 
 ### Prerequisites
 
@@ -160,10 +160,10 @@ Add to your deployment:
 SLACK_APP_TOKEN=xapp-1-your-app-level-token
 ```
 
-Optionally configure the session TTL (default: 3 minutes):
+Optionally configure the session TTL (default: 7 minutes):
 
 ```
-THREAD_SESSION_TTL=5m
+THREAD_SESSION_TTL=10m
 ```
 
 For Helm deployments, add the token to `secretValues` in your values file:
@@ -177,7 +177,7 @@ And optionally set the TTL in `env`:
 
 ```yaml
 env:
-  THREAD_SESSION_TTL: "3m"
+  THREAD_SESSION_TTL: "7m"
 ```
 
 ### Step 5: Verify
@@ -191,7 +191,7 @@ env:
 ### How It Works
 
 - When a slash command is executed, arbetern posts an audit message (creating a thread) and opens a **thread session**
-- The session stays active for `THREAD_SESSION_TTL` (default: 3 minutes), refreshed on every message
+- The session stays active for `THREAD_SESSION_TTL` (default: 7 minutes), refreshed on every message
 - Any user reply in that thread is automatically routed through the same agent — no `/command` prefix needed
 - After the TTL expires with no activity, the session closes and new thread replies are ignored
 
@@ -205,7 +205,7 @@ env:
 - Check that Socket Mode is enabled: **Socket Mode** → toggle **On**.
 
 **Thread replies are ignored (events arrive but no response)**
-- Check that the session hasn't expired (default 3 minutes of inactivity)
+- Check that the session hasn't expired (default 7 minutes of inactivity)
 - Check the logs for `[session] expired` — if seen, increase `THREAD_SESSION_TTL`
 
 **Debugging: enable verbose Socket Mode logging**
