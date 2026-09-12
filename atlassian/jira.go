@@ -669,9 +669,11 @@ func (c *Client) ListProjects() ([]string, error) {
 
 // JiraUser represents a user returned by the Jira user search API.
 type JiraUser struct {
-	AccountID   string `json:"accountId"`
-	DisplayName string `json:"displayName"`
-	Active      bool   `json:"active"`
+	AccountID    string            `json:"accountId"`
+	DisplayName  string            `json:"displayName"`
+	EmailAddress string            `json:"emailAddress,omitempty"`
+	AvatarURLs   map[string]string `json:"avatarUrls,omitempty"`
+	Active       bool              `json:"active"`
 }
 
 // SearchUsers searches for Jira users matching the given query string.

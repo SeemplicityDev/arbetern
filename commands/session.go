@@ -226,6 +226,11 @@ func (s *SessionStore) expire(key string, sess *ThreadSession) {
 
 	// Notify the user in the thread that the session has expired and how to continue.
 	if sess.Router != nil && sess.Router.slackClient != nil {
+		if exists, err := sess.Router.slackClient.MessageExists(sess.ChannelID, sess.ThreadTS); err == nil && !exists {
+			log.Printf("[session] anchor message deleted; expiry notice skipped channel=%s thread=%s",
+				sess.ChannelID, sess.ThreadTS)
+			return
+		}
 		msg := fmt.Sprintf(
 			"_:hourglass: Thread session expired after %d min of inactivity._\n"+
 				"To continue this conversation, copy the link to this thread and paste it in a new `/%s` message — the bot will pick up the context automatically.\n"+

@@ -149,6 +149,31 @@ func (c *Client) FetchThreadReplies(channelID, threadTS string, limit int) ([]sl
 	return msgs, nil
 }
 
+// MessageExists reports whether the message at ts is still in the channel. A
+// deleted parent (thread_not_found, or the tombstone left when a threaded
+// parent is removed) reports false with a nil error; other API failures return
+// the error so callers can decide whether to post anyway.
+func (c *Client) MessageExists(channelID, ts string) (bool, error) {
+	msgs, _, _, err := c.api.GetConversationReplies(&slack.GetConversationRepliesParameters{
+		ChannelID: channelID,
+		Timestamp: ts,
+		Limit:     1,
+		Inclusive: true,
+	})
+	if err != nil {
+		for _, code := range []string{"thread_not_found", "message_not_found", "channel_not_found"} {
+			if strings.Contains(err.Error(), code) {
+				return false, nil
+			}
+		}
+		return false, fmt.Errorf("failed to check message: %w", err)
+	}
+	if len(msgs) == 0 || msgs[0].SubType == "tombstone" {
+		return false, nil
+	}
+	return true, nil
+}
+
 func (c *Client) PostEphemeral(channelID, userID, text string) error {
 	_, err := c.api.PostEphemeral(channelID, userID,
 		slack.MsgOptionText(text, false),

@@ -26,7 +26,7 @@
 | `chat:write` | Post responses to channels |
 | `files:write` | Upload file snippets to channels (large search results, reports, code blocks) |
 | `users:read` | Resolve Slack user IDs to real names (used by agents like Seihin to look up the user's identity for Jira queries) |
-| `users:read.email` | Resolve a user's email to their Slack ID — required for the chat-UI `allowed_teams` fallback (maps the OAuth-proxy email to a Slack user) |
+| `users:read.email` | Resolve a user's email to their Slack ID — required for the chat-UI `allowed_teams` fallback (maps the OAuth-proxy email to a Slack user) and for the signed-in user button in the web UI |
 | `usergroups:read` | Read Slack user group (subteam) membership for per-agent RBAC (`allowed_teams`) |
 
 > **RBAC scopes:** `usergroups:read` is required whenever any agent sets `allowed_teams`. `users:read.email` is additionally required if you rely on `allowed_teams` as the chat-UI access fallback — without it the email→Slack-user lookup fails with `missing_scope` and access is denied (fail-closed). After adding scopes, **reinstall the app** (Slack requires a reinstall when scopes change) and update `SLACK_BOT_TOKEN`.

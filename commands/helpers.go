@@ -490,6 +490,15 @@ func resolveWriteBranch(ctx context.Context, ghClient *github.Client, owner, rep
 // or via the Slack response URL. Used by both DebugHandler and GeneralHandler.
 func replyOrThread(slackClient SlackClient, channelID, responseURL, auditTS, text string) {
 	if auditTS != "" {
+		if exists, err := slackClient.MessageExists(channelID, auditTS); err == nil && !exists {
+			log.Printf("[channel=%s] thread anchor %s was deleted; reply not posted to the channel", channelID, auditTS)
+			if responseURL != "" {
+				if err := slack.RespondToURL(responseURL, text, true); err != nil {
+					log.Printf("[channel=%s] failed to respond: %v", channelID, err)
+				}
+			}
+			return
+		}
 		if err := slackClient.PostThreadReply(channelID, auditTS, text); err != nil {
 			log.Printf("[channel=%s] failed to post thread reply: %v", channelID, err)
 		}

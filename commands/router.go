@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"regexp"
 	"strings"
 
 	"github.com/justmike1/arbetern/atlassian"
@@ -164,6 +165,10 @@ func (r *Router) Handle(channelID, userID, text, responseURL string) {
 
 	// Post a session footer so the user knows they can reply in the thread.
 	if auditTS != "" && r.sessions != nil {
+		if !r.threadAnchorExists(channelID, auditTS) {
+			r.sessions.Close(channelID, auditTS, "anchor message deleted")
+			return
+		}
 		ttlMinutes := int(math.Round(r.sessions.TTL().Minutes()))
 		footer := fmt.Sprintf("_:thread: Thread session active — reply here for %d min without a /command._", ttlMinutes)
 		_ = r.slackClient.PostThreadReply(channelID, auditTS, footer)
@@ -189,11 +194,19 @@ func isIntroIntent(text string) bool {
 	return false
 }
 
+// slackMessageLinkRe matches Slack message permalinks in already-lowercased
+// text. Reading a linked thread needs fetch_thread_context, which only the
+// general handler's tool loop can run.
+var slackMessageLinkRe = regexp.MustCompile(`https://[^/\s]+\.slack\.com/archives/[a-z0-9]+/p\d{16}`)
+
 func isDebugIntent(text string) bool {
 	// If the user requests an action (rerun, modify, create PR, etc.), route to
 	// the general handler which has the full tool loop — the debug handler is
 	// analysis-only and cannot execute actions.
 	if requiresAction(text) {
+		return false
+	}
+	if slackMessageLinkRe.MatchString(text) {
 		return false
 	}
 	// A GitHub Actions workflow run URL is an implicit debug request.
@@ -274,6 +287,14 @@ func (r *Router) newGeneralHandler(userContext string, session *ThreadSession) *
 	}
 }
 
+// threadAnchorExists reports whether the message a session thread hangs off is
+// still in the channel. A failed check counts as present so a transient Slack
+// error never silences a live thread.
+func (r *Router) threadAnchorExists(channelID, ts string) bool {
+	exists, err := r.slackClient.MessageExists(channelID, ts)
+	return err != nil || exists
+}
+
 func (r *Router) replyError(responseURL, msg string) {
 	if err := slack.RespondToURL(responseURL, msg, true); err != nil {
 		log.Printf("failed to send error to user: %v", err)
@@ -324,6 +345,10 @@ func (r *Router) HandleThreadReply(channelID, threadTS, userID, text string) {
 	// handler reuse branches/PRs created in earlier messages of this thread.
 	var sess *ThreadSession
 	if r.sessions != nil {
+		if !r.threadAnchorExists(channelID, threadTS) {
+			r.sessions.Close(channelID, threadTS, "anchor message deleted")
+			return
+		}
 		sess = r.sessions.Lookup(channelID, threadTS)
 	}
 

@@ -31,6 +31,8 @@ and picks a class without influencing the next:
 2. **Intent classification (binary scan).** Keyword lists fire independently
    (`isIntroIntent`, `isDebugIntent`); `requiresAction` acts as a conditional
    exclusion. First match wins.
+   A message carrying a Slack permalink always takes the tool loop, since only
+   the general handler can run `fetch_thread_context` to read the linked thread.
 3. **Tool loop (posterior update).** The general handler iterates LLM → tool
    calls → results until the model stops calling tools. The tool palette is
    feature-gated: each integration's `Ready()` flag toggles its tools in/out
@@ -40,6 +42,8 @@ and picks a class without influencing the next:
 5. **Thread sessions (temporal memory).** After the first reply a session is
    registered on the Slack thread; follow-ups re-enter the same router with
    accumulated history (see [Conversation Context](#conversation-context)).
+   If the message anchoring the thread is deleted, the session ends quietly:
+   no expiry notice is posted and no reply is redirected to the channel.
 
 Every layer is an independent binary decision — no sequential boosting, no
 ensemble voting, no external orchestration. The system is the product of
@@ -249,6 +253,7 @@ user × agent (`by_user_agent`). Slack user IDs are resolved to display names in
 the background via `users.info` (needs the `users:read` scope); until a name is
 cached the raw ID is shown. Chat turns are keyed by the proxy-verified email.
 
+- The top-right user button shows who is signed in (`/api/me`): the email verified by the SSO proxy, resolved to the Slack profile (name, handle, title, time zone) via `users.lookupByEmail`, and to the Atlassian account (name, account ID) when that integration is connected. Without a proxy it reads "Not signed in".
 - Drop a `logo.png` into `ui/` to replace the default icon
 - Set `UI_HEADER` env var to customize the top-bar title
 - Agents with `chat_enabled` expose a full-screen chat at `/ui/<agent>/chat` — a deep-linkable, reload-safe URL you can bookmark or share

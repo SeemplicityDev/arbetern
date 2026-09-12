@@ -1052,8 +1052,6 @@ function renderBilling(d) {
 /* Agents */
 function renderAgents(agents) {
   const grid = document.getElementById('agents-grid');
-  const countBadge = document.getElementById('agent-count');
-  countBadge.textContent = plural(agents.length, 'agent');
 
   if (agents.length === 0) {
     grid.innerHTML = `
@@ -1539,6 +1537,7 @@ document.getElementById('fs-chat-input').addEventListener('keydown', e => {
 
 document.addEventListener('keydown', e => {
   if (e.key !== 'Escape') return;
+  if (!document.getElementById('user-pop').hidden) { setIdentityOpen(false); return; }
   if (document.documentElement.dataset.drawer === 'open') { closeDrawer(); return; }
   if (chatFull) { closeFullChat(); return; }
   closeChat();
@@ -1677,6 +1676,95 @@ function setIntegrationTab(tab) {
   document.querySelectorAll('.integration-tab-panel').forEach(p => { p.hidden = p.dataset.tabPanel !== tab; });
 }
 
+/* Identity */
+let identityData = null;
+
+function initialsOf(name) {
+  const parts = String(name || '').trim().split(/\s+/).filter(Boolean);
+  if (!parts.length) return '?';
+  return (parts[0][0] + (parts.length > 1 ? parts[parts.length - 1][0] : '')).toUpperCase();
+}
+
+function avatarHtml(name, url, muted) {
+  const style = !muted && name ? ` style="background:${hashColor(name)}"` : '';
+  const img = url ? `<img src="${escapeHtml(url)}" alt="" onerror="this.remove()">` : '';
+  return `<span class="user-avatar${muted ? ' muted' : ''}"${style}>${escapeHtml(muted ? '?' : initialsOf(name))}${img}</span>`;
+}
+
+function idRows(rows) {
+  const items = rows.filter(r => r[1]);
+  if (!items.length) return '';
+  return `<dl class="id-row">${items.map(([k, v, cls]) => `<dt>${escapeHtml(k)}</dt><dd class="${cls || ''}" title="${escapeHtml(v)}">${cls === 'link' ? `<a href="${escapeHtml(v)}" target="_blank" rel="noopener">${escapeHtml(v.replace(/^https?:\/\//, ''))}</a>` : escapeHtml(v)}</dd>`).join('')}</dl>`;
+}
+
+function renderIdentity() {
+  const btn = document.getElementById('user-button');
+  const pop = document.getElementById('user-pop');
+  const me = identityData;
+  if (!me) return;
+  if (me.anonymous || me.error) {
+    btn.innerHTML = avatarHtml('', '', true) + `<span class="user-name">${me.error ? 'Identity unavailable' : 'Not signed in'}</span>`;
+    pop.innerHTML = `<div class="id-head">${avatarHtml('', '', true)}<div><div class="id-title">${me.error ? 'Identity unavailable' : 'Not signed in'}</div><div class="id-sub">${me.error ? 'The identity endpoint did not respond' : 'No identity from the sign-in proxy'}</div></div></div>
+      <div class="id-section"><div class="id-note">When the console runs behind the SSO proxy, your Slack profile and Atlassian account appear here.</div></div>`;
+    return;
+  }
+  const s = me.slack || {};
+  const displayName = s.real_name || s.display_name || (me.email || '').split('@')[0];
+  btn.innerHTML = avatarHtml(displayName, s.avatar, false) + `<span class="user-name">${escapeHtml(displayName)}</span>`;
+
+  const slackSection = me.slack
+    ? idRows([
+        ['Name', s.real_name],
+        ['Display name', s.display_name ? (s.handle ? `${s.display_name} (@${s.handle})` : s.display_name) : (s.handle ? '@' + s.handle : '')],
+        ['Title', s.title],
+        ['Time zone', s.timezone],
+        ['User ID', s.id, 'mono'],
+      ])
+    : '<div class="id-note">No Slack account matches this email.</div>';
+
+  let atlassianSection;
+  if (!me.atlassian_connected) atlassianSection = '<div class="id-note">Atlassian is not connected.</div>';
+  else if (!me.atlassian) atlassianSection = '<div class="id-note">No Atlassian account matches this email.</div>';
+  else {
+    const a = me.atlassian;
+    atlassianSection = idRows([
+      ['Name', a.display_name],
+      ['Email', a.email],
+      ['Account ID', a.account_id, 'mono'],
+      ['Site', a.site, 'link'],
+    ]);
+  }
+
+  pop.innerHTML = `<div class="id-head">${avatarHtml(displayName, s.avatar, false)}<div><div class="id-title">${escapeHtml(displayName)}</div><div class="id-sub" title="${escapeHtml(me.email)}">${escapeHtml(me.email)}</div></div></div>
+    <div class="id-section"><h3>${INTEGRATION_LOGOS.slack}Slack<span class="tag ${me.slack ? 'slack' : ''}">${me.slack ? 'matched' : 'not found'}</span></h3>${slackSection}</div>
+    <div class="id-section"><h3>${INTEGRATION_LOGOS.jira}Atlassian<span class="tag">${!me.atlassian_connected ? 'not connected' : me.atlassian ? 'matched' : 'not found'}</span></h3>${atlassianSection}</div>
+    <div class="id-foot">Resolved ${me.resolved_at ? timeAgo(me.resolved_at) : 'just now'} · identity comes from the sign-in proxy</div>`;
+}
+
+function setIdentityOpen(open) {
+  const btn = document.getElementById('user-button');
+  const pop = document.getElementById('user-pop');
+  pop.hidden = !open;
+  btn.setAttribute('aria-expanded', String(open));
+}
+
+document.getElementById('user-button').addEventListener('click', e => {
+  e.stopPropagation();
+  setIdentityOpen(document.getElementById('user-pop').hidden);
+});
+document.addEventListener('click', e => {
+  if (!e.target.closest('#user-menu')) setIdentityOpen(false);
+});
+
+async function loadIdentity() {
+  try {
+    identityData = await fetchJSON('/api/me');
+  } catch (err) {
+    identityData = { anonymous: true, error: true };
+  }
+  renderIdentity();
+}
+
 /* Branding */
 (function loadLogo() {
   const img = new Image();
@@ -1703,6 +1791,7 @@ function setIntegrationTab(tab) {
 /* Boot */
 applyRoute();
 loadAgents();
+loadIdentity();
 setInterval(() => {
   if (document.visibilityState !== 'visible' || chatFull) return;
   if (currentPage === 'overview' || currentPage === 'billing') loadPage(currentPage);

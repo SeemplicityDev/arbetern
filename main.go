@@ -471,6 +471,102 @@ func (c *userNameCache) resolve(slackClient *slack.Client, id string) string {
 	return ""
 }
 
+type slackIdentity struct {
+	ID          string `json:"id"`
+	Handle      string `json:"handle,omitempty"`
+	RealName    string `json:"real_name,omitempty"`
+	DisplayName string `json:"display_name,omitempty"`
+	Title       string `json:"title,omitempty"`
+	Timezone    string `json:"timezone,omitempty"`
+	Avatar      string `json:"avatar,omitempty"`
+}
+
+type atlassianIdentity struct {
+	AccountID   string `json:"account_id"`
+	DisplayName string `json:"display_name,omitempty"`
+	Email       string `json:"email,omitempty"`
+	Avatar      string `json:"avatar,omitempty"`
+	Site        string `json:"site,omitempty"`
+}
+
+// identity is what /api/me returns: the signed-in user's Slack profile, always
+// attempted, and their Atlassian account when that integration is connected.
+type identity struct {
+	Anonymous          bool               `json:"anonymous"`
+	Email              string             `json:"email,omitempty"`
+	Slack              *slackIdentity     `json:"slack,omitempty"`
+	Atlassian          *atlassianIdentity `json:"atlassian,omitempty"`
+	AtlassianConnected bool               `json:"atlassian_connected"`
+	ResolvedAt         time.Time          `json:"resolved_at"`
+}
+
+type identityCache struct {
+	mu      sync.Mutex
+	entries map[string]identity
+	ttl     time.Duration
+}
+
+func newIdentityCache(ttl time.Duration) *identityCache {
+	return &identityCache{entries: make(map[string]identity), ttl: ttl}
+}
+
+func (c *identityCache) lookup(email string, slackClient *slack.Client, jira *atlassian.Client, site string) identity {
+	jiraReady := jira != nil && jira.Ready()
+	if email == "" {
+		return identity{Anonymous: true, AtlassianConnected: jiraReady}
+	}
+	c.mu.Lock()
+	if e, ok := c.entries[email]; ok && time.Since(e.ResolvedAt) < c.ttl {
+		c.mu.Unlock()
+		return e
+	}
+	c.mu.Unlock()
+
+	id := identity{Email: email, AtlassianConnected: jiraReady, ResolvedAt: time.Now()}
+	if slackClient != nil {
+		if u, err := slackClient.GetUserByEmail(email); err != nil {
+			log.Printf("[identity] slack lookup for %s failed: %v", redactEmail(email), err)
+		} else if u != nil {
+			id.Slack = &slackIdentity{
+				ID:          u.ID,
+				Handle:      u.Name,
+				RealName:    firstNonBlank(u.RealName, u.Profile.RealName),
+				DisplayName: u.Profile.DisplayName,
+				Title:       u.Profile.Title,
+				Timezone:    firstNonBlank(u.TZLabel, u.TZ),
+				Avatar:      firstNonBlank(u.Profile.Image72, u.Profile.Image48),
+			}
+		}
+	}
+	if jiraReady {
+		if users, err := jira.SearchUsersGeneral(email); err != nil {
+			log.Printf("[identity] atlassian lookup for %s failed: %v", redactEmail(email), err)
+		} else if len(users) > 0 {
+			u := users[0]
+			for _, cand := range users {
+				if strings.EqualFold(cand.EmailAddress, email) {
+					u = cand
+					break
+				}
+			}
+			id.Atlassian = &atlassianIdentity{AccountID: u.AccountID, DisplayName: u.DisplayName, Email: u.EmailAddress, Avatar: u.AvatarURLs["48x48"], Site: site}
+		}
+	}
+	c.mu.Lock()
+	c.entries[email] = id
+	c.mu.Unlock()
+	return id
+}
+
+func firstNonBlank(values ...string) string {
+	for _, v := range values {
+		if s := strings.TrimSpace(v); s != "" {
+			return s
+		}
+	}
+	return ""
+}
+
 // checkChatRBAC authorizes a chat-UI request for an agent using two layers,
 // in priority order:
 //
@@ -1991,6 +2087,13 @@ func main() {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(agents)
+	})
+
+	identities := newIdentityCache(10 * time.Minute)
+	apiMux.HandleFunc("/api/me", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-store")
+		_ = json.NewEncoder(w).Encode(identities.lookup(clientEmail(r), slackClient, jiraClient, cfg.AtlassianURL))
 	})
 
 	// API: UI settings.

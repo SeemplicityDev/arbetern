@@ -24,6 +24,7 @@ type SlackClient interface {
 	GetUserInfo(userID string) (*slacklib.User, error)
 	GetUserByEmail(email string) (*slacklib.User, error)
 	GetUserByName(name string) (*slacklib.User, bool, error)
+	MessageExists(channelID, ts string) (bool, error)
 	UploadFileSnippet(channelID, threadTS, filename, title, content, filetype string) (string, error)
 }
 

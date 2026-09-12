@@ -335,6 +335,7 @@ func (h *GeneralHandler) Execute(channelID, userID, text, responseURL, auditTS s
 	blockedPreActionAcks := 0
 	emptyResponseRetries := 0
 	truncatedToolRounds := 0
+	narrationRetries := 0
 
 	// Track cumulative token usage and compression savings across all LLM rounds.
 	var totalUsage llm.Usage
@@ -453,6 +454,16 @@ func (h *GeneralHandler) Execute(channelID, userID, text, responseURL, auditTS s
 				}
 				h.replyDefault(channelID, responseURL, auditTS, fallback+stamp)
 				return
+			}
+
+			if name := narratedToolCall(choice.Message.Content, tools); name != "" && narrationRetries < 2 {
+				narrationRetries++
+				log.Printf("[user=%s channel=%s] model described a %s call instead of making it (retry %d)", userID, channelID, name, narrationRetries)
+				messages = append(messages,
+					llm.NewChatMessage("assistant", choice.Message.Content),
+					llm.NewChatMessage("user", narrationNudge(name)),
+				)
+				continue
 			}
 
 			log.Printf("[user=%s channel=%s] general query completed successfully", userID, channelID)
@@ -604,6 +615,7 @@ func (h *GeneralHandler) ExecuteHeadless(ctx context.Context, userID, prompt str
 	}
 	var mutatingFailures []string
 	truncatedToolRounds := 0
+	narrationRetries := 0
 	var totalUsage llm.Usage
 	var totalCompression llm.CompressionStats
 	defer func() { h.recordUsage(activeClient.Model(), userID, totalUsage, totalCompression) }()
@@ -661,6 +673,15 @@ func (h *GeneralHandler) ExecuteHeadless(ctx context.Context, userID, prompt str
 			if final == "" && isTruncatedFinish(choice.FinishReason) {
 				log.Printf("[workflow user=%s agent=%s] tick ended with truncated, empty output (finish=%q) — output limit hit before a result", userID, h.agentID, choice.FinishReason)
 				return "", fmt.Errorf("workflow tick output was truncated at the model's output limit before producing a result")
+			}
+			if name := narratedToolCall(final, tools); name != "" && narrationRetries < 2 {
+				narrationRetries++
+				log.Printf("[workflow user=%s agent=%s] model described a %s call instead of making it (retry %d)", userID, h.agentID, name, narrationRetries)
+				messages = append(messages,
+					llm.NewChatMessage("assistant", final),
+					llm.NewChatMessage("user", narrationNudge(name)),
+				)
+				continue
 			}
 			if len(mutatingFailures) > 0 {
 				// At least one side-effect tool failed. The tick technically
@@ -776,6 +797,7 @@ func (h *GeneralHandler) ExecuteChat(ctx context.Context, userID string, history
 	}
 	emptyResponseRetries := 0
 	truncatedToolRounds := 0
+	narrationRetries := 0
 	var totalUsage llm.Usage
 	var totalCompression llm.CompressionStats
 	defer func() { h.recordUsage(activeClient.Model(), userID, totalUsage, totalCompression) }()
@@ -840,6 +862,15 @@ func (h *GeneralHandler) ExecuteChat(ctx context.Context, userID string, history
 			if final == "" {
 				log.Printf("[chat user=%s agent=%s] ended with empty content after %d retries (finish=%q); returning fallback", userID, h.agentID, emptyResponseRetries, choice.FinishReason)
 				return "I couldn't complete this request — it may have been too large to finish in one pass (my response kept hitting the output limit). Try narrowing it and I'll pick it up from there.", nil
+			}
+			if name := narratedToolCall(final, tools); name != "" && narrationRetries < 2 {
+				narrationRetries++
+				log.Printf("[chat user=%s agent=%s] model described a %s call instead of making it (retry %d)", userID, h.agentID, name, narrationRetries)
+				messages = append(messages,
+					llm.NewChatMessage("assistant", final),
+					llm.NewChatMessage("user", narrationNudge(name)),
+				)
+				continue
 			}
 			log.Printf("[chat user=%s agent=%s] completed after %d rounds", userID, h.agentID, i+1)
 			return final, nil
@@ -5826,6 +5857,34 @@ func isCodeIntent(text string) bool {
 		}
 	}
 	return false
+}
+
+var narratedToolRe = regexp.MustCompile(`^\W{0,4}([a-z][a-z0-9_]{2,})\W{0,4}(?:→|->|=>|\(|:)`)
+
+// narratedToolCall returns the known tool a text-only turn describes invoking
+// (e.g. "**fetch_thread_context** → <url>") rather than calling; "" otherwise.
+func narratedToolCall(content string, tools []llm.Tool) string {
+	first := ""
+	for _, line := range strings.Split(strings.TrimSpace(content), "\n") {
+		if l := strings.TrimSpace(line); l != "" {
+			first = l
+			break
+		}
+	}
+	m := narratedToolRe.FindStringSubmatch(first)
+	if m == nil {
+		return ""
+	}
+	for _, t := range tools {
+		if t.Function.Name == m[1] {
+			return m[1]
+		}
+	}
+	return ""
+}
+
+func narrationNudge(tool string) string {
+	return fmt.Sprintf("You wrote a %s call as text instead of invoking the tool. Never describe tool calls in your reply: call %s now and continue with the request, or answer directly if the tool is not needed.", tool, tool)
 }
 
 var preActionAckRe = regexp.MustCompile(`(?i)\b(on it|i(?:'|’)m\s+(checking|looking|working|updating|investigating)|i\s+will|i(?:'|’)ll|we\s+will|will\s+return|let me check|let me take a look)\b`)

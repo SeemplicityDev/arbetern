@@ -30,7 +30,12 @@
           <svg class="tt-moon" viewBox="0 0 24 24" width="11" height="11" fill="currentColor"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
         </span>
       </button>
-      <span class="header-badge" id="agent-count">0 agents</span>
+      <div class="user-menu" id="user-menu">
+        <button class="user-btn" id="user-button" type="button" aria-haspopup="dialog" aria-expanded="false" title="Your identity">
+          <span class="user-avatar muted">?</span><span class="user-name">Signing in…</span>
+        </button>
+        <div class="user-pop" id="user-pop" role="dialog" aria-label="Your identity" hidden></div>
+      </div>
     </div>
   </header>
 
