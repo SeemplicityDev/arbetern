@@ -229,11 +229,30 @@ helm upgrade --install arbetern ./helm -f deploy.local.values.yaml
 
 ## Web UI
 
-Visit `/ui/` to see all registered agents. Click an agent card to view its prompts (read-only). The UI auto-discovers agents from the `agents/` directory.
+Visit `/ui/` for the management console. A top bar carries the logo, title and
+theme toggle; a collapsible side rail switches between pages, each with its own
+URL:
+
+| Page | URL | What it shows |
+|------|-----|---------------|
+| Overview | `/ui/` | Audit dashboard: who asks which agent (user × agent matrix, with each person's most-used agent marked), requests over time, per-agent and per-user leaderboards, where requests come from (Slack / chat / workflow / dashboard), live Slack thread sessions, fleet health and recent activity |
+| Integrations | `/ui/integrations` | Every connector with its live permission / auth state, scopes and tools |
+| Agents | `/ui/agents` | The roster — open a card for its prompts (read-only), or chat where `chat_enabled` |
+| Workflows | `/ui/workflows` | Every workflow across agents with schedule, status, last run, run / delete actions and GitOps sync state |
+| Dashboards | `/ui/dashboards` | Every dashboard across agents (source dashboards, prompt templates, rendered reports) with sync state |
+| Changelog | `/ui/changelog` | Latest commits to the arbetern repository |
+| Usage & Billing | `/ui/billing` | Estimated LLM spend by agent, model, source, user and workflow (`/billing` redirects here) |
+
+Overview and Usage & Billing share one time window (7 / 30 / 90 days / all) and
+read from the usage ledger (`/api/billing/summary`), which also aggregates per
+user × agent (`by_user_agent`). Slack user IDs are resolved to display names in
+the background via `users.info` (needs the `users:read` scope); until a name is
+cached the raw ID is shown. Chat turns are keyed by the proxy-verified email.
 
 - Drop a `logo.png` into `ui/` to replace the default icon
-- Set `UI_HEADER` env var to customize the navbar title
+- Set `UI_HEADER` env var to customize the top-bar title
 - Agents with `chat_enabled` expose a full-screen chat at `/ui/<agent>/chat` — a deep-linkable, reload-safe URL you can bookmark or share
+- The side rail's collapsed state, the theme and the time window are remembered per browser
 
 ### Authentication (SSO)
 
@@ -964,7 +983,8 @@ slack/               # Slack webhook handler + response helpers
 prompts/             # YAML prompt loader + agent discovery
 dashboards/          # dashboard registry, sync runner, executor, embedded HTML viewer
 workflows/           # workflow engine (monoflow / subflows / event-triggered) + embedded viewer
-ui/                  # embedded web UI (agent manager)
+billing/             # usage & billing ledger (per agent / model / source / user / workflow) + summary API
+ui/                  # embedded management console (index.html shell, app.css, app.js)
 helm/                # Helm chart
 docs/                # setup guides (Slack, GitHub PAT, Atlassian)
 ```

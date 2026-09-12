@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"regexp"
 	"strings"
 	"sync"
 	"syscall"
@@ -44,6 +45,17 @@ import (
 
 //go:embed ui/*
 var uiFS embed.FS
+
+// uiPages are the client-routed pages served from the SPA shell at /ui/<page>.
+var uiPages = map[string]bool{
+	"overview":     true,
+	"integrations": true,
+	"agents":       true,
+	"workflows":    true,
+	"dashboards":   true,
+	"changelog":    true,
+	"billing":      true,
+}
 
 // ── Integration permission types & cache ────────────────────────────────────
 
@@ -401,6 +413,62 @@ func (c *emailUserIDCache) resolve(slackClient *slack.Client, email string) stri
 	c.entries[email] = emailUserIDEntry{userID: userID, fetched: time.Now()}
 	c.mu.Unlock()
 	return userID
+}
+
+// slackUserIDRe matches Slack member IDs, the only user keys worth resolving
+// to a display name (chat turns are already keyed by email).
+var slackUserIDRe = regexp.MustCompile(`^[UW][A-Z0-9]{6,}$`)
+
+type userNameCache struct {
+	mu       sync.Mutex
+	names    map[string]userNameEntry
+	inflight map[string]bool
+	ttl      time.Duration
+}
+
+type userNameEntry struct {
+	name    string
+	fetched time.Time
+}
+
+func newUserNameCache(ttl time.Duration) *userNameCache {
+	return &userNameCache{names: make(map[string]userNameEntry), inflight: make(map[string]bool), ttl: ttl}
+}
+
+// resolve returns the cached display name for a Slack user ID, or "" while a
+// lookup is pending. Misses are fetched in the background so the summary
+// handler never waits on Slack; the name lands on the next refresh.
+func (c *userNameCache) resolve(slackClient *slack.Client, id string) string {
+	if slackClient == nil || !slackUserIDRe.MatchString(id) {
+		return ""
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if e, ok := c.names[id]; ok && time.Since(e.fetched) < c.ttl {
+		return e.name
+	}
+	if c.inflight[id] {
+		return ""
+	}
+	c.inflight[id] = true
+	safego.Go("billing: resolve user name "+id, func() {
+		name := ""
+		if user, err := slackClient.GetUserInfo(id); err == nil && user != nil {
+			for _, candidate := range []string{user.RealName, user.Profile.RealName, user.Profile.DisplayName} {
+				if n := strings.TrimSpace(candidate); n != "" {
+					name = n
+					break
+				}
+			}
+		} else if err != nil {
+			log.Printf("[billing] slack users.info %s failed: %v", id, err)
+		}
+		c.mu.Lock()
+		c.names[id] = userNameEntry{name: name, fetched: time.Now()}
+		delete(c.inflight, id)
+		c.mu.Unlock()
+	})
+	return ""
 }
 
 // checkChatRBAC authorizes a chat-UI request for an agent using two layers,
@@ -1631,6 +1699,8 @@ func main() {
 	log.Printf("Usage & billing store: %s", billingStore.Dir())
 	billingStop := make(chan struct{})
 	billingStore.StartFlusher(billingStop)
+	userNames := newUserNameCache(24 * time.Hour)
+	billingStore.SetUserNameResolver(func(id string) string { return userNames.resolve(slackClient, id) })
 	billing.StartPriceSync(billingStop)
 	defer close(billingStop)
 
@@ -1757,16 +1827,30 @@ func main() {
 	// the front-end instead of a raw 403 page. Only the agent's chat data is
 	// gated, and the same shell is already public at /ui/.
 	// More specific than the "/ui/" static handler, so it takes precedence.
+	uiContent, _ := fs.Sub(uiFS, "ui")
+	uiStatic := http.StripPrefix("/ui/", http.FileServer(http.FS(uiContent)))
 	if indexHTML, err := uiFS.ReadFile("ui/index.html"); err == nil {
+		serveShell := func(w http.ResponseWriter) {
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.Header().Set("Cache-Control", "no-store")
+			_, _ = w.Write(indexHTML)
+		}
 		http.HandleFunc("/ui/{agent}/chat", func(w http.ResponseWriter, r *http.Request) {
 			agent := r.PathValue("agent")
 			if !chatRegistry.IsEnabled(agent) {
 				http.NotFound(w, r)
 				return
 			}
-			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			w.Header().Set("Cache-Control", "no-store")
-			_, _ = w.Write(indexHTML)
+			serveShell(w)
+		})
+		// Client-routed pages of the management UI share the SPA shell; any
+		// other single-segment path under /ui/ is a static asset.
+		http.HandleFunc("/ui/{page}", func(w http.ResponseWriter, r *http.Request) {
+			if uiPages[r.PathValue("page")] {
+				serveShell(w)
+				return
+			}
+			uiStatic.ServeHTTP(w, r)
 		})
 	}
 
@@ -1866,14 +1950,13 @@ func main() {
 	})
 
 	// Agent management UI (embedded static files) — behind IP whitelist if configured.
-	uiContent, _ := fs.Sub(uiFS, "ui")
 	uiCIDRs := parseCIDRs(cfg.UIAllowedCIDRs)
 	if len(uiCIDRs) > 0 {
 		log.Printf("UI IP whitelist enabled: %s", cfg.UIAllowedCIDRs)
 	}
 	// Per-route IP gating is no longer needed — globalIPGate (installed on
 	// the server Handler below) covers every non-exempt path in one place.
-	http.Handle("/ui/", http.StripPrefix("/ui/", http.FileServer(http.FS(uiContent))))
+	http.Handle("/ui/", uiStatic)
 	// Favicon — served without IP whitelist so dashboard/workflow viewers can
 	// load it regardless of where they're accessing from.
 	http.HandleFunc("/favicon.svg", func(w http.ResponseWriter, r *http.Request) {

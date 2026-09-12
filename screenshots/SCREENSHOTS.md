@@ -4,8 +4,11 @@ A visual tour of the Arbetern UI.
 
 ## Home
 
-The landing page opens on the **integrations** section — every configured
-integration with its live permission / auth state.
+The console opens on the **Overview** audit dashboard (who asks which agent,
+requests over time, fleet health) with a collapsible side rail for the other
+pages. The screenshots below predate the side rail and show the
+**integrations** page — every configured integration with its live
+permission / auth state.
 
 ![Home — integrations](home_integrations_light.png)
 

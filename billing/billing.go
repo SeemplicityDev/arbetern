@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -100,25 +101,27 @@ type wfCounts struct {
 
 // monthData is the persisted shape of one calendar month.
 type monthData struct {
-	Month     string               `json:"month"`
-	Totals    Counts               `json:"totals"`
-	Days      map[string]*Counts   `json:"days"`
-	Agents    map[string]*Counts   `json:"agents"`
-	Models    map[string]*Counts   `json:"models"`
-	Sources   map[string]*Counts   `json:"sources"`
-	Users     map[string]*Counts   `json:"users"`
-	Workflows map[string]*wfCounts `json:"workflows"`
+	Month      string               `json:"month"`
+	Totals     Counts               `json:"totals"`
+	Days       map[string]*Counts   `json:"days"`
+	Agents     map[string]*Counts   `json:"agents"`
+	Models     map[string]*Counts   `json:"models"`
+	Sources    map[string]*Counts   `json:"sources"`
+	Users      map[string]*Counts   `json:"users"`
+	UserAgents map[string]*Counts   `json:"user_agents"`
+	Workflows  map[string]*wfCounts `json:"workflows"`
 }
 
 func newMonth(key string) *monthData {
 	return &monthData{
-		Month:     key,
-		Days:      map[string]*Counts{},
-		Agents:    map[string]*Counts{},
-		Models:    map[string]*Counts{},
-		Sources:   map[string]*Counts{},
-		Users:     map[string]*Counts{},
-		Workflows: map[string]*wfCounts{},
+		Month:      key,
+		Days:       map[string]*Counts{},
+		Agents:     map[string]*Counts{},
+		Models:     map[string]*Counts{},
+		Sources:    map[string]*Counts{},
+		Users:      map[string]*Counts{},
+		UserAgents: map[string]*Counts{},
+		Workflows:  map[string]*wfCounts{},
 	}
 }
 
@@ -130,6 +133,16 @@ type Store struct {
 	months map[string]*monthData
 	recent []Event
 	dirty  map[string]bool
+
+	resolveName func(userID string) string
+}
+
+// SetUserNameResolver installs a best-effort user ID → display name lookup
+// used to label users in summaries. Nil or "" results leave the raw ID.
+func (s *Store) SetUserNameResolver(fn func(userID string) string) {
+	s.mu.Lock()
+	s.resolveName = fn
+	s.mu.Unlock()
 }
 
 // New constructs a Store rooted at dir, loading any existing aggregates.
@@ -159,6 +172,10 @@ func dayKey(t time.Time) string   { return t.UTC().Format("2006-01-02") }
 // part of the usage-<month>.json filename on the next flush, so a hand-edited
 // descriptor must not be able to steer that write elsewhere.
 var monthRe = regexp.MustCompile(`^\d{4}-\d{2}$`)
+
+// userAgentSep joins a user ID and an agent ID into one UserAgents key. Agent
+// IDs never contain it, so the key splits unambiguously at its last occurrence.
+const userAgentSep = "|"
 
 func bucket(m map[string]*Counts, k string) *Counts {
 	c := m[k]
@@ -203,6 +220,7 @@ func (s *Store) Record(e Event) {
 	bucket(m.Sources, e.Source).add(e)
 	if e.UserID != "" {
 		bucket(m.Users, e.UserID).add(e)
+		bucket(m.UserAgents, e.UserID+userAgentSep+e.Agent).add(e)
 	}
 	if e.WorkflowID != "" {
 		key := e.Agent + "/" + e.WorkflowID
@@ -294,6 +312,9 @@ func (s *Store) load() {
 		if m.Users == nil {
 			m.Users = map[string]*Counts{}
 		}
+		if m.UserAgents == nil {
+			m.UserAgents = map[string]*Counts{}
+		}
 		if m.Workflows == nil {
 			m.Workflows = map[string]*wfCounts{}
 		}
@@ -317,18 +338,19 @@ type Row struct {
 
 // Summary is the aggregated view served to the UI for a trailing window.
 type Summary struct {
-	Days       int         `json:"days"`
-	Since      string      `json:"since"`
-	Totals     Counts      `json:"totals"`
-	ByAgent    []Row       `json:"by_agent"`
-	ByModel    []Row       `json:"by_model"`
-	BySource   []Row       `json:"by_source"`
-	ByUser     []Row       `json:"by_user"`
-	ByWorkflow []Row       `json:"by_workflow"`
-	Daily      []Row       `json:"daily"`
-	Recent     []Event     `json:"recent"`
-	Months     []string    `json:"months"`
-	Pricing    PriceSource `json:"pricing"`
+	Days        int         `json:"days"`
+	Since       string      `json:"since"`
+	Totals      Counts      `json:"totals"`
+	ByAgent     []Row       `json:"by_agent"`
+	ByModel     []Row       `json:"by_model"`
+	BySource    []Row       `json:"by_source"`
+	ByUser      []Row       `json:"by_user"`
+	ByUserAgent []Row       `json:"by_user_agent"`
+	ByWorkflow  []Row       `json:"by_workflow"`
+	Daily       []Row       `json:"daily"`
+	Recent      []Event     `json:"recent"`
+	Months      []string    `json:"months"`
+	Pricing     PriceSource `json:"pricing"`
 }
 
 // Summarize aggregates the trailing `days` (UTC) into a single view. days<=0
@@ -349,6 +371,7 @@ func (s *Store) Summarize(days int) Summary {
 	models := map[string]*Counts{}
 	sources := map[string]*Counts{}
 	users := map[string]*Counts{}
+	userAgents := map[string]*Counts{}
 	wfs := map[string]*wfCounts{}
 	daily := map[string]*Counts{}
 
@@ -365,6 +388,7 @@ func (s *Store) Summarize(days int) Summary {
 		merge(models, m.Models)
 		merge(sources, m.Sources)
 		merge(users, m.Users)
+		merge(userAgents, m.UserAgents)
 		for k, wf := range m.Workflows {
 			dst := wfs[k]
 			if dst == nil {
@@ -379,7 +403,10 @@ func (s *Store) Summarize(days int) Summary {
 	out.ByModel = rows(models)
 	out.BySource = rows(sources)
 	out.ByUser = rows(users)
+	out.ByUserAgent = userAgentRows(userAgents)
 	out.ByWorkflow = wfRows(wfs)
+	s.labelUsers(out.ByUser)
+	s.labelUsers(out.ByUserAgent)
 	out.Daily = dailyRows(daily)
 	out.Recent = recentSince(s.recent, since)
 	out.Pricing = SourceInfo()
@@ -418,6 +445,32 @@ func rows(m map[string]*Counts) []Row {
 	}
 	sortRows(out)
 	return out
+}
+
+func userAgentRows(m map[string]*Counts) []Row {
+	out := make([]Row, 0, len(m))
+	for k, c := range m {
+		user, agent := k, ""
+		if i := strings.LastIndex(k, userAgentSep); i >= 0 {
+			user, agent = k[:i], k[i+len(userAgentSep):]
+		}
+		out = append(out, Row{Key: user, Agent: agent, Counts: *c})
+	}
+	sortRows(out)
+	return out
+}
+
+// labelUsers fills Row.Name from the configured resolver. Called under the
+// read lock; the resolver is expected to cache and never block for long.
+func (s *Store) labelUsers(rows []Row) {
+	if s.resolveName == nil {
+		return
+	}
+	for i := range rows {
+		if name := s.resolveName(rows[i].Key); name != "" && name != rows[i].Key {
+			rows[i].Name = name
+		}
+	}
 }
 
 func wfRows(m map[string]*wfCounts) []Row {

@@ -1,25 +1,21 @@
 package billing
 
 import (
-	_ "embed"
 	"encoding/json"
 	"net/http"
 	"strconv"
 )
 
-//go:embed view.html
-var viewHTML string
-
-// RegisterRoutes mounts the Usage & Billing viewer and its read-only API:
+// RegisterRoutes mounts the read-only usage API and keeps the legacy
+// /billing URL working by redirecting to the Usage & Billing page in the UI:
 //
-//	GET /billing                  → embedded HTML dashboard
+//	GET /billing                  → 302 /ui/billing
 //	GET /api/billing/summary?days → aggregated usage/spend JSON
 //
 // Access control is enforced upstream by the global IP gate in main.
 func (s *Store) RegisterRoutes(mux, apiMux *http.ServeMux) {
-	mux.HandleFunc("/billing", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_, _ = w.Write([]byte(viewHTML))
+	mux.HandleFunc("/billing", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/ui/billing", http.StatusFound)
 	})
 	apiMux.HandleFunc("/api/billing/summary", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
