@@ -143,6 +143,8 @@ All live under `persistence.mountPath` in the chart and default to `./data/<feat
 | `CHAT_DIR` | Directory for centralized agent chat. Each agent holds many conversations (ChatGPT/Claude-style threads) stored at `<agent>/<conversation-id>.json`. Conversations are shared — everyone sees the same threads (no per-user auth yet). Chat is enabled per agent via `chat_enabled: true` in the agent's `config.yaml`; defaults to `./data/chat` |
 | `CHAT_RETENTION` | How long a UI chat conversation is kept after its last activity before a background sweeper deletes it (applies to all agents). Go duration; defaults to `168h` (1 week). The sweeper runs hourly |
 | `BILLING_DIR` | Directory for the usage & billing ledger. LLM token spend is aggregated per agent / workflow / source into monthly JSON files (`usage-YYYY-MM.json` + `recent.json`). Defaults to `./data/billing`; the chart points it at the PVC when `billing.enabled` is true |
+| `SKILLS_DIR` | Directory where custom skills (`<id>.json`) are persisted. Defaults to `./data/skills`; the chart points it at the PVC when `skills.enabled` is true |
+| `MCP_DIR` | Directory where MCP connectors (`<id>.json`) are persisted. Defaults to `./data/mcp`; the chart points it at the PVC when `mcp.enabled` is true |
 | `PRICE_SOURCE_URL` | Single source of truth for per-token prices, synced on boot and every 24h (default: LiteLLM's public price file, ~2900 models). The billing tab shows the live source, model count, and last-sync time. Set empty to rely solely on `LLM_PRICE_OVERRIDES`. Price changes only affect future turns — recorded costs are frozen at record time |
 | `LLM_PRICE_OVERRIDES` | Optional JSON map of model → `{"in":<usd_per_1M>,"out":<usd_per_1M>}` layered on top of the synced feed (wins over it) for negotiated/Azure rates. A model matched by neither is recorded at $0 and flagged `unpriced` |
 | `CUSTOM_PROMPTS_DIR` | Directory of custom prompt YAML files **appended** to built-in agent prompts. Set automatically by the chart when `customPrompts` is configured |
@@ -241,7 +243,10 @@ URL:
 |------|-----|---------------|
 | Overview | `/ui/` | Audit dashboard: who asks which agent (user × agent matrix, with each person's most-used agent marked), requests over time, per-agent and per-user leaderboards, where requests come from (Slack / chat / workflow / dashboard), live Slack thread sessions, fleet health and recent activity |
 | Integrations | `/ui/integrations` | Every connector with its live permission / auth state, scopes and tools |
+| MCP & Connectors | `/ui/mcp` | Registered Model Context Protocol servers: add, test (handshake + tool discovery), scope to agents, enable or disable — see [docs/MCP.md](docs/MCP.md) |
 | Agents | `/ui/agents` | The roster — open a card for its prompts (read-only), or chat where `chat_enabled` |
+| Chats | `/ui/chats` | Conversations of every chat-enabled agent: open, start, rename or delete them (same access rules as the chat itself) |
+| Skills | `/ui/skills` | Instruction blocks the agents follow: the built-in ones from the prompt files (read-only) plus custom skills written here and appended to the system prompts of the agents they target |
 | Workflows | `/ui/workflows` | Every workflow across agents with schedule, status, last run, run / delete actions and GitOps sync state |
 | Dashboards | `/ui/dashboards` | Every dashboard across agents (source dashboards, prompt templates, rendered reports) with sync state |
 | Changelog | `/ui/changelog` | Latest commits to the arbetern repository |
@@ -989,6 +994,8 @@ prompts/             # YAML prompt loader + agent discovery
 dashboards/          # dashboard registry, sync runner, executor, embedded HTML viewer
 workflows/           # workflow engine (monoflow / subflows / event-triggered) + embedded viewer
 billing/             # usage & billing ledger (per agent / model / source / user / workflow) + summary API
+skills/              # custom skill registry (instruction blocks appended to agent prompts) + API
+mcp/                 # MCP connector registry, Streamable HTTP JSON-RPC client, tool exposure + API
 ui/                  # embedded management console (index.html shell, app.css, app.js)
 helm/                # Helm chart
 docs/                # setup guides (Slack, GitHub PAT, Atlassian)
@@ -999,6 +1006,30 @@ docs/                # setup guides (Slack, GitHub PAT, Atlassian)
 Edit any `agents/<name>/prompts.yaml` to change LLM behavior without recompiling. Keys: `intro`, `security`, `classifier`, `debug`, `general`.
 
 Global prompts (e.g. `security`) are defined in `agents/prompts.yaml` and inherited by all agents. Agent-specific prompts override globals.
+
+## Skills
+
+A skill is an instruction block appended to an agent's system prompt. The
+**Skills** page lists two kinds:
+
+- **Built-in** — every block of `agents/prompts.yaml` (applies to all agents)
+  and every agent-specific block or override in `agents/<id>/prompts.yaml`.
+  Read-only; change them in the prompt files.
+- **Custom** — written in the UI (`POST /api/skills`), stored as JSON under
+  `SKILLS_DIR`, and appended after the agent's own prompt on every Slack,
+  chat and workflow turn. A skill can target specific agents or all of them,
+  and can be disabled without deleting it.
+
+## MCP & Connectors
+
+Model Context Protocol servers can be registered from the **MCP & Connectors**
+page or via `POST /api/mcp`. Testing a connector performs the MCP handshake and
+`tools/list`; the discovered tools are then exposed to the allowed agents as
+`mcp_<connector>_<tool>` in every tool loop, and calls are proxied through
+`tools/call`. Header values may reference environment variables as `${NAME}`
+so tokens stay in the Secret rather than on the volume; stored literal values
+are masked in API responses. See [docs/MCP.md](docs/MCP.md) for the supported
+transport, limits and roadmap.
 
 ## Integrations
 

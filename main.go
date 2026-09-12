@@ -35,9 +35,11 @@ import (
 	"github.com/justmike1/arbetern/google"
 	"github.com/justmike1/arbetern/internal/safego"
 	"github.com/justmike1/arbetern/llm"
+	"github.com/justmike1/arbetern/mcp"
 	"github.com/justmike1/arbetern/nvd"
 	"github.com/justmike1/arbetern/prompts"
 	"github.com/justmike1/arbetern/salesforce"
+	"github.com/justmike1/arbetern/skills"
 	"github.com/justmike1/arbetern/slack"
 	"github.com/justmike1/arbetern/workflows"
 	"github.com/justmike1/arbetern/workflows/gitopssync"
@@ -50,7 +52,10 @@ var uiFS embed.FS
 var uiPages = map[string]bool{
 	"overview":     true,
 	"integrations": true,
+	"mcp":          true,
 	"agents":       true,
+	"chats":        true,
+	"skills":       true,
 	"workflows":    true,
 	"dashboards":   true,
 	"changelog":    true,
@@ -1800,11 +1805,30 @@ func main() {
 	billing.StartPriceSync(billingStop)
 	defer close(billingStop)
 
+	agentIDs := make([]string, 0, len(agents))
+	for _, a := range agents {
+		agentIDs = append(agentIDs, a.ID)
+	}
+	skillRegistry, err := skills.New(cfg.SkillsDir)
+	if err != nil {
+		log.Fatalf("failed to init skills registry: %v", err)
+	}
+	skillRegistry.SetKnownAgents(agentIDs)
+	skillRegistry.SetBuiltin(func() []skills.Skill { return builtinSkills(agents) })
+	log.Printf("Skills store: %s", skillRegistry.Dir())
+	mcpRegistry, err := mcp.New(cfg.MCPDir)
+	if err != nil {
+		log.Fatalf("failed to init MCP registry: %v", err)
+	}
+	mcpRegistry.SetKnownAgents(agentIDs)
+	log.Printf("MCP connectors store: %s (%d connector(s))", mcpRegistry.Dir(), len(mcpRegistry.List()))
+
 	for _, agent := range agents {
 		ap, err := prompts.LoadAgent(agent.ID)
 		if err != nil {
 			log.Fatalf("failed to load prompts for agent %s: %v", agent.ID, err)
 		}
+		ap.SetSkillProvider(skillRegistry)
 
 		agentID := agent.ID // capture for closure
 
@@ -1829,6 +1853,7 @@ func main() {
 		})
 
 		router := commands.NewRouter(slackClient, ghClient, modelsClient, codeModelsClient, agentClients.jira, agentClients.nvd, agentClients.sf, agentClients.chorus, agentClients.datadog, agentClients.aws, agentClients.azure, agentClients.databricks, agentClients.clickhouse, agentClients.freshworks, agentClients.google, dashRegistry, wfRegistry, ap, agent.ID, cfg.AppURL, sessions, cfg.MaxToolRounds, userContextStore, billingStore)
+		router.SetMCP(mcpRegistry)
 		routers[agent.ID] = router
 
 		// Background sweepers for the per-router in-memory caches so
@@ -2161,6 +2186,8 @@ func main() {
 	wfRegistry.RegisterRoutes(http.DefaultServeMux, apiMux, knownAgents)
 	chatRegistry.RegisterRoutes(apiMux, knownAgents)
 	billingStore.RegisterRoutes(http.DefaultServeMux, apiMux)
+	skillRegistry.RegisterRoutes(apiMux, clientEmail)
+	mcpRegistry.RegisterRoutes(apiMux, clientEmail)
 
 	// Wire the workflow executor now that routers are built, then kick off
 	// tick goroutines for every workflow that was loaded from disk.

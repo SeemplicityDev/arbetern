@@ -197,6 +197,20 @@ billing:
   enabled: true
   subPath: billing
 
+# Custom skills: instruction blocks created in the web UI and appended to the
+# system prompts of the agents they target. Files at <mountPath>/<subPath>/<id>.json.
+skills:
+  enabled: true
+  subPath: skills
+
+# MCP connectors: registered Model Context Protocol servers whose tools are
+# exposed to the allowed agents. Files at <mountPath>/<subPath>/<id>.json.
+# Header values may reference environment variables as ${NAME} so tokens can
+# stay in the Secret instead of on the volume.
+mcp:
+  enabled: true
+  subPath: mcp
+
 secretName: arbetern-secrets
 
 # Set to true to have the chart create the Secret resource.

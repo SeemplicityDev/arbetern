@@ -26,6 +26,7 @@ import (
 	"github.com/justmike1/arbetern/github"
 	"github.com/justmike1/arbetern/google"
 	"github.com/justmike1/arbetern/llm"
+	"github.com/justmike1/arbetern/mcp"
 	"github.com/justmike1/arbetern/nvd"
 	"github.com/justmike1/arbetern/salesforce"
 	"github.com/justmike1/arbetern/workflows"
@@ -73,6 +74,8 @@ type GeneralHandler struct {
 	googleClient     *google.Client
 	dashboards       *dashboards.Registry
 	workflows        *workflows.Registry
+	mcp              *mcp.Registry
+	mcpTools         map[string]mcp.AgentTool
 	contextProvider  *ContextProvider
 	memory           *ConversationMemory
 	prompts          PromptProvider
@@ -2565,6 +2568,16 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 	tools = append(tools, h.dashboardTools()...)
 	tools = append(tools, h.workflowTools()...)
 
+	if h.mcp != nil {
+		h.mcpTools = map[string]mcp.AgentTool{}
+		for _, t := range h.mcp.ToolsFor(h.agentID) {
+			h.mcpTools[t.LLMName] = t
+			tools = append(tools, llm.Tool{
+				Type:     "function",
+				Function: llm.ToolFunction{Name: t.LLMName, Description: t.Description(), Parameters: t.Schema()},
+			})
+		}
+	}
 	return tools
 }
 
@@ -5769,6 +5782,14 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		return doHTTPGet(ctx, args.URL, args.Accept, args.MaxBytes, userID, channelID)
 
 	default:
+		if t, ok := h.mcpTools[name]; ok {
+			log.Printf("[user=%s channel=%s] mcp tool %s via %s", userID, channelID, t.Tool.Name, t.ConnectorName)
+			out, err := h.mcp.Call(ctx, t.ConnectorID, t.Tool.Name, json.RawMessage(argsJSON))
+			if err != nil {
+				return fmt.Sprintf("Error calling %s on MCP connector %s: %v", t.Tool.Name, t.ConnectorName, err)
+			}
+			return out
+		}
 		return fmt.Sprintf("Unknown tool: %s", name)
 	}
 }

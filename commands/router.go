@@ -21,6 +21,7 @@ import (
 	"github.com/justmike1/arbetern/github"
 	"github.com/justmike1/arbetern/google"
 	"github.com/justmike1/arbetern/llm"
+	"github.com/justmike1/arbetern/mcp"
 	"github.com/justmike1/arbetern/nvd"
 	"github.com/justmike1/arbetern/salesforce"
 	"github.com/justmike1/arbetern/slack"
@@ -45,6 +46,7 @@ type Router struct {
 	googleClient     *google.Client
 	dashboards       *dashboards.Registry
 	workflows        *workflows.Registry
+	mcp              *mcp.Registry
 	contextProvider  *ContextProvider
 	memory           *ConversationMemory
 	prompts          PromptProvider
@@ -95,6 +97,10 @@ func NewRouter(slackClient SlackClient, ghClient *github.Client, modelsClient *l
 		billing:          usage,
 	}
 }
+
+// SetMCP makes the tools of registered MCP connectors available to this
+// agent's tool loops.
+func (r *Router) SetMCP(reg *mcp.Registry) { r.mcp = reg }
 
 // ContextProvider exposes the channel-history cache so callers (e.g.
 // main) can attach a background GC sweeper.
@@ -273,6 +279,7 @@ func (r *Router) newGeneralHandler(userContext string, session *ThreadSession) *
 		googleClient:     r.googleClient,
 		dashboards:       r.dashboards,
 		workflows:        r.workflows,
+		mcp:              r.mcp,
 		contextProvider:  r.contextProvider,
 		memory:           r.memory,
 		prompts:          r.prompts,

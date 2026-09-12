@@ -38,6 +38,29 @@ type AgentPrompts struct {
 	agentID    string
 	store      map[string]string
 	globalKeys []string // ordered keys from agents/prompts.yaml
+	skills     SkillProvider
+}
+
+// SkillProvider supplies extra instruction blocks appended to every system
+// prompt built for an agent.
+type SkillProvider interface {
+	Instructions(agentID string) []string
+}
+
+// SetSkillProvider installs the source of custom skills for this agent.
+func (ap *AgentPrompts) SetSkillProvider(p SkillProvider) {
+	ap.skills = p
+}
+
+// GlobalPrompts returns the shared prompt blocks and their key order.
+func GlobalPrompts(agentsDir string) (map[string]string, []string, error) {
+	if agentsDir == "" {
+		agentsDir = os.Getenv("AGENTS_DIR")
+	}
+	if agentsDir == "" {
+		agentsDir = defaultAgentsDir
+	}
+	return loadGlobalPrompts(agentsDir)
 }
 
 // loadGlobalPrompts reads the global prompts.yaml from the agents root directory.
@@ -228,6 +251,9 @@ func (ap *AgentPrompts) SystemPrompt(specificKey string) string {
 	}
 	if v := ap.Get(specificKey); v != "" {
 		parts = append(parts, v)
+	}
+	if ap.skills != nil {
+		parts = append(parts, ap.skills.Instructions(ap.agentID)...)
 	}
 	return strings.Join(parts, "\n\n")
 }

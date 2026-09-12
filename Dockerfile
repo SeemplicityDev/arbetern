@@ -20,7 +20,7 @@ RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /arbetern .
 # Pre-create the shared data directory (dashboards + workflows subdirs) owned
 # by the distroless `nonroot` user (uid/gid 65532) so the runtime can persist
 # JSON even when DASHBOARDS_DIR / WORKFLOWS_DIR point at an unmounted default.
-RUN mkdir -p /var/lib/arbetern/dashboards /var/lib/arbetern/workflows \
+RUN mkdir -p /var/lib/arbetern/dashboards /var/lib/arbetern/workflows /var/lib/arbetern/skills /var/lib/arbetern/mcp \
     && chown -R 65532:65532 /var/lib/arbetern
 
 FROM gcr.io/distroless/static:nonroot

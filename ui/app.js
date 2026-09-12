@@ -72,10 +72,10 @@ const INTEGRATION_LOGOS = {
 
 const SOURCE_LABELS = { slack: 'Slack commands', chat: 'Web chat', workflow: 'Scheduled workflows', dashboard: 'Dashboard renders' };
 const SLACK_ID_RE = /^[UW][A-Z0-9]{6,}$/;
-const PAGES = ['overview', 'integrations', 'agents', 'workflows', 'dashboards', 'changelog', 'billing'];
+const PAGES = ['overview', 'integrations', 'mcp', 'agents', 'chats', 'skills', 'workflows', 'dashboards', 'changelog', 'billing'];
 const PAGE_TITLES = {
-  overview: 'Overview', integrations: 'Integrations', agents: 'Agents', workflows: 'Workflows',
-  dashboards: 'Dashboards', changelog: 'Changelog', billing: 'Usage & Billing',
+  overview: 'Overview', integrations: 'Integrations', mcp: 'MCP & Connectors', agents: 'Agents', chats: 'Chats',
+  skills: 'Skills', workflows: 'Workflows', dashboards: 'Dashboards', changelog: 'Changelog', billing: 'Usage & Billing',
 };
 const WINDOWS = [7, 30, 90, 0];
 const EXTRAS_CACHE_TTL_MS = 5 * 60 * 1000;
@@ -102,6 +102,12 @@ const AGENT_DASHBOARDS = {};
 const AGENT_WORKFLOWS = {};
 let wfFilter = 'all';
 let dashFilter = 'all';
+let chatsAgent = null;
+let chatsList = null;
+let chatsLoading = false;
+let skillsData = null;
+let skillFilter = 'all';
+let mcpData = null;
 
 function escapeHtml(str) {
   const d = document.createElement('div');
@@ -279,6 +285,9 @@ function renderCurrent() {
     case 'dashboards': renderDashboardsPage(); break;
     case 'changelog': renderChanges(); break;
     case 'billing': if (billingSummary) renderBilling(billingSummary); break;
+    case 'mcp': renderMCPPage(); break;
+    case 'chats': renderChatsPage(); break;
+    case 'skills': renderSkillsPage(); break;
     default: break;
   }
 }
@@ -287,7 +296,7 @@ function loadPage(page) {
   switch (page) {
     case 'overview':
       renderOverview();
-      return Promise.all([loadBilling(), loadSessions(), loadIntegrations(), loadWorkflows(), loadDashboards(), loadChanges()]);
+      return Promise.all([loadBilling(), loadSessions(), loadIntegrations(), loadWorkflows(), loadDashboards(), loadChanges(), loadMCP()]);
     case 'integrations':
       return loadIntegrations();
     case 'agents':
@@ -304,6 +313,15 @@ function loadPage(page) {
     case 'billing':
       if (billingSummary) renderBilling(billingSummary);
       return loadBilling();
+    case 'mcp':
+      renderMCPPage();
+      return loadMCP();
+    case 'chats':
+      renderChatsPage();
+      return chatsList ? loadChats() : Promise.resolve();
+    case 'skills':
+      renderSkillsPage();
+      return loadSkills();
     default:
       return Promise.resolve();
   }
@@ -724,6 +742,14 @@ function renderFleet() {
     rows.push(fleetRow('/ui/dashboards', 'dashboards', 'Dashboards', dashboardsData.length ? (parts || 'source dashboards') : 'none yet', fmtInt(dashboardsData.length), failing ? 'bad' : dashboardsData.length ? '' : 'off'));
   } else {
     rows.push(fleetRow('/ui/dashboards', 'dashboards', 'Dashboards', 'loading', '—', 'off'));
+  }
+  if (mcpData && mcpData.list) {
+    const list = mcpData.list;
+    const enabled = list.filter(c => c.enabled).length;
+    const failing = list.filter(c => c.enabled && c.last_error).length;
+    const tools = list.filter(c => c.enabled && !c.last_error).reduce((n, c) => n + (c.tools || []).length, 0);
+    const sub = list.length ? ([tools ? plural(tools, 'tool') : '', failing ? `${failing} failing` : ''].filter(Boolean).join(' · ') || 'no tools discovered') : 'none yet';
+    rows.push(fleetRow('/ui/mcp', 'mcp', 'MCP connectors', sub, `${enabled} / ${list.length}`, failing ? 'bad' : !list.length ? 'off' : tools ? '' : 'warn'));
   }
   el.innerHTML = rows.join('');
 }
@@ -1260,13 +1286,14 @@ function showChatAccessDenied() {
   }
 }
 
-async function openLatestOrNew(agent) {
+async function openLatestOrNew(agent, convId) {
   setChatInputVisible(true);
   try {
     const list = await apiListConversations(agent);
     if (chatAgentId !== agent) return;
     if (chatFull) renderConvList(list);
-    if (list.length > 0) await selectConversation(agent, list[0].id);
+    if (convId && list.some(c => c.id === convId)) await selectConversation(agent, convId);
+    else if (list.length > 0) await selectConversation(agent, list[0].id);
     else await newChat(agent);
   } catch (err) {
     if (chatAgentId !== agent) return;
@@ -1313,7 +1340,7 @@ async function refreshConvList(agent) {
   }
 }
 
-async function selectFullChatAgent(id) {
+async function selectFullChatAgent(id, convId) {
   const agent = agentById(id);
   if (!agent) return;
   chatAgentId = id;
@@ -1330,18 +1357,18 @@ async function selectFullChatAgent(id) {
   const path = '/ui/' + encodeURIComponent(id) + '/chat';
   if (location.pathname !== path) history.pushState({}, '', path);
   document.title = `${appTitle} — ${agent.name} chat`;
-  await openLatestOrNew(id);
+  await openLatestOrNew(id, convId);
   setTimeout(() => document.getElementById('fs-chat-input').focus(), 80);
 }
 
-function openFullChat(id) {
+function openFullChat(id, convId) {
   if (!agentById(id)) return;
   if (!chatFull && currentPage) pageBeforeChat = currentPage;
   chatFull = true;
   document.getElementById('chat-overlay').classList.remove('active');
   document.getElementById('chat-fullscreen').classList.add('active');
   populateAgentSelect();
-  selectFullChatAgent(id);
+  selectFullChatAgent(id, convId);
 }
 
 function hideFullChat() {
@@ -1538,6 +1565,7 @@ document.getElementById('fs-chat-input').addEventListener('keydown', e => {
 document.addEventListener('keydown', e => {
   if (e.key !== 'Escape') return;
   if (!document.getElementById('user-pop').hidden) { setIdentityOpen(false); return; }
+  if (document.getElementById('form-overlay').classList.contains('active')) { closeForm(); return; }
   if (document.documentElement.dataset.drawer === 'open') { closeDrawer(); return; }
   if (chatFull) { closeFullChat(); return; }
   closeChat();
@@ -1674,6 +1702,472 @@ function setIntegrationTab(tab) {
   activeIntegrationTab = tab;
   document.querySelectorAll('.integration-tab').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
   document.querySelectorAll('.integration-tab-panel').forEach(p => { p.hidden = p.dataset.tabPanel !== tab; });
+}
+
+/* Editor panel shared by skills and connectors */
+let formState = null;
+
+function openForm({ title, subtitle, html, saveLabel, onSave }) {
+  document.getElementById('form-title').textContent = title;
+  document.getElementById('form-subtitle').textContent = subtitle || '';
+  document.getElementById('form-body').innerHTML = html;
+  document.getElementById('form-error').textContent = '';
+  const save = document.getElementById('form-save');
+  save.textContent = saveLabel || 'Save';
+  save.disabled = false;
+  formState = { onSave };
+  document.getElementById('form-overlay').classList.add('active');
+  const first = document.querySelector('#form-body input, #form-body textarea');
+  if (first) setTimeout(() => first.focus(), 120);
+}
+
+function closeForm() {
+  document.getElementById('form-overlay').classList.remove('active');
+  formState = null;
+}
+
+async function submitForm() {
+  if (!formState) return;
+  const save = document.getElementById('form-save');
+  const errEl = document.getElementById('form-error');
+  save.disabled = true;
+  errEl.textContent = '';
+  try {
+    await formState.onSave();
+    closeForm();
+  } catch (err) {
+    errEl.textContent = err && err.message ? err.message : String(err);
+    save.disabled = false;
+  }
+}
+
+document.getElementById('form-save').addEventListener('click', submitForm);
+document.getElementById('form-cancel').addEventListener('click', closeForm);
+document.getElementById('form-close').addEventListener('click', closeForm);
+document.getElementById('form-overlay').addEventListener('click', e => {
+  if (e.target === document.getElementById('form-overlay')) closeForm();
+});
+document.getElementById('form-body').addEventListener('submit', e => { e.preventDefault(); submitForm(); });
+document.getElementById('form-body').addEventListener('click', e => {
+  const chip = e.target.closest('.chip-select .chip');
+  if (chip) { chip.classList.toggle('on'); return; }
+  const del = e.target.closest('.kv-del');
+  if (del) { del.closest('.kv-row').remove(); return; }
+  if (e.target.closest('#f-add-header')) document.getElementById('f-headers').insertAdjacentHTML('beforeend', headerRowHtml('', ''));
+});
+
+function formField(label, inputHtml, hint) {
+  return `<div class="form-field"><div class="form-label">${label}</div>${inputHtml}${hint ? `<div class="form-hint">${hint}</div>` : ''}</div>`;
+}
+
+function formValue(id) {
+  const el = document.getElementById(id);
+  return el ? el.value.trim() : '';
+}
+
+function agentChipsHtml(selected) {
+  return `<div class="chip-select" id="f-agents">${agentsData.map(a =>
+    `<button type="button" class="chip${selected.includes(a.id) ? ' on' : ''}" data-id="${a.id}">${miniAvatar(a.id)}${escapeHtml(a.name)}</button>`).join('')}</div>`;
+}
+
+function selectedAgents() {
+  return [...document.querySelectorAll('#f-agents .chip.on')].map(b => b.dataset.id);
+}
+
+async function apiSend(url, method, body) {
+  const init = { method };
+  if (body !== undefined) {
+    init.headers = { 'Content-Type': 'application/json' };
+    init.body = JSON.stringify(body);
+  }
+  const r = await fetch(url, init);
+  if (!r.ok) {
+    const text = (await r.text()).trim();
+    throw new Error(text || ('HTTP ' + r.status));
+  }
+  return r.status === 204 ? null : r.json();
+}
+
+function scopeChips(agents) {
+  return !agents || !agents.length ? '<span class="tag">All agents</span>' : agents.map(miniAvatar).join('');
+}
+
+/* Chats */
+function chatAgents() { return agentsData.filter(a => a.chat_enabled); }
+
+async function loadChats() {
+  const agents = chatAgents();
+  if (!agents.length) { renderChatsPage(); return; }
+  if (!chatsAgent || !agents.some(a => a.id === chatsAgent)) chatsAgent = agents[0].id;
+  const agent = chatsAgent;
+  chatsLoading = true;
+  try {
+    const list = await apiListConversations(agent);
+    if (chatsAgent === agent) chatsList = { agent, list, error: null };
+  } catch (err) {
+    if (chatsAgent === agent) chatsList = { agent, list: null, error: err };
+  }
+  chatsLoading = false;
+  if (currentPage === 'chats') renderChatsPage();
+}
+
+function renderChatsPage() {
+  const el = document.getElementById('chat-list');
+  const pills = document.getElementById('chat-agent-pills');
+  const newBtn = document.getElementById('chat-new-btn');
+  if (!agentsData.length) return;
+  const agents = chatAgents();
+  if (!agents.length) {
+    pills.innerHTML = '';
+    newBtn.hidden = true;
+    el.innerHTML = emptyHtml('No agent has chat enabled. Turn on chat for an agent in its config to start a conversation here.', true);
+    return;
+  }
+  newBtn.hidden = false;
+  if (!chatsAgent || !agents.some(a => a.id === chatsAgent)) chatsAgent = agents[0].id;
+  pills.innerHTML = agents.length > 1
+    ? agents.map(a => `<button class="pill${a.id === chatsAgent ? ' active' : ''}" data-agent="${a.id}">${escapeHtml(a.name)}</button>`).join('')
+    : '';
+  if (!chatsList || chatsList.agent !== chatsAgent) {
+    el.innerHTML = emptyHtml('Loading conversations…', true);
+    if (!chatsLoading) loadChats();
+    return;
+  }
+  if (chatsList.error) {
+    el.innerHTML = emptyHtml(chatsList.error.status === 403 ? 'You don’t have access to this agent’s chat.' : 'Failed to load conversations.', true);
+    return;
+  }
+  const list = chatsList.list || [];
+  if (!list.length) {
+    el.innerHTML = emptyHtml(`No conversations with ${agentLabel(chatsAgent)} yet. Start one with New chat.`, true);
+    return;
+  }
+  el.innerHTML = `<table class="data-table"><thead><tr><th>Conversation</th><th>Agent</th><th class="n">Messages</th><th>Last activity</th><th></th></tr></thead><tbody>${
+    list.map(c => `<tr>
+      <td><a href="/ui/${encodeURIComponent(chatsAgent)}/chat" onclick="event.preventDefault();openFullChat('${chatsAgent}','${c.id}')">${escapeHtml(c.title || 'New chat')}</a><span class="sub">started ${timeAgo(c.created_at)}</span></td>
+      <td>${agentChip(chatsAgent)}</td>
+      <td class="n">${fmtInt(c.message_count)}</td>
+      <td class="muted" title="${escapeHtml(new Date(c.updated_at).toLocaleString())}">${timeAgo(c.updated_at)}</td>
+      <td><div class="actions">
+        <button class="btn-mini" type="button" onclick="openFullChat('${chatsAgent}','${c.id}')">Open</button>
+        <button class="btn-mini" type="button" onclick="renameChatFromList('${c.id}')">Rename</button>
+        <button class="btn-mini danger" type="button" onclick="deleteChatFromList('${c.id}')">Delete</button>
+      </div></td>
+    </tr>`).join('')}</tbody></table>`;
+}
+
+document.getElementById('chat-agent-pills').addEventListener('click', e => {
+  const b = e.target.closest('.pill');
+  if (!b) return;
+  chatsAgent = b.dataset.agent;
+  chatsList = null;
+  renderChatsPage();
+});
+
+document.getElementById('chat-new-btn').addEventListener('click', async () => {
+  if (!chatsAgent) return;
+  try {
+    const conv = await apiCreateConversation(chatsAgent);
+    openFullChat(chatsAgent, conv.id);
+  } catch (err) {
+    alert(err && err.status === 403 ? 'You don’t have access to this agent’s chat.' : 'Failed to start a chat: ' + err);
+  }
+});
+
+async function renameChatFromList(id) {
+  const c = chatsList && chatsList.list ? chatsList.list.find(x => x.id === id) : null;
+  const title = prompt('Rename conversation', c ? c.title || '' : '');
+  if (title == null || !title.trim()) return;
+  try {
+    await apiRenameConversation(chatsAgent, id, title.trim());
+  } catch (err) {
+    alert('Failed to rename conversation: ' + err);
+  }
+  chatsList = null;
+  loadChats();
+}
+
+async function deleteChatFromList(id) {
+  if (!confirm('Delete this conversation? This removes its history for everyone.')) return;
+  try {
+    await apiDeleteConversation(chatsAgent, id);
+  } catch (err) {
+    alert('Failed to delete conversation: ' + err);
+  }
+  chatsList = null;
+  loadChats();
+}
+
+/* Skills */
+async function loadSkills() {
+  if (recentlyFetched('skills')) return;
+  try {
+    skillsData = { list: await fetchJSON('/api/skills'), error: null };
+  } catch (err) {
+    skillsData = { list: null, error: err };
+  }
+  if (currentPage === 'skills') renderSkillsPage();
+}
+
+function firstLine(text, max) {
+  const line = String(text || '').split('\n').map(l => l.trim().replace(/^[-•*#\s]+/, '')).find(Boolean) || '';
+  return line.length > max ? line.slice(0, max - 1) + '…' : line;
+}
+
+function skillApplies(s, agent) {
+  return agent === 'all' || !s.agents || !s.agents.length || s.agents.includes(agent);
+}
+
+function skillCard(s) {
+  const custom = s.kind === 'custom';
+  const desc = s.description || (custom ? firstLine(s.instructions, 120) : '');
+  const when = s.updated_at || s.created_at;
+  const sub = custom ? (s.created_by ? 'by ' + escapeHtml(s.created_by) : 'custom skill') : escapeHtml(s.source || 'prompt file');
+  return `<article class="card${!custom || s.enabled ? '' : ' off'}">
+      <div class="card-head">
+        <div><div class="card-name" title="${escapeHtml(s.name)}">${escapeHtml(s.name)}</div><div class="card-sub">${sub}</div></div>
+        <div class="card-scope">${scopeChips(s.agents)}</div>
+      </div>
+      ${desc ? `<div class="card-desc">${escapeHtml(desc)}</div>` : ''}
+      <details><summary>Instructions</summary><pre>${escapeHtml(s.instructions)}</pre></details>
+      <div class="card-foot">
+        <span class="tag ${custom ? (s.enabled ? 'workflow' : '') : 'gitops'}">${custom ? (s.enabled ? 'enabled' : 'disabled') : 'built-in'}</span>
+        ${custom && when ? `<span>updated ${timeAgo(when)}</span>` : ''}
+        ${custom ? `<div class="actions">
+          <button class="btn-mini" type="button" onclick="toggleSkill('${s.id}', ${!s.enabled})">${s.enabled ? 'Disable' : 'Enable'}</button>
+          <button class="btn-mini" type="button" onclick="editSkill('${s.id}')">Edit</button>
+          <button class="btn-mini danger" type="button" onclick="deleteSkill('${s.id}')">Delete</button>
+        </div>` : ''}
+      </div>
+    </article>`;
+}
+
+function renderSkillsPage() {
+  const customEl = document.getElementById('skills-custom');
+  const builtinEl = document.getElementById('skills-builtin');
+  const filterEl = document.getElementById('skill-filter');
+  filterEl.innerHTML = agentsData.length > 1
+    ? `<button class="pill${skillFilter === 'all' ? ' active' : ''}" data-agent="all">All agents</button>` +
+      agentsData.map(a => `<button class="pill${skillFilter === a.id ? ' active' : ''}" data-agent="${a.id}">${escapeHtml(a.name)}</button>`).join('')
+    : '';
+  if (!skillsData) return;
+  if (skillsData.error) {
+    customEl.innerHTML = emptyHtml('Failed to load skills.', true);
+    builtinEl.innerHTML = '';
+    return;
+  }
+  const list = skillsData.list.filter(s => skillApplies(s, skillFilter));
+  const custom = list.filter(s => s.kind === 'custom');
+  const builtin = list.filter(s => s.kind !== 'custom');
+  document.getElementById('skills-custom-meta').textContent = custom.length ? `${custom.length} · ${custom.filter(s => s.enabled).length} enabled` : '';
+  document.getElementById('skills-builtin-meta').textContent = builtin.length ? String(builtin.length) : '';
+  customEl.innerHTML = custom.length ? custom.map(skillCard).join('') : emptyHtml('No custom skills yet. Write one to give the agents an extra instruction block.', true);
+  builtinEl.innerHTML = builtin.length ? builtin.map(skillCard).join('') : emptyHtml('No built-in skills apply here.');
+}
+
+document.getElementById('skill-filter').addEventListener('click', e => {
+  const b = e.target.closest('.pill');
+  if (!b) return;
+  skillFilter = b.dataset.agent;
+  renderSkillsPage();
+});
+document.getElementById('skill-new-btn').addEventListener('click', () => skillForm(null));
+
+function skillForm(s) {
+  const isNew = !s;
+  openForm({
+    title: isNew ? 'New skill' : 'Edit skill',
+    subtitle: isNew ? 'Appended to the system prompt of the agents you pick' : s.name,
+    saveLabel: isNew ? 'Create skill' : 'Save changes',
+    html: formField('Name', `<input class="form-input" id="f-name" maxlength="80" value="${escapeHtml(s ? s.name : '')}" placeholder="Incident write-ups">`)
+      + formField('Description', `<input class="form-input" id="f-desc" maxlength="240" value="${escapeHtml(s ? s.description || '' : '')}" placeholder="One line on when this applies">`)
+      + formField('Instructions', `<textarea class="form-textarea" id="f-instructions" placeholder="Write the instruction block exactly as the agent should read it.">${escapeHtml(s ? s.instructions : '')}</textarea>`, 'Plain text or Markdown. Slack replies still follow the agent’s formatting rules.')
+      + formField('Agents', agentChipsHtml(s ? s.agents || [] : []), 'Leave every agent unselected to apply the skill to all of them.')
+      + `<label class="check-row"><input type="checkbox" id="f-enabled"${!s || s.enabled ? ' checked' : ''}> Enabled</label>`,
+    onSave: async () => {
+      const body = {
+        name: formValue('f-name'),
+        description: formValue('f-desc'),
+        instructions: document.getElementById('f-instructions').value.trim(),
+        agents: selectedAgents(),
+        enabled: document.getElementById('f-enabled').checked,
+      };
+      if (isNew) await apiSend('/api/skills', 'POST', body);
+      else await apiSend(`/api/skills/${encodeURIComponent(s.id)}`, 'PATCH', body);
+      delete lastFetched.skills;
+      await loadSkills();
+    },
+  });
+}
+
+function editSkill(id) {
+  const s = skillsData && skillsData.list ? skillsData.list.find(x => x.id === id) : null;
+  if (s) skillForm(s);
+}
+
+async function toggleSkill(id, enabled) {
+  try {
+    await apiSend(`/api/skills/${encodeURIComponent(id)}`, 'PATCH', { enabled });
+  } catch (err) {
+    alert('Failed to update skill: ' + err.message);
+  }
+  delete lastFetched.skills;
+  await loadSkills();
+}
+
+async function deleteSkill(id) {
+  if (!confirm('Delete this skill? Agents stop following it immediately.')) return;
+  try {
+    await apiSend(`/api/skills/${encodeURIComponent(id)}`, 'DELETE');
+  } catch (err) {
+    alert('Failed to delete skill: ' + err.message);
+  }
+  delete lastFetched.skills;
+  await loadSkills();
+}
+
+/* MCP connectors */
+async function loadMCP() {
+  if (recentlyFetched('mcp')) return;
+  try {
+    mcpData = { list: await fetchJSON('/api/mcp'), error: null };
+  } catch (err) {
+    mcpData = { list: null, error: err };
+  }
+  if (currentPage === 'mcp') renderMCPPage();
+  if (currentPage === 'overview') renderFleet();
+}
+
+function connectorHost(u) {
+  try { return new URL(u).host; } catch (e) { return u; }
+}
+
+function connectorCheck(c) {
+  if (c.last_error) return ['failed', 'check failed'];
+  if (c.last_check) return ['ok', plural((c.tools || []).length, 'tool')];
+  return ['untested', 'not tested'];
+}
+
+function connectorCard(c) {
+  const [cls, label] = connectorCheck(c);
+  const tools = c.tools || [];
+  const headers = Object.keys(c.headers || {});
+  const server = c.server_name ? ' · ' + escapeHtml(c.server_name + (c.server_version ? ' ' + c.server_version : '')) : '';
+  return `<article class="card${c.enabled ? '' : ' off'}">
+      <div class="card-head">
+        <div><div class="card-name" title="${escapeHtml(c.name)}">${escapeHtml(c.name)}</div><div class="card-sub" title="${escapeHtml(c.url)}">${escapeHtml(connectorHost(c.url))}${server}</div></div>
+        <div class="card-scope"><span class="status-pill ${c.enabled ? 'ok' : 'paused'}">${c.enabled ? 'enabled' : 'disabled'}</span><span class="status-pill ${cls}" title="${escapeHtml(c.last_error || '')}">${label}</span></div>
+      </div>
+      ${c.description ? `<div class="card-desc">${escapeHtml(c.description)}</div>` : ''}
+      ${c.last_error ? `<div class="card-note">${escapeHtml(c.last_error)}</div>` : ''}
+      <div class="card-scope" style="justify-content:flex-start"><span style="font-size:12px;color:var(--text-muted)">Agents</span>${scopeChips(c.agents)}</div>
+      ${tools.length ? `<details><summary>${plural(tools.length, 'tool')}</summary><div class="tool-chips" style="margin-top:8px">${tools.map(t => `<code class="tool-chip" title="${escapeHtml(t.description || '')}">${escapeHtml(t.name)}</code>`).join('')}</div></details>` : ''}
+      <div class="card-foot">
+        <span>${headers.length ? plural(headers.length, 'header') + ' · ' : ''}${c.last_check ? 'checked ' + timeAgo(c.last_check) : 'never checked'}</span>
+        <div class="actions">
+          <button class="btn-mini" type="button" onclick="testConnector('${c.id}', this)">Test</button>
+          <button class="btn-mini" type="button" onclick="toggleConnector('${c.id}', ${!c.enabled})">${c.enabled ? 'Disable' : 'Enable'}</button>
+          <button class="btn-mini" type="button" onclick="editConnector('${c.id}')">Edit</button>
+          <button class="btn-mini danger" type="button" onclick="deleteConnector('${c.id}')">Delete</button>
+        </div>
+      </div>
+    </article>`;
+}
+
+function renderMCPPage() {
+  const el = document.getElementById('mcp-list');
+  if (!mcpData) return;
+  if (mcpData.error) { el.innerHTML = emptyHtml('Failed to load connectors.', true); return; }
+  el.innerHTML = mcpData.list.length
+    ? mcpData.list.map(connectorCard).join('')
+    : emptyHtml('No connectors yet. Add an MCP server to give the agents its tools.', true);
+}
+
+document.getElementById('mcp-new-btn').addEventListener('click', () => connectorForm(null));
+
+function headerRowHtml(k, v) {
+  return `<div class="kv-row"><input class="form-input kv-key" placeholder="Header name" value="${escapeHtml(k)}"><input class="form-input kv-val" placeholder="Value or \${ENV_VAR}" value="${escapeHtml(v)}"><button type="button" class="btn-mini danger kv-del">Remove</button></div>`;
+}
+
+function collectHeaders() {
+  const out = {};
+  document.querySelectorAll('#f-headers .kv-row').forEach(row => {
+    const k = row.querySelector('.kv-key').value.trim();
+    const v = row.querySelector('.kv-val').value.trim();
+    if (k && v) out[k] = v;
+  });
+  return out;
+}
+
+function connectorForm(c) {
+  const isNew = !c;
+  const headers = Object.entries((c && c.headers) || {});
+  openForm({
+    title: isNew ? 'Add connector' : 'Edit connector',
+    subtitle: isNew ? 'A Model Context Protocol server reachable over HTTP' : c.name,
+    saveLabel: isNew ? 'Add and test' : 'Save changes',
+    html: formField('Name', `<input class="form-input" id="f-name" maxlength="80" value="${escapeHtml(c ? c.name : '')}" placeholder="Internal docs search">`)
+      + formField('Description', `<input class="form-input" id="f-desc" maxlength="240" value="${escapeHtml(c ? c.description || '' : '')}" placeholder="What this server offers">`)
+      + formField('Server URL', `<input class="form-input" id="f-url" value="${escapeHtml(c ? c.url : '')}" placeholder="https://mcp.example.com/mcp">`, 'Streamable HTTP endpoint, reached from where this app runs.')
+      + formField('Headers', `<div class="kv-rows" id="f-headers">${headers.map(([k, v]) => headerRowHtml(k, v)).join('')}</div><div><button type="button" class="btn-mini" id="f-add-header">Add header</button></div>`, 'Sent on every request, for example Authorization. Write a value as \${TOKEN_ENV_VAR} to read it from the environment instead of storing it here. Saved values are masked.')
+      + formField('Agents', agentChipsHtml(c ? c.agents || [] : []), 'Leave every agent unselected to expose the tools to all of them.')
+      + `<label class="check-row"><input type="checkbox" id="f-enabled"${!c || c.enabled ? ' checked' : ''}> Enabled</label>`,
+    onSave: async () => {
+      const body = {
+        name: formValue('f-name'),
+        description: formValue('f-desc'),
+        url: formValue('f-url'),
+        headers: collectHeaders(),
+        agents: selectedAgents(),
+        enabled: document.getElementById('f-enabled').checked,
+      };
+      const saved = isNew ? await apiSend('/api/mcp', 'POST', body) : await apiSend(`/api/mcp/${encodeURIComponent(c.id)}`, 'PATCH', body);
+      delete lastFetched.mcp;
+      await loadMCP();
+      if (saved && saved.id && (isNew || !saved.last_check)) testConnector(saved.id, null);
+    },
+  });
+}
+
+function editConnector(id) {
+  const c = mcpData && mcpData.list ? mcpData.list.find(x => x.id === id) : null;
+  if (c) connectorForm(c);
+}
+
+async function toggleConnector(id, enabled) {
+  try {
+    await apiSend(`/api/mcp/${encodeURIComponent(id)}`, 'PATCH', { enabled });
+  } catch (err) {
+    alert('Failed to update connector: ' + err.message);
+  }
+  delete lastFetched.mcp;
+  await loadMCP();
+}
+
+async function deleteConnector(id) {
+  if (!confirm('Delete this connector? Its tools disappear from the agents immediately.')) return;
+  try {
+    await apiSend(`/api/mcp/${encodeURIComponent(id)}`, 'DELETE');
+  } catch (err) {
+    alert('Failed to delete connector: ' + err.message);
+  }
+  delete lastFetched.mcp;
+  await loadMCP();
+}
+
+async function testConnector(id, btn) {
+  if (btn) { btn.disabled = true; btn.textContent = 'Testing…'; }
+  try {
+    const c = await apiSend(`/api/mcp/${encodeURIComponent(id)}/test`, 'POST');
+    if (mcpData && mcpData.list) {
+      const i = mcpData.list.findIndex(x => x.id === id);
+      if (i >= 0) mcpData.list[i] = c;
+    }
+  } catch (err) {
+    alert('Test failed: ' + err.message);
+  }
+  if (currentPage === 'mcp') renderMCPPage();
+  if (currentPage === 'overview') renderFleet();
 }
 
 /* Identity */

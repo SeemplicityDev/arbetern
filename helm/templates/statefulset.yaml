@@ -450,6 +450,14 @@ spec:
             - name: BILLING_DIR
               value: "{{ .Values.persistence.mountPath }}/{{ .Values.billing.subPath }}"
             {{- end }}
+            {{- if and .Values.persistence.enabled .Values.skills .Values.skills.enabled }}
+            - name: SKILLS_DIR
+              value: "{{ .Values.persistence.mountPath }}/{{ .Values.skills.subPath }}"
+            {{- end }}
+            {{- if and .Values.persistence.enabled .Values.mcp .Values.mcp.enabled }}
+            - name: MCP_DIR
+              value: "{{ .Values.persistence.mountPath }}/{{ .Values.mcp.subPath }}"
+            {{- end }}
           {{- with .Values.livenessProbe }}
           livenessProbe:
             {{- toYaml . | nindent 12 }}

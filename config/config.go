@@ -190,6 +190,8 @@ type Config struct {
 	WorkflowsDir  string // Directory where workflow JSON snapshots are persisted.
 	ChatDir       string // Directory where per-agent chat transcripts are persisted.
 	BillingDir    string // Directory where LLM usage/cost aggregates are persisted.
+	SkillsDir     string // Directory where custom skills are persisted.
+	MCPDir        string // Directory where MCP connectors are persisted.
 
 	// ChatRetention is how long a UI chat conversation is kept after its last
 	// activity before it is deleted by the background sweeper. Applies to all
@@ -449,6 +451,8 @@ func Load() (*Config, error) {
 		WorkflowsDir:        os.Getenv("WORKFLOWS_DIR"),
 		ChatDir:             os.Getenv("CHAT_DIR"),
 		BillingDir:          os.Getenv("BILLING_DIR"),
+		SkillsDir:           os.Getenv("SKILLS_DIR"),
+		MCPDir:              os.Getenv("MCP_DIR"),
 
 		WorkflowsGitOpsOwner:    os.Getenv("WORKFLOWS_GITOPS_OWNER"),
 		WorkflowsGitOpsRepo:     os.Getenv("WORKFLOWS_GITOPS_REPO"),
