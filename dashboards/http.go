@@ -2,7 +2,6 @@ package dashboards
 
 import (
 	"context"
-	_ "embed"
 	"encoding/json"
 	"net/http"
 	"strings"
@@ -11,15 +10,12 @@ import (
 	"github.com/justmike1/arbetern/internal/crud"
 )
 
-//go:embed view.html
-var viewHTML string
-
-// RegisterRoutes wires the per-agent view and the dashboard CRUD API onto
-// the given mux. Routing/validation/GitOps gating live in internal/crud;
+// RegisterRoutes wires the per-agent data route and the dashboard CRUD API
+// onto the given mux. Routing/validation/GitOps gating live in internal/crud;
 // this function only adapts the dashboards-specific Get/List/Delete shape and
 // the prompt-dashboard render verb.
 //
-//	GET    /<agent>/dashboard/<id>              → embedded HTML viewer
+//	GET    /<agent>/dashboard/<id>              → 302 to the console page
 //	GET    /<agent>/dashboard/<id>/data.json    → latest stored JSON
 //	GET    /api/dashboards                      → list (optional ?agent=)
 //	DELETE /api/dashboards/<agent>/<id>         → delete
@@ -30,7 +26,6 @@ func (r *Registry) RegisterRoutes(mux *http.ServeMux, apiMux *http.ServeMux, kno
 	crud.Mount(mux, apiMux, knownAgents, crud.Spec{
 		Kind:       "dashboard",
 		KindPlural: "dashboards",
-		ViewHTML:   viewHTML,
 		Get: func(agent, id string) (any, string, bool) {
 			d, ok := r.Get(agent, id)
 			if !ok {
@@ -71,9 +66,9 @@ type renderRequest struct {
 
 // handleRender renders a prompt template into an instance and returns 202 with
 // the instance's view URL. The LLM render runs in the instance's runner
-// goroutine (started by RenderInstance); the client polls the instance's
-// data.json until Markdown appears — the same fire-and-forget model as the
-// workflow "run now" button.
+// goroutine (started by RenderInstance); the client polls the instance until
+// Markdown appears — the same fire-and-forget model as the workflow "run now"
+// button.
 func (r *Registry) handleRender(w http.ResponseWriter, req *http.Request, agent, id string) {
 	var body renderRequest
 	if req.Body != nil {
@@ -103,6 +98,6 @@ func (r *Registry) handleRender(w http.ResponseWriter, req *http.Request, agent,
 		"agent":    agent,
 		"id":       inst.ID,
 		"view_url": inst.ViewURL(),
-		"message":  "render queued; poll the instance data.json until markdown appears",
+		"message":  "render queued; poll the instance until markdown appears",
 	})
 }

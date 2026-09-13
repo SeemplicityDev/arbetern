@@ -291,8 +291,8 @@ Daily AWS cost summary — 08:00 UTC
    - One-line net delta summary
 ```
 
-Create it from Slack with the built-in workflow tools, or edit from the
-web UI (the pencil button on `/<agent>/workflow/<id>`).
+Create it from Slack with the built-in workflow tools, or edit it from the
+console (the **Edit** button on `/ui/<agent>/workflow/<id>`).
 
 ## Troubleshooting
 

@@ -3,7 +3,6 @@ package workflows
 import (
 	"bytes"
 	"context"
-	_ "embed"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -13,15 +12,12 @@ import (
 	"github.com/justmike1/arbetern/internal/safego"
 )
 
-//go:embed view.html
-var viewHTML string
-
-// RegisterRoutes wires the per-agent view and workflow CRUD API onto the
-// given mux. The shared GET/DELETE/list/data.json plumbing lives in
+// RegisterRoutes wires the per-agent data route and workflow CRUD API onto
+// the given mux. The shared GET/DELETE/list/data.json plumbing lives in
 // internal/crud; the workflow-specific verbs (POST /<id>/run, PATCH/PUT
 // for partial updates) are handled by the Custom hook below.
 //
-//	GET    /<agent>/workflow/<id>            → embedded HTML viewer
+//	GET    /<agent>/workflow/<id>            → 302 to the console page
 //	GET    /<agent>/workflow/<id>/data.json  → latest stored JSON
 //	GET    /api/workflows                    → list (optional ?agent=)
 //	GET    /api/workflows/<agent>/<id>       → get
@@ -34,7 +30,6 @@ func (r *Registry) RegisterRoutes(mux *http.ServeMux, apiMux *http.ServeMux, kno
 	crud.Mount(mux, apiMux, knownAgents, crud.Spec{
 		Kind:       "workflow",
 		KindPlural: "workflows",
-		ViewHTML:   viewHTML,
 		Get: func(agent, id string) (any, string, bool) {
 			wf, ok := r.Get(agent, id)
 			if !ok {
@@ -81,7 +76,7 @@ func (r *Registry) handleCustom(w http.ResponseWriter, req *http.Request, agent,
 			"accepted": true,
 			"agent":    agent,
 			"id":       id,
-			"message":  "workflow run queued; poll /data.json to see the result appear in run history",
+			"message":  "workflow run queued; poll the workflow until the run appears in its history",
 		})
 		return true
 	}

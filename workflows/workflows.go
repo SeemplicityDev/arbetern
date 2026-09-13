@@ -51,6 +51,7 @@ import (
 	"github.com/justmike1/arbetern/internal/store"
 	"github.com/robfig/cron/v3"
 
+	"github.com/justmike1/arbetern/internal/crud"
 	"github.com/justmike1/arbetern/internal/safego"
 )
 
@@ -200,9 +201,9 @@ type Workflow struct {
 	Running bool `json:"running,omitempty"`
 }
 
-// ViewURL returns the path to the HTML view for this workflow.
+// ViewURL returns the management-console page for this workflow.
 func (w *Workflow) ViewURL() string {
-	return fmt.Sprintf("/%s/workflow/%s", w.Agent, w.ID)
+	return crud.ViewPath("workflow", w.Agent, w.ID)
 }
 
 // Pattern returns a human-readable label describing the workflow's

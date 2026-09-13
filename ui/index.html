@@ -210,6 +210,9 @@
         <div class="list-panel list-scroll" id="dash-list"><div class="empty tall">Loading dashboards…</div></div>
       </section>
 
+      <section class="page" data-page="workflow" hidden><div id="wf-detail"></div></section>
+      <section class="page" data-page="dashboard" hidden><div id="dash-detail"></div></section>
+
       <section class="page" data-page="mcp" hidden>
         <div class="page-head">
           <div>
@@ -315,7 +318,7 @@
         <div class="panel"><h2>By model</h2><div id="t-model"></div></div>
         <div class="panel"><h2>Recent activity <small id="recent-meta"></small></h2><div class="list-scroll" id="t-recent"></div></div>
 
-        <div class="footer">Aggregated in the state bucket · refreshes every 30s · prices are estimates</div>
+        <div class="footer">Aggregated from recorded turns · refreshes every 30s · prices are estimates</div>
       </section>
     </main>
   </div>
@@ -388,7 +391,7 @@
         <textarea id="chat-input" class="chat-input" rows="1" placeholder="Type a message…"></textarea>
         <button id="chat-send" class="chat-send">Send</button>
       </div>
-      <div class="chat-disclaimer">Shared conversation — everyone sees this history. No authentication yet.</div>
+      <div class="chat-disclaimer">Shared conversation — everyone with access to this agent sees this history.</div>
     </div>
   </div>
 
@@ -422,10 +425,11 @@
         <textarea id="fs-chat-input" class="chat-input" rows="1" placeholder="Type a message…"></textarea>
         <button id="fs-chat-send" class="chat-send">Send</button>
       </div>
-      <div class="chat-disclaimer">Shared conversations — everyone sees this history. No authentication yet.</div>
+      <div class="chat-disclaimer">Shared conversations — everyone with access to this agent sees this history.</div>
     </section>
   </div>
 
+  <script src="/ui/detail.js"></script>
   <script src="/ui/app.js"></script>
 </body>
 </html>

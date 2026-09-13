@@ -121,7 +121,7 @@ invites the model to editorialise about internals nobody can act on:
 |---|---|---|
 | Bad field selector (a connector bug) | `Invalid field selection sharedWithMe` | "the Google connector issued a request Google rejected… This is a defect in arbetern… do not retry it" |
 | Bad A1 range (the model's own mistake) | `Unable to parse range: 'Renewls'` | passed through verbatim — this is what lets the model fix itself |
-| 403 naming the GCP project | `The caller does not have permission for project seemplicity-mgmt` | "access was denied… never shared with this connector's service account, or shared read-only" |
+| 403 naming the GCP project | `The caller does not have permission for project acme-mgmt` | "access was denied… never shared with this connector's service account, or shared read-only" |
 | 404 naming a file ID | `File not found: 1abcXYZ` | "the file was not found… re-resolve it with drive_find_file" |
 
 The **service-account address is not printed into channels** either. It
@@ -153,15 +153,15 @@ Base64 is the expected form for the key because a PEM private key's `\n` escapes
 survive a Kubernetes Secret round-trip far more reliably as one opaque blob:
 
 ```bash
-base64 -w0 < seemplicity-mgmt-a8650c77398e.json   # Linux
-base64 -i   seemplicity-mgmt-a8650c77398e.json    # macOS
+base64 -w0 < acme-mgmt-0123456789ab.json   # Linux
+base64 -i   acme-mgmt-0123456789ab.json    # macOS
 ```
 
 Startup logs on success — the second line tells you what the connector can
 actually reach, which is the thing worth checking after a deploy:
 
 ```
-Google integration enabled (service account: arbetern-pulse-sheets@seemplicity-mgmt.iam.gserviceaccount.com, scope: all folders shared with the account)
+Google integration enabled (service account: arbetern-sheets@acme-mgmt.iam.gserviceaccount.com, scope: all folders shared with the account)
 Google Drive: 1 folder reachable ("CS Reporting", 1AbCdEf...) — it will be used automatically
 ```
 
@@ -183,7 +183,7 @@ in the background and the tools become available once it connects.
 ## Setup
 
 1. **Create the service account.** In the Google Cloud console for the project
-   (e.g. `seemplicity-mgmt`) go to **IAM & Admin → Service Accounts → Create
+   (e.g. `acme-mgmt`) go to **IAM & Admin → Service Accounts → Create
    service account**. It needs **no** IAM roles on the project — Drive access
    comes from the Drive share, not from GCP IAM. Note its email, of the form
    `<name>@<project>.iam.gserviceaccount.com`.

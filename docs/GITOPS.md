@@ -172,9 +172,9 @@ Dashboard files have the dashboards-registry shape, with runtime fields
 `{{VAR}}` placeholder in the `prompt` (e.g. `{{TENANT}}`) becomes a declared
 **input**. The GitOps descriptor is a *template*: it is not rendered itself.
 From the dashboard's page in the management UI a user fills in the inputs and
-presses **▶ render**, which substitutes the values, runs the prompt through the
+presses **Render**, which substitutes the values, runs the prompt through the
 owning agent's LLM tool-loop, and stores the Markdown output as a per-input
-**instance** under `/<agent>/dashboard/<id>-<slug>`. Instances (and
+**instance** under `/ui/<agent>/dashboard/<id>-<slug>`. Instances (and
 placeholder-free prompt dashboards) **auto-refresh** on their `sync_interval`.
 
 ## Reconcile semantics

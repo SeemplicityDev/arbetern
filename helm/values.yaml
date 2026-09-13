@@ -469,8 +469,8 @@ customPrompts: {}
 #     chat_enabled: true
 #   pulse:
 #     allowed_teams:
-#       - S0A6S3KNNLW   # CS team
-#       - S0B7T4LOOLX   # DevOps team
+#       - S0123456789   # CS team
+#       - S0987654321   # DevOps team
 #     allowed_emails:
 #       - solutions@acme.com
 #       - acme.com

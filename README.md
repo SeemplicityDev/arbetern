@@ -245,8 +245,8 @@ URL:
 | Agents | `/ui/agents` | The roster — open a card for its prompts (read-only), or chat where `chat_enabled` |
 | Chats | `/ui/chats` | Conversations of every chat-enabled agent: open, start, rename or delete them (same access rules as the chat itself) |
 | Skills | `/ui/skills` | Instruction blocks the agents follow: the built-in ones from the prompt files (read-only) plus custom skills written here and appended to the system prompts of the agents they target |
-| Workflows | `/ui/workflows` | Every workflow across agents with schedule, status, last run, run / delete actions and GitOps sync state |
-| Dashboards | `/ui/dashboards` | Every dashboard across agents (source dashboards, prompt templates, rendered reports) with sync state |
+| Workflows | `/ui/workflows` | Every workflow across agents with schedule, status, last run, run / delete actions and GitOps sync state; each opens at `/ui/<agent>/workflow/<id>` with its flow diagram, prompt or tasks, run history and editor |
+| Dashboards | `/ui/dashboards` | Every dashboard across agents (source dashboards, prompt templates, rendered reports) with sync state; each opens at `/ui/<agent>/dashboard/<id>` |
 | Changelog | `/ui/changelog` | Latest commits to the arbetern repository |
 | Usage & Billing | `/ui/billing` | Estimated LLM spend by agent, model, source, user and workflow (`/billing` redirects here) |
 
@@ -361,7 +361,7 @@ Each agent's `config.yaml` has an `allowed_teams` field:
 ```yaml
 name: Pulse
 allowed_teams:
-  - S0A6S3KNNLW   # CS team user group ID
+  - S0123456789   # CS team user group ID
 ```
 
 ### Override via Helm (Kubernetes ConfigMap)
@@ -376,11 +376,11 @@ you set take effect and everything else falls through to the baked-in
 customConfigs:
   pulse:
     allowed_teams:
-      - S0A6S3KNNLW   # CS team
+      - S0123456789   # CS team
   ovad:
     allowed_teams:
-      - S0A6S3KNNLW   # CS team
-      - S0B7T4LOOLX   # DevOps team
+      - S0123456789   # CS team
+      - S0987654321   # DevOps team
 ```
 
 The Helm chart creates a ConfigMap, mounts it, and sets `CUSTOM_CONFIG_DIR`
@@ -396,7 +396,7 @@ full `config.yaml` overlay):
 export CUSTOM_CONFIG_DIR=/path/to/custom-config
 # Create /path/to/custom-config/pulse.yaml:
 # allowed_teams:
-#   - S0A6S3KNNLW
+#   - S0123456789
 ```
 
 ### How it Works
@@ -447,7 +447,7 @@ customConfigs:
       - solutions@acme.com   # exact address
       - acme.com             # any address in this domain
     allowed_teams:
-      - S0A6S3KNNLW          # fallback: members of this Slack team also get in
+      - S0123456789          # fallback: members of this Slack team also get in
 ```
 
 When access is denied the chat API returns `403` and the UI shows a friendly
@@ -524,8 +524,9 @@ The agent composes a dashboard from its allow-listed read-only integration sourc
 `dashboards/<agent>/<dashboard-id>.json` in the state bucket, and spins up a background goroutine
 that re-runs every source on the requested interval.
 
-**Viewing:** each dashboard is served at `/<agent>/dashboard/<id>` as a self-refreshing
-HTML page, with the raw JSON at `/<agent>/dashboard/<id>/data.json`. Every agent card
+**Viewing:** each dashboard has its own page in the console at `/ui/<agent>/dashboard/<id>`
+(self-refreshing, inside the top bar and side rail), with the raw JSON at
+`/<agent>/dashboard/<id>/data.json`. Every agent card
 in the Web UI also shows an **Available dashboards** section listing its short-name
 chips — click to open, `×` to delete.
 
@@ -568,11 +569,11 @@ Rendering is driven from the management UI (there is no slash command):
 1. Open the template's dashboard page. It shows a **Render** form — one field per
    detected `{{VAR}}` input, plus an optional refresh interval — and a list of
    previously rendered instances.
-2. Fill in the inputs and press **▶ render**. The server substitutes the values,
+2. Fill in the inputs and press **Render**. The server substitutes the values,
    runs the prompt through the agent's headless LLM tool-loop (same tools as a
    normal command — Jira, Freshdesk, …), and stores the model's **Markdown**
    report as a per-input **instance** at a slug-stable URL
-   (`/<agent>/dashboard/<template-id>-<slug>`).
+   (`/ui/<agent>/dashboard/<template-id>-<slug>`).
 3. The instance page renders the Markdown (headings, tables, lists, links) and
    **auto-refreshes** on its schedule (the template's `sync_interval`, or the
    per-instance override entered in the form), re-running the prompt each tick.
@@ -679,11 +680,11 @@ The owning agent synthesises a complete, credentialless prompt (channel IDs,
 repo names, labels, assignees — everything needed so the tick is reproducible),
 persists a JSON descriptor at `workflows/<agent>/<id>.json` in the state
 bucket, and starts a goroutine that ticks on the requested cron schedule. Each run's result + error
-is appended to the descriptor; the viewer at `/<agent>/workflow/<id>` renders
-the run history and auto-refreshes adaptively (every 3 seconds while a tick
-is in flight, every 30 seconds otherwise). The header badge shows `running…`
-(blue, pulsing) while a tick is executing, and the **Run now** button is
-disabled until it completes.
+is appended to the descriptor; the workflow's page in the console
+(`/ui/<agent>/workflow/<id>`) renders the run history and auto-refreshes
+adaptively (every 3 seconds while a tick is in flight, every 30 seconds
+otherwise). The status pill shows `running` while a tick is executing, and the
+**Run now** button is disabled until it completes.
 
 ### Boot behaviour
 
@@ -960,8 +961,8 @@ chorus/              # Chorus (ZoomInfo) REST API client (call intelligence, dea
 google/              # Google Drive + Sheets client (service-account JWT, shared-folder discovery, streaming reads, batched writes)
 slack/               # Slack webhook handler + response helpers
 prompts/             # YAML prompt loader + agent discovery
-dashboards/          # dashboard registry, sync runner, executor, embedded HTML viewer
-workflows/           # workflow engine (monoflow / subflows / event-triggered) + embedded viewer
+dashboards/          # dashboard registry, sync runner, executor + CRUD API
+workflows/           # workflow engine (monoflow / subflows / event-triggered) + CRUD API
 billing/             # usage & billing ledger (per agent / model / source / user / workflow) + summary API
 skills/              # custom skill registry (instruction blocks appended to agent prompts) + API
 mcp/                 # MCP connector registry, Streamable HTTP JSON-RPC client, tool exposure + API

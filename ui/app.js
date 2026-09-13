@@ -218,20 +218,33 @@ function getAgentProfession(agent) {
 }
 
 /* Shell: theme, side rail, routing */
-(function initTheme() {
+const DETAIL_PARENT = { workflow: 'workflows', dashboard: 'dashboards' };
+
+function setThemeLabel(theme) {
   const btn = document.getElementById('theme-toggle');
-  function label(t) {
-    btn.title = 'Switch to ' + (t === 'light' ? 'dark' : 'light') + ' theme';
-    btn.setAttribute('aria-checked', String(t !== 'light'));
-  }
-  btn.addEventListener('click', () => {
-    const next = document.documentElement.dataset.theme === 'light' ? 'dark' : 'light';
-    document.documentElement.dataset.theme = next;
-    try { localStorage.setItem('arbetern-theme', next); } catch (e) {}
-    label(next);
-  });
-  label(document.documentElement.dataset.theme || 'dark');
-})();
+  btn.title = 'Switch to ' + (theme === 'light' ? 'dark' : 'light') + ' theme';
+  btn.setAttribute('aria-checked', String(theme !== 'light'));
+}
+
+function applyTheme(theme, persist) {
+  if (document.documentElement.dataset.theme === theme) return;
+  document.documentElement.dataset.theme = theme;
+  if (persist) { try { localStorage.setItem('arbetern-theme', theme); } catch (e) {} }
+  setThemeLabel(theme);
+  document.dispatchEvent(new CustomEvent('themechange', { detail: { theme } }));
+}
+
+function storedTheme() {
+  try { return localStorage.getItem('arbetern-theme'); } catch (e) { return null; }
+}
+
+setThemeLabel(document.documentElement.dataset.theme || 'dark');
+document.getElementById('theme-toggle').addEventListener('click', () => {
+  applyTheme(document.documentElement.dataset.theme === 'light' ? 'dark' : 'light', true);
+});
+window.addEventListener('storage', e => {
+  if (e.key === 'arbetern-theme' && (e.newValue === 'light' || e.newValue === 'dark')) applyTheme(e.newValue, false);
+});
 
 function setSidebarCollapsed(collapsed) {
   const html = document.documentElement;
@@ -256,10 +269,11 @@ document.getElementById('menu-toggle').addEventListener('click', () => {
 document.getElementById('sidebar-scrim').addEventListener('click', closeDrawer);
 
 document.addEventListener('click', e => {
-  const a = e.target.closest('a[data-page]');
+  const a = e.target.closest('a[data-page], a[data-link]');
   if (!a || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button !== 0) return;
   e.preventDefault();
-  navigate(a.dataset.page);
+  if (a.dataset.page) navigate(a.dataset.page);
+  else routeTo(a.getAttribute('href'));
 });
 
 function pathForPage(page) { return page === 'overview' ? '/ui/' : '/ui/' + page; }
@@ -272,31 +286,40 @@ function pageFromPath(path) {
 function showPage(page) {
   const changed = page !== currentPage;
   currentPage = page;
+  const navPage = DETAIL_PARENT[page] || page;
   document.querySelectorAll('.page').forEach(p => { p.hidden = p.dataset.page !== page; });
   document.querySelectorAll('.nav-item').forEach(a => {
-    const active = a.dataset.page === page;
+    const active = a.dataset.page === navPage;
     a.classList.toggle('active', active);
     if (active) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current');
   });
-  document.title = `${appTitle} — ${PAGE_TITLES[page]}`;
+  refreshTitle();
   if (changed) window.scrollTo(0, 0);
   loadPage(page);
 }
 
-function navigate(page, { replace = false } = {}) {
-  const path = pathForPage(page);
-  if (location.pathname !== path) history[replace ? 'replaceState' : 'pushState']({}, '', path);
-  closeDrawer();
-  if (chatFull) hideFullChat();
-  showPage(page);
+function refreshTitle() {
+  if (!currentPage) return;
+  const name = detailEntity ? (detailEntity.name || detailEntity.id) : PAGE_TITLES[DETAIL_PARENT[currentPage] || currentPage];
+  document.title = `${appTitle} — ${name}`;
 }
 
+function routeTo(path, { replace = false } = {}) {
+  if (location.pathname !== path) history[replace ? 'replaceState' : 'pushState']({}, '', path);
+  closeDrawer();
+  applyRoute();
+}
+
+function navigate(page, opts) { routeTo(pathForPage(page), opts); }
+
 function applyRoute() {
-  const m = location.pathname.match(/^\/ui\/([^/]+)\/chat\/?$/);
+  const path = location.pathname;
+  let m = path.match(/^\/ui\/([^/]+)\/chat\/?$/);
   if (m) {
     const id = decodeURIComponent(m[1]);
     const agent = agentById(id);
     if (agent && agent.chat_enabled) {
+      leaveDetail();
       if (!currentPage) showPage('agents');
       openFullChat(id);
       return;
@@ -304,23 +327,36 @@ function applyRoute() {
     if (!agentsData.length) { if (!currentPage) showPage('agents'); return; }
   }
   if (chatFull) hideFullChat();
-  showPage(pageFromPath(location.pathname));
+  m = path.match(/^\/ui\/([^/]+)\/(workflow|dashboard)\/([^/]+)\/?$/);
+  if (m) {
+    const agent = safeId(decodeURIComponent(m[1]));
+    const id = safeId(decodeURIComponent(m[3]));
+    if (agent && id) { openDetail(m[2], agent, id); return; }
+  }
+  leaveDetail();
+  showPage(pageFromPath(path));
 }
 
 window.addEventListener('popstate', applyRoute);
+window.addEventListener('pageshow', e => {
+  if (!e.persisted) return;
+  const theme = storedTheme();
+  if (theme === 'light' || theme === 'dark') applyTheme(theme, false);
+  applyRoute();
+});
 
 // Every view is painted whenever data lands, hidden pages included, so opening
 // a rail item shows finished content instead of a placeholder.
 function renderViews() {
-  renderOverview();
-  if (integrationsData) renderIntegrations(integrationsData);
-  renderWorkflowsPage();
-  renderDashboardsPage();
-  renderSkillsPage();
-  renderMCPPage();
-  renderChatsPage();
-  renderChanges();
-  if (billingSummary) renderBilling(billingSummary);
+  const painters = [
+    renderOverview,
+    () => { if (integrationsData) renderIntegrations(integrationsData); },
+    renderWorkflowsPage, renderDashboardsPage, renderSkillsPage, renderMCPPage, renderChatsPage, renderChanges,
+    () => { if (billingSummary) renderBilling(billingSummary); },
+  ];
+  for (const paint of painters) {
+    try { paint(); } catch (err) { console.error('render failed:', err); }
+  }
 }
 
 function loadPage(page) {
@@ -863,6 +899,7 @@ async function syncGitops(kind, btn) {
   }
   delete lastFetched[kind];
   await Promise.all([loadGitops(kind, true), kind === 'workflows' ? loadWorkflows() : loadDashboards()]);
+  refreshDetailIf(kind.slice(0, -1));
 }
 
 function wfStatus(w) {
@@ -898,18 +935,18 @@ function renderWorkflowsPage() {
       <th>Workflow</th><th>Agent</th><th>Schedule</th><th>Status</th><th>Last run</th><th></th>
     </tr></thead><tbody>${rows.map(w => {
       const [cls, label, title] = wfStatus(w);
-      const url = `/${encodeURIComponent(w.agent)}/workflow/${encodeURIComponent(w.id)}`;
+      const url = detailPath('workflow', w.agent, w.id);
       const managed = w.source === 'gitops';
       return `<tr>
-        <td><a href="${url}" target="_blank" rel="noopener">${escapeHtml(w.name || w.id)}</a>${managed ? ' <span class="tag gitops" title="Managed from git; read-only here">gitops</span>' : ''}
+        <td><a href="${url}" data-link>${escapeHtml(w.name || w.id)}</a>${managed ? ' <span class="tag gitops" title="Managed from git; read-only here">gitops</span>' : ''}
           <span class="sub" title="${escapeHtml(w.description || '')}">${escapeHtml(w.short_name || w.id)}${w.description ? ' · ' + escapeHtml(w.description) : ''}</span></td>
         <td>${agentChip(w.agent)}</td>
         <td>${wfSchedule(w)}</td>
         <td><span class="status-pill ${cls}" title="${escapeHtml(title)}">${label}</span></td>
         <td class="muted" title="${w.last_run ? escapeHtml(new Date(w.last_run).toLocaleString()) : ''}">${w.last_run ? timeAgo(w.last_run) : '—'}</td>
         <td><div class="actions">
-          <a class="btn-mini" href="${url}" target="_blank" rel="noopener">Open</a>
-          <button class="btn-mini" type="button" onclick="runWorkflow('${w.agent}','${w.id}', this)"${w.running ? ' disabled' : ''}>Run</button>
+          <a class="btn-mini" href="${url}" data-link>Open</a>
+          <button class="btn-mini" type="button" onclick="runWorkflow('${w.agent}','${w.id}', this)"${w.running || !w.enabled ? ' disabled' : ''} title="${w.enabled ? 'Run now, outside the schedule' : 'Paused; resume it from its page first'}">Run</button>
           ${managed ? '' : `<button class="btn-mini danger" type="button" onclick="deleteWorkflow('${w.agent}','${w.id}')">Delete</button>`}
         </div></td>
       </tr>`;
@@ -988,10 +1025,10 @@ function renderDashboardsPage() {
       <th>Dashboard</th><th>Agent</th><th>Kind</th><th>Refresh</th><th>Status</th><th>Last sync</th><th></th>
     </tr></thead><tbody>${rows.map(d => {
       const [cls, label, title] = dashStatus(d);
-      const url = `/${encodeURIComponent(d.agent)}/dashboard/${encodeURIComponent(d.id)}`;
+      const url = detailPath('dashboard', d.agent, d.id);
       const managed = d.source === 'gitops';
       return `<tr>
-        <td><a href="${url}" target="_blank" rel="noopener">${escapeHtml(d.name || d.id)}</a>${managed ? ' <span class="tag gitops" title="Managed from git; read-only here">gitops</span>' : ''}
+        <td><a href="${url}" data-link>${escapeHtml(d.name || d.id)}</a>${managed ? ' <span class="tag gitops" title="Managed from git; read-only here">gitops</span>' : ''}
           <span class="sub" title="${escapeHtml(d.description || '')}">${escapeHtml(d.short_name || d.id)}${d.description ? ' · ' + escapeHtml(d.description) : ''}</span></td>
         <td>${agentChip(d.agent)}</td>
         <td>${dashKind(d, byId)}</td>
@@ -999,7 +1036,7 @@ function renderDashboardsPage() {
         <td><span class="status-pill ${cls}" title="${escapeHtml(title)}">${label}</span></td>
         <td class="muted" title="${d.last_sync ? escapeHtml(new Date(d.last_sync).toLocaleString()) : ''}">${d.last_sync ? timeAgo(d.last_sync) : '—'}</td>
         <td><div class="actions">
-          <a class="btn-mini" href="${url}" target="_blank" rel="noopener">Open</a>
+          <a class="btn-mini" href="${url}" data-link>Open</a>
           ${managed ? '' : `<button class="btn-mini danger" type="button" onclick="deleteDashboard('${d.agent}','${d.id}')">Delete</button>`}
         </div></td>
       </tr>`;
@@ -1065,13 +1102,13 @@ function billingRecent(el, evs, names) {
 }
 
 function priceSrc(p) {
-  if (!p || (!p.url && !p.last_sync && !p.error)) return 'Pricing: LLM_PRICE_OVERRIDES only · set PRICE_SOURCE_URL for a live feed';
+  if (!p || (!p.url && !p.last_sync && !p.error)) return 'Pricing: configured overrides only, no live price feed';
   let host = p.url;
   try { host = new URL(p.url).host; } catch (e) {}
-  if (p.error) return `⚠ Pricing source unavailable (${escapeHtml(p.error)}) · ${p.models || 0} rates loaded · overrides win`;
+  if (p.error) return `⚠ Pricing source unavailable (${escapeHtml(p.error)}) · ${p.models || 0} rates loaded · overrides take precedence`;
   const sourceUrl = safeExternalUrl(p.url);
   const src = sourceUrl ? `<a href="${escapeHtml(sourceUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(host)}</a>` : escapeHtml(host);
-  return `Prices: ${src} · ${fmtInt(p.models || 0)} models${p.last_sync ? ' · synced ' + timeAgo(p.last_sync) : ''} · LLM_PRICE_OVERRIDES win`;
+  return `Prices: ${src} · ${fmtInt(p.models || 0)} models${p.last_sync ? ' · synced ' + timeAgo(p.last_sync) : ''} · overrides take precedence`;
 }
 
 function renderBilling(d) {
@@ -1116,7 +1153,7 @@ function renderAgents(agents) {
     const initial = agent.name.charAt(0).toUpperCase();
     const promptCount = Object.keys(agent.prompts || {}).length;
     return `
-      <div class="agent-card" style="--i:${idx}" data-agent-id="${agent.id}" onclick="openAgent('${agent.id}')">
+      <div class="agent-card" style="--i:${idx}" data-agent-id="${agent.id}" onclick="openAgent('${agent.id}', event)">
         <div class="agent-card-header">
           <div class="agent-avatar" style="background:${color}">${initial}</div>
           <div class="agent-info">
@@ -1153,9 +1190,9 @@ function renderAgentDashboards(agentId) {
     const did = safeId(d.id);
     if (!did) return '';
     const label = escapeHtml(d.short_name || d.name || d.id);
-    const url = `/${aid}/dashboard/${did}`;
+    const url = detailPath('dashboard', aid, did);
     const title = escapeHtml(d.name + (d.description ? ' — ' + d.description : ''));
-    return `<a class="agent-dashboard-chip" href="${url}" target="_blank" rel="noopener" title="${title}" onclick="event.stopPropagation()">${label}<button class="dash-delete" title="Delete dashboard" onclick="event.preventDefault();event.stopPropagation();deleteDashboard('${aid}','${did}');">×</button></a>`;
+    return `<a class="agent-dashboard-chip" href="${url}" data-link title="${title}">${label}<button class="dash-delete" type="button" title="Delete dashboard" onclick="event.preventDefault();event.stopPropagation();deleteDashboard('${aid}','${did}');">×</button></a>`;
   }).join('');
   return `<div class="agent-dashboards"><div class="agent-dashboards-label">Available dashboards</div><div class="agent-dashboards-list">${chips}</div></div>`;
 }
@@ -1168,10 +1205,10 @@ function renderAgentWorkflows(agentId) {
     const wid = safeId(w.id);
     if (!wid) return '';
     const label = escapeHtml(w.short_name || w.name || w.id);
-    const url = `/${aid}/workflow/${wid}`;
+    const url = detailPath('workflow', aid, wid);
     const title = escapeHtml(w.name + (w.description ? ' — ' + w.description : '') + ' · cron ' + (w.cron || '—'));
     const cls = w.last_error ? ' err' : '';
-    return `<a class="agent-workflow-chip${cls}" href="${url}" target="_blank" rel="noopener" title="${title}" onclick="event.stopPropagation()">${label}<button class="wf-delete" title="Delete workflow" onclick="event.preventDefault();event.stopPropagation();deleteWorkflow('${aid}','${wid}');">×</button></a>`;
+    return `<a class="agent-workflow-chip${cls}" href="${url}" data-link title="${title}">${label}<button class="wf-delete" type="button" title="Delete workflow" onclick="event.preventDefault();event.stopPropagation();deleteWorkflow('${aid}','${wid}');">×</button></a>`;
   }).join('');
   return `<div class="agent-workflows"><div class="agent-workflows-label">Scheduled workflows</div><div class="agent-workflows-list">${chips}</div></div>`;
 }
@@ -1187,7 +1224,8 @@ function renderAgentBadges(agentId) {
   return `<div class="agent-integrations">${badges}</div>`;
 }
 
-function openAgent(id) {
+function openAgent(id, e) {
+  if (e && e.target.closest('a, button')) return;
   const agent = agentById(id);
   if (!agent) return;
   const color = hashColor(agent.name);
@@ -2025,7 +2063,7 @@ function renderSkillsPage() {
     builtinEl.innerHTML = '';
     return;
   }
-  const list = skillsData.list.filter(s => skillApplies(s, skillFilter));
+  const list = (skillsData.list || []).filter(s => skillApplies(s, skillFilter));
   const custom = list.filter(s => s.kind === 'custom');
   const builtin = list.filter(s => s.kind !== 'custom');
   document.getElementById('skills-custom-meta').textContent = custom.length ? `${custom.length} · ${custom.filter(s => s.enabled).length} enabled` : '';
@@ -2279,8 +2317,8 @@ function renderIdentity() {
   if (!me) return;
   if (me.anonymous || me.error) {
     btn.innerHTML = avatarHtml('', '', true) + `<span class="user-name">${me.error ? 'Identity unavailable' : 'Not signed in'}</span>`;
-    pop.innerHTML = `<div class="id-head">${avatarHtml('', '', true)}<div><div class="id-title">${me.error ? 'Identity unavailable' : 'Not signed in'}</div><div class="id-sub">${me.error ? 'The identity endpoint did not respond' : 'No identity from the sign-in proxy'}</div></div></div>
-      <div class="id-section"><div class="id-note">When the console runs behind the SSO proxy, your Slack profile and Atlassian account appear here.</div></div>`;
+    pop.innerHTML = `<div class="id-head">${avatarHtml('', '', true)}<div><div class="id-title">${me.error ? 'Identity unavailable' : 'Not signed in'}</div><div class="id-sub">${me.error ? 'The identity endpoint did not respond' : 'No signed-in identity was provided'}</div></div></div>
+      <div class="id-section"><div class="id-note">When you sign in, your Slack profile and Atlassian account appear here.</div></div>`;
     return;
   }
   const s = me.slack || {};
@@ -2313,7 +2351,7 @@ function renderIdentity() {
   pop.innerHTML = `<div class="id-head">${avatarHtml(displayName, s.avatar, false)}<div><div class="id-title">${escapeHtml(displayName)}</div><div class="id-sub" title="${escapeHtml(me.email)}">${escapeHtml(me.email)}</div></div></div>
     <div class="id-section"><h3>${INTEGRATION_LOGOS.slack}Slack<span class="tag ${me.slack ? 'slack' : ''}">${me.slack ? 'matched' : 'not found'}</span></h3>${slackSection}</div>
     <div class="id-section"><h3>${INTEGRATION_LOGOS.jira}Atlassian<span class="tag">${!me.atlassian_connected ? 'not connected' : me.atlassian ? 'matched' : 'not found'}</span></h3>${atlassianSection}</div>
-    <div class="id-foot">Resolved ${me.resolved_at ? timeAgo(me.resolved_at) : 'just now'} · identity comes from the sign-in proxy</div>`;
+    <div class="id-foot">Resolved ${me.resolved_at ? timeAgo(me.resolved_at) : 'just now'} from your sign-in</div>`;
 }
 
 function setIdentityOpen(open) {
@@ -2359,7 +2397,7 @@ async function loadIdentity() {
     if (data.header) {
       appTitle = data.header;
       document.getElementById('header-title').textContent = data.header;
-      if (currentPage) document.title = `${appTitle} — ${PAGE_TITLES[currentPage]}`;
+      refreshTitle();
     }
   } catch (e) {}
 })();
@@ -2377,7 +2415,8 @@ applyRoute();
 loadIdentity();
 loadAgents().then(loadChats);
 prefetchAll();
+const LIVE_PAGES = new Set(['overview', 'billing', 'workflows', 'dashboards']);
 setInterval(() => {
   if (document.visibilityState !== 'visible' || chatFull) return;
-  if (currentPage === 'overview' || currentPage === 'billing') loadPage(currentPage);
+  if (LIVE_PAGES.has(currentPage)) loadPage(currentPage);
 }, REFRESH_MS);

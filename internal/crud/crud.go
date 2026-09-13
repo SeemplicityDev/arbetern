@@ -1,12 +1,8 @@
 // Package crud provides the shared HTTP handlers for the workflows and
-// dashboards CRUD APIs. Both registries expose a nearly identical surface
-// (per-agent viewer + data.json + REST list/get/delete with a GitOps 403
-// gate), so centralising the routing eliminates ~150 LOC of duplication
-// and keeps response shapes in lockstep.
-//
-// Per-package extras (POST /<id>/run, PATCH/PUT for workflows) are wired
-// in via Spec.Custom — the built-ins handle the bits that are truly the
-// same across both packages.
+// dashboards CRUD APIs: the per-agent data.json route, the redirect from the
+// legacy view path into the management console, and the REST list/get/delete
+// verbs with their GitOps 403 gate. Per-package extras (POST /<id>/run,
+// PATCH/PUT for workflows) are wired in via Spec.Custom.
 package crud
 
 import (
@@ -25,8 +21,6 @@ type Spec struct {
 	Kind string
 	// KindPlural is the API base segment (e.g. "workflows" → /api/workflows).
 	KindPlural string
-	// ViewHTML is the embedded viewer served at /<agent>/<kind>/<id>.
-	ViewHTML string
 
 	// Get returns the entity (any JSON-marshalable shape) and its GitOps
 	// source marker. src == "gitops" triggers the 403 gate on DELETE.
@@ -43,9 +37,9 @@ type Spec struct {
 	Custom func(w http.ResponseWriter, req *http.Request, agent, id string, subpath []string) bool
 }
 
-// Mount wires the per-agent view route and the API routes:
+// Mount wires the per-agent routes and the API routes:
 //
-//	GET    /<agent>/<kind>/<id>            → ViewHTML
+//	GET    /<agent>/<kind>/<id>            → 302 to /ui/<agent>/<kind>/<id>
 //	GET    /<agent>/<kind>/<id>/data.json  → entity JSON
 //	GET    /api/<plural>                   → List(agent)
 //	GET    /api/<plural>/<agent>/<id>      → Get
@@ -99,8 +93,12 @@ func handleAgentView(agent string, spec Spec, w http.ResponseWriter, req *http.R
 		http.NotFound(w, req)
 		return
 	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_, _ = w.Write([]byte(spec.ViewHTML))
+	http.Redirect(w, req, ViewPath(spec.Kind, agent, id), http.StatusFound)
+}
+
+// ViewPath is the management-console page that renders one entity.
+func ViewPath(kind, agent, id string) string {
+	return "/ui/" + agent + "/" + kind + "/" + id
 }
 
 func handleAPIItem(spec Spec, w http.ResponseWriter, req *http.Request) {

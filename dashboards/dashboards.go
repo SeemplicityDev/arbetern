@@ -11,7 +11,7 @@
 // directly.
 //
 // Dashboards can be created, listed, and deleted by LLM tools; they can also
-// be viewed through a generated HTML page at /<agent>/dashboard/<id>.
+// be viewed in the management console at /ui/<agent>/dashboard/<id>.
 //
 // Sync goroutines only run on the replica holding the scheduling lease; every
 // replica keeps its cache in step with the bucket, and each sync takes a
@@ -32,6 +32,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/justmike1/arbetern/internal/crud"
 	"github.com/justmike1/arbetern/internal/safego"
 	"github.com/justmike1/arbetern/internal/store"
 )
@@ -124,9 +125,9 @@ type Dashboard struct {
 	SourceRef string `json:"source_ref,omitempty"`
 }
 
-// ViewURL returns the path to the HTML view for this dashboard.
+// ViewURL returns the management-console page for this dashboard.
 func (d *Dashboard) ViewURL() string {
-	return fmt.Sprintf("/%s/dashboard/%s", d.Agent, d.ID)
+	return crud.ViewPath("dashboard", d.Agent, d.ID)
 }
 
 // interval parses SyncInterval, returning DefaultSyncInterval on failure.

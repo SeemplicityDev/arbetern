@@ -2139,6 +2139,11 @@ func main() {
 	// dev) it returns "" and the UI shows "Anonymous".
 	chatRegistry.SetUserResolver(clientEmail)
 
+	knownAgents := make(map[string]bool, len(agents))
+	for _, a := range agents {
+		knownAgents[a.ID] = true
+	}
+
 	// Deep-link route for the full-screen chat: /ui/<agent>/chat. Serves the
 	// SPA shell (the front-end router opens the agent's chat from the path).
 	// Access is enforced by the chat API authorizer, not here: unauthorized
@@ -2162,6 +2167,17 @@ func main() {
 			}
 			serveShell(w)
 		})
+		// Detail pages of one workflow or dashboard: the shell renders them
+		// from /api/<kind>s/<agent>/<id>, which answers 404 for unknown ids.
+		detailPage := func(w http.ResponseWriter, r *http.Request) {
+			if !knownAgents[r.PathValue("agent")] || !store.IDRe.MatchString(r.PathValue("id")) {
+				http.NotFound(w, r)
+				return
+			}
+			serveShell(w)
+		}
+		http.HandleFunc("/ui/{agent}/workflow/{id}", detailPage)
+		http.HandleFunc("/ui/{agent}/dashboard/{id}", detailPage)
 		// Client-routed pages of the management UI share the SPA shell; any
 		// other single-segment path under /ui/ is a static asset.
 		http.HandleFunc("/ui/{page}", func(w http.ResponseWriter, r *http.Request) {
@@ -2276,8 +2292,7 @@ func main() {
 	// Per-route IP gating is no longer needed — globalIPGate (installed on
 	// the server Handler below) covers every non-exempt path in one place.
 	http.Handle("/ui/", uiStatic)
-	// Favicon — served without IP whitelist so dashboard/workflow viewers can
-	// load it regardless of where they're accessing from.
+	// Favicon — exempt from the IP whitelist so it loads from anywhere.
 	http.HandleFunc("/favicon.svg", func(w http.ResponseWriter, r *http.Request) {
 		b, err := uiFS.ReadFile("ui/favicon.svg")
 		if err != nil {
@@ -2387,12 +2402,8 @@ func main() {
 
 	http.Handle("/api/", apiMux)
 
-	// Dashboard viewer routes: /<agent>/dashboard/<id>[/data.json]
-	// and API routes under /api/dashboards{,/...}.
-	knownAgents := make(map[string]bool, len(agents))
-	for _, a := range agents {
-		knownAgents[a.ID] = true
-	}
+	// Per-agent data routes (/<agent>/<kind>/<id>/data.json, with the bare
+	// path redirecting into the console) and the /api/<kind>s API.
 	dashRegistry.RegisterRoutes(http.DefaultServeMux, apiMux, knownAgents)
 	wfRegistry.RegisterRoutes(http.DefaultServeMux, apiMux, knownAgents)
 	chatRegistry.RegisterRoutes(apiMux, knownAgents)

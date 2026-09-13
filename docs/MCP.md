@@ -66,7 +66,7 @@ group IDs) and `MCP_ADMIN_EMAILS` (addresses or domains), set from the chart's
 ```yaml
 mcp:
   adminTeams:
-    - S0A6S3KNNLW
+    - S0123456789
 ```
 
 The check works like an agent's `allowed_teams`: the email oauth2-proxy injects
