@@ -616,14 +616,14 @@ html[data-sidebar="collapsed"] .sidebar-collapse svg { transform: rotate(180deg)
   text-decoration: none;
   cursor: pointer;
   white-space: nowrap;
-  transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease, box-shadow 0.15s ease;
+  transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
 }
-.btn-mini:hover { color: var(--text-bright); background: var(--card-hover); border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-glow); }
+.btn-mini:hover { color: var(--text-bright); background: var(--card-hover); border-color: var(--text-muted); }
 .btn-mini.danger { color: var(--red); border-color: rgba(196, 127, 127, 0.45); }
-.btn-mini.danger:hover { color: var(--red); background: rgba(196, 127, 127, 0.12); border-color: var(--red); box-shadow: 0 0 0 3px rgba(196, 127, 127, 0.15); }
+.btn-mini.danger:hover { color: var(--red); background: rgba(196, 127, 127, 0.1); border-color: rgba(196, 127, 127, 0.7); }
 .btn-mini.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
-.btn-mini.primary:hover { color: var(--on-accent); background: color-mix(in srgb, var(--accent) 85%, white); border-color: color-mix(in srgb, var(--accent) 85%, white); }
-.btn-mini:disabled { opacity: 0.5; cursor: default; box-shadow: none; }
+.btn-mini.primary:hover { color: var(--on-accent); background: color-mix(in srgb, var(--accent) 88%, black); border-color: color-mix(in srgb, var(--accent) 88%, black); }
+.btn-mini:disabled { opacity: 0.5; cursor: default; }
 .btn-mini[hidden] { display: none; }
 .actions { display: flex; gap: 6px; justify-content: flex-end; }
 
@@ -1281,7 +1281,7 @@ details.cell pre { margin-top: 6px; background: var(--bg); border: 1px solid var
 .dd-form { display: flex; flex-direction: column; gap: 14px; max-width: 520px; }
 .form-actions { display: flex; align-items: center; gap: 12px; }
 .inst-row { display: flex; justify-content: space-between; align-items: center; gap: 14px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; margin-bottom: 8px; background: var(--bg); text-decoration: none; color: var(--text); }
-.inst-row:hover { border-color: var(--accent); }
+.inst-row:hover { border-color: var(--border-accent); background: var(--card-2); }
 .inst-row:last-child { margin-bottom: 0; }
 .inst-label { font-weight: 600; color: var(--text-bright); overflow-wrap: anywhere; }
 .inst-when { display: inline-flex; align-items: center; gap: 10px; font-size: 12px; color: var(--text-muted); white-space: nowrap; }
