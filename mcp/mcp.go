@@ -159,7 +159,7 @@ func (r *Registry) SetKnownAgents(ids []string) {
 
 // List returns every connector with header values masked, sorted by name.
 func (r *Registry) List() []Connector {
-	var out []Connector
+	out := make([]Connector, 0, r.docs.Len())
 	r.docs.Range(func(_ string, c *Connector) {
 		normalize(c)
 		out = append(out, c.public())

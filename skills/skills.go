@@ -132,11 +132,11 @@ func (r *Registry) List() []Skill {
 	r.mu.RLock()
 	builtin := r.builtin
 	r.mu.RUnlock()
-	var out []Skill
+	out := make([]Skill, 0, r.docs.Len())
 	if builtin != nil {
 		out = append(out, builtin()...)
 	}
-	var custom []Skill
+	custom := make([]Skill, 0, r.docs.Len())
 	r.docs.Range(func(_ string, s *Skill) {
 		normalize(s)
 		custom = append(custom, *s)

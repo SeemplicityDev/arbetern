@@ -2111,8 +2111,9 @@ function renderMCPPage() {
   const el = document.getElementById('mcp-list');
   if (!mcpData) return;
   if (mcpData.error) { el.innerHTML = emptyHtml('Failed to load connectors.', true); return; }
-  el.innerHTML = mcpData.list.length
-    ? mcpData.list.map(connectorCard).join('')
+  const list = mcpData.list || [];
+  el.innerHTML = list.length
+    ? list.map(connectorCard).join('')
     : emptyHtml('No connectors yet. Add an MCP server to give the agents its tools.', true);
 }
 
