@@ -386,6 +386,14 @@ spec:
               value: {{ . | quote }}
             {{- end }}
             {{- end }}
+            {{- if and .Values.mcp .Values.mcp.adminTeams }}
+            - name: MCP_ADMIN_TEAMS
+              value: {{ join "," .Values.mcp.adminTeams | quote }}
+            {{- end }}
+            {{- if and .Values.mcp .Values.mcp.adminEmails }}
+            - name: MCP_ADMIN_EMAILS
+              value: {{ join "," .Values.mcp.adminEmails | quote }}
+            {{- end }}
             {{- if .Values.customPrompts }}
             - name: CUSTOM_PROMPTS_DIR
               value: /etc/arbetern/custom-prompts

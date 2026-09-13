@@ -198,6 +198,14 @@ type Config struct {
 	EmbeddingModel      string
 	EmbeddingDimensions int
 
+	// MCPAdminTeams and MCPAdminEmails restrict who may add, change, test or
+	// delete MCP connectors from the UI: Slack user-group IDs, and email
+	// addresses or domains matched like an agent's allowed_emails. Set from
+	// MCP_ADMIN_TEAMS / MCP_ADMIN_EMAILS (comma-separated); both empty means
+	// every UI user may.
+	MCPAdminTeams  []string
+	MCPAdminEmails []string
+
 	// ChatRetention is how long a UI chat conversation is kept after its last
 	// activity before it is deleted by the background sweeper. Applies to all
 	// agents. Defaults to one week; override with CHAT_RETENTION.
@@ -455,6 +463,8 @@ func Load() (*Config, error) {
 		StateBackendARN:     strings.TrimSpace(os.Getenv("S3_BACKEND_ARN")),
 		VectorsIndexARN:     strings.TrimSpace(os.Getenv("S3_VECTORS_INDEX_ARN")),
 		EmbeddingModel:      strings.TrimSpace(os.Getenv("EMBEDDING_MODEL")),
+		MCPAdminTeams:       splitList(os.Getenv("MCP_ADMIN_TEAMS")),
+		MCPAdminEmails:      splitList(os.Getenv("MCP_ADMIN_EMAILS")),
 
 		WorkflowsGitOpsOwner:    os.Getenv("WORKFLOWS_GITOPS_OWNER"),
 		WorkflowsGitOpsRepo:     os.Getenv("WORKFLOWS_GITOPS_REPO"),
@@ -569,4 +579,15 @@ func Load() (*Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// splitList splits a comma-separated value into its trimmed, non-empty items.
+func splitList(v string) []string {
+	var out []string
+	for _, item := range strings.Split(v, ",") {
+		if item = strings.TrimSpace(item); item != "" {
+			out = append(out, item)
+		}
+	}
+	return out
 }

@@ -36,8 +36,9 @@ const (
 )
 
 var (
-	ErrNotFound = errors.New("connector not found")
-	ErrDisabled = errors.New("connector is disabled")
+	ErrNotFound  = errors.New("connector not found")
+	ErrDisabled  = errors.New("connector is disabled")
+	ErrForbidden = errors.New("changing connectors is restricted to the configured admin group")
 )
 
 // ToolInfo is a tool advertised by an MCP server.
@@ -112,6 +113,7 @@ type Registry struct {
 
 	mu          sync.RWMutex
 	knownAgents map[string]bool
+	authorize   func(*http.Request) bool
 }
 
 // New loads the connectors stored under Prefix.
@@ -145,6 +147,21 @@ func normalize(c *Connector) {
 	if c.Transport == "" {
 		c.Transport = TransportHTTP
 	}
+}
+
+// SetAuthorizer installs the check every request that adds, changes, tests
+// or deletes a connector must pass. Reads stay open to every UI user.
+func (r *Registry) SetAuthorizer(fn func(*http.Request) bool) {
+	r.mu.Lock()
+	r.authorize = fn
+	r.mu.Unlock()
+}
+
+func (r *Registry) authorized(req *http.Request) bool {
+	r.mu.RLock()
+	fn := r.authorize
+	r.mu.RUnlock()
+	return fn == nil || fn(req)
 }
 
 // SetKnownAgents restricts the agent IDs a connector may target.
@@ -485,13 +502,18 @@ func llmToolName(prefix, tool string, taken map[string]bool) string {
 //	DELETE /api/mcp/{id}        → delete
 //	POST   /api/mcp/{id}/test   → handshake + tool discovery, result stored
 //
-// userFor resolves the requesting user for created_by; may be nil.
+// Every verb but GET is subject to the authorizer installed with
+// SetAuthorizer. userFor resolves the requesting user for created_by; may be nil.
 func (r *Registry) RegisterRoutes(apiMux *http.ServeMux, userFor func(*http.Request) string) {
 	apiMux.HandleFunc("/api/mcp", func(w http.ResponseWriter, req *http.Request) {
 		switch req.Method {
 		case http.MethodGet:
 			writeJSON(w, http.StatusOK, r.List())
 		case http.MethodPost:
+			if !r.authorized(req) {
+				http.Error(w, ErrForbidden.Error(), http.StatusForbidden)
+				return
+			}
 			var in Connector
 			if err := decodeBody(req, &in); err != nil {
 				http.Error(w, err.Error(), http.StatusBadRequest)
@@ -512,6 +534,10 @@ func (r *Registry) RegisterRoutes(apiMux *http.ServeMux, userFor func(*http.Requ
 	})
 	apiMux.HandleFunc("/api/mcp/{id}", func(w http.ResponseWriter, req *http.Request) {
 		id := req.PathValue("id")
+		if req.Method != http.MethodGet && !r.authorized(req) {
+			http.Error(w, ErrForbidden.Error(), http.StatusForbidden)
+			return
+		}
 		switch req.Method {
 		case http.MethodGet:
 			c, ok := r.Get(id)
@@ -545,6 +571,10 @@ func (r *Registry) RegisterRoutes(apiMux *http.ServeMux, userFor func(*http.Requ
 	apiMux.HandleFunc("/api/mcp/{id}/test", func(w http.ResponseWriter, req *http.Request) {
 		if req.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if !r.authorized(req) {
+			http.Error(w, ErrForbidden.Error(), http.StatusForbidden)
 			return
 		}
 		c, err := r.Test(req.Context(), req.PathValue("id"))

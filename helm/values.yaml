@@ -179,6 +179,15 @@ workflows:
     prune: true                # delete locally-managed workflows that disappear from git
 
 
+# MCP connectors. Every UI user can see them; only members of these Slack
+# user groups, or these email addresses / domains (matched like an agent's
+# allowed_emails), may add, edit, test or delete one. Both empty = no
+# restriction. Membership is resolved from the email oauth2-proxy injects, so
+# it needs the proxy plus the Slack users:read.email and usergroups:read scopes.
+mcp:
+  adminTeams: []
+  adminEmails: []
+
 secretName: arbetern-secrets
 
 # Set to true to have the chart create the Secret resource.

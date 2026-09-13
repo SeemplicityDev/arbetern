@@ -55,3 +55,21 @@ Agents outside a connector's allowlist never receive its tools.
 - One session per call; no long-lived sessions or server-initiated requests.
 - The server is reached from where arbetern runs, so it must be routable from
   the cluster and is trusted as much as any other integration.
+
+## Who can change connectors
+
+Everyone with UI access can see connectors and their tools. Adding, editing,
+testing and deleting them can be limited with `MCP_ADMIN_TEAMS` (Slack user
+group IDs) and `MCP_ADMIN_EMAILS` (addresses or domains), set from the chart's
+`mcp.adminTeams` / `mcp.adminEmails`:
+
+```yaml
+mcp:
+  adminTeams:
+    - S0A6S3KNNLW
+```
+
+The check works like an agent's `allowed_teams`: the email oauth2-proxy injects
+is resolved to a Slack user, whose group membership is checked. Members see the
+usual buttons; everyone else gets a read-only page and the API answers 403 to
+every verb but GET. Both lists empty means no restriction.

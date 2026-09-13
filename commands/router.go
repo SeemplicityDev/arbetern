@@ -102,6 +102,12 @@ func NewRouter(slackClient SlackClient, ghClient *github.Client, modelsClient *l
 // agent's tool loops.
 func (r *Router) SetMCP(reg *mcp.Registry) { r.mcp = reg }
 
+// ToolDefinitions returns the tool schema this agent's tool loop offers with
+// the clients configured right now, for the integrations catalogue.
+func (r *Router) ToolDefinitions() []llm.Tool {
+	return r.newGeneralHandler("", nil).buildTools()
+}
+
 // ContextProvider exposes the channel-history cache so callers (e.g.
 // main) can attach a background GC sweeper.
 func (r *Router) ContextProvider() *ContextProvider { return r.contextProvider }

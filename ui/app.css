@@ -966,7 +966,7 @@ html[data-sidebar="collapsed"] .sidebar-collapse svg { transform: rotate(180deg)
 .integration-tab.active { color: var(--text); border-bottom-color: var(--accent); }
 .integration-tab .tab-count { font-size: 10px; font-weight: 700; color: var(--text-muted); background: var(--card-2); border-radius: 8px; padding: 1px 6px; margin-left: 4px; }
 .integration-tab-panel[hidden] { display: none; }
-.integration-tools-list { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 14px; }
+.tools-table .scope-desc { font-size: 12px; line-height: 1.5; }
 .tool-chip { font-family: var(--font-mono); font-size: 12px; color: var(--text); background: var(--card-2); border: 1px solid var(--border); border-radius: 6px; padding: 4px 8px; white-space: nowrap; }
 .integration-tools-empty { margin-top: 14px; color: var(--text-muted); font-style: italic; font-size: 13px; }
 

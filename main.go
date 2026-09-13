@@ -84,10 +84,56 @@ type integration struct {
 	Tools        []string          `json:"tools,omitempty"`
 }
 
+// integrationTool is one row of an integration's Tools tab.
+type integrationTool struct {
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+}
+
+// integrationView is the /api/integrations shape: the cached integration with
+// its tool names joined to the descriptions the agents' tool loops advertise.
+type integrationView struct {
+	integration
+	Tools []integrationTool `json:"tools,omitempty"`
+}
+
 var (
 	integrationsMu    sync.RWMutex
 	integrationsCache []integration
+
+	toolDescriptionsMu sync.RWMutex
+	toolDescriptions   map[string]string
 )
+
+// setToolDescriptions collects every tool description the agents can offer.
+// Tools of integrations no agent has configured stay undescribed.
+func setToolDescriptions(routers map[string]*commands.Router) {
+	m := make(map[string]string)
+	for _, r := range routers {
+		for _, t := range r.ToolDefinitions() {
+			if _, seen := m[t.Function.Name]; !seen && t.Function.Description != "" {
+				m[t.Function.Name] = t.Function.Description
+			}
+		}
+	}
+	toolDescriptionsMu.Lock()
+	toolDescriptions = m
+	toolDescriptionsMu.Unlock()
+}
+
+func describeIntegrations(list []integration) []integrationView {
+	toolDescriptionsMu.RLock()
+	defer toolDescriptionsMu.RUnlock()
+	out := make([]integrationView, 0, len(list))
+	for _, ig := range list {
+		v := integrationView{integration: ig}
+		for _, name := range ig.Tools {
+			v.Tools = append(v.Tools, integrationTool{Name: name, Description: toolDescriptions[name]})
+		}
+		out = append(out, v)
+	}
+	return out
+}
 
 func boolPtr(v bool) *bool { return &v }
 
@@ -650,7 +696,17 @@ func firstNonBlank(values ...string) string {
 // When both lists are empty the agent's chat is unrestricted. Team resolution
 // fails closed: if the email can't be mapped to a Slack user (e.g. missing the
 // users:read.email scope) the fallback simply doesn't grant access.
-func checkChatRBAC(r *http.Request, agentID string, allowedEmails, allowedTeams []string, slackClient *slack.Client, emailCache *emailUserIDCache, groupCache *groupMemberCache) bool {
+func checkChatRBAC(r *http.Request, scope string, allowedEmails, allowedTeams []string, slackClient *slack.Client, emailCache *emailUserIDCache, groupCache *groupMemberCache) bool {
+	if uiRBACAllowed(r, allowedEmails, allowedTeams, slackClient, emailCache, groupCache) {
+		return true
+	}
+	log.Printf("[rbac] DENIED email=%q scope=%s (allowed_emails=%v allowed_teams=%v)", redactEmail(clientEmail(r)), scope, allowedEmails, allowedTeams)
+	return false
+}
+
+// uiRBACAllowed is the check behind checkChatRBAC without the denial log, for
+// callers that only describe what the viewer may do.
+func uiRBACAllowed(r *http.Request, allowedEmails, allowedTeams []string, slackClient *slack.Client, emailCache *emailUserIDCache, groupCache *groupMemberCache) bool {
 	if len(allowedEmails) == 0 && len(allowedTeams) == 0 {
 		return true // no restriction
 	}
@@ -668,8 +724,6 @@ func checkChatRBAC(r *http.Request, agentID string, allowedEmails, allowedTeams 
 			return true
 		}
 	}
-
-	log.Printf("[rbac] DENIED email=%q agent=%s (allowed_emails=%v allowed_teams=%v)", redactEmail(email), agentID, allowedEmails, allowedTeams)
 	return false
 }
 
@@ -1952,6 +2006,17 @@ func main() {
 	}
 	mcpRegistry.SetKnownAgents(agentIDs)
 	log.Printf("MCP connectors store: %smcp/ (%d connector(s))", backend, mcpRegistry.Count())
+	// Who may add, change, test or delete connectors. Reads stay open; the
+	// identity endpoint tells the UI whether to offer the actions at all.
+	canManageMCP := func(r *http.Request) bool {
+		return uiRBACAllowed(r, cfg.MCPAdminEmails, cfg.MCPAdminTeams, slackClient, emailUserCache, rbacCache)
+	}
+	if len(cfg.MCPAdminTeams) > 0 || len(cfg.MCPAdminEmails) > 0 {
+		mcpRegistry.SetAuthorizer(func(r *http.Request) bool {
+			return checkChatRBAC(r, "mcp-connectors", cfg.MCPAdminEmails, cfg.MCPAdminTeams, slackClient, emailUserCache, rbacCache)
+		})
+		log.Printf("RBAC: MCP connector changes restricted to emails %v / teams %v", cfg.MCPAdminEmails, cfg.MCPAdminTeams)
+	}
 
 	for _, agent := range agents {
 		ap, err := prompts.LoadAgent(agent.ID)
@@ -2008,6 +2073,8 @@ func main() {
 		http.Handle(webhookPath, handler)
 		log.Printf("Registered agent %q at %s", agent.ID, webhookPath)
 	}
+
+	setToolDescriptions(routers)
 
 	// Centralized per-agent chat (UI-driven). Disabled per agent by default;
 	// enabled via `chat_enabled: true` in the agent's config.yaml. There is no
@@ -2250,7 +2317,10 @@ func main() {
 	apiMux.HandleFunc("/api/me", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Cache-Control", "no-store")
-		_ = json.NewEncoder(w).Encode(identities.lookup(clientEmail(r), slackClient, jiraClient, cfg.AtlassianURL))
+		_ = json.NewEncoder(w).Encode(struct {
+			identity
+			MCPAdmin bool `json:"mcp_admin"`
+		}{identities.lookup(clientEmail(r), slackClient, jiraClient, cfg.AtlassianURL), canManageMCP(r)})
 	})
 
 	// API: UI settings.
@@ -2269,7 +2339,7 @@ func main() {
 		data := integrationsCache
 		integrationsMu.RUnlock()
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(data)
+		_ = json.NewEncoder(w).Encode(describeIntegrations(data))
 	})
 
 	// API: thread session stats (observability).

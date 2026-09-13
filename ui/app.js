@@ -1715,11 +1715,32 @@ function renderIntegrations(integrations) {
       </table>
       </div>
       <div class="integration-tab-panel" data-tab-panel="tools"${activeIntegrationTab === 'tools' ? '' : ' hidden'}>
-        ${(ig.tools && ig.tools.length)
-          ? `<div class="integration-tools-list">${ig.tools.map(t => `<code class="tool-chip">${escapeHtml(t)}</code>`).join('')}</div>`
-          : '<div class="integration-tools-empty">No tools are exposed by this integration.</div>'}
+        ${renderIntegrationTools(ig.tools)}
       </div>
     </div>`;
+}
+
+// Tools are listed one per row; the description column appears only when the
+// integration exposes at least one description.
+function renderIntegrationTools(tools) {
+  const list = (tools || []).map(t => (typeof t === 'string' ? { name: t } : t));
+  if (!list.length) return '<div class="integration-tools-empty">No tools are exposed by this integration.</div>';
+  const withDesc = list.some(t => t.description);
+  const rows = list.map(t => `
+            <tr>
+              <td class="scope-name">${escapeHtml(t.name)}</td>
+              ${withDesc ? `<td class="scope-desc">${escapeHtml(t.description || '')}</td>` : ''}
+            </tr>`).join('');
+  return `
+      <table class="permissions-table tools-table">
+        <thead>
+          <tr>
+            <th>Tool</th>
+            ${withDesc ? '<th>Description</th>' : ''}
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>`;
 }
 
 function toggleIntegration(id) {
@@ -2097,24 +2118,34 @@ function connectorCard(c) {
       ${tools.length ? `<details><summary>${plural(tools.length, 'tool')}</summary><div class="tool-chips" style="margin-top:8px">${tools.map(t => `<code class="tool-chip" title="${escapeHtml(t.description || '')}">${escapeHtml(t.name)}</code>`).join('')}</div></details>` : ''}
       <div class="card-foot">
         <span>${headers.length ? plural(headers.length, 'header') + ' · ' : ''}${c.last_check ? 'checked ' + timeAgo(c.last_check) : 'never checked'}</span>
-        <div class="actions">
+        ${canManageMCP() ? `<div class="actions">
           <button class="btn-mini" type="button" onclick="testConnector('${c.id}', this)">Test</button>
           <button class="btn-mini" type="button" onclick="toggleConnector('${c.id}', ${!c.enabled})">${c.enabled ? 'Disable' : 'Enable'}</button>
           <button class="btn-mini" type="button" onclick="editConnector('${c.id}')">Edit</button>
           <button class="btn-mini danger" type="button" onclick="deleteConnector('${c.id}')">Delete</button>
-        </div>
+        </div>` : ''}
       </div>
     </article>`;
 }
 
+// canManageMCP reflects the mcp_admin flag of the identity endpoint; until the
+// identity is known the actions stay visible and the API is the arbiter.
+function canManageMCP() {
+  return !(identityData && identityData.mcp_admin === false);
+}
+
 function renderMCPPage() {
   const el = document.getElementById('mcp-list');
+  const manage = canManageMCP();
+  document.getElementById('mcp-new-btn').hidden = !manage;
+  const note = document.getElementById('mcp-readonly-note');
+  if (note) note.hidden = manage;
   if (!mcpData) return;
   if (mcpData.error) { el.innerHTML = emptyHtml('Failed to load connectors.', true); return; }
   const list = mcpData.list || [];
   el.innerHTML = list.length
     ? list.map(connectorCard).join('')
-    : emptyHtml('No connectors yet. Add an MCP server to give the agents its tools.', true);
+    : emptyHtml(manage ? 'No connectors yet. Add an MCP server to give the agents its tools.' : 'No connectors yet.', true);
 }
 
 document.getElementById('mcp-new-btn').addEventListener('click', () => connectorForm(null));
@@ -2291,6 +2322,7 @@ async function loadIdentity() {
     identityData = { anonymous: true, error: true };
   }
   renderIdentity();
+  renderMCPPage();
 }
 
 /* Branding */

@@ -124,6 +124,7 @@ Authentication is one of two schemes, and the target principal/key needs
 | `LLM_PROMPT_CACHE` | Enable Anthropic prompt caching of the static prefix (tool schemas + system prompt) and the rolling conversation tail, so long tool-loops re-read shared context at the provider's ~0.1x cache rate instead of full price. Quality-neutral. Default `true`; set `false` as a kill-switch |
 | `SHOW_USAGE_STAMP` | Append model/token usage metadata to Slack replies. Default `true` |
 | `UI_ALLOWED_CIDRS` | Comma-separated CIDRs allowed to access the UI |
+| `MCP_ADMIN_TEAMS` / `MCP_ADMIN_EMAILS` | Who may add, edit, test or delete MCP connectors from the UI: comma-separated Slack user group IDs, and email addresses or domains matched like an agent's `allowed_emails`. Both empty = every UI user. Set from the chart's `mcp.adminTeams` / `mcp.adminEmails`; needs oauth2-proxy so the viewer's email is known. Everyone else sees connectors read-only and the API answers 403 to every verb but GET |
 | `UI_HEADER` | Custom header text for the web UI (default `arbetern`) |
 | `HEADROOM_PROXY_URL` | Base URL of a [Headroom](docs/HEADROOM.md) compression sidecar (e.g. `http://localhost:8787`). When set, each conversation is compressed via its `/v1/compress` endpoint before every LLM call — cutting tokens across **all** backends (GitHub Models, Azure OpenAI, Azure Foundry/Claude, AWS Bedrock). Set automatically by Helm when `headroom.enabled: true` |
 | `HEADROOM_COMPRESS_TIMEOUT` | Go duration bounding a single `/v1/compress` round-trip before the app falls back to sending the conversation uncompressed (fail-open). Default `90s`; raise for very large contexts. Set via Helm `headroom.compressTimeout` |
@@ -996,7 +997,8 @@ page or via `POST /api/mcp`. Testing a connector performs the MCP handshake and
 `mcp_<connector>_<tool>` in every tool loop, and calls are proxied through
 `tools/call`. Header values may reference environment variables as `${NAME}`
 so tokens stay in the Secret rather than in the state bucket; stored literal
-values are masked in API responses. See [docs/MCP.md](docs/MCP.md) for the supported
+values are masked in API responses. Set `mcp.adminTeams` in the chart to limit
+who may add or change connectors to members of those Slack user groups. See [docs/MCP.md](docs/MCP.md) for the supported
 transport, limits and roadmap.
 
 ## Integrations
