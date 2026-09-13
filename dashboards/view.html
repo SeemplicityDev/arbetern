@@ -187,17 +187,16 @@
       @page { margin: 15mm; }
     }
   </style>
+  <link rel="stylesheet" href="/ui/app.css">
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
 </head>
-<body>
-<header>
-  <div>
-    <h1 id="title">Loading...</h1>
-    <div class="meta" id="meta"></div>
-  </div>
-  <div style="display:flex;gap:10px;align-items:center">
-    <button id="theme-toggle" class="theme-toggle" type="button" role="switch" aria-label="Toggle color theme"><span class="theme-toggle-knob"><svg class="tt-sun" viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><circle cx="12" cy="12" r="4" fill="currentColor" stroke="none"/><path d="M12 2.5v2M12 19.5v2M2.5 12h2M19.5 12h2M5 5l1.4 1.4M17.6 17.6 19 19M19 5l-1.4 1.4M6.4 17.6 5 19"/></svg><svg class="tt-moon" viewBox="0 0 24 24" width="11" height="11" fill="currentColor"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg></span></button>
+<body data-shell-page="dashboards">
+<div id="shell-mount"></div>
+<main id="page-content" class="content">
+<header class="detail-head page-head">
+  <div><h1 class="page-title" id="title">Loading...</h1><div class="meta" id="meta"></div></div>
+  <div class="page-actions">
     <span class="badge" id="sync-badge">syncing</span>
     <button id="prompt-btn" class="badge" type="button"
       style="cursor:pointer;font-family:inherit;color:var(--text);background:var(--card);display:none;"
@@ -208,11 +207,9 @@
     <button id="gitops-sync-btn" class="badge" type="button"
       style="cursor:pointer;font-family:inherit;color:var(--text);background:var(--card);display:none;"
       title="Reconcile this dashboard registry with the source repo right now.">⟳ sync now</button>
-    <a class="badge" href="/ui/dashboards">← dashboards</a>
   </div>
 </header>
-<main>
-  <div class="description" id="description"></div>
+  <div class="page-desc detail-description" id="description"></div>
   <div id="gitops-banner" style="display:none;background:rgba(114,151,189,.08);border:1px solid rgba(114,151,189,.4);border-radius:10px;padding:12px 14px;margin-bottom:14px;color:var(--text);font-size:13px;line-height:1.55"></div>
   <div id="prompt-card" style="display:none">
     <div class="prompt-card-title">Prompt</div>
@@ -223,7 +220,8 @@
   <div class="footer">
     Auto-refreshes from the server every sync interval. Raw JSON: <a id="raw-link" href="">data.json</a>
   </div>
-</main>
+  </main>
+<script src="/ui/shell.js"></script>
 <script>
   function escapeHtml(s){const d=document.createElement('div');d.textContent=String(s??'');return d.innerHTML}
   function fmtTime(s){if(!s)return '';try{return new Date(s).toLocaleString()}catch(e){return s}}
@@ -1104,22 +1102,9 @@
     }
   }
 
-  // Theme toggle (dark ⇆ light, persisted).
-  (function(){
-    const btn = document.getElementById('theme-toggle');
-    function label(t){
-      btn.title = 'Switch to ' + (t === 'light' ? 'dark' : 'light') + ' theme';
-      btn.setAttribute('aria-checked', String(t !== 'light'));
-    }
-    btn.addEventListener('click', () => {
-      const next = document.documentElement.dataset.theme === 'light' ? 'dark' : 'light';
-      document.documentElement.dataset.theme = next;
-      try { localStorage.setItem('arbetern-theme', next); } catch (e) {}
-      label(next);
-      Object.values(metricsCharts).forEach(applyChartTheme);
-    });
-    label(document.documentElement.dataset.theme || 'dark');
-  })();
+  window.addEventListener('arbetern-theme-change', () => {
+    Object.values(metricsCharts).forEach(applyChartTheme);
+  });
 
   load();
   // Poll once every 15s so users see refreshed data without reloading.

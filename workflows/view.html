@@ -171,15 +171,14 @@
     .modal-error.show{display:block}
     .edit-btn{cursor:pointer;font-family:inherit;color:var(--text);background:var(--card);display:inline-flex;align-items:center;gap:4px}
   </style>
+  <link rel="stylesheet" href="/ui/app.css">
 </head>
-<body>
-  <header>
-    <div>
-      <h1 id="title">workflow</h1>
-      <div class="meta" id="subtitle"></div>
-    </div>
-    <div style="display:flex;gap:10px;align-items:center">
-      <button id="theme-toggle" class="theme-toggle" type="button" role="switch" aria-label="Toggle color theme"><span class="theme-toggle-knob"><svg class="tt-sun" viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><circle cx="12" cy="12" r="4" fill="currentColor" stroke="none"/><path d="M12 2.5v2M12 19.5v2M2.5 12h2M19.5 12h2M5 5l1.4 1.4M17.6 17.6 19 19M19 5l-1.4 1.4M6.4 17.6 5 19"/></svg><svg class="tt-moon" viewBox="0 0 24 24" width="11" height="11" fill="currentColor"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg></span></button>
+<body data-shell-page="workflows">
+  <div id="shell-mount"></div>
+  <main id="page-content" class="content">
+  <header class="detail-head page-head">
+    <div><h1 class="page-title" id="title">workflow</h1><div class="meta" id="subtitle"></div></div>
+    <div class="page-actions">
       <div id="status-badge" class="badge">loading…</div>
       <button id="run-now-btn" class="badge" type="button"
         style="cursor:pointer;font-family:inherit;color:var(--text);background:var(--card);"
@@ -195,11 +194,9 @@
         <svg viewBox="0 0 16 16" width="12" height="12" xmlns="http://www.w3.org/2000/svg" style="fill:currentColor"><path d="M11.013 1.427a1.75 1.75 0 0 1 2.474 0l1.086 1.086a1.75 1.75 0 0 1 0 2.474l-8.61 8.61c-.21.21-.47.364-.756.445l-3.251.93a.75.75 0 0 1-.927-.928l.929-3.25c.081-.286.235-.547.445-.758l8.61-8.61zm1.414 1.06a.25.25 0 0 0-.354 0L10.811 3.75l1.439 1.44 1.263-1.263a.25.25 0 0 0 0-.354l-1.086-1.086zM11.189 6.25 9.75 4.811l-6.286 6.287a.25.25 0 0 0-.064.108l-.558 1.953 1.953-.558a.249.249 0 0 0 .108-.064l6.286-6.287z"/></svg>
         edit
       </button>
-      <a class="badge" href="/ui/workflows">← workflows</a>
     </div>
   </header>
-  <main>
-    <p class="description" id="description"></p>
+    <p class="page-desc detail-description" id="description"></p>
     <div id="gitops-banner" style="display:none;background:rgba(114,151,189,.08);border:1px solid rgba(114,151,189,.4);border-radius:10px;padding:12px 14px;margin-bottom:14px;color:var(--text);font-size:13px;line-height:1.55"></div>
     <div id="disabled-banner" style="display:none;background:rgba(196,127,127,.08);border:1px solid rgba(196,127,127,.35);border-radius:10px;padding:14px 16px;margin-bottom:18px;color:var(--red);font-size:13px;line-height:1.55"></div>
     <div class="meta-grid" id="meta-grid"></div>
@@ -226,6 +223,7 @@
 
     <div class="footer" id="footer"></div>
   </main>
+  <script src="/ui/shell.js"></script>
 
   <!-- Edit modal -->
   <div id="edit-modal" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="edit-modal-title">
@@ -1028,21 +1026,6 @@
       }
     });
 
-    // Theme toggle (dark ⇆ light, persisted).
-    (function(){
-      const btn = document.getElementById('theme-toggle');
-      function label(t){
-        btn.title = 'Switch to ' + (t === 'light' ? 'dark' : 'light') + ' theme';
-        btn.setAttribute('aria-checked', String(t !== 'light'));
-      }
-      btn.addEventListener('click', () => {
-        const next = document.documentElement.dataset.theme === 'light' ? 'dark' : 'light';
-        document.documentElement.dataset.theme = next;
-        try { localStorage.setItem('arbetern-theme', next); } catch (e) {}
-        label(next);
-      });
-      label(document.documentElement.dataset.theme || 'dark');
-    })();
   </script>
 </body>
 </html>

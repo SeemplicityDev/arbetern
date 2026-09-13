@@ -119,6 +119,20 @@ function escapeHtml(str) {
     .replace(/'/g, '&#39;');
 }
 
+function safeExternalUrl(value) {
+  try {
+    const url = new URL(String(value || ''), window.location.origin);
+    return url.protocol === 'http:' || url.protocol === 'https:' ? url.href : '';
+  } catch (e) {
+    return '';
+  }
+}
+
+function safeImageUrl(value) {
+  const url = safeExternalUrl(value);
+  return url && url.startsWith('https://') ? url : '';
+}
+
 // Agent and descriptor ids are validated server-side against this alphabet;
 // anything else is never interpolated into markup.
 const SAFE_ID_RE = /^[a-z0-9][a-z0-9-]{0,62}$/;
@@ -798,7 +812,7 @@ function renderLatestChange() {
   if (!changesState.list) { el.innerHTML = emptyHtml('Loading…'); return; }
   const c = changesState.list[0];
   if (!c) { el.innerHTML = emptyHtml('No commits found.'); return; }
-  el.innerHTML = `<a class="change-sha" href="${escapeHtml(c.url)}" target="_blank" rel="noopener">${escapeHtml(c.sha)}</a>
+  el.innerHTML = `<a class="change-sha" href="${escapeHtml(safeExternalUrl(c.url) || '#')}" target="_blank" rel="noopener">${escapeHtml(c.sha)}</a>
     <div class="change-msg">${escapeHtml(c.message)}</div>
     <div class="change-meta">${escapeHtml(c.author)}${c.date ? ' · ' + timeAgo(c.date) : ''}</div>`;
 }
@@ -1019,7 +1033,7 @@ function renderChanges() {
   }
   list.innerHTML = commits.map(c => `
     <div class="change-item">
-      <a class="change-sha" href="${escapeHtml(c.url)}" target="_blank" rel="noopener">${escapeHtml(c.sha)}</a>
+      <a class="change-sha" href="${escapeHtml(safeExternalUrl(c.url) || '#')}" target="_blank" rel="noopener">${escapeHtml(c.sha)}</a>
       <div class="change-body">
         <div class="change-message" title="${escapeHtml(c.message)}">${escapeHtml(c.message)}</div>
         <div class="change-meta">${escapeHtml(c.author)} · ${c.date ? timeAgo(c.date) : ''}</div>
@@ -1055,7 +1069,8 @@ function priceSrc(p) {
   let host = p.url;
   try { host = new URL(p.url).host; } catch (e) {}
   if (p.error) return `⚠ Pricing source unavailable (${escapeHtml(p.error)}) · ${p.models || 0} rates loaded · overrides win`;
-  const src = /^https?:\/\//i.test(p.url || '') ? `<a href="${escapeHtml(p.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(host)}</a>` : escapeHtml(host);
+  const sourceUrl = safeExternalUrl(p.url);
+  const src = sourceUrl ? `<a href="${escapeHtml(sourceUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(host)}</a>` : escapeHtml(host);
   return `Prices: ${src} · ${fmtInt(p.models || 0)} models${p.last_sync ? ' · synced ' + timeAgo(p.last_sync) : ''} · LLM_PRICE_OVERRIDES win`;
 }
 
@@ -2246,14 +2261,15 @@ function initialsOf(name) {
 
 function avatarHtml(name, url, muted) {
   const style = !muted && name ? ` style="background:${hashColor(name)}"` : '';
-  const img = url ? `<img src="${escapeHtml(url)}" alt="" onerror="this.remove()">` : '';
+  const imageUrl = safeImageUrl(url);
+  const img = imageUrl ? `<img src="${escapeHtml(imageUrl)}" alt="" onerror="this.remove()">` : '';
   return `<span class="user-avatar${muted ? ' muted' : ''}"${style}>${escapeHtml(muted ? '?' : initialsOf(name))}${img}</span>`;
 }
 
 function idRows(rows) {
   const items = rows.filter(r => r[1]);
   if (!items.length) return '';
-  return `<dl class="id-row">${items.map(([k, v, cls]) => `<dt>${escapeHtml(k)}</dt><dd class="${cls || ''}" title="${escapeHtml(v)}">${cls === 'link' ? `<a href="${escapeHtml(v)}" target="_blank" rel="noopener">${escapeHtml(v.replace(/^https?:\/\//, ''))}</a>` : escapeHtml(v)}</dd>`).join('')}</dl>`;
+  return `<dl class="id-row">${items.map(([k, v, cls]) => { const link = cls === 'link' ? safeExternalUrl(v) : ''; return `<dt>${escapeHtml(k)}</dt><dd class="${cls || ''}" title="${escapeHtml(v)}">${link ? `<a href="${escapeHtml(link)}" target="_blank" rel="noopener">${escapeHtml(v.replace(/^https?:\/\//, ''))}</a>` : escapeHtml(v)}</dd>`; }).join('')}</dl>`;
 }
 
 function renderIdentity() {
