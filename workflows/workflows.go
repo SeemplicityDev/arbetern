@@ -274,7 +274,7 @@ type Registry struct {
 // New creates a Registry over b. Call LoadAll before serving.
 func New(b *store.Backend, exec Executor) *Registry {
 	return &Registry{
-		docs: store.NewDocuments(b, Prefix, func(w *Workflow) error {
+		docs: store.NewDocuments(b, Prefix, store.AgentKeyRe, func(w *Workflow) error {
 			if w.ID == "" || w.Agent == "" || !idValidRe.MatchString(w.ID) || !agentValidRe.MatchString(w.Agent) {
 				return fmt.Errorf("invalid workflow descriptor")
 			}

@@ -117,7 +117,7 @@ type Registry struct {
 // New loads the connectors stored under Prefix.
 func New(ctx context.Context, b *store.Backend) (*Registry, error) {
 	r := &Registry{
-		docs: store.NewDocuments(b, Prefix, func(c *Connector) error {
+		docs: store.NewDocuments(b, Prefix, store.FlatKeyRe, func(c *Connector) error {
 			if c.ID == "" || !store.IDRe.MatchString(c.ID) {
 				return errors.New("missing or invalid id")
 			}

@@ -46,7 +46,10 @@ and immutability plus ETags replace explicit invalidation.
   request per registry, ETags included), fetches only the documents whose
   ETag changed and evicts the ones that disappeared. S3 list and read
   operations are strongly consistent, so a change made on one replica is
-  visible on the others within that window.
+  visible on the others within that window. Objects whose key does not have
+  the descriptor shape (`<agent>/<id>.json` or `<id>.json`) are ignored, and
+  an object that fails to decode is logged once and left alone until its
+  ETag changes.
 - **Billing merges.** Usage events are buffered in memory and merged into the
   stored month aggregate with a conditional write every 15 seconds. Several
   replicas recording at once fold their events into the same object without

@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/justmike1/arbetern/internal/safego"
@@ -25,7 +26,7 @@ import (
 // keyed <agentID>/<userID>/<entryID>.
 type UserContextStore struct {
 	b     *store.Backend
-	index *vectors.Index
+	index atomic.Pointer[vectors.Index]
 }
 
 const (
@@ -66,13 +67,23 @@ type userContextEntry struct {
 }
 
 // NewUserContextStore returns a store over b. index may be nil, in which case
-// retrieval is recency-based.
+// retrieval is recency-based until SetIndex installs one.
 func NewUserContextStore(b *store.Backend, index *vectors.Index) *UserContextStore {
-	return &UserContextStore{b: b, index: index}
+	s := &UserContextStore{b: b}
+	s.index.Store(index)
+	return s
+}
+
+// SetIndex switches retrieval to the given vector index; nil returns to
+// recency. Safe to call while requests are in flight.
+func (s *UserContextStore) SetIndex(index *vectors.Index) {
+	if s != nil {
+		s.index.Store(index)
+	}
 }
 
 // Semantic reports whether retrieval is similarity-based.
-func (s *UserContextStore) Semantic() bool { return s != nil && s.index != nil }
+func (s *UserContextStore) Semantic() bool { return s != nil && s.index.Load() != nil }
 
 func (s *UserContextStore) key(agentID, userID string) string {
 	if !safeIDRe.MatchString(agentID) || !safeIDRe.MatchString(userID) {
@@ -103,8 +114,8 @@ func (s *UserContextStore) Context(ctx context.Context, agentID, userID, questio
 	if len(doc.Entries) == 0 {
 		return ""
 	}
-	if s.index != nil && strings.TrimSpace(question) != "" {
-		picked, err := s.relevant(ctx, agentID, userID, question, doc.Entries)
+	if index := s.index.Load(); index != nil && strings.TrimSpace(question) != "" {
+		picked, err := s.relevant(ctx, index, agentID, userID, question, doc.Entries)
 		if err != nil {
 			log.Printf("[user-context] semantic retrieval failed agent=%s user=%s: %v", agentID, userID, err)
 		} else if len(picked) > 0 {
@@ -116,9 +127,9 @@ func (s *UserContextStore) Context(ctx context.Context, agentID, userID, questio
 
 // relevant picks the entries closest to question plus the latest few, in
 // chronological order.
-func (s *UserContextStore) relevant(ctx context.Context, agentID, userID, question string, entries []userContextEntry) ([]userContextEntry, error) {
+func (s *UserContextStore) relevant(ctx context.Context, index *vectors.Index, agentID, userID, question string, entries []userContextEntry) ([]userContextEntry, error) {
 	filter := vectors.Eq(map[string]any{"agent": agentID, "user": userID})
-	matches, err := s.index.Query(ctx, question, userContextTopK, filter)
+	matches, err := index.Query(ctx, question, userContextTopK, filter)
 	if err != nil {
 		return nil, err
 	}
@@ -193,8 +204,9 @@ func (s *UserContextStore) Append(ctx context.Context, agentID, userID, question
 		return
 	}
 	entry := userContextEntry{ID: id, At: time.Now().UTC(), Question: question, Answer: answer}
+	index := s.index.Load()
 	maxEntries, maxBytes := userContextMaxEntries, userContextMaxDocBytes
-	if s.index != nil {
+	if index != nil {
 		maxEntries, maxBytes = userContextMaxEntriesIndexed, userContextMaxDocBytesIndexed
 	}
 	var dropped []string
@@ -210,7 +222,7 @@ func (s *UserContextStore) Append(ctx context.Context, agentID, userID, question
 		log.Printf("[user-context] write failed agent=%s user=%s: %v", agentID, userID, err)
 		return
 	}
-	if s.index == nil {
+	if index == nil {
 		return
 	}
 	safego.Go("user context: index", func() {
@@ -221,7 +233,7 @@ func (s *UserContextStore) Append(ctx context.Context, agentID, userID, question
 			Text:     "Q: " + entry.Question + "\nA: " + entry.Answer,
 			Metadata: map[string]any{"agent": agentID, "user": userID, "at": entry.At.Unix()},
 		}
-		if err := s.index.Upsert(ictx, []vectors.Item{item}); err != nil {
+		if err := index.Upsert(ictx, []vectors.Item{item}); err != nil {
 			log.Printf("[user-context] index failed agent=%s user=%s: %v", agentID, userID, err)
 		}
 		if len(dropped) == 0 {
@@ -231,7 +243,7 @@ func (s *UserContextStore) Append(ctx context.Context, agentID, userID, question
 		for _, id := range dropped {
 			keys = append(keys, vectorKeyPrefix(agentID, userID)+id)
 		}
-		if err := s.index.Delete(ictx, keys); err != nil {
+		if err := index.Delete(ictx, keys); err != nil {
 			log.Printf("[user-context] unindex failed agent=%s user=%s: %v", agentID, userID, err)
 		}
 	})
@@ -310,13 +322,14 @@ func (s *UserContextStore) sweep(ctx context.Context) {
 		return
 	}
 	cutoff := time.Now().Add(-UserContextTTL)
+	index := s.index.Load()
 	removed := 0
 	for _, o := range objs {
 		if !strings.HasSuffix(o.Key, ".json") || o.LastModified.After(cutoff) {
 			continue
 		}
-		if s.index != nil {
-			s.unindexAll(ctx, o.Key)
+		if index != nil {
+			s.unindexAll(ctx, index, o.Key)
 		}
 		if err := s.b.Delete(ctx, o.Key, ""); err != nil {
 			log.Printf("[user-context] delete %s: %v", o.Key, err)
@@ -329,7 +342,7 @@ func (s *UserContextStore) sweep(ctx context.Context) {
 	}
 }
 
-func (s *UserContextStore) unindexAll(ctx context.Context, key string) {
+func (s *UserContextStore) unindexAll(ctx context.Context, index *vectors.Index, key string) {
 	doc, _, err := store.GetJSON[userContextDoc](ctx, s.b, key)
 	if err != nil || len(doc.Entries) == 0 {
 		return
@@ -339,7 +352,7 @@ func (s *UserContextStore) unindexAll(ctx context.Context, key string) {
 	for _, e := range doc.Entries {
 		keys = append(keys, prefix+e.ID)
 	}
-	if err := s.index.Delete(ctx, keys); err != nil {
+	if err := index.Delete(ctx, keys); err != nil {
 		log.Printf("[user-context] unindex %s: %v", key, err)
 	}
 }

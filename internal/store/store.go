@@ -51,6 +51,14 @@ func Slugify(s, fallback string) string {
 // Key returns the document key of a descriptor scoped to an agent.
 func Key(agent, id string) string { return agent + "/" + id + ".json" }
 
+// AgentKeyRe matches the keys Key produces; FlatKeyRe matches <id>.json.
+// Objects under a prefix whose keys match neither are not descriptors and
+// are never loaded.
+var (
+	AgentKeyRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}/[a-z0-9][a-z0-9-]{0,62}\.json$`)
+	FlatKeyRe  = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}\.json$`)
+)
+
 // InstanceID identifies this process to other replicas, for lease ownership.
 var InstanceID = sync.OnceValue(func() string {
 	host, _ := os.Hostname()

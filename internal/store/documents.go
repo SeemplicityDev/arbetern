@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -27,10 +28,14 @@ var errInvalid = errors.New("invalid document")
 type Documents[T any] struct {
 	b        *Backend
 	prefix   string
+	keyRe    *regexp.Regexp
 	validate func(*T) error
 
 	mu    sync.RWMutex
 	items map[string]*entry[T]
+	// rejected remembers the ETag of every object that failed to decode or
+	// validate, so it is logged once and not fetched again until it changes.
+	rejected map[string]string
 }
 
 type entry[T any] struct {
@@ -46,13 +51,21 @@ type Change[T any] struct {
 	New *T
 }
 
-// NewDocuments returns an empty cache for the documents under prefix. validate
-// may be nil; documents it rejects are skipped with a log line.
-func NewDocuments[T any](b *Backend, prefix string, validate func(*T) error) *Documents[T] {
+// NewDocuments returns an empty cache for the documents under prefix whose
+// keys match keyRe. validate may be nil; documents it rejects are skipped
+// with a log line.
+func NewDocuments[T any](b *Backend, prefix string, keyRe *regexp.Regexp, validate func(*T) error) *Documents[T] {
 	if prefix != "" && !strings.HasSuffix(prefix, "/") {
 		prefix += "/"
 	}
-	return &Documents[T]{b: b, prefix: prefix, validate: validate, items: map[string]*entry[T]{}}
+	return &Documents[T]{b: b, prefix: prefix, keyRe: keyRe, validate: validate, items: map[string]*entry[T]{}, rejected: map[string]string{}}
+}
+
+func (d *Documents[T]) accepts(key string) bool {
+	if d.keyRe == nil {
+		return strings.HasSuffix(key, ".json")
+	}
+	return d.keyRe.MatchString(key)
 }
 
 // Prefix is the object prefix the collection lives under.
@@ -65,6 +78,7 @@ func (d *Documents[T]) Load(ctx context.Context) error {
 		return err
 	}
 	items := make(map[string]*entry[T], len(objs))
+	rejected := map[string]string{}
 	var (
 		mu       sync.Mutex
 		wg       sync.WaitGroup
@@ -73,7 +87,7 @@ func (d *Documents[T]) Load(ctx context.Context) error {
 	sem := make(chan struct{}, loadConcurrency)
 	for _, o := range objs {
 		key := strings.TrimPrefix(o.Key, d.prefix)
-		if !strings.HasSuffix(key, ".json") {
+		if !d.accepts(key) {
 			continue
 		}
 		wg.Add(1)
@@ -88,6 +102,7 @@ func (d *Documents[T]) Load(ctx context.Context) error {
 			case errors.Is(err, ErrNotFound):
 			case errors.Is(err, errInvalid):
 				log.Printf("[store] skipping %s%s: %v", d.prefix, key, err)
+				rejected[key] = o.ETag
 			case err != nil:
 				if firstErr == nil {
 					firstErr = err
@@ -103,6 +118,7 @@ func (d *Documents[T]) Load(ctx context.Context) error {
 	}
 	d.mu.Lock()
 	d.items = items
+	d.rejected = rejected
 	d.mu.Unlock()
 	return nil
 }
@@ -230,7 +246,7 @@ func (d *Documents[T]) Refresh(ctx context.Context) ([]Change[T], error) {
 	remote := make(map[string]string, len(objs))
 	for _, o := range objs {
 		key := strings.TrimPrefix(o.Key, d.prefix)
-		if strings.HasSuffix(key, ".json") {
+		if d.accepts(key) {
 			remote[key] = o.ETag
 		}
 	}
@@ -248,10 +264,19 @@ func (d *Documents[T]) Refresh(ctx context.Context) ([]Change[T], error) {
 			stale = append(stale, key)
 		}
 	}
-	for key := range remote {
-		if _, ok := d.items[key]; !ok {
-			stale = append(stale, key)
+	for key := range d.rejected {
+		if _, ok := remote[key]; !ok {
+			delete(d.rejected, key)
 		}
+	}
+	for key, tag := range remote {
+		if _, ok := d.items[key]; ok {
+			continue
+		}
+		if d.rejected[key] == tag {
+			continue
+		}
+		stale = append(stale, key)
 	}
 	d.mu.Unlock()
 
@@ -265,6 +290,9 @@ func (d *Documents[T]) Refresh(ctx context.Context) ([]Change[T], error) {
 			continue
 		case errors.Is(err, errInvalid):
 			log.Printf("[store] skipping %s%s: %v", d.prefix, key, err)
+			d.mu.Lock()
+			d.rejected[key] = remote[key]
+			d.mu.Unlock()
 			continue
 		case err != nil:
 			return changes, err
@@ -313,6 +341,7 @@ func (d *Documents[T]) set(key string, e *entry[T]) *entry[T] {
 	defer d.mu.Unlock()
 	old := d.items[key]
 	d.items[key] = e
+	delete(d.rejected, key)
 	return old
 }
 

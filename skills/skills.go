@@ -78,7 +78,7 @@ type Registry struct {
 // New loads the custom skills stored under Prefix.
 func New(ctx context.Context, b *store.Backend) (*Registry, error) {
 	r := &Registry{
-		docs: store.NewDocuments(b, Prefix, func(s *Skill) error {
+		docs: store.NewDocuments(b, Prefix, store.FlatKeyRe, func(s *Skill) error {
 			if s.ID == "" || !store.IDRe.MatchString(s.ID) {
 				return errors.New("missing or invalid id")
 			}

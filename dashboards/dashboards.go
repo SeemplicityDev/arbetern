@@ -183,7 +183,7 @@ type Registry struct {
 // New creates a Registry over b. Call LoadAll before serving.
 func New(b *store.Backend, exec Executor) *Registry {
 	return &Registry{
-		docs: store.NewDocuments(b, Prefix, func(d *Dashboard) error {
+		docs: store.NewDocuments(b, Prefix, store.AgentKeyRe, func(d *Dashboard) error {
 			if d.ID == "" || d.Agent == "" || !idValidRe.MatchString(d.ID) || !agentValidRe.MatchString(d.Agent) {
 				return fmt.Errorf("invalid dashboard descriptor")
 			}

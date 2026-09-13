@@ -94,7 +94,7 @@ type Registry struct {
 // New constructs a Registry over b. respond is invoked to generate assistant
 // replies. Call Load before serving.
 func New(b *store.Backend, respond Responder) *Registry {
-	return &Registry{docs: store.NewDocuments[transcript](b, Prefix, nil), respond: respond, enabled: make(map[string]bool)}
+	return &Registry{docs: store.NewDocuments[transcript](b, Prefix, store.AgentKeyRe, nil), respond: respond, enabled: make(map[string]bool)}
 }
 
 // Load reads every stored conversation into the cache.

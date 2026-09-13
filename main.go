@@ -211,6 +211,9 @@ const (
 	stateRefreshInterval = 30 * time.Second
 	// schedulerLeaseTTL bounds how long a crashed leader blocks scheduling.
 	schedulerLeaseTTL = 30 * time.Second
+	// vectorIndexRetry is how often a vector index that failed to open at boot
+	// is tried again, so a permission fix takes effect without a restart.
+	vectorIndexRetry = 5 * time.Minute
 )
 
 // registerGitOpsRoutes mounts the per-kind GitOps inspection endpoints on
@@ -807,25 +810,38 @@ func buildWorkflowsMessage(reg *workflows.Registry, agents []prompts.AgentConfig
 	return b.String()
 }
 
-// openVectorIndex connects the optional S3 Vectors index that turns the
-// per-user context into a semantic memory. A misconfiguration disables the
-// index and logs why; the store then falls back to recency.
-func openVectorIndex(ctx context.Context, cfg *config.Config) *vectors.Index {
-	if cfg.VectorsIndexARN == "" {
-		return nil
-	}
+// openVectorIndex connects the S3 Vectors index that turns the per-user
+// context into a semantic memory.
+func openVectorIndex(ctx context.Context, cfg *config.Config) (*vectors.Index, error) {
 	embedder, err := buildEmbedder(ctx, cfg)
 	if err != nil {
-		log.Printf("Vector index disabled (embedding model misconfigured): %v", err)
-		return nil
+		return nil, fmt.Errorf("embedding model: %w", err)
 	}
 	index, err := vectors.Open(ctx, cfg.VectorsIndexARN, embedder)
 	if err != nil {
-		log.Printf("Vector index disabled: %v", err)
-		return nil
+		return nil, err
 	}
 	log.Printf("Vector index enabled: %s (metric %s, %s @ %d dims)", index.ARN(), index.Metric(), embedder.Model(), embedder.Dimensions())
-	return index
+	return index, nil
+}
+
+// retryVectorIndex keeps trying to open the index in the background and
+// switches the user-context store to semantic retrieval once it succeeds.
+func retryVectorIndex(cfg *config.Config, ucs *commands.UserContextStore) {
+	safego.Go("vector index: retry", func() {
+		t := time.NewTicker(vectorIndexRetry)
+		defer t.Stop()
+		for range t.C {
+			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+			index, err := openVectorIndex(ctx, cfg)
+			cancel()
+			if err == nil {
+				ucs.SetIndex(index)
+				return
+			}
+			log.Printf("Vector index still unavailable: %v", err)
+		}
+	})
 }
 
 // buildEmbedder picks the embeddings backend from the model name: Amazon
@@ -1846,7 +1862,11 @@ func main() {
 		log.Fatalf("state backend: %v", err)
 	}
 	log.Printf("State backend: %s (region %s, instance %s)", backend, backend.Region(), store.InstanceID())
-	vectorIndex := openVectorIndex(bootCtx, cfg)
+	var vectorIndex *vectors.Index
+	var vectorErr error
+	if cfg.VectorsIndexARN != "" {
+		vectorIndex, vectorErr = openVectorIndex(bootCtx, cfg)
+	}
 
 	// Per-user context store. Populated after every Slack request (DMs,
 	// channels, and in-thread follow-ups all flow through the same
@@ -1856,6 +1876,10 @@ func main() {
 	// current question rather than simply the latest.
 	userContextStore := commands.NewUserContextStore(backend, vectorIndex)
 	log.Printf("User-context store: %suser-context/ (TTL=%s, semantic=%t)", backend, commands.UserContextTTL, userContextStore.Semantic())
+	if vectorErr != nil {
+		log.Printf("Vector index disabled, retrying every %s: %v", vectorIndexRetry, vectorErr)
+		retryVectorIndex(cfg, userContextStore)
+	}
 
 	// RBAC: build agentID → allowedTeams map and group membership cache.
 	agentRBAC := make(map[string][]string, len(agents))
