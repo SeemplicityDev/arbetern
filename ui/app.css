@@ -1046,6 +1046,10 @@ html[data-sidebar="collapsed"] .nav-sep { margin: 6px 16px; }
 
 
 .page-note { font-size: 12.5px; color: var(--text-muted); margin: -8px 0 18px; }
+.search-input { min-width: 240px; height: 32px; padding: 0 12px; border-radius: 8px; background: var(--card); border: 1px solid var(--border); color: var(--text); font-family: inherit; font-size: 13px; outline: none; transition: border-color 0.15s ease, box-shadow 0.15s ease; }
+.search-input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-glow); }
+.search-input::placeholder { color: var(--text-muted); }
+.search-note { font-size: 12.5px; color: var(--text-muted); margin: -6px 0 12px; }
 .page-note a { color: var(--accent); text-decoration: none; }
 .page-note a:hover { text-decoration: underline; }
 

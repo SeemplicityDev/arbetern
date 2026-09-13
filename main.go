@@ -21,6 +21,7 @@ import (
 	"github.com/justmike1/arbetern/aws"
 	"github.com/justmike1/arbetern/azure"
 	"github.com/justmike1/arbetern/billing"
+	"github.com/justmike1/arbetern/catalog"
 	"github.com/justmike1/arbetern/chat"
 	"github.com/justmike1/arbetern/chorus"
 	"github.com/justmike1/arbetern/clickhouse"
@@ -260,7 +261,53 @@ const (
 	// vectorIndexRetry is how often a vector index that failed to open at boot
 	// is tried again, so a permission fix takes effect without a restart.
 	vectorIndexRetry = 5 * time.Minute
+	// catalogSyncInterval is how often the leader re-embeds changed workflow
+	// and dashboard descriptors for search.
+	catalogSyncInterval = 5 * time.Minute
+	// gitOpsStatusStale is how long a stored "running" GitOps status is
+	// believed before it is assumed to come from a crashed reconcile.
+	gitOpsStatusStale = 10 * time.Minute
 )
+
+type storedGitOpsStatus struct {
+	gitopssync.Status
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+func gitOpsStatusKey(kind string) string { return "gitops/" + kind + ".json" }
+
+// persistGitOpsStatus shares a syncer's status through the bucket, since only
+// the scheduling replica runs the reconcile loop.
+func persistGitOpsStatus(b *store.Backend, kind string) func(gitopssync.Status) {
+	return func(st gitopssync.Status) {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		if _, err := store.PutJSON(ctx, b, gitOpsStatusKey(kind), storedGitOpsStatus{Status: st, UpdatedAt: time.Now().UTC()}, store.Condition{}); err != nil {
+			log.Printf("[gitops] persist %s status: %v", kind, err)
+		}
+	}
+}
+
+// sharedGitOpsStatus serves the status stored by whichever replica last
+// reconciled, falling back to this replica's own view.
+func sharedGitOpsStatus(b *store.Backend, kind string, local func() any) func() any {
+	return func() any {
+		own := local()
+		if own == nil {
+			return nil
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		st, _, err := store.GetJSON[storedGitOpsStatus](ctx, b, gitOpsStatusKey(kind))
+		if err != nil {
+			return own
+		}
+		if st.Running && time.Since(st.UpdatedAt) > gitOpsStatusStale {
+			st.Running = false
+		}
+		return st.Status
+	}
+}
 
 // registerGitOpsRoutes mounts the per-kind GitOps inspection endpoints on
 // apiMux:
@@ -880,8 +927,8 @@ func openVectorIndex(ctx context.Context, cfg *config.Config) (*vectors.Index, e
 }
 
 // retryVectorIndex keeps trying to open the index in the background and
-// switches the user-context store to semantic retrieval once it succeeds.
-func retryVectorIndex(cfg *config.Config, ucs *commands.UserContextStore) {
+// hands it to apply once it succeeds.
+func retryVectorIndex(cfg *config.Config, apply func(*vectors.Index)) {
 	safego.Go("vector index: retry", func() {
 		t := time.NewTicker(vectorIndexRetry)
 		defer t.Stop()
@@ -890,7 +937,7 @@ func retryVectorIndex(cfg *config.Config, ucs *commands.UserContextStore) {
 			index, err := openVectorIndex(ctx, cfg)
 			cancel()
 			if err == nil {
-				ucs.SetIndex(index)
+				apply(index)
 				return
 			}
 			log.Printf("Vector index still unavailable: %v", err)
@@ -1902,10 +1949,6 @@ func main() {
 	// Start background integration permission refresher (runs once now, then every hour).
 	startIntegrationsRefresher(cfg, slackClient, ghClient, jiraClient, sfClient, chorusClient, datadogClients, awsClient, azureClient, databricksClient, clickhouseClient, freshworksClient, googleClient, modelsClient, codeModelsClient)
 
-	// Thread session store — enables follow-up replies in threads without /commands.
-	sessions := commands.NewSessionStore(cfg.ThreadSessionTTL)
-	log.Printf("Thread session TTL: %s", cfg.ThreadSessionTTL)
-
 	// State backend: every registry below reads and writes the S3 bucket and
 	// keeps only a cache in memory, so any replica can serve any request and a
 	// restart loses nothing.
@@ -1916,6 +1959,12 @@ func main() {
 		log.Fatalf("state backend: %v", err)
 	}
 	log.Printf("State backend: %s (region %s, instance %s)", backend, backend.Region(), store.InstanceID())
+
+	// Thread sessions live in the bucket so a reply in a thread may be
+	// answered by any replica.
+	sessions := commands.NewSessionStore(backend, cfg.ThreadSessionTTL)
+	sessions.SetSlack(slackClient)
+	log.Printf("Thread sessions: %ssessions/ (TTL %s)", backend, cfg.ThreadSessionTTL)
 	var vectorIndex *vectors.Index
 	var vectorErr error
 	if cfg.VectorsIndexARN != "" {
@@ -1929,11 +1978,14 @@ func main() {
 	// vector index attached, the turns shown are the ones relevant to the
 	// current question rather than simply the latest.
 	userContextStore := commands.NewUserContextStore(backend, vectorIndex)
-	log.Printf("User-context store: %suser-context/ (TTL=%s, semantic=%t)", backend, commands.UserContextTTL, userContextStore.Semantic())
-	if vectorErr != nil {
-		log.Printf("Vector index disabled, retrying every %s: %v", vectorIndexRetry, vectorErr)
-		retryVectorIndex(cfg, userContextStore)
+	sharedAgents := make([]string, 0, len(agents))
+	for _, agent := range agents {
+		if agent.SharedMemory {
+			sharedAgents = append(sharedAgents, agent.ID)
+		}
 	}
+	userContextStore.SetSharedAgents(sharedAgents)
+	log.Printf("User-context store: %suser-context/ (TTL=%s, semantic=%t, shared agents=%d)", backend, commands.UserContextTTL, userContextStore.Semantic(), len(sharedAgents))
 
 	// RBAC: build agentID → allowedTeams map and group membership cache.
 	agentRBAC := make(map[string][]string, len(agents))
@@ -1975,6 +2027,18 @@ func main() {
 		log.Fatalf("failed to load workflows: %v", err)
 	}
 	defer wfRegistry.StopAll()
+
+	// Catalog: workflows and dashboards searchable by meaning through the
+	// same vector index as the user context.
+	catalogIndex := catalog.New(backend, wfRegistry, dashRegistry)
+	catalogIndex.SetIndex(vectorIndex)
+	if vectorErr != nil {
+		log.Printf("Vector index disabled, retrying every %s: %v", vectorIndexRetry, vectorErr)
+		retryVectorIndex(cfg, func(index *vectors.Index) {
+			userContextStore.SetIndex(index)
+			catalogIndex.SetIndex(index)
+		})
+	}
 
 	// Usage & Billing store: aggregates LLM token cost of every Slack,
 	// workflow, and chat turn and merges it into the bucket periodically.
@@ -2049,15 +2113,12 @@ func main() {
 
 		router := commands.NewRouter(slackClient, ghClient, modelsClient, codeModelsClient, agentClients.jira, agentClients.nvd, agentClients.sf, agentClients.chorus, agentClients.datadog, agentClients.aws, agentClients.azure, agentClients.databricks, agentClients.clickhouse, agentClients.freshworks, agentClients.google, dashRegistry, wfRegistry, ap, agent.ID, cfg.AppURL, sessions, cfg.MaxToolRounds, userContextStore, billingStore)
 		router.SetMCP(mcpRegistry)
+		router.SetCatalog(catalogIndex)
 		routers[agent.ID] = router
 
-		// Background sweepers for the per-router in-memory caches so
-		// stale (channel, user) pairs and channel history entries do not
-		// accumulate indefinitely. Sweep cadence matches each cache's
-		// TTL — entries expire on access already; this just reclaims the
-		// memory promptly for inactive keys.
+		// Sweeps the per-router channel-history cache so inactive channels
+		// do not accumulate.
 		router.ContextProvider().StartGC(context.Background(), router.ContextProvider().TTL())
-		router.Memory().StartGC(context.Background(), time.Minute)
 
 		// Wrap router.Handle with RBAC check.
 		rbacHandler := func(channelID, userID, text, responseURL string) {
@@ -2082,6 +2143,8 @@ func main() {
 	// The responder replays recent history and runs the agent's full tool
 	// loop (RunChat) so the chat can use the same integrations as a Slack
 	// command.
+	sessions.SetRouterResolver(func(agentID string) *commands.Router { return routers[agentID] })
+
 	chatRegistry := chat.New(backend, func(ctx context.Context, agentID, user string, history []chat.Message, userMessage string) (string, error) {
 		router := routers[agentID]
 		if router == nil {
@@ -2359,7 +2422,7 @@ func main() {
 
 	// API: thread session stats (observability).
 	apiMux.HandleFunc("/api/sessions", func(w http.ResponseWriter, r *http.Request) {
-		active, opened, expired, explicit := sessions.Stats()
+		active, opened, expired, explicit := sessions.Stats(r.Context())
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"active":        active,
@@ -2439,16 +2502,17 @@ func main() {
 			if err != nil {
 				log.Printf("warn: gitops sync init failed: %v", err)
 			} else {
+				s.OnStatus(persistGitOpsStatus(backend, "workflows"))
 				wfSyncer = s
 			}
 		}
 	}
-	registerGitOpsRoutes(apiMux, "workflows", func() any {
+	registerGitOpsRoutes(apiMux, "workflows", sharedGitOpsStatus(backend, "workflows", func() any {
 		if wfSyncer == nil {
 			return nil
 		}
 		return wfSyncer.Status()
-	}, func(ctx context.Context) error {
+	}), func(ctx context.Context) error {
 		if wfSyncer == nil {
 			return errGitOpsDisabled
 		}
@@ -2472,21 +2536,48 @@ func main() {
 			if err != nil {
 				log.Printf("warn: dashboards gitops sync init failed: %v", err)
 			} else {
+				s.OnStatus(persistGitOpsStatus(backend, "dashboards"))
 				dashSyncer = s
 			}
 		}
 	}
-	registerGitOpsRoutes(apiMux, "dashboards", func() any {
+	registerGitOpsRoutes(apiMux, "dashboards", sharedGitOpsStatus(backend, "dashboards", func() any {
 		if dashSyncer == nil {
 			return nil
 		}
 		return dashSyncer.Status()
-	}, func(ctx context.Context) error {
+	}), func(ctx context.Context) error {
 		if dashSyncer == nil {
 			return errGitOpsDisabled
 		}
 		return dashSyncer.SyncNow(ctx)
 	})
+
+	// Search by meaning over the catalogued descriptors; exact paths, so they
+	// win over the crud prefix handlers.
+	for _, kind := range []string{catalog.KindWorkflow, catalog.KindDashboard} {
+		kind := kind
+		apiMux.HandleFunc("/api/"+kind+"s/_search", func(w http.ResponseWriter, r *http.Request) {
+			q := strings.TrimSpace(r.URL.Query().Get("q"))
+			if q == "" {
+				http.Error(w, "q is required", http.StatusBadRequest)
+				return
+			}
+			hits, err := catalogIndex.Search(r.Context(), kind, r.URL.Query().Get("agent"), q, catalog.MaxResults)
+			switch {
+			case errors.Is(err, catalog.ErrDisabled):
+				http.Error(w, err.Error(), http.StatusServiceUnavailable)
+				return
+			case err != nil:
+				log.Printf("[catalog] %s search failed: %v", kind, err)
+				http.Error(w, "search failed", http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Cache-Control", "no-store")
+			_ = json.NewEncoder(w).Encode(map[string]any{"query": q, "kind": kind, "hits": hits})
+		})
+	}
 
 	// Every replica keeps its caches in step with the bucket so UI reads and
 	// tool calls see what other replicas wrote.
@@ -2518,6 +2609,13 @@ func main() {
 			}
 			chatRegistry.StartRetention(held, cfg.ChatRetention, time.Hour)
 			userContextStore.StartGC(held, time.Hour)
+			sessions.StartSweeper(held, time.Minute)
+			catalogIndex.StartSync(held, catalogSyncInterval)
+			if n, err := dashRegistry.PurgeLegacyCache(held); err != nil {
+				log.Printf("[dashboards] legacy cache purge: %v", err)
+			} else if n > 0 {
+				log.Printf("[dashboards] removed %d legacy cache object(s)", n)
+			}
 			<-held.Done()
 			wfRegistry.StopAll()
 			dashRegistry.StopAll()

@@ -38,7 +38,7 @@ func (r *Registry) RegisterRoutes(mux *http.ServeMux, apiMux *http.ServeMux, kno
 			return wf, wf.Source, true
 		},
 		List: func(agent string) any {
-			return r.List(agent)
+			return r.ListSummaries(agent)
 		},
 		Delete: func(agent, id string) error {
 			return r.Delete(agent, id)

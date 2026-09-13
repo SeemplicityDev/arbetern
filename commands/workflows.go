@@ -7,6 +7,7 @@ import (
 	"log"
 	"strings"
 
+	"github.com/justmike1/arbetern/catalog"
 	"github.com/justmike1/arbetern/llm"
 	"github.com/justmike1/arbetern/workflows"
 )
@@ -45,6 +46,14 @@ func (h *GeneralHandler) workflowTools() []llm.Tool {
 				Parameters:  json.RawMessage(`{"type":"object","properties":{}}`),
 			},
 		},
+		{
+			Type: "function",
+			Function: llm.ToolFunction{
+				Name:        "find_workflow",
+				Description: "Find this agent's workflows by meaning: describe what the workflow does (for example 'posts the daily AWS cost to Slack') and get the closest matches with their ids. Prefer it over list_workflows when the user refers to a workflow by purpose rather than by exact name or id.",
+				Parameters:  json.RawMessage(`{"type":"object","properties":{"query":{"type":"string","description":"What the workflow does, in a few words."}},"required":["query"]}`),
+			},
+		},
 	}
 	if h.headless {
 		return tools
@@ -54,7 +63,7 @@ func (h *GeneralHandler) workflowTools() []llm.Tool {
 			Type: "function",
 			Function: llm.ToolFunction{
 				Name:        "create_workflow",
-				Description: "Create a scheduled or event-triggered workflow owned by the current agent. Each run re-invokes this same agent's tool-loop so prompts can freely use Jira search, GitHub PR creation, Slack posting (post_slack_message), etc. Four execution patterns are supported:\n\n  - Monoflow: supply `prompt` only. One LLM call per tick.\n  - Flow of subflows: supply `tasks` (ordered list of {name, prompt}). Each task runs sequentially; outputs thread forward as context.\n  - Flow of deployments: write a `prompt` that instructs the agent to use `call_workflow` against already-registered child workflows.\n  - Event-triggered: set `trigger.type` to 'on_success' or 'on_failure' and `trigger.ref` to '<agent>/<id>' of the upstream workflow. Cron is ignored.\n\nScheduled workflows fire on a `cron` expression in UTC. Use scheduled monoflow when the user says 'every N minutes', 'poll X and do Y', 'daily at HH:MM UTC'. Use tasks for multi-step recurring processes. Use event triggers when something should happen 'after workflow X succeeds / fails'. A JSON descriptor is stored in the state bucket at workflows/<agent>/<id>.json and an HTML viewer is rendered at /" + h.agentID + "/workflow/<id>. Returns the id, short_name, and view URL which you MUST include in your reply.",
+				Description: "Create a scheduled or event-triggered workflow owned by the current agent. Each run re-invokes this same agent's tool-loop so prompts can freely use Jira search, GitHub PR creation, Slack posting (post_slack_message), etc. Four execution patterns are supported:\n\n  - Monoflow: supply `prompt` only. One LLM call per tick.\n  - Flow of subflows: supply `tasks` (ordered list of {name, prompt}). Each task runs sequentially; outputs thread forward as context.\n  - Flow of deployments: write a `prompt` that instructs the agent to use `call_workflow` against already-registered child workflows.\n  - Event-triggered: set `trigger.type` to 'on_success' or 'on_failure' and `trigger.ref` to '<agent>/<id>' of the upstream workflow. Cron is ignored.\n\nScheduled workflows fire on a `cron` expression in UTC. Use scheduled monoflow when the user says 'every N minutes', 'poll X and do Y', 'daily at HH:MM UTC'. Use tasks for multi-step recurring processes. Use event triggers when something should happen 'after workflow X succeeds / fails'. Returns the id, short_name, and view URL which you MUST include in your reply.",
 				Parameters: json.RawMessage(`{
 					"type":"object",
 					"properties":{
@@ -154,6 +163,27 @@ func (h *GeneralHandler) executeWorkflowTool(ctx context.Context, userID, channe
 		log.Printf("[user=%s channel=%s] created workflow agent=%s id=%s pattern=%s", userID, channelID, h.agentID, w.ID, w.Pattern())
 		url := h.appURL + w.ViewURL()
 		return fmt.Sprintf("Created %s workflow %q (id=%s, short=%s). View: %s", w.Pattern(), w.Name, w.ID, w.ShortName, url), true
+
+	case "find_workflow":
+		var args struct {
+			Query string `json:"query"`
+		}
+		if msg := unmarshalArgs(argsJSON, &args); msg != "" {
+			return msg, true
+		}
+		if strings.TrimSpace(args.Query) == "" {
+			return "Error: 'query' is required.", true
+		}
+		hits := h.findWorkflows(ctx, args.Query)
+		if len(hits) == 0 {
+			return "No workflow of this agent matches that description. Use list_workflows to see them all.", true
+		}
+		var b strings.Builder
+		fmt.Fprintf(&b, "Closest workflows for %q:\n", args.Query)
+		for _, w := range hits {
+			fmt.Fprintf(&b, "- %s — %s (short=%s, pattern=%s, cron=%s)\n  %s\n  %s\n", w.ID, w.Name, w.ShortName, w.Pattern(), w.Cron, w.Description, h.appURL+w.ViewURL())
+		}
+		return b.String(), true
 
 	case "list_workflows":
 		list := h.workflows.List(h.agentID)
@@ -304,4 +334,44 @@ func (h *GeneralHandler) executeWorkflowTool(ctx context.Context, userID, channe
 		return fmt.Sprintf("Workflow %s/%s (%q) completed.\nResult:\n%s", w.Agent, w.ID, w.Name, out), true
 	}
 	return "", false
+}
+
+// findWorkflows ranks this agent's workflows against query, semantically when
+// the catalog index is available and by substring otherwise.
+func (h *GeneralHandler) findWorkflows(ctx context.Context, query string) []*workflows.Workflow {
+	const limit = 5
+	if h.catalog != nil && h.catalog.Enabled() {
+		hits, err := h.catalog.Search(ctx, catalog.KindWorkflow, h.agentID, query, limit)
+		if err == nil {
+			out := make([]*workflows.Workflow, 0, len(hits))
+			for _, hit := range hits {
+				if w, ok := h.workflows.Get(h.agentID, hit.ID); ok {
+					out = append(out, w)
+				}
+			}
+			return out
+		}
+		log.Printf("[catalog] workflow search failed, falling back to text match: %v", err)
+	}
+	var out []*workflows.Workflow
+	for _, w := range h.workflows.List(h.agentID) {
+		if textMatches(query, w.Name, w.ShortName, w.Description, w.Prompt) {
+			out = append(out, w)
+		}
+		if len(out) == limit {
+			break
+		}
+	}
+	return out
+}
+
+// textMatches reports whether every word of query appears in one of fields.
+func textMatches(query string, fields ...string) bool {
+	hay := strings.ToLower(strings.Join(fields, "\n"))
+	for _, word := range strings.Fields(strings.ToLower(query)) {
+		if !strings.Contains(hay, word) {
+			return false
+		}
+	}
+	return true
 }

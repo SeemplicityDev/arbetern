@@ -160,8 +160,9 @@ func (bm *BranchManager) forget(repoKey string) {
 		return
 	}
 	bm.session.mu.Lock()
-	defer bm.session.mu.Unlock()
 	delete(bm.session.ActiveBranches, repoKey)
+	bm.session.mu.Unlock()
+	bm.session.Save()
 }
 
 // CommitResult is returned by CommitAndPR with the outcome of the operation.
@@ -336,9 +337,10 @@ func (bm *BranchManager) syncToSession(repoKey string, info *ActiveBranchInfo) {
 		return
 	}
 	bm.session.mu.Lock()
-	defer bm.session.mu.Unlock()
 	if bm.session.ActiveBranches == nil {
 		bm.session.ActiveBranches = make(map[string]*ActiveBranchInfo)
 	}
 	bm.session.ActiveBranches[repoKey] = info
+	bm.session.mu.Unlock()
+	bm.session.Save()
 }

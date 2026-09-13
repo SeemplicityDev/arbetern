@@ -206,6 +206,14 @@ func (w *Workflow) ViewURL() string {
 	return crud.ViewPath("workflow", w.Agent, w.ID)
 }
 
+// Summary returns a copy without the run history and last result, for lists.
+func (w *Workflow) Summary() *Workflow {
+	cp := *w
+	cp.Runs = nil
+	cp.LastResult = ""
+	return &cp
+}
+
 // Pattern returns a human-readable label describing the workflow's
 // execution pattern, used for UI labels and logs.
 func (w *Workflow) Pattern() string {
@@ -476,6 +484,15 @@ func (r *Registry) List(agent string) []*Workflow {
 	})
 	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt < out[j].CreatedAt })
 	return out
+}
+
+// ListSummaries is List without run histories and last results.
+func (r *Registry) ListSummaries(agent string) []*Workflow {
+	list := r.List(agent)
+	for i, w := range list {
+		list[i] = w.Summary()
+	}
+	return list
 }
 
 // isRunning reports whether this replica has a tick of the workflow in flight.

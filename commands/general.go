@@ -16,6 +16,7 @@ import (
 	"github.com/justmike1/arbetern/aws"
 	"github.com/justmike1/arbetern/azure"
 	"github.com/justmike1/arbetern/billing"
+	"github.com/justmike1/arbetern/catalog"
 	"github.com/justmike1/arbetern/chorus"
 	"github.com/justmike1/arbetern/clickhouse"
 	"github.com/justmike1/arbetern/config"
@@ -77,7 +78,7 @@ type GeneralHandler struct {
 	mcp              *mcp.Registry
 	mcpTools         map[string]mcp.AgentTool
 	contextProvider  *ContextProvider
-	memory           *ConversationMemory
+	catalog          *catalog.Index
 	prompts          PromptProvider
 	agentID          string
 	appURL           string
@@ -311,13 +312,7 @@ func (h *GeneralHandler) Execute(channelID, userID, text, responseURL, auditTS s
 	systemMsg = strings.Replace(systemMsg, "{{MODEL}}", activeClient.Model(), 1)
 	systemMsg = strings.Replace(systemMsg, "{{USER_ID}}", userID, 1)
 	systemMsg = strings.Replace(systemMsg, "{{USER_CONTEXT}}", h.userContext, 1)
-	history := h.memory.GetHistory(channelID, userID)
-	if history != "" {
-		systemMsg += fmt.Sprintf("\n\nPrevious conversation with this user:\n%s", history)
-	}
-	if persistent := h.readPersistentUserContext(ctx, userID, text); persistent != "" {
-		systemMsg += fmt.Sprintf("\n\nRecurring topics this user has asked about previously (may hint at current intent):\n%s", persistent)
-	}
+	systemMsg += userContextPrompt(h.readPersistentUserContext(ctx, userID, channelID, text))
 	if channelContext != "" && channelContext != "(no recent messages)" {
 		systemMsg += fmt.Sprintf("\n\nRecent channel messages for context:\n%s", channelContext)
 	}
@@ -470,8 +465,7 @@ func (h *GeneralHandler) Execute(channelID, userID, text, responseURL, auditTS s
 			}
 
 			log.Printf("[user=%s channel=%s] general query completed successfully", userID, channelID)
-			h.memory.SetAssistantResponse(channelID, userID, choice.Message.Content)
-			h.persistUserContext(ctx, userID, text, choice.Message.Content)
+			h.persistUserContext(ctx, userID, channelID, text, choice.Message.Content)
 			stamp := llm.FormatUsageStamp(&totalUsage, activeClient.Model())
 			// If we already replied in a specific thread, don't send a redundant follow-up.
 			if repliedInThread {
@@ -788,6 +782,10 @@ func (h *GeneralHandler) ExecuteChat(ctx context.Context, userID string, history
 	systemMsg = strings.Replace(systemMsg, "{{MODEL}}", activeClient.Model(), 1)
 	systemMsg = strings.Replace(systemMsg, "{{USER_ID}}", userID, 1)
 	systemMsg = strings.Replace(systemMsg, "{{USER_CONTEXT}}", h.userContext, 1)
+	memoryUser := h.requesterEmail
+	if memoryUser != "" {
+		systemMsg += userContextPrompt(h.readPersistentUserContext(ctx, memoryUser, "", userMessage))
+	}
 
 	messages := make([]llm.ChatMessage, 0, len(history)+2)
 	messages = append(messages, llm.NewChatMessage("system", systemMsg))
@@ -876,6 +874,9 @@ func (h *GeneralHandler) ExecuteChat(ctx context.Context, userID string, history
 				continue
 			}
 			log.Printf("[chat user=%s agent=%s] completed after %d rounds", userID, h.agentID, i+1)
+			if memoryUser != "" {
+				h.persistUserContext(ctx, memoryUser, "", userMessage, final)
+			}
 			return final, nil
 		}
 

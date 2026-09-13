@@ -113,6 +113,7 @@ type Syncer struct {
 	managed  map[string]string // agent/id -> repo path from last successful sync
 	owner    string            // resolved repo owner (cached for SyncNow)
 	running  bool              // a reconcile is currently in progress
+	onStatus func(Status)
 }
 
 // Status is a UI-facing snapshot of the syncer's configuration and the
@@ -194,6 +195,30 @@ func (s *Syncer) Stop() {
 	}
 }
 
+// OnStatus registers fn to receive a status snapshot whenever a reconcile
+// starts or finishes, so the status can be shared with other replicas.
+func (s *Syncer) OnStatus(fn func(Status)) {
+	s.mu.Lock()
+	s.onStatus = fn
+	s.mu.Unlock()
+}
+
+func (s *Syncer) notify() {
+	s.mu.Lock()
+	fn := s.onStatus
+	s.mu.Unlock()
+	if fn != nil {
+		fn(s.Status())
+	}
+}
+
+func (s *Syncer) setRunning(running bool) {
+	s.mu.Lock()
+	s.running = running
+	s.mu.Unlock()
+	s.notify()
+}
+
 // LastResult returns the timestamp and error of the most recent reconcile.
 func (s *Syncer) LastResult() (time.Time, error) {
 	s.mu.Lock()
@@ -237,13 +262,9 @@ func (s *Syncer) SyncNow(ctx context.Context) error {
 	if owner == "" {
 		owner = s.cfg.Owner
 	}
-	s.running = true
 	s.mu.Unlock()
-	defer func() {
-		s.mu.Lock()
-		s.running = false
-		s.mu.Unlock()
-	}()
+	s.setRunning(true)
+	defer s.setRunning(false)
 
 	if owner == "" {
 		o, err := s.gh.ResolveOwner(ctx)
@@ -298,14 +319,10 @@ func (s *Syncer) run(ctx context.Context, stop, stopped chan struct{}) {
 				return
 			}
 		}
-		s.mu.Lock()
-		s.running = true
-		s.mu.Unlock()
+		s.setRunning(true)
 		err := s.reconcile(ctx, owner)
-		s.mu.Lock()
-		s.running = false
-		s.mu.Unlock()
 		s.recordResult(err)
+		s.setRunning(false)
 		if err != nil {
 			log.Printf("%s reconcile failed: %v", s.prefix, err)
 		}
@@ -328,9 +345,10 @@ func (s *Syncer) run(ctx context.Context, stop, stopped chan struct{}) {
 
 func (s *Syncer) recordResult(err error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.lastSync = time.Now().UTC()
 	s.lastErr = err
+	s.mu.Unlock()
+	s.notify()
 }
 
 // desired keys items by agent/id and remembers the upsert closure plus the

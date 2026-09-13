@@ -23,6 +23,7 @@ type AgentConfig struct {
 	AllowedTeams  []string          `json:"allowed_teams,omitempty"`
 	AllowedEmails []string          `json:"allowed_emails,omitempty"`
 	ChatEnabled   bool              `json:"chat_enabled"`
+	SharedMemory  bool              `json:"shared_memory"`
 }
 
 // agentMeta is the on-disk config.yaml structure for an agent.
@@ -31,6 +32,7 @@ type agentMeta struct {
 	AllowedTeams  []string `yaml:"allowed_teams"`
 	AllowedEmails []string `yaml:"allowed_emails"`
 	ChatEnabled   bool     `yaml:"chat_enabled"`
+	SharedMemory  bool     `yaml:"shared_memory"`
 }
 
 // AgentPrompts holds a per-agent prompt store with Get/MustGet methods.
@@ -344,6 +346,7 @@ func DiscoverAgents(agentsDir string) ([]AgentConfig, error) {
 			AllowedTeams:  meta.AllowedTeams,
 			AllowedEmails: meta.AllowedEmails,
 			ChatEnabled:   meta.ChatEnabled,
+			SharedMemory:  meta.SharedMemory,
 		})
 	}
 

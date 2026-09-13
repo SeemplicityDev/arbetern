@@ -12,6 +12,7 @@ import (
 	"github.com/justmike1/arbetern/aws"
 	"github.com/justmike1/arbetern/azure"
 	"github.com/justmike1/arbetern/billing"
+	"github.com/justmike1/arbetern/catalog"
 	"github.com/justmike1/arbetern/chorus"
 	"github.com/justmike1/arbetern/clickhouse"
 	"github.com/justmike1/arbetern/dashboards"
@@ -48,7 +49,7 @@ type Router struct {
 	workflows        *workflows.Registry
 	mcp              *mcp.Registry
 	contextProvider  *ContextProvider
-	memory           *ConversationMemory
+	catalog          *catalog.Index
 	prompts          PromptProvider
 	agentID          string
 	appURL           string
@@ -87,7 +88,6 @@ func NewRouter(slackClient SlackClient, ghClient *github.Client, modelsClient *l
 		dashboards:       dashboardRegistry,
 		workflows:        workflowRegistry,
 		contextProvider:  NewContextProvider(slackClient, cacheTTL),
-		memory:           NewConversationMemory(),
 		prompts:          pp,
 		agentID:          agentID,
 		appURL:           appURL,
@@ -102,6 +102,10 @@ func NewRouter(slackClient SlackClient, ghClient *github.Client, modelsClient *l
 // agent's tool loops.
 func (r *Router) SetMCP(reg *mcp.Registry) { r.mcp = reg }
 
+// SetCatalog gives the tool loops semantic search over workflows and
+// dashboards.
+func (r *Router) SetCatalog(c *catalog.Index) { r.catalog = c }
+
 // ToolDefinitions returns the tool schema this agent's tool loop offers with
 // the clients configured right now, for the integrations catalogue.
 func (r *Router) ToolDefinitions() []llm.Tool {
@@ -111,10 +115,6 @@ func (r *Router) ToolDefinitions() []llm.Tool {
 // ContextProvider exposes the channel-history cache so callers (e.g.
 // main) can attach a background GC sweeper.
 func (r *Router) ContextProvider() *ContextProvider { return r.contextProvider }
-
-// Memory exposes the in-memory short-term conversation cache so callers
-// can attach a background GC sweeper.
-func (r *Router) Memory() *ConversationMemory { return r.memory }
 
 func (r *Router) Handle(channelID, userID, text, responseURL string) {
 	text = strings.TrimSpace(text)
@@ -138,24 +138,15 @@ func (r *Router) Handle(channelID, userID, text, responseURL string) {
 	// Acquire the processing lock so that any thread reply arriving while
 	// the initial request is still running is silently ignored (prevents
 	// casual chatter from triggering a second concurrent response).
+	var sess *ThreadSession
 	if auditTS != "" && r.sessions != nil {
-		r.sessions.Open(channelID, auditTS, userID, r.agentID, r)
-		if sess := r.sessions.Lookup(channelID, auditTS); sess != nil {
+		if sess = r.sessions.Open(channelID, auditTS, userID, r.agentID, r); sess != nil {
 			sess.TryStartProcessing()
 			defer sess.DoneProcessing()
 		}
 	}
 
-	r.memory.AddUserMessage(channelID, userID, text)
-
 	userContext := r.resolveUserContext(userID)
-
-	// Look up the session so the initial handler can persist branches/PRs
-	// for follow-up thread messages.
-	var sess *ThreadSession
-	if auditTS != "" && r.sessions != nil {
-		sess = r.sessions.Lookup(channelID, auditTS)
-	}
 
 	lower := strings.ToLower(text)
 
@@ -258,7 +249,6 @@ func (r *Router) newDebugHandler(userContext string) *DebugHandler {
 		ghClient:         r.ghClient,
 		modelsClient:     r.modelsClient,
 		contextProvider:  r.contextProvider,
-		memory:           r.memory,
 		prompts:          r.prompts,
 		userContext:      userContext,
 		agentID:          r.agentID,
@@ -287,7 +277,7 @@ func (r *Router) newGeneralHandler(userContext string, session *ThreadSession) *
 		workflows:        r.workflows,
 		mcp:              r.mcp,
 		contextProvider:  r.contextProvider,
-		memory:           r.memory,
+		catalog:          r.catalog,
 		prompts:          r.prompts,
 		agentID:          r.agentID,
 		appURL:           r.appURL,
@@ -349,8 +339,6 @@ func (r *Router) HandleThreadReply(channelID, threadTS, userID, text string) {
 
 	log.Printf("[agent=%s user=%s channel=%s thread=%s] thread follow-up: %s",
 		r.agentID, userID, channelID, threadTS, text)
-
-	r.memory.AddUserMessage(channelID, userID, text)
 
 	userContext := r.resolveUserContext(userID)
 

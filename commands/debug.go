@@ -11,14 +11,11 @@ import (
 	"github.com/justmike1/arbetern/slack"
 )
 
-const channelHistoryLimit = 20
-
 type DebugHandler struct {
 	slackClient      SlackClient
 	ghClient         *github.Client
 	modelsClient     *llm.Client
 	contextProvider  *ContextProvider
-	memory           *ConversationMemory
 	prompts          PromptProvider
 	userContext      string
 	agentID          string
@@ -44,9 +41,7 @@ func (h *DebugHandler) Execute(channelID, userID, text, responseURL, auditTS str
 
 	systemPrompt := h.prompts.SystemPrompt("debug")
 	systemPrompt = strings.Replace(systemPrompt, "{{USER_CONTEXT}}", h.userContext, 1)
-	if persistent := h.readPersistentUserContext(ctx, userID, text); persistent != "" {
-		systemPrompt += fmt.Sprintf("\n\nRecurring topics this user has asked about previously (may hint at current intent):\n%s", persistent)
-	}
+	systemPrompt += userContextPrompt(h.readPersistentUserContext(ctx, userID, channelID, text))
 
 	userPrompt := fmt.Sprintf("Here are the recent messages from the channel:\n\n%s\n\nUser request: %s", channelContext, text)
 	if workflowLogs != "" {
@@ -61,8 +56,7 @@ func (h *DebugHandler) Execute(channelID, userID, text, responseURL, auditTS str
 	}
 
 	log.Printf("[user=%s channel=%s] debug analysis completed successfully", userID, channelID)
-	h.memory.SetAssistantResponse(channelID, userID, response)
-	h.persistUserContext(ctx, userID, text, response)
+	h.persistUserContext(ctx, userID, channelID, text, response)
 	stamp := llm.FormatUsageStamp(usage, h.modelsClient.Model())
 	replyOrThread(h.slackClient, channelID, responseURL, auditTS, response+stamp)
 }

@@ -9,3 +9,8 @@ allowed_teams: []
 # (no per-user auth yet — everyone sees the same history) and stored in
 # the state bucket. Disabled by default.
 chat_enabled: false
+
+# Shared memory: when true, a user's question may be grounded in related
+# questions other users asked this agent (rendered without names). Leave off
+# for agents whose answers can be personal.
+shared_memory: false

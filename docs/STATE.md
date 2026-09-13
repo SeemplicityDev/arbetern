@@ -25,8 +25,11 @@ IAM policy.
 | `skills/<id>.json` | Custom skills |
 | `mcp/<id>.json` | MCP connectors |
 | `billing/usage-YYYY-MM.json`, `billing/recent.json` | Usage & billing ledger |
-| `user-context/<agent>/<user>.json` | Per-user rolling context (`{"entries":[{id,at,q,a}]}`) |
-| `locks/scheduler`, `locks/workflows/…`, `locks/dashboards/…` | Leases (see below) |
+| `user-context/<agent>/<user>.json` | Per-user rolling context (`{"entries":[{id,at,c,q,a}]}`, `c` = channel) |
+| `sessions/<channel>/<thread>.json`, `sessions/_stats.json` | Slack thread sessions and their counters |
+| `gitops/<kind>.json` | Status of the last GitOps reconcile, shared with every replica |
+| `catalog/manifest.json` | What the catalog search index currently holds |
+| `locks/scheduler`, `locks/workflows/…`, `locks/dashboards/…`, `locks/sessions/…` | Leases (see below) |
 
 ## How the cache works
 
@@ -69,6 +72,9 @@ with conditional writes:
   for the duration of one run or sync, so a manual "Run now" handled by one
   replica cannot overlap a scheduled tick on the leader. They expire five
   minutes after a crash.
+- `locks/sessions/<channel>/<thread>` — held while a replica answers a message
+  in a Slack thread, so a second reply arriving on another replica is ignored
+  instead of answered twice. It expires two minutes after a crash.
 
 Followers still accept every write (a workflow created from Slack, a
 dashboard rendered from the UI, a GitOps `sync now`); the leader picks the
@@ -76,11 +82,27 @@ change up on its next reconciliation and starts or stops the corresponding
 runner, firing the first tick of a freshly created workflow just as a
 single-replica deployment would.
 
-Two things remain per replica and are not shared through the bucket: Slack
-thread sessions (the 7-minute follow-up window) and the 10-minute
-conversation memory. With more than one replica, a thread reply may reach a
-replica that did not open the session; keep `replicaCount: 1` until those
-move into the store, or route Slack traffic to a single replica.
+Slack thread sessions live in the bucket too: the replica that answers a slash
+command writes `sessions/<channel>/<thread>.json`, any replica that receives a
+reply in that thread reads it (a short per-replica cache keeps busy threads
+cheap), and the leader expires sessions nobody touched for the TTL and posts
+the expiry notice. The follow-up conversation itself is read back from the
+user's context entries of the last ten minutes in that channel, so nothing
+about a thread depends on which replica served the previous message. The
+chart therefore defaults to two replicas.
+
+The GitOps reconcile runs only on the leader; it writes its status to
+`gitops/<kind>.json` after every run, and the status endpoint of every
+replica serves that object, so the Workflows and Dashboards pages show the
+same sync state everywhere. A `running` flag older than ten minutes is
+treated as stale.
+
+## Lists and detail pages
+
+The list endpoints (`/api/workflows`, `/api/dashboards`) return descriptors
+without run histories, fetched data and rendered reports; the page of one
+workflow or dashboard fetches the full object. Only that page polls, and it
+does so adaptively.
 
 ## Semantic user context (S3 Vectors)
 
@@ -92,17 +114,41 @@ EMBEDDING_MODEL=amazon.titan-embed-text-v2:0   # default when the index is set
 EMBEDDING_DIMENSIONS=1024                      # defaults per model; must equal the index dimension
 ```
 
-Every completed turn is embedded and written to the index keyed
-`<agent>/<user>/<entry-id>` with filterable metadata `{agent, user, at}`; the
-text itself stays in the user's document, so the index carries no payload and
-no metadata size limit applies. On the next request the question is embedded,
-the eight closest entries of that user are fetched (filtered by agent and
-user), the two most recent entries are added, and the result is rendered
-chronologically into the system prompt. The document keeps up to 200 entries
-(instead of 50) because only the relevant ones reach the prompt, which cuts
-prompt tokens compared with the recency window while surfacing older but
-related turns. Any failure of the embedding model or the index falls back to
-the recency window for that request.
+Every completed turn — Slack command, thread reply or web chat — is embedded
+and written to the index keyed `<agent>/<user>/<entry-id>` with filterable
+metadata `{agent, user, at}`; the text itself stays in the user's document,
+so the index carries no payload and no metadata size limit applies. Web chat
+users are keyed by a slug of their signed-in email plus a short hash.
+
+On the next request the question is embedded and the closest entries of that
+user from the last 90 days are fetched. A match is kept only when its cosine
+distance is at most 0.6 and within 0.2 of the best match, so an unrelated
+question brings no stale context along; the two most recent entries are
+always added, and the result is rendered chronologically into the system
+prompt after the working memory (the same-channel turns of the last ten
+minutes). The document keeps up to 200 entries (instead of 50) because only
+the relevant ones reach the prompt. Any failure of the embedding model or the
+index falls back to the recency window for that request.
+
+Agents with `shared_memory: true` in their `config.yaml` also receive up to
+four related turns of *other* users of that agent (distance at most 0.45),
+rendered without names. Enable it only where answers are not personal.
+
+The scheduling replica repairs the index every hour: entries whose vector is
+missing (an indexing call that failed, or turns recorded while the index was
+down) are embedded, and vectors whose entry no longer exists are deleted.
+That needs `s3vectors:GetVectors` and `s3vectors:ListVectors` on the index.
+
+## Catalog search
+
+The same index also holds one vector per workflow and dashboard, keyed
+`registry/<kind>/<agent>/<id>` and built from the name, description, schedule
+and prompt or sources. The leader re-embeds changed descriptors every five
+minutes (a manifest of content hashes avoids re-embedding unchanged ones) and
+removes deleted ones. The agents get `find_workflow` and `find_dashboard`
+tools, and the Workflows and Dashboards pages search by meaning through
+`/api/workflows/_search` and `/api/dashboards/_search`; without an index both
+fall back to plain text matching.
 
 Embedding models: Amazon Titan (`amazon.titan-embed-text-v2:0`, 1024 dims;
 `v1`, 1536) through Bedrock, or any `text-embedding-3-*` / `ada-002`

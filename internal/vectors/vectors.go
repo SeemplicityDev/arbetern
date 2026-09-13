@@ -16,7 +16,8 @@ import (
 )
 
 const (
-	maxBatch = 500
+	maxBatch    = 500
+	maxGetBatch = 100
 	// MaxTopK is the largest result count a single query may ask for.
 	MaxTopK = 30
 )
@@ -168,13 +169,89 @@ func (ix *Index) Delete(ctx context.Context, keys []string) error {
 	return nil
 }
 
+// Exists reports which of keys are present in the index.
+func (ix *Index) Exists(ctx context.Context, keys []string) (map[string]bool, error) {
+	found := make(map[string]bool, len(keys))
+	for start := 0; start < len(keys); start += maxGetBatch {
+		end := min(start+maxGetBatch, len(keys))
+		out, err := ix.client.GetVectors(ctx, &s3vectors.GetVectorsInput{IndexArn: awsv2.String(ix.arn), Keys: keys[start:end]})
+		if err != nil {
+			return nil, fmt.Errorf("get vectors: %w", err)
+		}
+		for _, v := range out.Vectors {
+			found[awsv2.ToString(v.Key)] = true
+		}
+	}
+	return found, nil
+}
+
+// Each calls fn with every key in the index and its metadata until fn
+// returns false.
+func (ix *Index) Each(ctx context.Context, fn func(key string, meta map[string]any) bool) error {
+	in := &s3vectors.ListVectorsInput{IndexArn: awsv2.String(ix.arn), MaxResults: awsv2.Int32(maxBatch), ReturnMetadata: true}
+	for {
+		out, err := ix.client.ListVectors(ctx, in)
+		if err != nil {
+			return fmt.Errorf("list vectors: %w", err)
+		}
+		for _, v := range out.Vectors {
+			var meta map[string]any
+			if v.Metadata != nil {
+				_ = v.Metadata.UnmarshalSmithyDocument(&meta)
+			}
+			if !fn(awsv2.ToString(v.Key), meta) {
+				return nil
+			}
+		}
+		if out.NextToken == nil || *out.NextToken == "" {
+			return nil
+		}
+		in.NextToken = out.NextToken
+	}
+}
+
+// CosineDistance converts a query distance to cosine distance (0 = identical,
+// 1 = unrelated) so callers can apply one threshold whatever the metric.
+// Vectors are unit length, so euclidean distance d maps to d²/2.
+func (ix *Index) CosineDistance(d float32) float32 {
+	if ix.metric == types.DistanceMetricEuclidean {
+		return d * d / 2
+	}
+	return d
+}
+
 // Eq builds a metadata filter requiring every field to equal its value.
 func Eq(fields map[string]any) map[string]any {
 	clauses := make([]any, 0, len(fields))
 	for k, v := range fields {
 		clauses = append(clauses, map[string]any{k: map[string]any{"$eq": v}})
 	}
-	if len(clauses) == 1 {
+	return And(clauses...)
+}
+
+// Ne builds a metadata filter requiring field to differ from value.
+func Ne(field string, value any) map[string]any {
+	return map[string]any{field: map[string]any{"$ne": value}}
+}
+
+// Gte builds a metadata filter requiring field to be at least value.
+func Gte(field string, value any) map[string]any {
+	return map[string]any{field: map[string]any{"$gte": value}}
+}
+
+// And combines filters; nil entries are skipped and a single filter is
+// returned as is.
+func And(filters ...any) map[string]any {
+	clauses := make([]any, 0, len(filters))
+	for _, f := range filters {
+		if m, ok := f.(map[string]any); ok && len(m) > 0 {
+			clauses = append(clauses, m)
+		}
+	}
+	switch len(clauses) {
+	case 0:
+		return nil
+	case 1:
 		return clauses[0].(map[string]any)
 	}
 	return map[string]any{"$and": clauses}

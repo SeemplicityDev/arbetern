@@ -103,6 +103,7 @@ const AGENT_DASHBOARDS = {};
 const AGENT_WORKFLOWS = {};
 let wfFilter = 'all';
 let dashFilter = 'all';
+const searchState = { workflows: { q: '', order: null, semantic: false }, dashboards: { q: '', order: null, semantic: false } };
 let chatsAgent = null;
 let chatsList = null;
 let chatsLoading = false;
@@ -757,7 +758,7 @@ function renderSessions() {
     document.getElementById('ov-sessions-meta').textContent = '';
     return;
   }
-  document.getElementById('ov-sessions-meta').textContent = 'since last restart';
+  document.getElementById('ov-sessions-meta').textContent = 'all replicas';
   el.innerHTML = `<div class="kpis">
       <div class="kpi-big">${fmtInt(s.active)}<small>active now</small></div>
       <div class="kpi">${fmtInt(s.total_opened)}<small>opened</small></div>
@@ -919,16 +920,73 @@ function wfSchedule(w) {
   return `<span class="muted">${escapeHtml(type)}</span>`;
 }
 
+/* Search: semantic through the catalog index, text match when it is off */
+function searchRank(kind, items) {
+  const st = searchState[kind];
+  if (!st.q) return items;
+  if (st.order) {
+    const rank = new Map(st.order.map((k, i) => [k, i]));
+    return items.filter(x => rank.has(x.agent + '/' + x.id)).sort((a, b) => rank.get(a.agent + '/' + a.id) - rank.get(b.agent + '/' + b.id));
+  }
+  const words = st.q.toLowerCase().split(/\s+/).filter(Boolean);
+  return items.filter(x => {
+    const hay = [x.name, x.short_name, x.description, x.prompt, x.cron].join('\n').toLowerCase();
+    return words.every(w => hay.includes(w));
+  });
+}
+
+function searchNote(kind, shown) {
+  const el = document.getElementById(kind === 'workflows' ? 'wf-search-note' : 'dash-search-note');
+  const st = searchState[kind];
+  el.hidden = !st.q;
+  if (!st.q) return;
+  el.textContent = `${plural(shown, 'match')} for “${st.q}” · ${st.semantic ? 'ranked by meaning' : 'text match'}`;
+}
+
+async function runSearch(kind, q) {
+  const st = searchState[kind];
+  st.q = q.trim();
+  st.order = null;
+  st.semantic = false;
+  const paint = kind === 'workflows' ? renderWorkflowsPage : renderDashboardsPage;
+  if (!st.q) { paint(); return; }
+  try {
+    const r = await fetch(`/api/${kind}/_search?q=${encodeURIComponent(st.q)}`);
+    if (r.ok) {
+      const body = await r.json();
+      if (searchState[kind].q !== st.q) return;
+      st.order = (body.hits || []).map(h => h.agent + '/' + h.id);
+      st.semantic = true;
+    }
+  } catch (err) {}
+  paint();
+}
+
+function bindSearch(kind, id) {
+  const input = document.getElementById(id);
+  let timer = null;
+  input.addEventListener('input', () => {
+    clearTimeout(timer);
+    timer = setTimeout(() => runSearch(kind, input.value), 300);
+  });
+  input.addEventListener('keydown', e => {
+    if (e.key === 'Escape') { input.value = ''; runSearch(kind, ''); }
+  });
+}
+bindSearch('workflows', 'wf-search');
+bindSearch('dashboards', 'dash-search');
+
 function renderWorkflowsPage() {
   const el = document.getElementById('wf-list');
   document.getElementById('wf-gitops').innerHTML = gitopsHtml('workflows');
   if (!workflowsData) return;
   filterPills(document.getElementById('wf-filter'), workflowsData, wfFilter, 'data-agent');
   if (wfFilter !== 'all' && !workflowsData.some(w => w.agent === wfFilter)) wfFilter = 'all';
-  const rows = workflowsData.filter(w => wfFilter === 'all' || w.agent === wfFilter)
-    .sort((a, b) => agentLabel(a.agent).localeCompare(agentLabel(b.agent)) || (a.name || '').localeCompare(b.name || ''));
+  const rows = searchRank('workflows', workflowsData.filter(w => wfFilter === 'all' || w.agent === wfFilter)
+    .sort((a, b) => agentLabel(a.agent).localeCompare(agentLabel(b.agent)) || (a.name || '').localeCompare(b.name || '')));
+  searchNote('workflows', rows.length);
   if (!rows.length) {
-    el.innerHTML = emptyHtml(workflowsData.length ? 'No workflows for this agent.' : 'No workflows yet. Ask an agent in Slack to create one, or add a descriptor to the GitOps repo.', true);
+    el.innerHTML = emptyHtml(searchState.workflows.q ? 'No workflow matches this search.' : workflowsData.length ? 'No workflows for this agent.' : 'No workflows yet. Ask an agent in Slack to create one, or add a descriptor to the GitOps repo.', true);
     return;
   }
   el.innerHTML = `<table class="data-table"><thead><tr>
@@ -1015,10 +1073,11 @@ function renderDashboardsPage() {
   if (dashFilter !== 'all' && !dashboardsData.some(d => d.agent === dashFilter)) dashFilter = 'all';
   const byId = new Map(dashboardsData.map(d => [d.agent + '/' + d.id, d]));
   const rank = d => (d.template_id ? 2 : d.kind === 'prompt' ? 1 : 0);
-  const rows = dashboardsData.filter(d => dashFilter === 'all' || d.agent === dashFilter)
-    .sort((a, b) => agentLabel(a.agent).localeCompare(agentLabel(b.agent)) || rank(a) - rank(b) || (a.name || '').localeCompare(b.name || ''));
+  const rows = searchRank('dashboards', dashboardsData.filter(d => dashFilter === 'all' || d.agent === dashFilter)
+    .sort((a, b) => agentLabel(a.agent).localeCompare(agentLabel(b.agent)) || rank(a) - rank(b) || (a.name || '').localeCompare(b.name || '')));
+  searchNote('dashboards', rows.length);
   if (!rows.length) {
-    el.innerHTML = emptyHtml(dashboardsData.length ? 'No dashboards for this agent.' : 'No dashboards yet. Ask an agent in Slack to create one, or add a descriptor to the GitOps repo.', true);
+    el.innerHTML = emptyHtml(searchState.dashboards.q ? 'No dashboard matches this search.' : dashboardsData.length ? 'No dashboards for this agent.' : 'No dashboards yet. Ask an agent in Slack to create one, or add a descriptor to the GitOps repo.', true);
     return;
   }
   el.innerHTML = `<table class="data-table"><thead><tr>

@@ -86,6 +86,8 @@ features you use.
       "Action": [
         "s3vectors:GetIndex",
         "s3vectors:PutVectors",
+        "s3vectors:GetVectors",
+        "s3vectors:ListVectors",
         "s3vectors:QueryVectors",
         "s3vectors:DeleteVectors"
       ],

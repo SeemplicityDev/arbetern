@@ -40,8 +40,9 @@ and picks a class without influencing the next:
 4. **Model switch.** Detecting a code-related tool call dynamically swaps the
    general model for `CODE_MODEL` mid-inference, without restarting the loop.
 5. **Thread sessions (temporal memory).** After the first reply a session is
-   registered on the Slack thread; follow-ups re-enter the same router with
-   accumulated history (see [Conversation Context](#conversation-context)).
+   registered on the Slack thread and stored in the state bucket, so a
+   follow-up may be answered by any replica; it re-enters the same router
+   with accumulated history (see [Conversation Context](#conversation-context)).
    If the message anchoring the thread is deleted, the session ends quietly:
    no expiry notice is posted and no reply is redirected to the channel.
 
@@ -139,7 +140,7 @@ Every stateful feature (workflows, dashboards, chat, billing, skills, MCP connec
 | Variable | Description |
 |---|---|
 | `S3_BACKEND_ARN` | **Required.** Bucket holding all service state, optionally with a key prefix: `arn:aws:s3:::acme-arbetern-state/prod`, `s3://acme-arbetern-state/prod` or `acme-arbetern-state/prod`. The bucket's region is detected at boot; credentials come from the default AWS chain (IRSA, static keys, profile) |
-| `S3_VECTORS_INDEX_ARN` | Optional S3 Vectors index (`arn:aws:s3vectors:<region>:<account>:bucket/<vector-bucket>/index/<index>`). When set, every completed turn is embedded and the per-user context shown to the model is the set of prior turns closest to the current question plus the latest few, instead of a plain recency window |
+| `S3_VECTORS_INDEX_ARN` | Optional S3 Vectors index (`arn:aws:s3vectors:<region>:<account>:bucket/<vector-bucket>/index/<index>`). When set, every completed turn (Slack or web chat) is embedded and the per-user context shown to the model is the set of prior turns closest to the current question plus the latest few, instead of a plain recency window; the same index powers `find_workflow` / `find_dashboard` and the search boxes of the console — see [docs/STATE.md](docs/STATE.md) |
 | `EMBEDDING_MODEL` | Embedding model for the vector index. Default `amazon.titan-embed-text-v2:0` (Bedrock, 1024 dims); `amazon.titan-embed-text-v1`, or a `text-embedding-3-*` / `ada-002` deployment on Azure OpenAI or GitHub Models also work — the backend follows the model name and the inference credentials already configured |
 | `EMBEDDING_DIMENSIONS` | Vector size; must equal the index dimension. Defaults per model, required for models the app does not know |
 | `CHAT_RETENTION` | How long a UI chat conversation is kept after its last activity before a background sweeper deletes it (applies to all agents). Go duration; defaults to `168h` (1 week). The sweeper runs hourly |
@@ -303,20 +304,22 @@ Every Slack-driven request — DMs, channel mentions, slash commands, and in-thr
 | **Agent prompt** | Per agent, static | File on disk (read-only) | Whatever you author in `agents/<id>/prompts.yaml` (+ `CUSTOM_PROMPTS_DIR` overrides) |
 | **Slack user profile** | Per request | Refetched every turn via `users.info` | A few hundred bytes (Slack ID, real name, display name, email, title) |
 | **Channel context** | Per channel/DM | In-memory cache, TTL = `THREAD_SESSION_TTL` (default 7m). Background sweeper evicts stale entries; hard cap of 4096 channels with oldest-first eviction | Up to 50 most recent Slack messages (no per-message char cap) |
-| **Conversation memory** | Per `(channel, user)` | In-memory, 10-minute TTL on inactivity. Background sweeper runs every minute; hard cap of 8192 pairs | Up to 10 turns (no per-turn char cap) |
-| **User context (persistent)** | Per `(agent, user)`, shared across DMs and channels | Document in the state bucket at `user-context/<agent>/<user>.json`. 30-day TTL on inactivity (refreshed on every append) | Each entry capped at 800 chars (question) + 1200 chars (answer). Recency mode: up to 50 entries and 96 KiB, all injected. Semantic mode (`S3_VECTORS_INDEX_ARN`): up to 200 entries stored, the 8 most similar to the current question plus the 2 latest injected, capped at 24 KiB |
+| **Working memory** | Per `(agent, user, channel)` | The user-context entries of the last 10 minutes in the same channel, read from the state bucket on every request so any replica sees the same conversation | Up to 10 turns, each capped like a user-context entry |
+| **User context (persistent)** | Per `(agent, user)`, shared across DMs, channels and web chat | Document in the state bucket at `user-context/<agent>/<user>.json`. 30-day TTL on inactivity (refreshed on every append) | Each entry capped at 800 chars (question) + 1200 chars (answer). Recency mode: up to 50 entries and 96 KiB, all injected. Semantic mode (`S3_VECTORS_INDEX_ARN`): up to 200 entries stored; the closest matches from the last 90 days (cosine distance ≤ 0.6 and within 0.2 of the best) plus the 2 latest injected, capped at 24 KiB |
+| **Shared memory** (opt-in) | Per agent with `shared_memory: true` | Semantic mode only: up to 4 related turns of other users of the agent, rendered without names | 8 KiB |
 
 ### How it flows
 
-1. **Read on every request.** All five layers are assembled before the LLM is called. The user-context document is read for both DMs and channels — `channelID` is *not* part of its key, so DM and channel turns merge into the same per-user document. In semantic mode the question is embedded and the closest prior turns are selected from the vector index.
-2. **Append on every completed turn.** When the model finishes, a compact `(question, answer)` entry is appended to the user-context document (and embedded into the index in semantic mode) regardless of whether the request came from a DM or a channel. Scheduled workflow ticks (`ExecuteHeadless`) intentionally skip persistence.
+1. **Read on every request.** All layers are assembled before the LLM is called. The user-context document is read for DMs, channels and web chat — `channelID` is *not* part of its key, so every turn of a user merges into the same per-user document; each entry records the channel it came from, which is what scopes the working memory. In semantic mode the question is embedded and the closest prior turns are selected from the vector index.
+2. **Append on every completed turn.** When the model finishes, a compact `(question, answer, channel)` entry is appended to the user-context document (and embedded into the index in semantic mode). Web chat turns are keyed by the signed-in email. Scheduled workflow ticks (`ExecuteHeadless`) intentionally skip persistence.
 3. **Cache reuse.** The channel-history cache TTL is wired to `THREAD_SESSION_TTL`, so a multi-turn thread reuses the same cached 50-message window for the entire session window without re-hitting Slack.
 
 ### Knobs
 
 - **`THREAD_SESSION_TTL`** — controls both the thread-session lifetime *and* the channel-context cache TTL.
 - **`S3_VECTORS_INDEX_ARN`** — switches the persistent layer from a recency window to semantic retrieval (see [docs/STATE.md](docs/STATE.md#semantic-user-context-s3-vectors)).
-- All other size caps are constants in [commands/user_context.go](commands/user_context.go), [commands/context.go](commands/context.go), and [commands/memory.go](commands/memory.go) — adjust there if you need a different envelope.
+- **`shared_memory: true`** in an agent's `config.yaml` — lets that agent ground a user's question in related questions other users asked it.
+- All other size caps are constants in [commands/user_context.go](commands/user_context.go) and [commands/context.go](commands/context.go) — adjust there if you need a different envelope.
 
 ## Custom Prompts (Org-Specific Context)
 
@@ -915,9 +918,11 @@ state:
 
 Grant the pod's IAM role access to the bucket as described in
 [docs/AWS.md](docs/AWS.md#required-iam-permissions). The chart deploys a
-plain Deployment with no volumes; ticks, syncs and GitOps reconciles run on
-the replica holding the scheduling lease, so a rolling update never
-double-fires a workflow.
+plain Deployment with no volumes and two replicas by default (with a pod
+disruption budget and node spreading); ticks, syncs and GitOps reconciles run
+on the replica holding the scheduling lease, so a rolling update never
+double-fires a workflow, and Slack thread sessions are shared through the
+bucket so a follow-up may be answered by either replica.
 
 ### Cross-agent list command
 

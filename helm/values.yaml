@@ -1,4 +1,19 @@
-replicaCount: 1
+# Two replicas by default: every replica serves Slack, chat and the UI, and one
+# of them holds the scheduling lease for workflow ticks and dashboard syncs.
+# Thread sessions, user context and GitOps status live in the state bucket, so
+# a reply may reach either replica.
+replicaCount: 2
+
+# Keeps one replica serving during node drains and rolling updates.
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+# Prefer spreading replicas over nodes (soft constraint).
+topologySpread:
+  enabled: true
+  topologyKey: kubernetes.io/hostname
+  maxSkew: 1
 
 image:
   repository: ghcr.io/justmike1/arbetern
@@ -467,6 +482,7 @@ customPrompts: {}
 # customConfigs:
 #   ovad:
 #     chat_enabled: true
+#     shared_memory: false   # ground answers in related questions of other users
 #   pulse:
 #     allowed_teams:
 #       - S0123456789   # CS team

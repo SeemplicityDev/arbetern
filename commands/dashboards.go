@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/justmike1/arbetern/catalog"
 	"github.com/justmike1/arbetern/dashboards"
 	"github.com/justmike1/arbetern/llm"
 )
@@ -24,7 +25,7 @@ func (h *GeneralHandler) dashboardTools() []llm.Tool {
 			Type: "function",
 			Function: llm.ToolFunction{
 				Name:        "create_dashboard",
-				Description: "Create a recurring data dashboard owned by the current agent. The dashboard periodically fetches data from the allow-listed integration sources and persists each run as JSON on disk, which is rendered as an HTML page at /" + h.agentID + "/dashboard/<id>. Use this when the user asks to 'create a dashboard', 'build me a view', or 'sync X every N minutes'. Compose one DataSource per distinct data feed the user is asking about — e.g. a Salesforce SOQL query per object, a Jira JQL search per board, a Chorus filter per engagement slice. Each source MUST be from this allow-list: " + supported + ". Give each source a short human label via its 'name' so the dashboard UI can title its section. sync_interval accepts Go duration strings like '5m', '30s', '1h'. Returns the dashboard id, short_name, and view URL which you MUST include in your reply to the user.",
+				Description: "Create a recurring data dashboard owned by the current agent. The dashboard periodically fetches data from the allow-listed integration sources and persists each run for the console page of the dashboard. Use this when the user asks to 'create a dashboard', 'build me a view', or 'sync X every N minutes'. Compose one DataSource per distinct data feed the user is asking about — e.g. a Salesforce SOQL query per object, a Jira JQL search per board, a Chorus filter per engagement slice. Each source MUST be from this allow-list: " + supported + ". Give each source a short human label via its 'name' so the dashboard UI can title its section. sync_interval accepts Go duration strings like '5m', '30s', '1h'. Returns the dashboard id, short_name, and view URL which you MUST include in your reply to the user.",
 				Parameters: json.RawMessage(`{
 					"type":"object",
 					"properties":{
@@ -52,6 +53,14 @@ func (h *GeneralHandler) dashboardTools() []llm.Tool {
 					},
 					"required":["name","short_name","sources"]
 				}`),
+			},
+		},
+		{
+			Type: "function",
+			Function: llm.ToolFunction{
+				Name:        "find_dashboard",
+				Description: "Find this agent's dashboards by meaning: describe what the dashboard shows (for example 'open Jira bugs per team') and get the closest matches with their ids. Prefer it over list_dashboards when the user refers to a dashboard by content rather than by exact name or id.",
+				Parameters:  json.RawMessage(`{"type":"object","properties":{"query":{"type":"string","description":"What the dashboard shows, in a few words."}},"required":["query"]}`),
 			},
 		},
 		{
@@ -87,6 +96,27 @@ func (h *GeneralHandler) executeDashboardTool(ctx context.Context, userID, chann
 		return "", false
 	}
 	switch name {
+	case "find_dashboard":
+		var args struct {
+			Query string `json:"query"`
+		}
+		if msg := unmarshalArgs(argsJSON, &args); msg != "" {
+			return msg, true
+		}
+		if strings.TrimSpace(args.Query) == "" {
+			return "Error: 'query' is required.", true
+		}
+		hits := h.findDashboards(ctx, args.Query)
+		if len(hits) == 0 {
+			return "No dashboard of this agent matches that description. Use list_dashboards to see them all.", true
+		}
+		var b strings.Builder
+		fmt.Fprintf(&b, "Closest dashboards for %q:\n", args.Query)
+		for _, d := range hits {
+			fmt.Fprintf(&b, "- %s — %s (short=%s, every %s)\n  %s\n  %s\n", d.ID, d.Name, d.ShortName, d.SyncInterval, d.Description, h.appURL+d.ViewURL())
+		}
+		return b.String(), true
+
 	case "create_dashboard":
 		var args struct {
 			Name         string                  `json:"name"`
@@ -161,4 +191,33 @@ func unmarshalArgs(argsJSON string, out any) string {
 		return fmt.Sprintf("Error parsing arguments: %v", err)
 	}
 	return ""
+}
+
+// findDashboards ranks this agent's dashboards against query, semantically
+// when the catalog index is available and by substring otherwise.
+func (h *GeneralHandler) findDashboards(ctx context.Context, query string) []*dashboards.Dashboard {
+	const limit = 5
+	if h.catalog != nil && h.catalog.Enabled() {
+		hits, err := h.catalog.Search(ctx, catalog.KindDashboard, h.agentID, query, limit)
+		if err == nil {
+			out := make([]*dashboards.Dashboard, 0, len(hits))
+			for _, hit := range hits {
+				if d, ok := h.dashboards.Get(h.agentID, hit.ID); ok {
+					out = append(out, d)
+				}
+			}
+			return out
+		}
+		log.Printf("[catalog] dashboard search failed, falling back to text match: %v", err)
+	}
+	var out []*dashboards.Dashboard
+	for _, d := range h.dashboards.List(h.agentID) {
+		if textMatches(query, d.Name, d.ShortName, d.Description, d.Prompt) {
+			out = append(out, d)
+		}
+		if len(out) == limit {
+			break
+		}
+	}
+	return out
 }

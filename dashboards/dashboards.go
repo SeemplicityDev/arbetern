@@ -40,6 +40,8 @@ import (
 const (
 	// Prefix is the object prefix dashboard descriptors are stored under.
 	Prefix = "dashboards/"
+	// legacyCachePrefix held per-account lookups before state moved to the bucket.
+	legacyCachePrefix = Prefix + "_cache/"
 
 	// syncLeaseTTL bounds how long a crashed replica blocks a dashboard's next sync.
 	syncLeaseTTL = 5 * time.Minute
@@ -128,6 +130,14 @@ type Dashboard struct {
 // ViewURL returns the management-console page for this dashboard.
 func (d *Dashboard) ViewURL() string {
 	return crud.ViewPath("dashboard", d.Agent, d.ID)
+}
+
+// Summary returns a copy without the fetched data and rendered report, for lists.
+func (d *Dashboard) Summary() *Dashboard {
+	cp := *d
+	cp.Data = nil
+	cp.Markdown = ""
+	return &cp
 }
 
 // interval parses SyncInterval, returning DefaultSyncInterval on failure.
@@ -331,6 +341,32 @@ func (r *Registry) List(agent string) []*Dashboard {
 	})
 	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt < out[j].CreatedAt })
 	return out
+}
+
+// ListSummaries is List without fetched data and rendered reports.
+func (r *Registry) ListSummaries(agent string) []*Dashboard {
+	list := r.List(agent)
+	for i, d := range list {
+		list[i] = d.Summary()
+	}
+	return list
+}
+
+// PurgeLegacyCache deletes the objects a previous release kept under the
+// dashboards prefix that are not descriptors. It returns how many were removed.
+func (r *Registry) PurgeLegacyCache(ctx context.Context) (int, error) {
+	objs, err := r.b.List(ctx, legacyCachePrefix)
+	if err != nil {
+		return 0, err
+	}
+	removed := 0
+	for _, o := range objs {
+		if err := r.b.Delete(ctx, o.Key, ""); err != nil {
+			return removed, err
+		}
+		removed++
+	}
+	return removed, nil
 }
 
 // Delete stops the sync goroutine and removes the stored descriptor.

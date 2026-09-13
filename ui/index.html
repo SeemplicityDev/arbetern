@@ -192,9 +192,13 @@
             <h1 class="page-title">Workflows</h1>
             <p class="page-desc">Scheduled and event-driven runs across every agent. Open one for its run history and editor.</p>
           </div>
-          <div class="page-actions"><div class="pills" id="wf-filter"></div></div>
+          <div class="page-actions">
+            <div class="pills" id="wf-filter"></div>
+            <input class="search-input" id="wf-search" type="search" placeholder="Search workflows by meaning…" autocomplete="off" aria-label="Search workflows">
+          </div>
         </div>
         <div class="gitops-line" id="wf-gitops"></div>
+        <p class="search-note" id="wf-search-note" hidden></p>
         <div class="list-panel list-scroll" id="wf-list"><div class="empty tall">Loading workflows…</div></div>
       </section>
 
@@ -204,9 +208,13 @@
             <h1 class="page-title">Dashboards</h1>
             <p class="page-desc">Recurring data snapshots and prompt-rendered reports, refreshed on their own schedule.</p>
           </div>
-          <div class="page-actions"><div class="pills" id="dash-filter"></div></div>
+          <div class="page-actions">
+            <div class="pills" id="dash-filter"></div>
+            <input class="search-input" id="dash-search" type="search" placeholder="Search dashboards by meaning…" autocomplete="off" aria-label="Search dashboards">
+          </div>
         </div>
         <div class="gitops-line" id="dash-gitops"></div>
+        <p class="search-note" id="dash-search-note" hidden></p>
         <div class="list-panel list-scroll" id="dash-list"><div class="empty tall">Loading dashboards…</div></div>
       </section>
 

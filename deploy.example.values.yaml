@@ -185,6 +185,7 @@ secretValues:
 # customConfigs:
 #   ovad:
 #     chat_enabled: true
+#     shared_memory: false   # ground answers in related questions of other users
 #   pulse:
 #     chat_enabled: true
 #     allowed_teams:
