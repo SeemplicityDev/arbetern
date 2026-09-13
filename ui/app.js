@@ -98,6 +98,7 @@ let billingSummary = null;
 let billingSummaryDays = null;
 const gitops = { workflows: null, dashboards: null };
 const lastFetched = {};
+const inflight = new Set();
 const AGENT_DASHBOARDS = {};
 const AGENT_WORKFLOWS = {};
 let wfFilter = 'all';
@@ -277,19 +278,18 @@ function applyRoute() {
 
 window.addEventListener('popstate', applyRoute);
 
-function renderCurrent() {
-  switch (currentPage) {
-    case 'overview': renderOverview(); break;
-    case 'integrations': if (integrationsData) renderIntegrations(integrationsData); break;
-    case 'workflows': renderWorkflowsPage(); break;
-    case 'dashboards': renderDashboardsPage(); break;
-    case 'changelog': renderChanges(); break;
-    case 'billing': if (billingSummary) renderBilling(billingSummary); break;
-    case 'mcp': renderMCPPage(); break;
-    case 'chats': renderChatsPage(); break;
-    case 'skills': renderSkillsPage(); break;
-    default: break;
-  }
+// Every view is painted whenever data lands, hidden pages included, so opening
+// a rail item shows finished content instead of a placeholder.
+function renderViews() {
+  renderOverview();
+  if (integrationsData) renderIntegrations(integrationsData);
+  renderWorkflowsPage();
+  renderDashboardsPage();
+  renderSkillsPage();
+  renderMCPPage();
+  renderChatsPage();
+  renderChanges();
+  if (billingSummary) renderBilling(billingSummary);
 }
 
 function loadPage(page) {
@@ -298,6 +298,7 @@ function loadPage(page) {
       renderOverview();
       return Promise.all([loadBilling(), loadSessions(), loadIntegrations(), loadWorkflows(), loadDashboards(), loadChanges(), loadMCP()]);
     case 'integrations':
+      if (integrationsData) renderIntegrations(integrationsData);
       return loadIntegrations();
     case 'agents':
       return Promise.all([loadDashboards(), loadWorkflows()]);
@@ -318,7 +319,7 @@ function loadPage(page) {
       return loadMCP();
     case 'chats':
       renderChatsPage();
-      return chatsList ? loadChats() : Promise.resolve();
+      return loadChats();
     case 'skills':
       renderSkillsPage();
       return loadSkills();
@@ -338,7 +339,7 @@ document.querySelectorAll('[data-pills="window"]').forEach(group => {
     days = +b.dataset.days;
     try { localStorage.setItem('arbetern-window', String(days)); } catch (_) {}
     syncPills();
-    delete lastFetched.billing;
+    delete lastFetched['billing:' + days];
     loadPage(currentPage);
   });
 });
@@ -351,7 +352,7 @@ async function loadAgents() {
     renderAgents(agentsData);
     applyRoute();
     if (hydrateExtrasFromCache()) applyAgentExtras();
-    renderCurrent();
+    renderViews();
   } catch (err) {
     console.error('Failed to load agents:', err);
     document.getElementById('agents-grid').innerHTML = `
@@ -366,8 +367,7 @@ async function loadIntegrations() {
   if (recentlyFetched('integrations')) return;
   try {
     integrationsData = await fetchJSON('/api/integrations');
-    renderIntegrations(integrationsData);
-    if (currentPage === 'overview') renderFleet();
+    renderViews();
   } catch (err) {
     console.error('Failed to load integrations:', err);
     document.getElementById('integrations-grid').innerHTML = `
@@ -382,7 +382,7 @@ async function loadWorkflows() {
     populateWorkflows(list);
     writeExtrasCache('extras.workflows', list);
     applyAgentExtras();
-    renderCurrent();
+    renderViews();
   } catch (err) {
     console.warn('Failed to load workflows:', err);
   }
@@ -395,7 +395,7 @@ async function loadDashboards() {
     populateDashboards(list);
     writeExtrasCache('extras.dashboards', list);
     applyAgentExtras();
-    renderCurrent();
+    renderViews();
   } catch (err) {
     console.warn('Failed to load dashboards:', err);
   }
@@ -409,8 +409,8 @@ async function loadChanges() {
     console.error('Failed to load changes:', err);
     changesState = { list: null, error: err };
   }
-  if (currentPage === 'changelog') renderChanges();
-  if (currentPage === 'overview') renderLatestChange();
+  renderChanges();
+  renderLatestChange();
 }
 
 async function loadSessions() {
@@ -421,29 +421,37 @@ async function loadSessions() {
     sessionsData = null;
   }
   sessionsFetched = true;
-  if (currentPage === 'overview') renderSessions();
+  renderSessions();
 }
 
 async function loadBilling() {
-  if (billingSummaryDays === days && recentlyFetched('billing')) return;
-  lastFetched.billing = Date.now();
+  const windowDays = days;
+  const key = 'billing:' + windowDays;
+  if (inflight.has(key)) return;
+  const fresh = recentlyFetched(key);
+  if (fresh && billingSummaryDays === windowDays) return;
+  inflight.add(key);
   try {
-    const sum = await fetchJSON('/api/billing/summary?days=' + days);
+    const sum = await fetchJSON('/api/billing/summary?days=' + windowDays);
+    if (windowDays !== days) return;
     billingSummary = sum;
-    billingSummaryDays = days;
-    renderCurrent();
+    billingSummaryDays = windowDays;
+    renderViews();
   } catch (err) {
     console.warn('Failed to load usage summary:', err);
+  } finally {
+    inflight.delete(key);
   }
 }
 
-async function loadGitops(kind) {
+async function loadGitops(kind, force) {
+  if (!force && recentlyFetched('gitops:' + kind)) return;
   try {
     gitops[kind] = await fetchJSON(`/api/${kind}/_gitops`);
   } catch (err) {
     gitops[kind] = null;
   }
-  renderCurrent();
+  renderViews();
 }
 
 function readExtrasCache(key) {
@@ -511,16 +519,6 @@ function userNamesFrom(sum) {
   return names;
 }
 
-function favoriteAgents(sum) {
-  const best = new Map();
-  (sum.by_user_agent || []).forEach(r => {
-    const n = r.counts.requests;
-    const cur = best.get(r.key);
-    if (!cur || n > cur.n) best.set(r.key, { agent: r.agent, n });
-  });
-  return best;
-}
-
 function renderMatrix(sum) {
   const el = document.getElementById('matrix');
   const meta = document.getElementById('matrix-meta');
@@ -552,11 +550,10 @@ function renderMatrix(sum) {
     `<th class="mx-agent-head">${miniAvatar(a)}<small>${escapeHtml(agentLabel(a))}</small></th>`).join('')}<th class="mx-total-head">Total</th></tr>`;
 
   const body = shown.map(u => {
-    const fav = agents.reduce((best, a) => ((u.cells[a] || 0) > (u.cells[best] || 0) ? a : best), agents[0]);
     const cells = agents.map(a => {
       const v = u.cells[a] || 0;
       const al = alpha(v);
-      const cls = ['mx-cell', v ? '' : 'zero', al >= 0.6 ? 'hi' : '', v && a === fav ? 'fav' : ''].filter(Boolean).join(' ');
+      const cls = ['mx-cell', v ? '' : 'zero', al >= 0.6 ? 'hi' : ''].filter(Boolean).join(' ');
       const title = `${userLabel(u)} · ${agentLabel(a)} · ${plural(v, 'request')}`;
       return `<td class="${cls}" style="--a:${al}" title="${escapeHtml(title)}">${v ? fmtInt(v) : ''}</td>`;
     }).join('');
@@ -570,7 +567,6 @@ function renderMatrix(sum) {
   const hidden = sorted.length - shown.length;
   const legend = `<div class="matrix-legend">
       <span><span class="scale">${[0.15, 0.35, 0.6, 0.9].map(a => `<i style="--a:${a}"></i>`).join('')}</span>more requests</span>
-      <span><span class="fav-key"></span>the agent this person uses most</span>
       ${hidden > 0 ? `<span>${plural(hidden, 'more user')} not shown</span>` : ''}
     </div>`;
 
@@ -661,21 +657,16 @@ function renderAgentsBoard(sum) {
 
 function renderTopUsers(sum) {
   const el = document.getElementById('ov-users');
-  const fav = favoriteAgents(sum);
   const rows = (sum.by_user || []).filter(r => r.counts.requests > 0)
     .sort((a, b) => b.counts.requests - a.counts.requests);
   document.getElementById('ov-users-meta').textContent = rows.length ? plural(rows.length, 'user') : '';
   if (!rows.length) { el.innerHTML = emptyHtml('No user-attributed turns yet.'); return; }
-  el.innerHTML = rows.slice(0, 8).map((r, i) => {
-    const f = fav.get(r.key);
-    return `<div class="ur-row">
-        <span class="ur-rank">${i + 1}</span>
-        <div><div class="lb-name" title="${escapeHtml(r.key)}">${escapeHtml(userLabel(r))}</div>
-          <div class="lb-sub">${tok(r.counts.total_tokens)} tokens · ${money4(r.counts.cost_usd)}</div></div>
-        <span class="ur-fav" title="${f ? escapeHtml('Uses ' + agentLabel(f.agent) + ' most') : ''}">${f ? miniAvatar(f.agent) + escapeHtml(agentLabel(f.agent)) : ''}</span>
-        <span class="lb-num">${fmtInt(r.counts.requests)}</span>
-      </div>`;
-  }).join('');
+  el.innerHTML = rows.slice(0, 8).map((r, i) => `<div class="ur-row">
+      <span class="ur-rank">${i + 1}</span>
+      <div><div class="lb-name" title="${escapeHtml(r.key)}">${escapeHtml(userLabel(r))}</div>
+        <div class="lb-sub">${tok(r.counts.total_tokens)} tokens · ${money4(r.counts.cost_usd)}</div></div>
+      <span class="lb-num">${fmtInt(r.counts.requests)}</span>
+    </div>`).join('');
 }
 
 function renderSources(sum) {
@@ -840,7 +831,7 @@ async function syncGitops(kind, btn) {
     alert('Sync failed: ' + err);
   }
   delete lastFetched[kind];
-  await Promise.all([loadGitops(kind), kind === 'workflows' ? loadWorkflows() : loadDashboards()]);
+  await Promise.all([loadGitops(kind, true), kind === 'workflows' ? loadWorkflows() : loadDashboards()]);
 }
 
 function wfStatus(w) {
@@ -1575,7 +1566,7 @@ document.addEventListener('keydown', e => {
 function renderSlackMarkdown(text) {
   if (text == null) return '';
   const tokens = [];
-  const stash = (html) => ` ${tokens.push(html) - 1} `;
+  const stash = (html) => `\u0000${tokens.push(html) - 1}\u0000`;
   const escAttr = (s) => String(s).replace(/&/g, '&amp;').replace(/"/g, '&quot;');
   let s = String(text);
   s = s.replace(/<(https?:\/\/[^|>\s]+)\|([^>]+)>/g, (_, url, label) =>
@@ -1587,7 +1578,7 @@ function renderSlackMarkdown(text) {
   s = s.replace(/\*([^*\n]+)\*/g, '<strong>$1</strong>');
   s = s.replace(/(^|[\s(])_([^_\n]+)_(?=[\s).,!?:;]|$)/g, '$1<em>$2</em>');
   s = s.replace(/~([^~\n]+)~/g, '<del>$1</del>');
-  return s.replace(/ (\d+) /g, (_, i) => tokens[Number(i)]);
+  return s.replace(/\u0000(\d+)\u0000/g, (_, i) => tokens[Number(i)]);
 }
 
 /* Integrations */
@@ -1800,6 +1791,8 @@ async function loadChats() {
   if (!agents.length) { renderChatsPage(); return; }
   if (!chatsAgent || !agents.some(a => a.id === chatsAgent)) chatsAgent = agents[0].id;
   const agent = chatsAgent;
+  if (chatsLoading) return;
+  if (chatsList && chatsList.agent === agent && recentlyFetched('chats:' + agent)) return;
   chatsLoading = true;
   try {
     const list = await apiListConversations(agent);
@@ -1808,7 +1801,7 @@ async function loadChats() {
     if (chatsAgent === agent) chatsList = { agent, list: null, error: err };
   }
   chatsLoading = false;
-  if (currentPage === 'chats') renderChatsPage();
+  renderChatsPage();
 }
 
 function renderChatsPage() {
@@ -1906,7 +1899,7 @@ async function loadSkills() {
   } catch (err) {
     skillsData = { list: null, error: err };
   }
-  if (currentPage === 'skills') renderSkillsPage();
+  renderSkillsPage();
 }
 
 function firstLine(text, max) {
@@ -2034,8 +2027,8 @@ async function loadMCP() {
   } catch (err) {
     mcpData = { list: null, error: err };
   }
-  if (currentPage === 'mcp') renderMCPPage();
-  if (currentPage === 'overview') renderFleet();
+  renderMCPPage();
+  renderFleet();
 }
 
 function connectorHost(u) {
@@ -2166,8 +2159,8 @@ async function testConnector(id, btn) {
   } catch (err) {
     alert('Test failed: ' + err.message);
   }
-  if (currentPage === 'mcp') renderMCPPage();
-  if (currentPage === 'overview') renderFleet();
+  renderMCPPage();
+  renderFleet();
 }
 
 /* Identity */
@@ -2282,10 +2275,19 @@ async function loadIdentity() {
   } catch (e) {}
 })();
 
-/* Boot */
+/* Boot — every dataset the console renders is fetched up front and in parallel,
+   so each page and widget draws from memory instead of its own round trip. */
+function prefetchAll() {
+  return Promise.allSettled([
+    loadIntegrations(), loadWorkflows(), loadDashboards(), loadChanges(), loadSessions(),
+    loadBilling(), loadSkills(), loadMCP(), loadGitops('workflows'), loadGitops('dashboards'),
+  ]);
+}
+
 applyRoute();
-loadAgents();
 loadIdentity();
+loadAgents().then(loadChats);
+prefetchAll();
 setInterval(() => {
   if (document.visibilityState !== 'visible' || chatFull) return;
   if (currentPage === 'overview' || currentPage === 'billing') loadPage(currentPage);

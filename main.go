@@ -147,6 +147,58 @@ func (c *agentsCache) get() ([]prompts.AgentConfig, error) {
 	return agents, nil
 }
 
+// seed installs the roster discovered at startup so the first landing-page
+// request is served from memory instead of re-walking the agents directory.
+func (c *agentsCache) seed(agents []prompts.AgentConfig) {
+	if len(agents) == 0 {
+		return
+	}
+	c.mu.Lock()
+	c.data = agents
+	c.expiresAt = time.Now().Add(agentsCacheTTL)
+	c.mu.Unlock()
+}
+
+// changelogCacheTTL is how long the commit list behind the Changelog page is
+// served from memory.
+const changelogCacheTTL = 5 * time.Minute
+
+// changelogCache is a process-wide TTL cache for the /api/changes payload.
+// Without it every console load spends a GitHub API call on a list that changes
+// a few times a day. Concurrent misses are single-flighted by the mutex, and a
+// failed refresh falls back to the last good snapshot.
+type changelogCache struct {
+	gh *github.Client
+
+	mu        sync.Mutex
+	data      []github.CommitSummary
+	expiresAt time.Time
+}
+
+func (c *changelogCache) get(ctx context.Context) ([]github.CommitSummary, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.data != nil && time.Now().Before(c.expiresAt) {
+		return c.data, nil
+	}
+	commits, err := c.gh.ListCommits(ctx, changelogOwner, changelogRepo, "", "", "", time.Time{}, time.Time{}, 20)
+	if err != nil {
+		if c.data != nil {
+			return c.data, nil
+		}
+		return nil, err
+	}
+	// Shorten SHAs to 7 chars for the UI's changelog view.
+	for i := range commits {
+		if len(commits[i].SHA) > 7 {
+			commits[i].SHA = commits[i].SHA[:7]
+		}
+	}
+	c.data = commits
+	c.expiresAt = time.Now().Add(changelogCacheTTL)
+	return commits, nil
+}
+
 // errGitOpsDisabled is returned by the gitops sync HTTP handler when no
 // syncer is configured for that kind (e.g. WORKFLOWS_GITOPS_REPO unset).
 var errGitOpsDisabled = errors.New("gitops sync is not enabled for this kind")
@@ -2104,6 +2156,7 @@ func main() {
 	// instead of re-walking the agents/ directory on every request.
 	apiMux := http.NewServeMux()
 	agentList := &agentsCache{}
+	agentList.seed(agents)
 	apiMux.HandleFunc("/api/agents", func(w http.ResponseWriter, r *http.Request) {
 		agents, err := agentList.get()
 		if err != nil {
@@ -2154,25 +2207,34 @@ func main() {
 	})
 
 	// API: latest changes (commits from the arbetern repo).
+	changelog := &changelogCache{gh: ghClient}
 	apiMux.HandleFunc("/api/changes", func(w http.ResponseWriter, r *http.Request) {
 		if ghClient == nil {
 			http.Error(w, "GitHub integration not configured", http.StatusServiceUnavailable)
 			return
 		}
-		commits, err := ghClient.ListCommits(r.Context(), changelogOwner, changelogRepo, "", "", "", time.Time{}, time.Time{}, 20)
+		commits, err := changelog.get(r.Context())
 		if err != nil {
 			http.Error(w, fmt.Sprintf("failed to fetch commits: %v", err), http.StatusInternalServerError)
 			return
 		}
-		// Shorten SHAs to 7 chars for the UI's changelog view.
-		for i := range commits {
-			if len(commits[i].SHA) > 7 {
-				commits[i].SHA = commits[i].SHA[:7]
-			}
-		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(commits)
 	})
+
+	// Fill the two caches the console reads on load that are not already warm:
+	// the commit list (a GitHub call) and the usage summary, whose first pass
+	// starts resolving Slack display names for the user leaderboards.
+	if ghClient != nil {
+		safego.Go("warm: changelog", func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			if _, err := changelog.get(ctx); err != nil {
+				log.Printf("warn: changelog warm-up failed: %v", err)
+			}
+		})
+	}
+	safego.Go("warm: usage summary", func() { _ = billingStore.Summarize(30) })
 
 	http.Handle("/api/", apiMux)
 
