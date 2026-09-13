@@ -2196,6 +2196,33 @@ func main() {
 	chatRegistry.SetAuthorizer(func(req *http.Request, agentID string) bool {
 		return checkChatRBAC(req, agentID, agentEmailRBAC[agentID], agentRBAC[agentID], slackClient, emailUserCache, rbacCache)
 	})
+	// Skills follow the same allow-lists: a skill may only be added, changed
+	// or deleted by someone allowed to use every agent it targets.
+	canManageSkillsFor := func(r *http.Request, agentID string) bool {
+		return uiRBACAllowed(r, agentEmailRBAC[agentID], agentRBAC[agentID], slackClient, emailUserCache, rbacCache)
+	}
+	skillAgentsFor := func(r *http.Request) []string {
+		out := make([]string, 0, len(agentIDs))
+		for _, id := range agentIDs {
+			if canManageSkillsFor(r, id) {
+				out = append(out, id)
+			}
+		}
+		return out
+	}
+	skillRegistry.SetAuthorizer(func(r *http.Request, scope []string) bool {
+		targets := scope
+		if len(targets) == 0 {
+			targets = agentIDs
+		}
+		for _, id := range targets {
+			if !canManageSkillsFor(r, id) {
+				log.Printf("[rbac] DENIED email=%q scope=skills/%s (allowed_emails=%v allowed_teams=%v)", redactEmail(clientEmail(r)), id, agentEmailRBAC[id], agentRBAC[id])
+				return false
+			}
+		}
+		return true
+	})
 
 	// Attribute chat messages to the OAuth-proxy-verified sender. When a proxy is
 	// in front, clientEmail returns the authenticated email; with no proxy (local
@@ -2397,8 +2424,9 @@ func main() {
 		w.Header().Set("Cache-Control", "no-store")
 		_ = json.NewEncoder(w).Encode(struct {
 			identity
-			MCPAdmin bool `json:"mcp_admin"`
-		}{identities.lookup(clientEmail(r), slackClient, jiraClient, cfg.AtlassianURL), canManageMCP(r)})
+			MCPAdmin    bool     `json:"mcp_admin"`
+			SkillAgents []string `json:"skill_agents"`
+		}{identities.lookup(clientEmail(r), slackClient, jiraClient, cfg.AtlassianURL), canManageMCP(r), skillAgentsFor(r)})
 	})
 
 	// API: UI settings.

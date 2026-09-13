@@ -61,8 +61,9 @@ type Patch struct {
 }
 
 var (
-	ErrNotFound = errors.New("skill not found")
-	ErrReadOnly = errors.New("built-in skills are defined in the agent prompt files and cannot be changed here")
+	ErrNotFound  = errors.New("skill not found")
+	ErrReadOnly  = errors.New("built-in skills are defined in the agent prompt files and cannot be changed here")
+	ErrForbidden = errors.New("changing skills for this agent is restricted to its allowed teams")
 )
 
 // Registry serves custom skills from the state bucket plus the read-only
@@ -73,6 +74,23 @@ type Registry struct {
 	mu          sync.RWMutex
 	builtin     func() []Skill
 	knownAgents map[string]bool
+	authorize   func(req *http.Request, agents []string) bool
+}
+
+// SetAuthorizer installs the check a request must pass to add, change or
+// delete a skill scoped to agents; an empty scope means every agent. Reads
+// stay open to every UI user.
+func (r *Registry) SetAuthorizer(fn func(req *http.Request, agents []string) bool) {
+	r.mu.Lock()
+	r.authorize = fn
+	r.mu.Unlock()
+}
+
+func (r *Registry) authorized(req *http.Request, agents []string) bool {
+	r.mu.RLock()
+	fn := r.authorize
+	r.mu.RUnlock()
+	return fn == nil || fn(req, agents)
 }
 
 // New loads the custom skills stored under Prefix.
@@ -354,6 +372,10 @@ func (r *Registry) RegisterRoutes(apiMux *http.ServeMux, userFor func(*http.Requ
 				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
 			}
+			if !r.authorized(req, normalizeAgents(in.Agents)) {
+				http.Error(w, ErrForbidden.Error(), http.StatusForbidden)
+				return
+			}
 			if userFor != nil {
 				in.CreatedBy = userFor(req)
 			}
@@ -383,6 +405,12 @@ func (r *Registry) RegisterRoutes(apiMux *http.ServeMux, userFor func(*http.Requ
 				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
 			}
+			if cur, ok := r.Get(id); ok {
+				if !r.authorized(req, cur.Agents) || (p.Agents != nil && !r.authorized(req, normalizeAgents(*p.Agents))) {
+					http.Error(w, ErrForbidden.Error(), http.StatusForbidden)
+					return
+				}
+			}
 			s, err := r.Update(req.Context(), id, p)
 			if err != nil {
 				http.Error(w, err.Error(), statusFor(err))
@@ -390,6 +418,10 @@ func (r *Registry) RegisterRoutes(apiMux *http.ServeMux, userFor func(*http.Requ
 			}
 			writeJSON(w, http.StatusOK, s)
 		case http.MethodDelete:
+			if cur, ok := r.Get(id); ok && !r.authorized(req, cur.Agents) {
+				http.Error(w, ErrForbidden.Error(), http.StatusForbidden)
+				return
+			}
 			if err := r.Delete(req.Context(), id); err != nil {
 				http.Error(w, err.Error(), statusFor(err))
 				return
@@ -405,7 +437,7 @@ func statusFor(err error) int {
 	switch {
 	case errors.Is(err, ErrNotFound):
 		return http.StatusNotFound
-	case errors.Is(err, ErrReadOnly):
+	case errors.Is(err, ErrReadOnly), errors.Is(err, ErrForbidden):
 		return http.StatusForbidden
 	default:
 		return http.StatusBadRequest

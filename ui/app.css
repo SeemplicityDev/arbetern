@@ -1089,6 +1089,7 @@ html[data-sidebar="collapsed"] .nav-sep { margin: 6px 16px; }
 .form-textarea { min-height: 220px; resize: vertical; font-family: var(--font-mono); font-size: 12.5px; line-height: 1.6; }
 .chip-select { display: flex; flex-wrap: wrap; gap: 6px; }
 .chip-select .chip { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px 4px 5px; border-radius: 20px; background: var(--card); border: 1px solid var(--border); color: var(--text-muted); font-family: inherit; font-size: 12.5px; cursor: pointer; transition: border-color 0.15s ease, color 0.15s ease; }
+.chip-select .chip:disabled { opacity: 0.45; cursor: not-allowed; }
 .chip-select .chip.on { border-color: var(--accent); color: var(--text-bright); background: var(--accent-glow); }
 .kv-rows { display: flex; flex-direction: column; gap: 8px; }
 .kv-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr) auto; gap: 8px; align-items: center; }

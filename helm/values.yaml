@@ -440,21 +440,6 @@ autoscaling:
 
 volumes: []
 volumesMounts: []
-# Custom prompts — org-specific context appended to built-in agent prompts via ConfigMap.
-# Each key is an agent ID; values are prompt key/value pairs that get APPENDED (not overridden)
-# to the agent's existing prompts. This lets you inject deployment-specific context without
-# modifying the source prompts.yaml files.
-# Example:
-# customPrompts:
-#   ovad:
-#     general: |
-#       Our GitHub org is "acme-corp". Default repo for infra is "infra-live".
-#       Terraform state is in S3 bucket "acme-tf-state".
-#   goldsai:
-#     general: |
-#       Our container base images are hosted in ECR at 123456789.dkr.ecr.us-east-1.amazonaws.com.
-#       All Python services must use Python >= 3.13.11.
-customPrompts: {}
 
 # Custom per-agent config overrides — override agent config.yaml settings at
 # deploy time via ConfigMap, without rebuilding the image. Each key is an agent
@@ -466,7 +451,8 @@ customPrompts: {}
 #   - chat_enabled: turn on the centralized UI chat for an agent.
 #   - allowed_teams: restrict the agent to the listed Slack user group
 #     (subteam) IDs. This is how you do per-agent RBAC at deploy time; when set,
-#     only members of those groups can use the agent. Omit/empty = no
+#     only members of those groups can use the agent, and only they can add,
+#     change or delete the agent's skills in the console. Omit/empty = no
 #     restriction. Also acts as the fallback layer for the UI chat (see below).
 #   - allowed_emails: restrict the agent's UI chat (/ui/<agent>/chat and the
 #     /api/chat API). Chat access is evaluated in two layers, in order:

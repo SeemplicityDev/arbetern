@@ -146,7 +146,6 @@ Every stateful feature (workflows, dashboards, chat, billing, skills, MCP connec
 | `CHAT_RETENTION` | How long a UI chat conversation is kept after its last activity before a background sweeper deletes it (applies to all agents). Go duration; defaults to `168h` (1 week). The sweeper runs hourly |
 | `PRICE_SOURCE_URL` | Single source of truth for per-token prices, synced on boot and every 24h (default: LiteLLM's public price file, ~2900 models). The billing tab shows the live source, model count, and last-sync time. Set empty to rely solely on `LLM_PRICE_OVERRIDES`. Price changes only affect future turns — recorded costs are frozen at record time |
 | `LLM_PRICE_OVERRIDES` | Optional JSON map of model → `{"in":<usd_per_1M>,"out":<usd_per_1M>}` layered on top of the synced feed (wins over it) for negotiated/Azure rates. A model matched by neither is recorded at $0 and flagged `unpriced` |
-| `CUSTOM_PROMPTS_DIR` | Directory of custom prompt YAML files **appended** to built-in agent prompts. Set automatically by the chart when `customPrompts` is configured |
 | `CUSTOM_CONFIG_DIR` | Directory of per-agent config overrides (`<agent-id>.yaml`, a full `config.yaml` overlay — e.g. `chat_enabled`, `allowed_teams`, `allowed_emails`). Set automatically by the chart when `customConfigs` is configured |
 | `AGENT_CREDENTIALS_DIR` | Directory of per-agent credential overrides (`<agent-id>/<secret-key>` files). Set automatically by the chart when `customCredentials` is configured. See [Per-Agent Credentials](#per-agent-credentials-integration-overrides) |
 
@@ -301,7 +300,7 @@ Every Slack-driven request — DMs, channel mentions, slash commands, and in-thr
 
 | Layer | Scope | Retention | Size cap |
 | --- | --- | --- | --- |
-| **Agent prompt** | Per agent, static | File on disk (read-only) | Whatever you author in `agents/<id>/prompts.yaml` (+ `CUSTOM_PROMPTS_DIR` overrides) |
+| **Agent prompt** | Per agent, static | File on disk (read-only) | Whatever you author in `agents/<id>/prompts.yaml`, plus the enabled skills |
 | **Slack user profile** | Per request | Refetched every turn via `users.info` | A few hundred bytes (Slack ID, real name, display name, email, title) |
 | **Channel context** | Per channel/DM | In-memory cache, TTL = `THREAD_SESSION_TTL` (default 7m). Background sweeper evicts stale entries; hard cap of 4096 channels with oldest-first eviction | Up to 50 most recent Slack messages (no per-message char cap) |
 | **Working memory** | Per `(agent, user, channel)` | The user-context entries of the last 10 minutes in the same channel, read from the state bucket on every request so any replica sees the same conversation | Up to 10 turns, each capped like a user-context entry |
@@ -321,41 +320,17 @@ Every Slack-driven request — DMs, channel mentions, slash commands, and in-thr
 - **`shared_memory: true`** in an agent's `config.yaml` — lets that agent ground a user's question in related questions other users asked it.
 - All other size caps are constants in [commands/user_context.go](commands/user_context.go) and [commands/context.go](commands/context.go) — adjust there if you need a different envelope.
 
-## Custom Prompts (Org-Specific Context)
+## Org-Specific Context
 
-You can append org-specific context to any agent's prompts without modifying the built-in `agents/*/prompts.yaml` files. Custom prompts are **appended** to existing prompt keys — they never override the originals.
-
-### Via Helm (Kubernetes ConfigMap)
-
-Add a `customPrompts` section to your values file:
-
-```yaml
-customPrompts:
-  ovad:
-    general: |
-      Our GitHub org is "acme-corp". Default repo for infra is "infra-live".
-      Terraform state is in S3 bucket "acme-tf-state".
-      Production cluster is EKS "prod-us-east-1".
-  goldsai:
-    general: |
-      All Python services must use Python >= 3.13.11.
-      Container base images are in ECR at 123456789.dkr.ecr.us-east-1.amazonaws.com.
-```
-
-The Helm chart creates a ConfigMap, mounts it, and sets `CUSTOM_PROMPTS_DIR` automatically.
-
-### Via Environment Variable (local / Docker)
-
-Set `CUSTOM_PROMPTS_DIR` to a directory containing `<agent-id>.yaml` files:
-
-```bash
-export CUSTOM_PROMPTS_DIR=/path/to/custom-prompts
-# Create /path/to/custom-prompts/ovad.yaml with prompt key/value pairs
-```
+Deployment-specific instructions (your GitHub org, default repos, naming
+conventions, escalation rules) are written as **skills** in the console rather
+than baked into the release: open **Skills → New skill**, pick the agents it
+applies to and save. Skills live in the state bucket, take effect on the next
+turn, and can be edited or disabled without a redeploy. See [Skills](#skills).
 
 ## Agent RBAC (Team-Based Access Control)
 
-Restrict which Slack user groups (teams) can access each agent. When `allowed_teams` is set for an agent, only members of those Slack user groups can invoke it. Empty list = open to everyone.
+Restrict which Slack user groups (teams) can access each agent. When `allowed_teams` is set for an agent, only members of those Slack user groups can invoke it, and only they can add, change or delete that agent's skills in the console (a skill that applies to all agents needs access to every restricted agent). Empty list = open to everyone.
 
 ### Default Config (`agents/<id>/config.yaml`)
 
@@ -993,7 +968,10 @@ A skill is an instruction block appended to an agent's system prompt. The
 - **Custom** — written in the UI (`POST /api/skills`), stored as JSON at
   `skills/<id>.json` in the state bucket, and appended after the agent's own
   prompt on every Slack, chat and workflow turn. A skill can target specific agents or all of them,
-  and can be disabled without deleting it.
+  and can be disabled without deleting it. Adding, changing or deleting a skill
+  follows the targeted agents' `allowed_emails` / `allowed_teams`: the requester
+  must be allowed to use every agent the skill applies to, and the console shows
+  the other agents' skills read-only.
 
 ## MCP & Connectors
 

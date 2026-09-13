@@ -1929,9 +1929,11 @@ function formValue(id) {
   return el ? el.value.trim() : '';
 }
 
-function agentChipsHtml(selected) {
-  return `<div class="chip-select" id="f-agents">${agentsData.map(a =>
-    `<button type="button" class="chip${selected.includes(a.id) ? ' on' : ''}" data-id="${a.id}">${miniAvatar(a.id)}${escapeHtml(a.name)}</button>`).join('')}</div>`;
+function agentChipsHtml(selected, allowed) {
+  return `<div class="chip-select" id="f-agents">${agentsData.map(a => {
+    const locked = allowed && !allowed.has(a.id);
+    return `<button type="button" class="chip${selected.includes(a.id) ? ' on' : ''}" data-id="${a.id}"${locked ? ' disabled title="Only members of this agent’s allowed teams can change its skills"' : ''}>${miniAvatar(a.id)}${escapeHtml(a.name)}</button>`;
+  }).join('')}</div>`;
 }
 
 function selectedAgents() {
@@ -2084,8 +2086,23 @@ function skillApplies(s, agent) {
   return agent === 'all' || !s.agents || !s.agents.length || s.agents.includes(agent);
 }
 
+// skillAgentsAllowed is the set of agents whose skills the viewer may change,
+// or null until the identity is known (the API stays the arbiter meanwhile).
+function skillAgentsAllowed() {
+  if (!identityData || !Array.isArray(identityData.skill_agents)) return null;
+  return new Set(identityData.skill_agents);
+}
+
+function canManageSkill(s) {
+  const allowed = skillAgentsAllowed();
+  if (!allowed) return true;
+  const targets = s.agents && s.agents.length ? s.agents : agentsData.map(a => a.id);
+  return targets.every(id => allowed.has(id));
+}
+
 function skillCard(s) {
   const custom = s.kind === 'custom';
+  const manage = custom && canManageSkill(s);
   const desc = s.description || (custom ? firstLine(s.instructions, 120) : '');
   const when = s.updated_at || s.created_at;
   const sub = custom ? (s.created_by ? 'by ' + escapeHtml(s.created_by) : 'custom skill') : escapeHtml(s.source || 'prompt file');
@@ -2099,7 +2116,8 @@ function skillCard(s) {
       <div class="card-foot">
         <span class="tag ${custom ? (s.enabled ? 'workflow' : '') : 'gitops'}">${custom ? (s.enabled ? 'enabled' : 'disabled') : 'built-in'}</span>
         ${custom && when ? `<span>updated ${timeAgo(when)}</span>` : ''}
-        ${custom ? `<div class="actions">
+        ${custom && !manage ? '<span class="tag" title="Only members of the targeted agents’ allowed teams can change this skill">locked</span>' : ''}
+        ${manage ? `<div class="actions">
           <button class="btn-mini" type="button" onclick="toggleSkill('${s.id}', ${!s.enabled})">${s.enabled ? 'Disable' : 'Enable'}</button>
           <button class="btn-mini" type="button" onclick="editSkill('${s.id}')">Edit</button>
           <button class="btn-mini danger" type="button" onclick="deleteSkill('${s.id}')">Delete</button>
@@ -2115,6 +2133,14 @@ function renderSkillsPage() {
   filterEl.innerHTML = agentsData.length > 1
     ? `<button class="pill${skillFilter === 'all' ? ' active' : ''}" data-agent="all">All agents</button>` +
       agentsData.map(a => `<button class="pill${skillFilter === a.id ? ' active' : ''}" data-agent="${a.id}">${escapeHtml(a.name)}</button>`).join('')
+    : '';
+  const allowed = skillAgentsAllowed();
+  const lockedAgents = allowed ? agentsData.filter(a => !allowed.has(a.id)) : [];
+  document.getElementById('skill-new-btn').hidden = !!allowed && allowed.size === 0;
+  const note = document.getElementById('skills-readonly-note');
+  note.hidden = !lockedAgents.length;
+  note.textContent = lockedAgents.length
+    ? `Skills of ${lockedAgents.map(a => a.name).join(', ')} are read-only for you: only members of those agents’ allowed teams can change them.`
     : '';
   if (!skillsData) return;
   if (skillsData.error) {
@@ -2141,6 +2167,8 @@ document.getElementById('skill-new-btn').addEventListener('click', () => skillFo
 
 function skillForm(s) {
   const isNew = !s;
+  const allowed = skillAgentsAllowed();
+  const canAll = !allowed || agentsData.every(a => allowed.has(a.id));
   openForm({
     title: isNew ? 'New skill' : 'Edit skill',
     subtitle: isNew ? 'Appended to the system prompt of the agents you pick' : s.name,
@@ -2148,7 +2176,7 @@ function skillForm(s) {
     html: formField('Name', `<input class="form-input" id="f-name" maxlength="80" value="${escapeHtml(s ? s.name : '')}" placeholder="Incident write-ups">`)
       + formField('Description', `<input class="form-input" id="f-desc" maxlength="240" value="${escapeHtml(s ? s.description || '' : '')}" placeholder="One line on when this applies">`)
       + formField('Instructions', `<textarea class="form-textarea" id="f-instructions" placeholder="Write the instruction block exactly as the agent should read it.">${escapeHtml(s ? s.instructions : '')}</textarea>`, 'Plain text or Markdown. Slack replies still follow the agent’s formatting rules.')
-      + formField('Agents', agentChipsHtml(s ? s.agents || [] : []), 'Leave every agent unselected to apply the skill to all of them.')
+      + formField('Agents', agentChipsHtml(s ? s.agents || [] : [], allowed), canAll ? 'Leave every agent unselected to apply the skill to all of them.' : 'Pick at least one agent. Applying a skill to all agents needs access to every agent, and greyed-out agents are managed by their allowed teams.')
       + `<label class="check-row"><input type="checkbox" id="f-enabled"${!s || s.enabled ? ' checked' : ''}> Enabled</label>`,
     onSave: async () => {
       const body = {
@@ -2158,6 +2186,7 @@ function skillForm(s) {
         agents: selectedAgents(),
         enabled: document.getElementById('f-enabled').checked,
       };
+      if (!body.agents.length && !canAll) throw new Error('Pick at least one agent you can manage.');
       if (isNew) await apiSend('/api/skills', 'POST', body);
       else await apiSend(`/api/skills/${encodeURIComponent(s.id)}`, 'PATCH', body);
       delete lastFetched.skills;
@@ -2436,6 +2465,7 @@ async function loadIdentity() {
   }
   renderIdentity();
   renderMCPPage();
+  renderSkillsPage();
 }
 
 /* Branding */

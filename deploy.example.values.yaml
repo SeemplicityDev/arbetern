@@ -153,17 +153,6 @@ secretValues:
 #     clientSecret: "your-oauth-client-secret"
 #     cookieSecret: "your-cookie-secret"  # openssl rand -base64 32 | tr -- '+/' '-_'
 
-# Custom prompts — org-specific context appended to agent prompts via ConfigMap.
-# customPrompts:
-#   ovad:
-#     general: |
-#       Our GitHub org is "acme-corp". Default repo for infra is "infra-live".
-#       Terraform state is in S3 bucket "acme-tf-state".
-#   goldsai:
-#     general: |
-#       Our container base images are hosted in ECR at 123456789.dkr.ecr.us-east-1.amazonaws.com.
-#       All Python services must use Python >= 3.13.11.
-
 # Per-agent config overrides — override agent config.yaml settings at deploy
 # time (without rebuilding the image). The override is a full config file, so
 # only the keys you set take effect; everything else falls through to the
