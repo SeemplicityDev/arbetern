@@ -19,12 +19,12 @@ Open **MCP & Connectors** in the web UI (or `POST /api/mcp`) and provide:
 
 Header values may reference environment variables as `${NAME}`. The value is
 resolved when a request is made, so the token can live in the Helm Secret
-instead of the persisted JSON. Literal values are stored on the volume and
-returned masked (`••••••••`) by the API; sending the mask back on update keeps
+instead of the persisted JSON. Literal values are stored in the state bucket
+and returned masked (`••••••••`) by the API; sending the mask back on update keeps
 the stored value.
 
-Connectors are persisted as `<MCP_DIR>/<id>.json` (default `./data/mcp`; the
-chart mounts `<persistence.mountPath>/mcp` when `mcp.enabled` is true).
+Connectors are stored at `mcp/<id>.json` in the state bucket (see
+[STATE.md](STATE.md)).
 
 ## Testing and discovery
 

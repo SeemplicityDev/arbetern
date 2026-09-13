@@ -160,24 +160,36 @@ func New(cfg Config, gh *github.Client, backend Backend) (*Syncer, error) {
 		gh:      gh,
 		backend: backend,
 		prefix:  prefix,
-		stop:    make(chan struct{}),
-		stopped: make(chan struct{}),
 		managed: make(map[string]string),
 	}, nil
 }
 
 // Start runs the first reconcile immediately, then polls on Interval until
-// Stop is called or ctx is cancelled.
-func (s *Syncer) Start(ctx context.Context) { go s.run(ctx) }
+// Stop is called or ctx is cancelled. A Syncer may be started again after its
+// loop has ended.
+func (s *Syncer) Start(ctx context.Context) {
+	s.mu.Lock()
+	s.stop = make(chan struct{})
+	s.stopped = make(chan struct{})
+	stop, stopped := s.stop, s.stopped
+	s.mu.Unlock()
+	go s.run(ctx, stop, stopped)
+}
 
 func (s *Syncer) Stop() {
-	select {
-	case <-s.stop:
-	default:
-		close(s.stop)
+	s.mu.Lock()
+	stop, stopped := s.stop, s.stopped
+	s.mu.Unlock()
+	if stop == nil {
+		return
 	}
 	select {
-	case <-s.stopped:
+	case <-stop:
+	default:
+		close(stop)
+	}
+	select {
+	case <-stopped:
 	case <-time.After(5 * time.Second):
 	}
 }
@@ -253,8 +265,8 @@ func (s *Syncer) SyncNow(ctx context.Context) error {
 	return err
 }
 
-func (s *Syncer) run(ctx context.Context) {
-	defer close(s.stopped)
+func (s *Syncer) run(ctx context.Context, stop, stopped chan struct{}) {
+	defer close(stopped)
 	owner := s.cfg.Owner
 	if owner == "" {
 		// Best-effort resolve; tick() retries on next interval if it fails.
@@ -306,7 +318,7 @@ func (s *Syncer) run(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
-		case <-s.stop:
+		case <-stop:
 			return
 		case <-t.C:
 			tick()

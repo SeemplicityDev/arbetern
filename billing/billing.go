@@ -1,19 +1,22 @@
 // Package billing tracks the LLM token cost of every arbetern turn — Slack
-// command, scheduled workflow tick, and web chat — and aggregates it on disk
-// so usage and spend can be reviewed per agent, model, source, and workflow.
+// command, scheduled workflow tick, and web chat — and aggregates it so usage
+// and spend can be reviewed per agent, model, source, and workflow.
 //
-// Data lives under <BILLING_DIR>/ on the same persistent volume as workflows
-// and dashboards: one rolling file per calendar month (usage-YYYY-MM.json)
-// plus a recent-events feed (recent.json), written atomically. Pricing is
-// synced daily from a single source of truth (PRICE_SOURCE_URL) and overridable
-// via LLM_PRICE_OVERRIDES; price changes only affect future turns.
+// Data lives under Prefix in the state bucket: one rolling object per calendar
+// month (usage-YYYY-MM.json) plus a recent-events feed (recent.json). Events
+// are buffered in memory and merged into the stored aggregates with
+// conditional writes, so several replicas can record concurrently without
+// losing each other's turns. Pricing is synced daily from a single source of
+// truth (PRICE_SOURCE_URL) and overridable via LLM_PRICE_OVERRIDES; price
+// changes only affect future turns.
 package billing
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"log"
-	"os"
-	"path/filepath"
+	"path"
 	"regexp"
 	"sort"
 	"strings"
@@ -24,14 +27,19 @@ import (
 	"github.com/justmike1/arbetern/internal/store"
 )
 
-// DefaultDir is used when BILLING_DIR is unset (dev only — not persisted).
-const DefaultDir = "./data/billing"
+// Prefix is the object prefix the ledger is stored under.
+const Prefix = "billing/"
 
-// maxRecentEvents bounds the on-disk activity feed shown in the UI.
+// maxRecentEvents bounds the stored activity feed shown in the UI.
 const maxRecentEvents = 500
 
-// flushInterval is how often dirty aggregates are written back to disk.
+// flushInterval is how often buffered events are merged into the bucket.
 const flushInterval = 15 * time.Second
+
+const (
+	recentKey        = Prefix + "recent.json"
+	maxMergeAttempts = 4
+)
 
 // Source labels the entry path that produced a turn.
 const (
@@ -113,26 +121,71 @@ type monthData struct {
 }
 
 func newMonth(key string) *monthData {
-	return &monthData{
-		Month:      key,
-		Days:       map[string]*Counts{},
-		Agents:     map[string]*Counts{},
-		Models:     map[string]*Counts{},
-		Sources:    map[string]*Counts{},
-		Users:      map[string]*Counts{},
-		UserAgents: map[string]*Counts{},
-		Workflows:  map[string]*wfCounts{},
+	m := &monthData{Month: key}
+	m.ensureMaps()
+	return m
+}
+
+func (m *monthData) ensureMaps() {
+	if m.Days == nil {
+		m.Days = map[string]*Counts{}
+	}
+	if m.Agents == nil {
+		m.Agents = map[string]*Counts{}
+	}
+	if m.Models == nil {
+		m.Models = map[string]*Counts{}
+	}
+	if m.Sources == nil {
+		m.Sources = map[string]*Counts{}
+	}
+	if m.Users == nil {
+		m.Users = map[string]*Counts{}
+	}
+	if m.UserAgents == nil {
+		m.UserAgents = map[string]*Counts{}
+	}
+	if m.Workflows == nil {
+		m.Workflows = map[string]*wfCounts{}
 	}
 }
 
-// Store aggregates and persists usage events. Safe for concurrent use.
-type Store struct {
-	dir string
+// add tallies one event into every dimension of the month.
+func (m *monthData) add(e Event) {
+	m.Totals.add(e)
+	bucket(m.Days, dayKey(e.At)).add(e)
+	bucket(m.Agents, e.Agent).add(e)
+	bucket(m.Models, e.Model).add(e)
+	bucket(m.Sources, e.Source).add(e)
+	if e.UserID != "" {
+		bucket(m.Users, e.UserID).add(e)
+		bucket(m.UserAgents, e.UserID+userAgentSep+e.Agent).add(e)
+	}
+	if e.WorkflowID != "" {
+		key := e.Agent + "/" + e.WorkflowID
+		wf := m.Workflows[key]
+		if wf == nil {
+			wf = &wfCounts{Agent: e.Agent, Name: e.WorkflowName}
+			m.Workflows[key] = wf
+		}
+		if e.WorkflowName != "" {
+			wf.Name = e.WorkflowName
+		}
+		wf.add(e)
+	}
+}
 
-	mu     sync.RWMutex
-	months map[string]*monthData
-	recent []Event
-	dirty  map[string]bool
+func monthObjectKey(month string) string { return Prefix + "usage-" + month + ".json" }
+
+// Store aggregates usage events in memory and merges them into the bucket.
+// Safe for concurrent use.
+type Store struct {
+	b *store.Backend
+
+	mu      sync.RWMutex
+	months  map[string]*monthData
+	recent  []Event
+	pending map[string][]Event
 
 	resolveName func(userID string) string
 }
@@ -145,32 +198,32 @@ func (s *Store) SetUserNameResolver(fn func(userID string) string) {
 	s.mu.Unlock()
 }
 
-// New constructs a Store rooted at dir, loading any existing aggregates.
-func New(dir string) (*Store, error) {
-	if dir == "" {
-		dir = DefaultDir
-	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return nil, fmt.Errorf("create billing dir: %w", err)
-	}
+// New constructs a Store over b, loading the stored aggregates.
+func New(ctx context.Context, b *store.Backend) (*Store, error) {
 	s := &Store{
-		dir:    dir,
-		months: map[string]*monthData{},
-		dirty:  map[string]bool{},
+		b:       b,
+		months:  map[string]*monthData{},
+		pending: map[string][]Event{},
 	}
-	s.load()
+	if err := s.load(ctx); err != nil {
+		return nil, fmt.Errorf("load billing: %w", err)
+	}
 	return s, nil
 }
 
-// Dir returns the root directory backing the store.
-func (s *Store) Dir() string { return s.dir }
+// Months is the number of calendar months with recorded usage.
+func (s *Store) Months() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.months)
+}
 
 func monthKey(t time.Time) string { return t.UTC().Format("2006-01") }
 func dayKey(t time.Time) string   { return t.UTC().Format("2006-01-02") }
 
-// monthRe validates a month key read back from disk. Keys become the variable
-// part of the usage-<month>.json filename on the next flush, so a hand-edited
-// descriptor must not be able to steer that write elsewhere.
+// monthRe validates a month key read back from the bucket. Keys become the
+// variable part of the usage-<month>.json object name on the next flush, so a
+// hand-edited document must not be able to steer that write elsewhere.
 var monthRe = regexp.MustCompile(`^\d{4}-\d{2}$`)
 
 // userAgentSep joins a user ID and an agent ID into one UserAgents key. Agent
@@ -213,40 +266,22 @@ func (s *Store) Record(e Event) {
 		m = newMonth(mk)
 		s.months[mk] = m
 	}
-	m.Totals.add(e)
-	bucket(m.Days, dayKey(e.At)).add(e)
-	bucket(m.Agents, e.Agent).add(e)
-	bucket(m.Models, e.Model).add(e)
-	bucket(m.Sources, e.Source).add(e)
-	if e.UserID != "" {
-		bucket(m.Users, e.UserID).add(e)
-		bucket(m.UserAgents, e.UserID+userAgentSep+e.Agent).add(e)
-	}
-	if e.WorkflowID != "" {
-		key := e.Agent + "/" + e.WorkflowID
-		wf := m.Workflows[key]
-		if wf == nil {
-			wf = &wfCounts{Agent: e.Agent, Name: e.WorkflowName}
-			m.Workflows[key] = wf
-		}
-		if e.WorkflowName != "" {
-			wf.Name = e.WorkflowName
-		}
-		wf.add(e)
-	}
+	m.add(e)
 	s.recent = append(s.recent, e)
 	if len(s.recent) > maxRecentEvents {
 		s.recent = s.recent[len(s.recent)-maxRecentEvents:]
 	}
-	s.dirty[mk] = true
+	s.pending[mk] = append(s.pending[mk], e)
 	s.mu.Unlock()
 }
 
-// StartFlusher persists dirty aggregates on a timer until ctx is done. Call
-// once at startup.
-func (s *Store) StartFlusher(stop <-chan struct{}) {
-	flush := func() { safego.Run("billing: flush", s.flush) }
+// StartFlusher merges buffered events into the bucket on a timer until stop is
+// closed, then once more. The returned channel closes after that final flush.
+func (s *Store) StartFlusher(stop <-chan struct{}) <-chan struct{} {
+	done := make(chan struct{})
+	flush := func() { safego.Run("billing: flush", func() { s.flush(context.Background()) }) }
 	safego.Go("billing: flush loop", func() {
+		defer close(done)
 		t := time.NewTicker(flushInterval)
 		defer t.Stop()
 		for {
@@ -259,73 +294,149 @@ func (s *Store) StartFlusher(stop <-chan struct{}) {
 			}
 		}
 	})
+	return done
 }
 
-func (s *Store) flush() {
+func (s *Store) flush(ctx context.Context) {
 	s.mu.Lock()
-	pending := make([]string, 0, len(s.dirty))
-	for k := range s.dirty {
-		pending = append(pending, k)
-	}
-	snaps := make(map[string]*monthData, len(pending))
-	for _, k := range pending {
-		snaps[k] = s.months[k]
-	}
-	var recent []Event
-	if len(pending) > 0 {
-		recent = append(recent, s.recent...)
-	}
-	s.dirty = map[string]bool{}
+	pending := s.pending
+	s.pending = map[string][]Event{}
 	s.mu.Unlock()
-
-	for k, m := range snaps {
-		if err := store.WriteJSONAt(s.dir, filepath.Join(s.dir, "usage-"+k+".json"), m); err != nil {
-			log.Printf("[billing] persist %s failed: %v", k, err)
-		}
+	if len(pending) == 0 {
+		return
 	}
-	if recent != nil {
-		if err := store.WriteJSONAt(s.dir, filepath.Join(s.dir, "recent.json"), recent); err != nil {
+	var flushed []Event
+	for mk, evs := range pending {
+		if err := s.mergeMonth(ctx, mk, evs); err != nil {
+			log.Printf("[billing] persist %s failed: %v", mk, err)
+			s.mu.Lock()
+			s.pending[mk] = append(evs, s.pending[mk]...)
+			s.mu.Unlock()
+			continue
+		}
+		flushed = append(flushed, evs...)
+	}
+	if len(flushed) > 0 {
+		if err := s.mergeRecent(ctx, flushed); err != nil {
 			log.Printf("[billing] persist recent failed: %v", err)
 		}
 	}
 }
 
-func (s *Store) load() {
-	entries, _ := filepath.Glob(filepath.Join(s.dir, "usage-*.json"))
-	for _, p := range entries {
-		m, err := store.ReadJSON[monthData](p, nil)
-		if err != nil || m == nil || !monthRe.MatchString(m.Month) {
+// mergeMonth folds evs into the stored month with a conditional write and
+// adopts the merged result as the local view, so turns recorded by other
+// replicas show up here too.
+func (s *Store) mergeMonth(ctx context.Context, mk string, evs []Event) error {
+	key := monthObjectKey(mk)
+	for attempt := 0; attempt < maxMergeAttempts; attempt++ {
+		remote, tag, err := store.GetJSON[monthData](ctx, s.b, key)
+		cond := store.Condition{IfMatch: tag}
+		switch {
+		case errors.Is(err, store.ErrNotFound):
+			remote = newMonth(mk)
+			cond = store.Condition{IfNoneMatch: true}
+		case err != nil:
+			return err
+		default:
+			remote.ensureMaps()
+		}
+		for _, e := range evs {
+			remote.add(e)
+		}
+		if _, err := store.PutJSON(ctx, s.b, key, remote, cond); err != nil {
+			if errors.Is(err, store.ErrConflict) {
+				continue
+			}
+			return err
+		}
+		s.mu.Lock()
+		for _, e := range s.pending[mk] {
+			remote.add(e)
+		}
+		s.months[mk] = remote
+		s.mu.Unlock()
+		return nil
+	}
+	return store.ErrConflict
+}
+
+// mergeRecent appends added to the stored activity feed with a conditional
+// write and adopts the merged feed locally.
+func (s *Store) mergeRecent(ctx context.Context, added []Event) error {
+	for attempt := 0; attempt < maxMergeAttempts; attempt++ {
+		remote, tag, err := store.GetJSON[[]Event](ctx, s.b, recentKey)
+		cond := store.Condition{IfMatch: tag}
+		var list []Event
+		switch {
+		case errors.Is(err, store.ErrNotFound):
+			cond = store.Condition{IfNoneMatch: true}
+		case err != nil:
+			return err
+		default:
+			list = *remote
+		}
+		list = capRecent(append(list, added...))
+		if _, err := store.PutJSON(ctx, s.b, recentKey, list, cond); err != nil {
+			if errors.Is(err, store.ErrConflict) {
+				continue
+			}
+			return err
+		}
+		s.mu.Lock()
+		for _, evs := range s.pending {
+			list = append(list, evs...)
+		}
+		s.recent = capRecent(list)
+		s.mu.Unlock()
+		return nil
+	}
+	return store.ErrConflict
+}
+
+func capRecent(list []Event) []Event {
+	sort.SliceStable(list, func(i, j int) bool { return list[i].At.Before(list[j].At) })
+	if len(list) > maxRecentEvents {
+		list = list[len(list)-maxRecentEvents:]
+	}
+	return list
+}
+
+func (s *Store) load(ctx context.Context) error {
+	objs, err := s.b.List(ctx, Prefix)
+	if err != nil {
+		return err
+	}
+	for _, o := range objs {
+		name := path.Base(o.Key)
+		if !strings.HasPrefix(name, "usage-") || !strings.HasSuffix(name, ".json") {
 			continue
 		}
-		if m.Days == nil {
-			m.Days = map[string]*Counts{}
+		m, _, err := store.GetJSON[monthData](ctx, s.b, o.Key)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				continue
+			}
+			return err
 		}
-		if m.Agents == nil {
-			m.Agents = map[string]*Counts{}
+		if !monthRe.MatchString(m.Month) {
+			log.Printf("[billing] skipping %s: invalid month %q", o.Key, m.Month)
+			continue
 		}
-		if m.Models == nil {
-			m.Models = map[string]*Counts{}
-		}
-		if m.Sources == nil {
-			m.Sources = map[string]*Counts{}
-		}
-		if m.Users == nil {
-			m.Users = map[string]*Counts{}
-		}
-		if m.UserAgents == nil {
-			m.UserAgents = map[string]*Counts{}
-		}
-		if m.Workflows == nil {
-			m.Workflows = map[string]*wfCounts{}
-		}
+		m.ensureMaps()
 		s.months[m.Month] = m
 	}
-	if rec, err := store.ReadJSON[[]Event](filepath.Join(s.dir, "recent.json"), nil); err == nil && rec != nil {
+	rec, _, err := store.GetJSON[[]Event](ctx, s.b, recentKey)
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+	case err != nil:
+		return err
+	default:
 		s.recent = *rec
 	}
 	if n := len(s.months); n > 0 {
-		log.Printf("[billing] loaded %d month(s) of usage from %s", n, s.dir)
+		log.Printf("[billing] loaded %d month(s) of usage from %s", n, s.b)
 	}
+	return nil
 }
 
 // Row pairs a key with its tally for sorted JSON output.

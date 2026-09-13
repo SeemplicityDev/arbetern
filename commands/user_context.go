@@ -2,118 +2,184 @@ package commands
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"io/fs"
 	"log"
-	"os"
-	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/justmike1/arbetern/internal/safego"
+	"github.com/justmike1/arbetern/internal/store"
+	"github.com/justmike1/arbetern/internal/vectors"
 )
 
-// UserContextStore persists a small rolling log of per-user / per-agent
-// interactions on local disk, so that follow-up requests from the same user
-// can be enriched with prior-topic context. The store is intentionally
-// ephemeral — files live outside the persistent mount and are garbage
-// collected after UserContextTTL of inactivity.
+// UserContextStore keeps a rolling log of per-user, per-agent turns in the
+// state bucket so later requests from the same user can be grounded in what
+// they asked before. With a vector index attached, the turns shown to the
+// model are the ones semantically closest to the current question plus the
+// latest few; without one, the most recent turns are shown.
 //
-// Layout: <BaseDir>/<agentID>/<userID>/context.txt
+// Layout: <userContextPrefix><agentID>/<userID>.json, one vector per entry
+// keyed <agentID>/<userID>/<entryID>.
 type UserContextStore struct {
-	baseDir string
-	ttl     time.Duration
-	mu      sync.Mutex // serialises read/append per-process; files are small
+	b     *store.Backend
+	index *vectors.Index
 }
 
 const (
-	// UserContextTTL is the garbage collection horizon for context files.
-	// Each new append refreshes the file's mtime, so an active user's
-	// context effectively never expires; the TTL only fires after a
-	// stretch of silence.
+	userContextPrefix = "user-context/"
+	// UserContextTTL is how long a user's context survives without activity.
 	UserContextTTL = 30 * 24 * time.Hour
-	// userContextMaxEntries caps the number of turns kept in a single file
-	// so it never grows unbounded. Entries are expected to be compact
-	// summaries (the agent itself summarises before persisting), so this
-	// roughly mirrors the 50-message channel-history window.
-	userContextMaxEntries = 50
-	// userContextMaxAnswerLen truncates assistant responses before storing
-	// them — we only need a topical hint, not the full output.
-	userContextMaxAnswerLen = 1200
-	// userContextMaxQuestionLen truncates the user question similarly.
-	userContextMaxQuestionLen = 800
-	// userContextMaxFileBytes is a hard ceiling on the file size. Defence in
-	// depth against pathological inputs slipping past the per-entry limits.
-	// At ~2 KB/entry × 50 entries ≈ 100 KB worst case, 96 KB is a snug fit
-	// that keeps the system-prompt injection well under model limits.
-	userContextMaxFileBytes = 96 * 1024
-	// userContextEntrySep separates entries inside the file.
-	userContextEntrySep = "\n---\n"
+	// Entry and document caps. Indexed stores keep more history because only
+	// the relevant part of it reaches the prompt.
+	userContextMaxEntries         = 50
+	userContextMaxEntriesIndexed  = 200
+	userContextMaxDocBytes        = 96 * 1024
+	userContextMaxDocBytesIndexed = 512 * 1024
+	userContextMaxAnswerLen       = 1200
+	userContextMaxQuestionLen     = 800
+	// Prompt budget: the recency fallback may use the whole document; the
+	// semantic selection is a handful of entries.
+	userContextMaxPromptBytes   = 96 * 1024
+	userContextMaxRelevantBytes = 24 * 1024
+	userContextTopK             = 8
+	userContextRecentAnchors    = 2
+	userContextEntrySep         = "\n---\n"
+	userContextIndexTimeout     = 30 * time.Second
 )
 
 // safeIDRe restricts agent IDs and Slack user IDs to characters that are
-// safe for filesystem paths. Slack IDs are `[A-Z0-9]+` and our agent IDs
-// are lowercase alnum + dashes.
+// safe inside object keys and vector keys.
 var safeIDRe = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
 
-// NewUserContextStore returns a store rooted at baseDir. If baseDir is
-// empty, a subdirectory of the OS temp dir is used. The directory is
-// created lazily on write; missing-directory reads are not errors.
-func NewUserContextStore(baseDir string) *UserContextStore {
-	if strings.TrimSpace(baseDir) == "" {
-		baseDir = filepath.Join(os.TempDir(), "arbetern-user-context")
-	}
-	return &UserContextStore{
-		baseDir: baseDir,
-		ttl:     UserContextTTL,
-	}
+type userContextDoc struct {
+	Entries []userContextEntry `json:"entries"`
 }
 
-// BaseDir returns the root directory the store writes to.
-func (s *UserContextStore) BaseDir() string { return s.baseDir }
+type userContextEntry struct {
+	ID       string    `json:"id"`
+	At       time.Time `json:"at"`
+	Question string    `json:"q"`
+	Answer   string    `json:"a"`
+}
 
-// pathFor returns the on-disk path for the given agent/user pair, or empty
-// string if either identifier is unsafe.
-func (s *UserContextStore) pathFor(agentID, userID string) string {
+// NewUserContextStore returns a store over b. index may be nil, in which case
+// retrieval is recency-based.
+func NewUserContextStore(b *store.Backend, index *vectors.Index) *UserContextStore {
+	return &UserContextStore{b: b, index: index}
+}
+
+// Semantic reports whether retrieval is similarity-based.
+func (s *UserContextStore) Semantic() bool { return s != nil && s.index != nil }
+
+func (s *UserContextStore) key(agentID, userID string) string {
 	if !safeIDRe.MatchString(agentID) || !safeIDRe.MatchString(userID) {
 		return ""
 	}
-	return filepath.Join(s.baseDir, agentID, userID, "context.txt")
+	return userContextPrefix + agentID + "/" + userID + ".json"
 }
 
-// Read returns the stored context for the user, or an empty string if the
-// file does not exist or cannot be read. Missing files are not logged.
-func (s *UserContextStore) Read(agentID, userID string) string {
+func vectorKeyPrefix(agentID, userID string) string { return agentID + "/" + userID + "/" }
+
+// Context returns the user's prior turns worth showing the model alongside
+// question, or "" when there are none or the store is not configured.
+func (s *UserContextStore) Context(ctx context.Context, agentID, userID, question string) string {
 	if s == nil {
 		return ""
 	}
-	p := s.pathFor(agentID, userID)
-	if p == "" {
+	key := s.key(agentID, userID)
+	if key == "" {
 		return ""
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	data, err := os.ReadFile(p)
+	doc, _, err := store.GetJSON[userContextDoc](ctx, s.b, key)
 	if err != nil {
-		if !os.IsNotExist(err) {
+		if !errors.Is(err, store.ErrNotFound) {
 			log.Printf("[user-context] read failed agent=%s user=%s: %v", agentID, userID, err)
 		}
 		return ""
 	}
-	return strings.TrimSpace(string(data))
+	if len(doc.Entries) == 0 {
+		return ""
+	}
+	if s.index != nil && strings.TrimSpace(question) != "" {
+		picked, err := s.relevant(ctx, agentID, userID, question, doc.Entries)
+		if err != nil {
+			log.Printf("[user-context] semantic retrieval failed agent=%s user=%s: %v", agentID, userID, err)
+		} else if len(picked) > 0 {
+			return renderEntries(picked, userContextMaxRelevantBytes)
+		}
+	}
+	return renderEntries(lastEntries(doc.Entries, userContextMaxEntries), userContextMaxPromptBytes)
 }
 
-// Append records a new (question, answer) turn for the user. It keeps only
-// the most recent userContextMaxEntries turns and caps the file size.
-// Errors are logged but never returned — context persistence is best-effort.
-func (s *UserContextStore) Append(agentID, userID, question, answer string) {
+// relevant picks the entries closest to question plus the latest few, in
+// chronological order.
+func (s *UserContextStore) relevant(ctx context.Context, agentID, userID, question string, entries []userContextEntry) ([]userContextEntry, error) {
+	filter := vectors.Eq(map[string]any{"agent": agentID, "user": userID})
+	matches, err := s.index.Query(ctx, question, userContextTopK, filter)
+	if err != nil {
+		return nil, err
+	}
+	byID := make(map[string]userContextEntry, len(entries))
+	for _, e := range entries {
+		byID[e.ID] = e
+	}
+	prefix := vectorKeyPrefix(agentID, userID)
+	seen := map[string]bool{}
+	picked := make([]userContextEntry, 0, len(matches)+userContextRecentAnchors)
+	for _, m := range matches {
+		if !strings.HasPrefix(m.Key, prefix) {
+			continue
+		}
+		id := strings.TrimPrefix(m.Key, prefix)
+		if e, ok := byID[id]; ok && !seen[id] {
+			seen[id] = true
+			picked = append(picked, e)
+		}
+	}
+	for _, e := range lastEntries(entries, userContextRecentAnchors) {
+		if !seen[e.ID] {
+			seen[e.ID] = true
+			picked = append(picked, e)
+		}
+	}
+	sort.Slice(picked, func(i, j int) bool { return picked[i].At.Before(picked[j].At) })
+	return picked, nil
+}
+
+func lastEntries(entries []userContextEntry, n int) []userContextEntry {
+	if len(entries) > n {
+		return entries[len(entries)-n:]
+	}
+	return entries
+}
+
+// renderEntries formats entries oldest first, dropping the oldest while the
+// result exceeds maxBytes.
+func renderEntries(entries []userContextEntry, maxBytes int) string {
+	parts := make([]string, 0, len(entries))
+	for _, e := range entries {
+		parts = append(parts, fmt.Sprintf("[%s]\nQ: %s\nA: %s", e.At.UTC().Format(time.RFC3339), e.Question, e.Answer))
+	}
+	out := strings.Join(parts, userContextEntrySep)
+	for len(parts) > 1 && len(out) > maxBytes {
+		parts = parts[1:]
+		out = strings.Join(parts, userContextEntrySep)
+	}
+	return out
+}
+
+// Append records a completed (question, answer) turn, trims the document to
+// its caps, and indexes the new entry when a vector index is attached.
+// Errors are logged, never returned: context persistence is best-effort.
+func (s *UserContextStore) Append(ctx context.Context, agentID, userID, question, answer string) {
 	if s == nil {
 		return
 	}
-	p := s.pathFor(agentID, userID)
-	if p == "" {
+	key := s.key(agentID, userID)
+	if key == "" {
 		return
 	}
 	question = truncate(strings.TrimSpace(question), userContextMaxQuestionLen)
@@ -121,55 +187,88 @@ func (s *UserContextStore) Append(agentID, userID, question, answer string) {
 	if question == "" && answer == "" {
 		return
 	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-		log.Printf("[user-context] mkdir failed agent=%s user=%s: %v", agentID, userID, err)
+	id, err := store.NewID()
+	if err != nil {
+		log.Printf("[user-context] id generation failed: %v", err)
 		return
 	}
-
-	existing, _ := os.ReadFile(p)
-	entries := splitEntries(string(existing))
-
-	newEntry := fmt.Sprintf("[%s]\nQ: %s\nA: %s",
-		time.Now().UTC().Format(time.RFC3339),
-		question,
-		answer,
-	)
-	entries = append(entries, newEntry)
-	if len(entries) > userContextMaxEntries {
-		entries = entries[len(entries)-userContextMaxEntries:]
+	entry := userContextEntry{ID: id, At: time.Now().UTC(), Question: question, Answer: answer}
+	maxEntries, maxBytes := userContextMaxEntries, userContextMaxDocBytes
+	if s.index != nil {
+		maxEntries, maxBytes = userContextMaxEntriesIndexed, userContextMaxDocBytesIndexed
 	}
-
-	out := strings.Join(entries, userContextEntrySep)
-	if len(out) > userContextMaxFileBytes {
-		// Drop oldest entries until under the byte cap.
-		for len(entries) > 1 && len(out) > userContextMaxFileBytes {
-			entries = entries[1:]
-			out = strings.Join(entries, userContextEntrySep)
+	var dropped []string
+	err = s.update(ctx, key, func(d *userContextDoc) {
+		dropped = dropped[:0]
+		d.Entries = append(d.Entries, entry)
+		for len(d.Entries) > 1 && (len(d.Entries) > maxEntries || d.size() > maxBytes) {
+			dropped = append(dropped, d.Entries[0].ID)
+			d.Entries = d.Entries[1:]
 		}
-	}
-
-	if err := os.WriteFile(p, []byte(out), 0o644); err != nil {
+	})
+	if err != nil {
 		log.Printf("[user-context] write failed agent=%s user=%s: %v", agentID, userID, err)
+		return
 	}
+	if s.index == nil {
+		return
+	}
+	safego.Go("user context: index", func() {
+		ictx, cancel := context.WithTimeout(context.Background(), userContextIndexTimeout)
+		defer cancel()
+		item := vectors.Item{
+			Key:      vectorKeyPrefix(agentID, userID) + entry.ID,
+			Text:     "Q: " + entry.Question + "\nA: " + entry.Answer,
+			Metadata: map[string]any{"agent": agentID, "user": userID, "at": entry.At.Unix()},
+		}
+		if err := s.index.Upsert(ictx, []vectors.Item{item}); err != nil {
+			log.Printf("[user-context] index failed agent=%s user=%s: %v", agentID, userID, err)
+		}
+		if len(dropped) == 0 {
+			return
+		}
+		keys := make([]string, 0, len(dropped))
+		for _, id := range dropped {
+			keys = append(keys, vectorKeyPrefix(agentID, userID)+id)
+		}
+		if err := s.index.Delete(ictx, keys); err != nil {
+			log.Printf("[user-context] unindex failed agent=%s user=%s: %v", agentID, userID, err)
+		}
+	})
 }
 
-func splitEntries(raw string) []string {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
+func (d *userContextDoc) size() int {
+	n := 0
+	for _, e := range d.Entries {
+		n += len(e.Question) + len(e.Answer) + 96
+	}
+	return n
+}
+
+// update applies fn to the latest document and writes it back, creating the
+// document when it does not exist and retrying when another replica wrote in
+// between.
+func (s *UserContextStore) update(ctx context.Context, key string, fn func(*userContextDoc)) error {
+	for attempt := 0; attempt < 4; attempt++ {
+		doc, tag, err := store.GetJSON[userContextDoc](ctx, s.b, key)
+		cond := store.Condition{IfMatch: tag}
+		switch {
+		case errors.Is(err, store.ErrNotFound):
+			doc = &userContextDoc{}
+			cond = store.Condition{IfNoneMatch: true}
+		case err != nil:
+			return err
+		}
+		fn(doc)
+		if _, err := store.PutJSON(ctx, s.b, key, doc, cond); err != nil {
+			if errors.Is(err, store.ErrConflict) {
+				continue
+			}
+			return err
+		}
 		return nil
 	}
-	parts := strings.Split(raw, userContextEntrySep)
-	out := parts[:0]
-	for _, p := range parts {
-		if strings.TrimSpace(p) != "" {
-			out = append(out, strings.TrimSpace(p))
-		}
-	}
-	return out
+	return store.ErrConflict
 }
 
 func truncate(s string, max int) string {
@@ -179,9 +278,8 @@ func truncate(s string, max int) string {
 	return s[:max] + "…"
 }
 
-// StartGC launches a background goroutine that sweeps the store every
-// `interval`, deleting any context file whose mtime is older than the
-// store's TTL. The goroutine exits when ctx is cancelled.
+// StartGC deletes the documents (and vectors) of users inactive for longer
+// than UserContextTTL, once at start and then every interval until ctx ends.
 func (s *UserContextStore) StartGC(ctx context.Context, interval time.Duration) {
 	if s == nil {
 		return
@@ -189,10 +287,8 @@ func (s *UserContextStore) StartGC(ctx context.Context, interval time.Duration) 
 	if interval <= 0 {
 		interval = time.Hour
 	}
-	sweep := func() { safego.Run("user context: sweep", s.sweep) }
+	sweep := func() { safego.Run("user context: sweep", func() { s.sweep(ctx) }) }
 	safego.Go("user context: sweep loop", func() {
-		// Run once at startup so stale files are cleared even if the
-		// process restarts before the first tick.
 		sweep()
 		t := time.NewTicker(interval)
 		defer t.Stop()
@@ -207,50 +303,43 @@ func (s *UserContextStore) StartGC(ctx context.Context, interval time.Duration) 
 	})
 }
 
-// sweep removes context.txt files older than the TTL and prunes empty dirs.
-func (s *UserContextStore) sweep() {
-	cutoff := time.Now().Add(-s.ttl)
-	removed := 0
-	err := filepath.WalkDir(s.baseDir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			if os.IsNotExist(err) {
-				return nil
-			}
-			return err
-		}
-		if d.IsDir() {
-			return nil
-		}
-		info, ierr := d.Info()
-		if ierr != nil {
-			return nil
-		}
-		if info.ModTime().Before(cutoff) {
-			if rerr := os.Remove(path); rerr == nil {
-				removed++
-			}
-		}
-		return nil
-	})
-	if err != nil && !os.IsNotExist(err) {
+func (s *UserContextStore) sweep(ctx context.Context) {
+	objs, err := s.b.List(ctx, userContextPrefix)
+	if err != nil {
 		log.Printf("[user-context] sweep error: %v", err)
+		return
 	}
-	// Prune empty user/agent directories.
-	s.pruneEmptyDirs()
+	cutoff := time.Now().Add(-UserContextTTL)
+	removed := 0
+	for _, o := range objs {
+		if !strings.HasSuffix(o.Key, ".json") || o.LastModified.After(cutoff) {
+			continue
+		}
+		if s.index != nil {
+			s.unindexAll(ctx, o.Key)
+		}
+		if err := s.b.Delete(ctx, o.Key, ""); err != nil {
+			log.Printf("[user-context] delete %s: %v", o.Key, err)
+			continue
+		}
+		removed++
+	}
 	if removed > 0 {
-		log.Printf("[user-context] gc removed %d stale file(s)", removed)
+		log.Printf("[user-context] gc removed %d stale document(s)", removed)
 	}
 }
 
-func (s *UserContextStore) pruneEmptyDirs() {
-	_ = filepath.WalkDir(s.baseDir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil || !d.IsDir() || path == s.baseDir {
-			return nil
-		}
-		entries, rerr := os.ReadDir(path)
-		if rerr == nil && len(entries) == 0 {
-			_ = os.Remove(path)
-		}
-		return nil
-	})
+func (s *UserContextStore) unindexAll(ctx context.Context, key string) {
+	doc, _, err := store.GetJSON[userContextDoc](ctx, s.b, key)
+	if err != nil || len(doc.Entries) == 0 {
+		return
+	}
+	prefix := strings.TrimSuffix(strings.TrimPrefix(key, userContextPrefix), ".json") + "/"
+	keys := make([]string, 0, len(doc.Entries))
+	for _, e := range doc.Entries {
+		keys = append(keys, prefix+e.ID)
+	}
+	if err := s.index.Delete(ctx, keys); err != nil {
+		log.Printf("[user-context] unindex %s: %v", key, err)
+	}
 }

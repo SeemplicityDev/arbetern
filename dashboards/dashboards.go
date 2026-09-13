@@ -1,17 +1,21 @@
 // Package dashboards provides a lightweight dashboard engine for arbetern.
 //
-// Each dashboard is a small JSON descriptor stored at
+// Each dashboard is a small JSON descriptor stored in the state bucket at
 //
-//	<DASHBOARDS_DIR>/<agent>/<dashboard-id>.json
+//	<Prefix><agent>/<dashboard-id>.json
 //
 // It owns a list of "data sources" (pre-defined read-only integration queries)
 // and a sync interval. A goroutine per dashboard periodically re-executes the
-// sources and writes the latest results back to the same JSON file, so the
-// serving layer can read the file and render a fresh view without touching
-// the integrations directly.
+// sources and writes the latest results back to the same document, so the
+// serving layer can render a fresh view without touching the integrations
+// directly.
 //
 // Dashboards can be created, listed, and deleted by LLM tools; they can also
 // be viewed through a generated HTML page at /<agent>/dashboard/<id>.
+//
+// Sync goroutines only run on the replica holding the scheduling lease; every
+// replica keeps its cache in step with the bucket, and each sync takes a
+// per-dashboard lease so two replicas never refresh the same dashboard at once.
 package dashboards
 
 import (
@@ -19,10 +23,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
-	"os"
-	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -34,8 +37,13 @@ import (
 )
 
 const (
-	// DefaultDir is used when DASHBOARDS_DIR is unset.
-	DefaultDir = "./data/dashboards"
+	// Prefix is the object prefix dashboard descriptors are stored under.
+	Prefix = "dashboards/"
+
+	// syncLeaseTTL bounds how long a crashed replica blocks a dashboard's next sync.
+	syncLeaseTTL = 5 * time.Minute
+	// persistTimeout bounds the write of a finished sync's results.
+	persistTimeout = 30 * time.Second
 
 	// MinSyncInterval is the shortest allowed sync interval.
 	MinSyncInterval = 30 * time.Second
@@ -76,7 +84,7 @@ type SourceResult struct {
 	Content any `json:"content,omitempty"`
 }
 
-// Dashboard is the on-disk descriptor.
+// Dashboard is the stored descriptor.
 type Dashboard struct {
 	ID          string `json:"id"`
 	Agent       string `json:"agent"`
@@ -154,35 +162,41 @@ type runner struct {
 	done   chan struct{}
 }
 
-// Registry is the thread-safe in-memory index of dashboards plus their goroutines.
+// Registry is the cached view of the stored dashboards plus their goroutines.
 type Registry struct {
+	docs *store.Documents[Dashboard]
+	b    *store.Backend
+
 	mu       sync.RWMutex
-	dir      string
 	executor Executor
 	renderer PromptRenderer
-	items    map[string]*Dashboard // key: agent/id
-	runners  map[string]*runner    // key: agent/id
+	runners  map[string]*runner // key: agent/id
+	// baseCtx is the long-lived registry context, set by StartAll. Runner
+	// goroutines derive their context from it rather than from the request
+	// that created the dashboard.
+	baseCtx context.Context
+	// active is true between StartAll and StopAll, i.e. while this replica
+	// holds the scheduling lease. Runners are only started while active.
+	active bool
 }
 
-// New creates a Registry rooted at dir. It creates the directory if missing.
-func New(dir string, exec Executor) (*Registry, error) {
-	if dir == "" {
-		dir = DefaultDir
-	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return nil, fmt.Errorf("create dashboards dir: %w", err)
-	}
-	r := &Registry{
-		dir:      dir,
+// New creates a Registry over b. Call LoadAll before serving.
+func New(b *store.Backend, exec Executor) *Registry {
+	return &Registry{
+		docs: store.NewDocuments(b, Prefix, func(d *Dashboard) error {
+			if d.ID == "" || d.Agent == "" || !idValidRe.MatchString(d.ID) || !agentValidRe.MatchString(d.Agent) {
+				return fmt.Errorf("invalid dashboard descriptor")
+			}
+			return nil
+		}),
+		b:        b,
 		executor: exec,
-		items:    make(map[string]*Dashboard),
 		runners:  make(map[string]*runner),
 	}
-	return r, nil
 }
 
-// Dir returns the root directory managed by the registry.
-func (r *Registry) Dir() string { return r.dir }
+// Count is the number of stored dashboards.
+func (r *Registry) Count() int { return r.docs.Len() }
 
 // SetPromptRenderer installs the prompt renderer post-construction. It is
 // wired after the router map is built (which depends on the registry), so a
@@ -202,67 +216,60 @@ var (
 	idValidRe    = store.IDRe
 )
 
-// LoadAll scans the dashboards directory and loads each dashboard into
-// memory. It does NOT start sync goroutines — call StartAll afterwards to
-// launch them. Invalid files are logged and skipped; they do not prevent
-// startup.
+// LoadAll loads every stored dashboard into the cache. It does NOT start
+// sync goroutines — call StartAll afterwards to launch them. Invalid
+// documents are logged and skipped; they do not prevent startup.
 func (r *Registry) LoadAll(ctx context.Context) error {
-	entries, err := os.ReadDir(r.dir)
-	if err != nil {
-		return fmt.Errorf("read dashboards dir: %w", err)
+	if err := r.docs.Load(ctx); err != nil {
+		return fmt.Errorf("load dashboards: %w", err)
 	}
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
-		}
-		agent := e.Name()
-		if !agentValidRe.MatchString(agent) {
-			continue
-		}
-		agentDir := filepath.Join(r.dir, agent)
-		files, err := os.ReadDir(agentDir)
-		if err != nil {
-			continue
-		}
-		for _, f := range files {
-			if f.IsDir() || !strings.HasSuffix(f.Name(), ".json") {
-				continue
-			}
-			path := filepath.Join(agentDir, f.Name())
-			d, err := readFile(path)
-			if err != nil {
-				log.Printf("[dashboards] skipping %s: %v", path, err)
-				continue
-			}
-			r.mu.Lock()
-			r.items[key(d.Agent, d.ID)] = d
-			r.mu.Unlock()
-			log.Printf("[dashboards] loaded %s/%s (%q, every %s)", d.Agent, d.ID, d.Name, d.interval())
-		}
-	}
+	r.docs.Range(func(_ string, d *Dashboard) {
+		log.Printf("[dashboards] loaded %s/%s (%q, every %s)", d.Agent, d.ID, d.Name, d.interval())
+	})
 	return nil
 }
 
-// StartAll launches a sync goroutine for every loaded dashboard WITHOUT
-// firing an immediate sync. Intended as the server-boot entry point: on
-// startup we just want the scheduled ticker to begin, not to blast every
-// upstream (Jira, Datadog, GitHub, Chorus, …) the moment the process comes
-// up. Dashboards that are explicitly refreshed via "Refresh now" or via
-// Create will still sync immediately — only the boot path is lazy.
-//
-// Account-kind dashboards, which have no ticker by design, are started the
-// same way startRunner handles them (no-op runner) so StopAll still works.
-func (r *Registry) StartAll(ctx context.Context) {
+// StartRefresh keeps the cache in step with dashboards written by other
+// replicas every interval, and reconciles runners on the replica holding the
+// scheduling lease.
+func (r *Registry) StartRefresh(ctx context.Context, interval time.Duration) {
+	r.docs.StartRefresh(ctx, interval, r.applyChanges)
+}
+
+func (r *Registry) applyChanges(changes []store.Change[Dashboard]) {
 	r.mu.RLock()
-	list := make([]*Dashboard, 0, len(r.items))
-	for _, d := range r.items {
-		cp := *d
-		list = append(list, &cp)
-	}
+	active := r.active
 	r.mu.RUnlock()
-	for _, d := range list {
-		r.startRunner(ctx, d, false)
+	for _, c := range changes {
+		switch {
+		case c.New == nil:
+			if c.Old != nil {
+				r.stopRunner(c.Old.Agent, c.Old.ID)
+			}
+		case !active:
+		case c.Old == nil:
+			r.startRunner(c.New, c.New.Source != "gitops")
+		case c.Old.SyncInterval != c.New.SyncInterval || c.Old.Kind != c.New.Kind:
+			r.startRunner(c.New, false)
+		}
 	}
+}
+
+// StartAll launches a sync goroutine for every loaded dashboard WITHOUT
+// firing an immediate sync, and marks this replica as the one that syncs.
+// Intended as the server-boot (and lease-acquired) entry point: we just want
+// the scheduled ticker to begin, not to blast every upstream (Jira, Datadog,
+// GitHub, Chorus, …) the moment the process comes up. Dashboards that are
+// explicitly refreshed via "Refresh now" or via Create will still sync
+// immediately — only the boot path is lazy.
+func (r *Registry) StartAll(ctx context.Context) {
+	r.mu.Lock()
+	r.baseCtx = ctx
+	r.active = true
+	r.mu.Unlock()
+	r.docs.Range(func(_ string, d *Dashboard) {
+		r.startRunner(d, false)
+	})
 }
 
 // Create validates, persists, and starts a new dashboard.
@@ -298,123 +305,80 @@ func (r *Registry) Create(ctx context.Context, agent, createdBy string, name, sh
 		CreatedBy:    createdBy,
 		CreatedAt:    time.Now().UTC().Format(time.RFC3339),
 	}
-	if err := r.persist(d); err != nil {
+	if err := r.docs.Create(ctx, store.Key(agent, id), d); err != nil {
 		return nil, err
 	}
-	r.mu.Lock()
-	r.items[key(agent, id)] = d
-	r.mu.Unlock()
-	r.startRunner(ctx, d, true)
+	r.startRunner(d, true)
 	log.Printf("[dashboards] created %s/%s (%q, every %s)", agent, id, name, d.interval())
 	return d, nil
 }
 
-// Upsert stores a fully-formed Dashboard under its own ID without starting a
-// background sync goroutine. Intended for on-demand dashboards (e.g. account
-// health snapshots) where the caller, not a cron ticker, drives refreshes.
-//
-// Any existing runner for the same (agent, id) is stopped so the new snapshot
-// becomes the sole source of truth. The dashboard is written to disk atomically.
-func (r *Registry) Upsert(d *Dashboard) error {
-	if d == nil {
-		return fmt.Errorf("dashboard is nil")
-	}
-	if !agentValidRe.MatchString(d.Agent) {
-		return fmt.Errorf("invalid agent id %q", d.Agent)
-	}
-	if !idValidRe.MatchString(d.ID) {
-		return fmt.Errorf("invalid dashboard id %q", d.ID)
-	}
-	if d.CreatedAt == "" {
-		d.CreatedAt = time.Now().UTC().Format(time.RFC3339)
-	}
-	if d.SyncInterval == "" {
-		d.SyncInterval = DefaultSyncInterval.String()
-	}
-
-	r.mu.Lock()
-	if run, ok := r.runners[key(d.Agent, d.ID)]; ok {
-		run.cancel()
-		delete(r.runners, key(d.Agent, d.ID))
-	}
-	r.items[key(d.Agent, d.ID)] = d
-	r.mu.Unlock()
-
-	if err := r.persist(d); err != nil {
-		return err
-	}
-	log.Printf("[dashboards] upsert %s/%s (%q)", d.Agent, d.ID, d.Name)
-	return nil
-}
-
 // Get returns a copy of the stored dashboard by agent+id, or (nil,false) if missing.
 func (r *Registry) Get(agent, id string) (*Dashboard, bool) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	d, ok := r.items[key(agent, id)]
-	if !ok {
-		return nil, false
-	}
-	cp := *d
-	return &cp, true
+	return r.docs.Get(store.Key(agent, id))
 }
 
 // List returns all dashboards, optionally filtered by agent (empty = all),
 // sorted by creation time ascending.
 func (r *Registry) List(agent string) []*Dashboard {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	out := make([]*Dashboard, 0, len(r.items))
-	for _, d := range r.items {
+	out := make([]*Dashboard, 0)
+	r.docs.Range(func(_ string, d *Dashboard) {
 		if agent != "" && d.Agent != agent {
-			continue
+			return
 		}
-		cp := *d
-		out = append(out, &cp)
-	}
+		out = append(out, d)
+	})
 	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt < out[j].CreatedAt })
 	return out
 }
 
-// Delete stops the sync goroutine, removes the file, and deletes from memory.
+// Delete stops the sync goroutine and removes the stored descriptor.
 func (r *Registry) Delete(agent, id string) error {
-	r.mu.Lock()
-	d, ok := r.items[key(agent, id)]
-	if !ok {
-		r.mu.Unlock()
+	k := store.Key(agent, id)
+	if _, ok := r.docs.Get(k); !ok {
 		return fmt.Errorf("dashboard %s/%s not found", agent, id)
 	}
-	delete(r.items, key(agent, id))
+	r.mu.Lock()
 	run := r.runners[key(agent, id)]
 	delete(r.runners, key(agent, id))
 	r.mu.Unlock()
 
 	if run != nil {
 		run.cancel()
-		// Best-effort wait so a concurrent sync finishes before we remove the file.
+		// Best-effort wait so a concurrent sync finishes before we remove the document.
 		select {
 		case <-run.done:
 		case <-time.After(2 * time.Second):
 		}
 	}
-	path, err := r.pathFor(d)
-	if err != nil {
-		return err
-	}
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("remove dashboard file: %w", err)
+	if err := r.docs.Delete(context.Background(), k); err != nil {
+		return fmt.Errorf("remove dashboard: %w", err)
 	}
 	log.Printf("[dashboards] deleted %s/%s", agent, id)
 	return nil
 }
 
-// StopAll cancels every sync goroutine. Safe to call at shutdown.
+// StopAll cancels every sync goroutine and stops new ones from starting until
+// StartAll runs again. Safe to call at shutdown.
 func (r *Registry) StopAll() {
 	r.mu.Lock()
+	r.active = false
 	runs := r.runners
 	r.runners = make(map[string]*runner)
 	r.mu.Unlock()
 	for _, run := range runs {
+		run.cancel()
+	}
+}
+
+func (r *Registry) stopRunner(agent, id string) {
+	r.mu.Lock()
+	run, ok := r.runners[key(agent, id)]
+	if ok {
+		delete(r.runners, key(agent, id))
+	}
+	r.mu.Unlock()
+	if ok {
 		run.cancel()
 	}
 }
@@ -469,11 +433,8 @@ func (r *Registry) UpsertFromSpec(ctx context.Context, spec UpsertSpec) (d *Dash
 		shortName = slugify(spec.Name)
 	}
 
-	r.mu.Lock()
-	orig, exists := r.items[key(spec.Agent, spec.ID)]
-	r.mu.Unlock()
-
-	if !exists {
+	k := store.Key(spec.Agent, spec.ID)
+	if _, exists := r.docs.Get(k); !exists {
 		nd := &Dashboard{
 			ID:           spec.ID,
 			Agent:        spec.Agent,
@@ -489,61 +450,58 @@ func (r *Registry) UpsertFromSpec(ctx context.Context, spec UpsertSpec) (d *Dash
 			Source:       spec.Source,
 			SourceRef:    spec.SourceRef,
 		}
-		if err := r.persist(nd); err != nil {
+		err := r.docs.Create(ctx, k, nd)
+		if err == nil {
+			r.startRunner(nd, false)
+			log.Printf("[dashboards] upsert created %s/%s (%q, source=%s)", spec.Agent, spec.ID, spec.Name, spec.Source)
+			return nd, true, nil
+		}
+		if !errors.Is(err, store.ErrConflict) {
 			return nil, false, err
 		}
-		r.mu.Lock()
-		r.items[key(spec.Agent, spec.ID)] = nd
-		r.mu.Unlock()
-		r.startRunner(ctx, nd, false)
-		log.Printf("[dashboards] upsert created %s/%s (%q, source=%s)", spec.Agent, spec.ID, spec.Name, spec.Source)
-		return nd, true, nil
 	}
 
 	specHash := upsertFingerprint(spec, interval, shortName)
-	currentHash := upsertFingerprint(specFromDashboard(orig), orig.SyncInterval, orig.ShortName)
-	if specHash == currentHash {
-		return orig, false, nil
+	var orig Dashboard
+	updated, err := r.docs.Update(ctx, k, func(d *Dashboard) error {
+		orig = *d
+		if upsertFingerprint(specFromDashboard(d), d.SyncInterval, d.ShortName) == specHash {
+			return errUnchanged
+		}
+		d.Name = spec.Name
+		d.ShortName = shortName
+		d.Description = spec.Description
+		d.Kind = spec.Kind
+		d.SyncInterval = interval
+		d.Sources = append([]DataSource(nil), spec.Sources...)
+		d.Prompt = spec.Prompt
+		d.Source = spec.Source
+		d.SourceRef = spec.SourceRef
+		return nil
+	})
+	if errors.Is(err, errUnchanged) {
+		return &orig, false, nil
 	}
-
-	updated := *orig
-	scheduleChanged := updated.SyncInterval != interval
-	updated.Name = spec.Name
-	updated.ShortName = shortName
-	updated.Description = spec.Description
-	updated.Kind = spec.Kind
-	updated.SyncInterval = interval
-	updated.Sources = append([]DataSource(nil), spec.Sources...)
-	updated.Prompt = spec.Prompt
-	updated.Source = spec.Source
-	updated.SourceRef = spec.SourceRef
-
-	if err := r.persist(&updated); err != nil {
+	if err != nil {
 		return nil, false, err
 	}
-	r.mu.Lock()
-	r.items[key(spec.Agent, spec.ID)] = &updated
-	r.mu.Unlock()
-	if scheduleChanged {
-		r.startRunner(ctx, &updated, false)
+	if orig.SyncInterval != updated.SyncInterval {
+		r.startRunner(updated, false)
 	}
 	log.Printf("[dashboards] upsert updated %s/%s (%q, source=%s)", spec.Agent, spec.ID, spec.Name, spec.Source)
-	cp := updated
-	return &cp, true, nil
+	return updated, true, nil
 }
 
-// ListBySource returns shallow copies of dashboards whose Source equals src.
+var errUnchanged = errors.New("unchanged")
+
+// ListBySource returns copies of dashboards whose Source equals src.
 func (r *Registry) ListBySource(src string) []*Dashboard {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
 	out := make([]*Dashboard, 0)
-	for _, d := range r.items {
-		if d.Source != src {
-			continue
+	r.docs.Range(func(_ string, d *Dashboard) {
+		if d.Source == src {
+			out = append(out, d)
 		}
-		cp := *d
-		out = append(out, &cp)
-	}
+	})
 	return out
 }
 
@@ -586,10 +544,19 @@ func specFromDashboard(d *Dashboard) UpsertSpec {
 }
 
 // startRunner launches the sync goroutine for d. Replaces any existing runner.
-func (r *Registry) startRunner(parent context.Context, d *Dashboard, runInitial bool) {
+// It does nothing on a replica that does not hold the scheduling lease.
+func (r *Registry) startRunner(d *Dashboard, runInitial bool) {
 	r.mu.Lock()
+	if !r.active {
+		r.mu.Unlock()
+		return
+	}
 	if old, ok := r.runners[key(d.Agent, d.ID)]; ok {
 		old.cancel()
+	}
+	parent := r.baseCtx
+	if parent == nil {
+		parent = context.Background()
 	}
 	ctx, cancel := context.WithCancel(parent)
 	run := &runner{cancel: cancel, done: make(chan struct{})}
@@ -611,7 +578,7 @@ func (r *Registry) startRunner(parent context.Context, d *Dashboard, runInitial 
 		defer safego.Recover("dashboards: runner " + agent + "/" + id)
 		// runInitial=true is the create / explicit-refresh path and should
 		// populate the dashboard so the first view has data. runInitial=false
-		// is the server-boot path — we trust whatever is already on disk and
+		// is the server-boot path — we trust whatever is already stored and
 		// wait for the next tick.
 		if runInitial {
 			sync()
@@ -630,21 +597,31 @@ func (r *Registry) startRunner(parent context.Context, d *Dashboard, runInitial 
 	}()
 }
 
-// syncOne re-executes all sources for a dashboard and persists the updated file.
+// syncOne re-executes all sources for a dashboard and stores the results
+// against the latest descriptor. A per-dashboard lease keeps two replicas
+// from refreshing the same dashboard at once.
 func (r *Registry) syncOne(ctx context.Context, agent, id string) {
-	r.mu.RLock()
-	orig, ok := r.items[key(agent, id)]
-	r.mu.RUnlock()
+	d, ok := r.docs.Get(store.Key(agent, id))
 	if !ok {
 		return
 	}
-	// Work on a copy so concurrent readers see a stable snapshot.
-	d := *orig
+	lease := store.NewLease(r.b, "locks/dashboards/"+agent+"/"+id, store.InstanceID(), syncLeaseTTL)
+	held, release, acquired, err := lease.Acquire(ctx)
+	switch {
+	case err != nil:
+		log.Printf("[dashboards] %s/%s sync lease unavailable, continuing without it: %v", agent, id, err)
+	case !acquired:
+		log.Printf("[dashboards] skip %s/%s: syncing on another replica", agent, id)
+		return
+	default:
+		defer release()
+		ctx = held
+	}
 
 	// Prompt-driven dashboards render through the LLM tool-loop, not the
 	// source executor.
 	if d.Kind == KindPrompt {
-		r.syncPrompt(ctx, agent, id, &d)
+		r.syncPrompt(ctx, agent, id, d)
 		return
 	}
 
@@ -671,35 +648,26 @@ func (r *Registry) syncOne(ctx context.Context, agent, id string) {
 			return
 		}
 	}
-	d.Data = data
-	d.LastSync = time.Now().UTC().Format(time.RFC3339)
-	d.LastError = ""
-
-	r.mu.Lock()
-	r.items[key(agent, id)] = &d
-	r.mu.Unlock()
-
-	if err := r.persist(&d); err != nil {
-		log.Printf("[dashboards] persist %s/%s failed: %v", agent, id, err)
-	}
+	syncedAt := time.Now().UTC().Format(time.RFC3339)
+	r.record(agent, id, func(d *Dashboard) {
+		d.Data = data
+		d.LastSync = syncedAt
+		d.LastError = ""
+	})
 }
 
-// persist atomically writes a dashboard to disk.
-func (r *Registry) persist(d *Dashboard) error {
-	return store.WriteJSON(r.dir, d.Agent, d.ID, d)
-}
-
-func (r *Registry) pathFor(d *Dashboard) (string, error) {
-	return store.PathFor(r.dir, d.Agent, d.ID)
-}
-
-func readFile(path string) (*Dashboard, error) {
-	return store.ReadJSON[Dashboard](path, func(d *Dashboard) error {
-		if d.ID == "" || d.Agent == "" || !idValidRe.MatchString(d.ID) || !agentValidRe.MatchString(d.Agent) {
-			return fmt.Errorf("invalid dashboard descriptor")
-		}
+// record applies fn to the latest stored descriptor. It uses its own context
+// so a sync whose context was cancelled after the work finished still lands.
+func (r *Registry) record(agent, id string, fn func(*Dashboard)) {
+	pctx, cancel := context.WithTimeout(context.Background(), persistTimeout)
+	defer cancel()
+	_, err := r.docs.Update(pctx, store.Key(agent, id), func(d *Dashboard) error {
+		fn(d)
 		return nil
 	})
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		log.Printf("[dashboards] persist %s/%s failed: %v", agent, id, err)
+	}
 }
 
 // newID generates an 8-byte URL-safe hex identifier.
@@ -871,15 +839,19 @@ func (r *Registry) RenderInstance(ctx context.Context, agent, templateID string,
 			inst.SyncInterval = s
 		}
 	}
-	if err := r.persist(inst); err != nil {
+	k := store.Key(agent, inst.ID)
+	err := r.docs.Create(ctx, k, inst)
+	if errors.Is(err, store.ErrConflict) {
+		_, err = r.docs.Update(ctx, k, func(d *Dashboard) error {
+			*d = *inst
+			return nil
+		})
+	}
+	if err != nil {
 		return nil, err
 	}
-	r.mu.Lock()
-	r.items[key(agent, inst.ID)] = inst
-	r.mu.Unlock()
-	// runInitial=true renders immediately in the runner goroutine. Use a
-	// background parent so the render survives the HTTP request returning.
-	r.startRunner(context.Background(), inst, true)
+	// runInitial=true renders immediately in the runner goroutine.
+	r.startRunner(inst, true)
 	log.Printf("[dashboards] render instance %s/%s of template %s", agent, inst.ID, templateID)
 	cp := *inst
 	return &cp, nil
@@ -911,17 +883,14 @@ func (r *Registry) syncPrompt(ctx context.Context, agent, id string, d *Dashboar
 	}
 
 	md, err := renderer.RenderPrompt(ctx, agent, id, d.Name, prompt)
-	d.LastSync = time.Now().UTC().Format(time.RFC3339)
-	if err != nil {
-		d.LastError = err.Error()
-	} else {
+	syncedAt := time.Now().UTC().Format(time.RFC3339)
+	r.record(agent, id, func(d *Dashboard) {
+		d.LastSync = syncedAt
+		if err != nil {
+			d.LastError = err.Error()
+			return
+		}
 		d.Markdown = strings.TrimSpace(md)
 		d.LastError = ""
-	}
-	r.mu.Lock()
-	r.items[key(agent, id)] = d
-	r.mu.Unlock()
-	if perr := r.persist(d); perr != nil {
-		log.Printf("[dashboards] persist %s/%s failed: %v", agent, id, perr)
-	}
+	})
 }

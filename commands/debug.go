@@ -44,7 +44,7 @@ func (h *DebugHandler) Execute(channelID, userID, text, responseURL, auditTS str
 
 	systemPrompt := h.prompts.SystemPrompt("debug")
 	systemPrompt = strings.Replace(systemPrompt, "{{USER_CONTEXT}}", h.userContext, 1)
-	if persistent := h.readPersistentUserContext(userID); persistent != "" {
+	if persistent := h.readPersistentUserContext(ctx, userID, text); persistent != "" {
 		systemPrompt += fmt.Sprintf("\n\nRecurring topics this user has asked about previously (may hint at current intent):\n%s", persistent)
 	}
 
@@ -62,7 +62,7 @@ func (h *DebugHandler) Execute(channelID, userID, text, responseURL, auditTS str
 
 	log.Printf("[user=%s channel=%s] debug analysis completed successfully", userID, channelID)
 	h.memory.SetAssistantResponse(channelID, userID, response)
-	h.persistUserContext(userID, text, response)
+	h.persistUserContext(ctx, userID, text, response)
 	stamp := llm.FormatUsageStamp(usage, h.modelsClient.Model())
 	replyOrThread(h.slackClient, channelID, responseURL, auditTS, response+stamp)
 }

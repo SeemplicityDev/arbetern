@@ -19,8 +19,7 @@ podAnnotations: {}
 podLabels: {}
 
 podSecurityContext:
-  # distroless/static:nonroot runs as uid/gid 65532. fsGroup ensures the shared
-  # data volume (emptyDir / PVC for dashboards + workflows) is writable by that user.
+  # distroless/static:nonroot runs as uid/gid 65532.
   runAsNonRoot: true
   runAsUser: 65532
   runAsGroup: 65532
@@ -115,28 +114,37 @@ headroom:
       drop:
         - ALL
 
-# Persistent data directory shared by dashboards + workflows JSON snapshots.
-# Both features store their files under `persistence.mountPath/<subdir>/<agent>/...`.
-# When `persistentVolumeClaim.enabled` is true, a PVC is provisioned per replica
-# so the data survives pod restarts. Otherwise an emptyDir is used and the data
-# is rebuilt from scratch on every roll (fine for dev).
-persistence:
-  enabled: true
-  mountPath: /var/lib/arbetern
-  persistentVolumeClaim:
-    enabled: false
-    size: 2Gi
-    # storageClass: ""           # Leave empty for cluster default
-    accessModes:
-      - ReadWriteOnce
-    annotations: {}
+# Remote state. Every stateful feature — workflows, dashboards, chat, usage &
+# billing, custom skills, MCP connectors and per-user context — lives in this
+# S3 bucket under <prefix>/<feature>/…; pods keep only an in-memory cache, so
+# any replica can serve any request and a restart loses nothing. Replicas
+# coordinate through the bucket as well: one holds the scheduling lease and
+# runs workflow ticks, dashboard syncs and GitOps reconciles, the others serve
+# Slack, chat and the UI. The IAM principal (IRSA or static keys, see
+# docs/AWS.md) needs s3:ListBucket on the bucket and s3:GetObject /
+# s3:PutObject / s3:DeleteObject on <prefix>/*.
+state:
+  s3:
+    # Required. Bucket ARN with an optional key prefix:
+    #   arn:aws:s3:::acme-arbetern-state          -> objects at the bucket root
+    #   arn:aws:s3:::acme-arbetern-state/prod     -> objects under prod/
+    arn: ""
+  # Optional S3 Vectors index. When set, the per-user context becomes a
+  # semantic memory: each completed turn is embedded and stored, and the turns
+  # shown to the model are the ones closest to the current question plus the
+  # latest few, instead of a plain recency window. Create a vector bucket and
+  # an index whose dimension matches the embedding model (cosine metric), and
+  # grant s3vectors:GetIndex / PutVectors / QueryVectors / DeleteVectors on the
+  # index plus bedrock:InvokeModel on the embedding model.
+  vectors:
+    indexArn: ""          # arn:aws:s3vectors:<region>:<account>:bucket/<vector-bucket>/index/<index>
+    embeddingModel: ""    # default amazon.titan-embed-text-v2:0 (Bedrock); Azure/GitHub Models deployments also work
+    dimensions: ""        # must equal the index dimension; defaults per model (Titan v2 = 1024)
 
-# Feature toggles — DASHBOARDS_DIR / WORKFLOWS_DIR are derived from
-# persistence.mountPath + each feature's subPath. Disable a feature by
-# setting enabled: false (its env var is then omitted).
+# GitOps sync for dashboards and workflows. Both registries always store their
+# state in the bucket; these blocks only add the poller that reconciles JSON
+# descriptors from a GitHub repo into them.
 dashboards:
-  enabled: true
-  subPath: dashboards
   # GitOps sync: same model as workflows below, but for dashboards.
   # Layout in the remote repo (basePath defaults to "arbetern/dashboards"):
   #   arbetern/dashboards/<agent>/<id>.json
@@ -150,8 +158,6 @@ dashboards:
     prune: true
 
 workflows:
-  enabled: true
-  subPath: workflows
   # GitOps sync: poll a remote GitHub repo for workflow JSON descriptors and
   # reconcile them into the local registry every `interval`. The same
   # GITHUB_TOKEN the rest of the app uses is required. Workflows synced
@@ -172,44 +178,6 @@ workflows:
     interval: "5m"             # Go duration; minimum 30s
     prune: true                # delete locally-managed workflows that disappear from git
 
-# Per-user rolling context store. Files at <mountPath>/<subPath>/<agent>/<user>/context.txt
-# accumulate compact (question, summary) turns so the agent can recognise
-# recurring user topics across DMs and channels. Disable to fall back to
-# an in-tmp directory that does not survive pod restarts.
-userContext:
-  enabled: true
-  subPath: user-context
-
-# Centralized per-agent chat transcripts. Files at <mountPath>/<subPath>/<agent>/history.json
-# hold a single shared conversation per agent (no per-user auth yet, so every
-# viewer sees the same history). This only controls where transcripts are
-# persisted; chat itself is enabled per agent via `chat_enabled: true` in each
-# agent's config.yaml. Disable to fall back to an in-tmp directory that does
-# not survive pod restarts.
-chat:
-  enabled: true
-  subPath: chat
-
-# Usage & billing aggregates (LLM token cost per agent / workflow / source).
-# Files at <mountPath>/<subPath>/usage-YYYY-MM.json + recent.json. Disable to
-# fall back to an in-tmp directory that does not survive pod restarts.
-billing:
-  enabled: true
-  subPath: billing
-
-# Custom skills: instruction blocks created in the web UI and appended to the
-# system prompts of the agents they target. Files at <mountPath>/<subPath>/<id>.json.
-skills:
-  enabled: true
-  subPath: skills
-
-# MCP connectors: registered Model Context Protocol servers whose tools are
-# exposed to the allowed agents. Files at <mountPath>/<subPath>/<id>.json.
-# Header values may reference environment variables as ${NAME} so tokens can
-# stay in the Secret instead of on the volume.
-mcp:
-  enabled: true
-  subPath: mcp
 
 secretName: arbetern-secrets
 

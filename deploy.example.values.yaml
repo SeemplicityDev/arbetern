@@ -237,18 +237,21 @@ secretValues:
 #     google-credentials-json: "REPLACE_ME"   # base64 -w0 < service-account-key.json
 #     # google-drive-folder-ids: "1AbCd...,1ZyXw..."   # optional: confine pulse to these folders
 
-# Dashboards + workflows share a single persistent data directory.
-# Enable the PVC to keep state across pod restarts; leave disabled for
-# ephemeral/dev environments where emptyDir is fine.
-# dashboards:
-#   enabled: true
-# billing:
-#   enabled: true                     # BILLING_DIR = $mountPath/billing
+# State backend (required). Every stateful feature lives in this S3 bucket;
+# grant the pod's IAM role the policy in docs/AWS.md. See docs/STATE.md.
+state:
+  s3:
+    arn: "arn:aws:s3:::your-arbetern-state-bucket/prod"
+  # Optional: semantic per-user context. Create a vector bucket + index (cosine,
+  # 1024 dims for Titan v2) and grant s3vectors:* on it plus bedrock:InvokeModel.
+  # vectors:
+  #   indexArn: "arn:aws:s3vectors:eu-central-1:123456789012:bucket/your-vectors/index/user-context"
+  #   embeddingModel: "amazon.titan-embed-text-v2:0"
+
 # workflows:
-#   enabled: true
 #   # GitOps: poll a remote GitHub repo and reconcile workflow JSON
-#   # descriptors found at <basePath>/<agent>/<id>.json into the local
-#   # registry on `interval`. See docs/WORKFLOWS_GITOPS.md.
+#   # descriptors found at <basePath>/<agent>/<id>.json into the registry on
+#   # `interval`. See docs/GITOPS.md.
 #   gitops:
 #     enabled: true
 #     # owner: "your-org"        # optional; defaults to bot's resolved owner
@@ -257,10 +260,4 @@ secretValues:
 #     basePath: "arbetern/workflows"
 #     interval: "5m"
 #     prune: false               # set true to delete workflows removed from git
-# persistence:
-#   enabled: true
-#   mountPath: /var/lib/arbetern
-#   persistentVolumeClaim:
-#     enabled: true
-#     size: 2Gi
-#     storageClass: "gp3"
+

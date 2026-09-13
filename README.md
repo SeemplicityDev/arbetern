@@ -131,20 +131,17 @@ Authentication is one of two schemes, and the target principal/key needs
 </details>
 
 <details>
-<summary><b>Persistence</b> — dashboards, workflows, user context, chat</summary>
+<summary><b>State</b> — S3 backend, semantic user context</summary>
 
-All live under `persistence.mountPath` in the chart and default to `./data/<feature>` locally. See [Helm / persistence](#helm--persistence) for the consolidated values block.
+Every stateful feature (workflows, dashboards, chat, billing, skills, MCP connectors, per-user context) lives in one S3 bucket; pods keep only an in-memory cache. See [docs/STATE.md](docs/STATE.md) for the layout, caching and leases.
 
 | Variable | Description |
 |---|---|
-| `DASHBOARDS_DIR` | Directory for dashboard JSON snapshots (default `./data/dashboards`) |
-| `WORKFLOWS_DIR` | Directory for workflow descriptors + run history (default `./data/workflows`) |
-| `USER_CONTEXT_DIR` | Directory for per-user rolling conversation summaries (`<agent>/<user>/context.txt`). Defaults to a temp dir; the chart points it at the PVC when `userContext.enabled` is true |
-| `CHAT_DIR` | Directory for centralized agent chat. Each agent holds many conversations (ChatGPT/Claude-style threads) stored at `<agent>/<conversation-id>.json`. Conversations are shared — everyone sees the same threads (no per-user auth yet). Chat is enabled per agent via `chat_enabled: true` in the agent's `config.yaml`; defaults to `./data/chat` |
+| `S3_BACKEND_ARN` | **Required.** Bucket holding all service state, optionally with a key prefix: `arn:aws:s3:::acme-arbetern-state/prod`, `s3://acme-arbetern-state/prod` or `acme-arbetern-state/prod`. The bucket's region is detected at boot; credentials come from the default AWS chain (IRSA, static keys, profile) |
+| `S3_VECTORS_INDEX_ARN` | Optional S3 Vectors index (`arn:aws:s3vectors:<region>:<account>:bucket/<vector-bucket>/index/<index>`). When set, every completed turn is embedded and the per-user context shown to the model is the set of prior turns closest to the current question plus the latest few, instead of a plain recency window |
+| `EMBEDDING_MODEL` | Embedding model for the vector index. Default `amazon.titan-embed-text-v2:0` (Bedrock, 1024 dims); `amazon.titan-embed-text-v1`, or a `text-embedding-3-*` / `ada-002` deployment on Azure OpenAI or GitHub Models also work — the backend follows the model name and the inference credentials already configured |
+| `EMBEDDING_DIMENSIONS` | Vector size; must equal the index dimension. Defaults per model, required for models the app does not know |
 | `CHAT_RETENTION` | How long a UI chat conversation is kept after its last activity before a background sweeper deletes it (applies to all agents). Go duration; defaults to `168h` (1 week). The sweeper runs hourly |
-| `BILLING_DIR` | Directory for the usage & billing ledger. LLM token spend is aggregated per agent / workflow / source into monthly JSON files (`usage-YYYY-MM.json` + `recent.json`). Defaults to `./data/billing`; the chart points it at the PVC when `billing.enabled` is true |
-| `SKILLS_DIR` | Directory where custom skills (`<id>.json`) are persisted. Defaults to `./data/skills`; the chart points it at the PVC when `skills.enabled` is true |
-| `MCP_DIR` | Directory where MCP connectors (`<id>.json`) are persisted. Defaults to `./data/mcp`; the chart points it at the PVC when `mcp.enabled` is true |
 | `PRICE_SOURCE_URL` | Single source of truth for per-token prices, synced on boot and every 24h (default: LiteLLM's public price file, ~2900 models). The billing tab shows the live source, model count, and last-sync time. Set empty to rely solely on `LLM_PRICE_OVERRIDES`. Price changes only affect future turns — recorded costs are frozen at record time |
 | `LLM_PRICE_OVERRIDES` | Optional JSON map of model → `{"in":<usd_per_1M>,"out":<usd_per_1M>}` layered on top of the synced feed (wins over it) for negotiated/Azure rates. A model matched by neither is recorded at $0 and flagged `unpriced` |
 | `CUSTOM_PROMPTS_DIR` | Directory of custom prompt YAML files **appended** to built-in agent prompts. Set automatically by the chart when `customPrompts` is configured |
@@ -306,25 +303,19 @@ Every Slack-driven request — DMs, channel mentions, slash commands, and in-thr
 | **Slack user profile** | Per request | Refetched every turn via `users.info` | A few hundred bytes (Slack ID, real name, display name, email, title) |
 | **Channel context** | Per channel/DM | In-memory cache, TTL = `THREAD_SESSION_TTL` (default 7m). Background sweeper evicts stale entries; hard cap of 4096 channels with oldest-first eviction | Up to 50 most recent Slack messages (no per-message char cap) |
 | **Conversation memory** | Per `(channel, user)` | In-memory, 10-minute TTL on inactivity. Background sweeper runs every minute; hard cap of 8192 pairs | Up to 10 turns (no per-turn char cap) |
-| **User context (persistent)** | Per `(agent, user)`, shared across DMs and channels | File on disk at `<USER_CONTEXT_DIR>/<agent>/<user>/context.txt`. 30-day TTL on inactivity (refreshed on every append). PVC-backed in the Helm chart when `userContext.enabled` is true | Up to 50 entries (oldest dropped first), each capped at 800 chars (question) + 1200 chars (answer) + ~30 chars overhead, with a hard 96 KiB file ceiling |
+| **User context (persistent)** | Per `(agent, user)`, shared across DMs and channels | Document in the state bucket at `user-context/<agent>/<user>.json`. 30-day TTL on inactivity (refreshed on every append) | Each entry capped at 800 chars (question) + 1200 chars (answer). Recency mode: up to 50 entries and 96 KiB, all injected. Semantic mode (`S3_VECTORS_INDEX_ARN`): up to 200 entries stored, the 8 most similar to the current question plus the 2 latest injected, capped at 24 KiB |
 
 ### How it flows
 
-1. **Read on every request.** All five layers are assembled before the LLM is called. The user-context file is read for both DMs and channels — `channelID` is *not* part of its key, so DM and channel turns merge into the same per-user file.
-2. **Append on every completed turn.** When the model finishes, a compact `(question, answer)` entry is appended to the user-context file regardless of whether the request came from a DM or a channel. Scheduled workflow ticks (`ExecuteHeadless`) intentionally skip persistence.
+1. **Read on every request.** All five layers are assembled before the LLM is called. The user-context document is read for both DMs and channels — `channelID` is *not* part of its key, so DM and channel turns merge into the same per-user document. In semantic mode the question is embedded and the closest prior turns are selected from the vector index.
+2. **Append on every completed turn.** When the model finishes, a compact `(question, answer)` entry is appended to the user-context document (and embedded into the index in semantic mode) regardless of whether the request came from a DM or a channel. Scheduled workflow ticks (`ExecuteHeadless`) intentionally skip persistence.
 3. **Cache reuse.** The channel-history cache TTL is wired to `THREAD_SESSION_TTL`, so a multi-turn thread reuses the same cached 50-message window for the entire session window without re-hitting Slack.
 
 ### Knobs
 
 - **`THREAD_SESSION_TTL`** — controls both the thread-session lifetime *and* the channel-context cache TTL.
-- **`USER_CONTEXT_DIR`** — where the persistent per-user files live. The Helm chart sets it under `persistence.mountPath` when `userContext.enabled` is true.
+- **`S3_VECTORS_INDEX_ARN`** — switches the persistent layer from a recency window to semantic retrieval (see [docs/STATE.md](docs/STATE.md#semantic-user-context-s3-vectors)).
 - All other size caps are constants in [commands/user_context.go](commands/user_context.go), [commands/context.go](commands/context.go), and [commands/memory.go](commands/memory.go) — adjust there if you need a different envelope.
-
-### Persistence in Kubernetes
-
-The user-context store shares the same PVC as dashboards and workflows. Set
-`userContext.enabled: true` (default) and enable the PVC \u2014 see
-[Workflows \u2192 Helm / persistence](#helm--persistence) for the full values block.
 
 ## Custom Prompts (Org-Specific Context)
 
@@ -529,7 +520,7 @@ Agents can create **recurring data dashboards** on demand. Ask the agent in Slac
 The agent composes a dashboard from its allow-listed read-only integration sources
 (`jira_search`, `salesforce_query`, `chorus_list_conversations`, `datadog_search_logs`,
 `datadog_list_monitors`, `confluence_search`, `github_list_prs`), saves it as JSON at
-`<DASHBOARDS_DIR>/<agent>/<dashboard-id>.json`, and spins up a background goroutine
+`dashboards/<agent>/<dashboard-id>.json` in the state bucket, and spins up a background goroutine
 that re-runs every source on the requested interval.
 
 **Viewing:** each dashboard is served at `/<agent>/dashboard/<id>` as a self-refreshing
@@ -547,15 +538,9 @@ chips — click to open, `×` to delete.
 
 **Configuration:**
 
-- `DASHBOARDS_DIR` — where JSON snapshots are persisted (default `./data/dashboards`).
+- Descriptors and their latest data live at `dashboards/<agent>/<id>.json` in the state bucket (see [State](#state--s3-backend-semantic-user-context)).
 - Sync interval is clamped to `[30s, 24h]`; the default is `5m`.
 - Each source type maps 1:1 to an existing integration client and is read-only.
-
-**Helm / persistence:** dashboards share the same PVC as workflows and the
-user-context store — see [Workflows → Helm / persistence](#helm--persistence)
-for the full values block. Setting `dashboards.enabled: true` is enough; the
-chart wires `DASHBOARDS_DIR` to `<persistence.mountPath>/dashboards`
-automatically.
 
 **Global cross-agent command:** in any Slack channel, run `/arbetern list dashboards` to
 get a single list of every active dashboard across every agent, with clickable view
@@ -691,8 +676,8 @@ will review.
 
 The owning agent synthesises a complete, credentialless prompt (channel IDs,
 repo names, labels, assignees — everything needed so the tick is reproducible),
-persists a JSON descriptor at `<WORKFLOWS_DIR>/<agent>/<id>.json`, and starts
-a goroutine that ticks on the requested cron schedule. Each run's result + error
+persists a JSON descriptor at `workflows/<agent>/<id>.json` in the state
+bucket, and starts a goroutine that ticks on the requested cron schedule. Each run's result + error
 is appended to the descriptor; the viewer at `/<agent>/workflow/<id>` renders
 the run history and auto-refreshes adaptively (every 3 seconds while a tick
 is in flight, every 30 seconds otherwise). The header badge shows `running…`
@@ -906,50 +891,31 @@ off the first time.
 
 ### Configuration
 
-- `WORKFLOWS_DIR` — where descriptors are persisted (default `./data/workflows`).
+- Descriptors and run history live at `workflows/<agent>/<id>.json` in the
+  state bucket (see [State](#state--s3-backend-semantic-user-context)).
 - Schedule is a standard 5-field UTC cron expression (`@every 1h`, `@daily`,
   `@hourly` descriptors also accepted); default `@every 5m` when omitted.
 - Only a workflow's own agent can create / delete / list it via the LLM tools;
   `call_workflow` can target any agent.
 
-### Helm / persistence
+### Helm / state
 
-A single PVC backs every stateful feature — dashboards, workflows, and the
-per-user context store live in their own sub-directory under
-`persistence.mountPath`:
+The chart needs the state bucket and nothing else to persist:
 
 ```yaml
-dashboards:
-  enabled: true                        # DASHBOARDS_DIR  = $mountPath/dashboards
-workflows:
-  enabled: true                        # WORKFLOWS_DIR   = $mountPath/workflows
-billing:
-  enabled: true                        # BILLING_DIR     = $mountPath/billing
-userContext:
-  enabled: true                        # USER_CONTEXT_DIR = $mountPath/user-context
-
-persistence:
-  enabled: true
-  mountPath: /var/lib/arbetern
-  persistentVolumeClaim:
-    enabled: true                      # false = emptyDir (rebuilt every roll)
-    size: 2Gi
-    storageClass: "gp3"
+state:
+  s3:
+    arn: arn:aws:s3:::acme-arbetern-state/prod   # required
+  vectors:                                       # optional semantic user context
+    indexArn: arn:aws:s3vectors:eu-central-1:123456789012:bucket/acme-arbetern-vectors/index/user-context
+    embeddingModel: amazon.titan-embed-text-v2:0
 ```
 
-When `persistentVolumeClaim.enabled=false`, the mount falls back to an
-`emptyDir` and all three feature stores are rebuilt from scratch on each
-pod roll.
-
-> **Pod security:** the Helm chart sets `podSecurityContext.fsGroup=65532`
-> (matching the `distroless/static:nonroot` user) so kubelet chowns the shared
-> volume on pod start, letting the non-root process create the `<agent>/`
-> sub-directories.
->
-> **StatefulSet immutability:** `volumeClaimTemplates` are immutable once
-> created. Switching `persistentVolumeClaim.enabled` from `false` to `true`
-> on an existing release requires deleting the StatefulSet first
-> (`kubectl delete statefulset arbetern`) before `helm upgrade`.
+Grant the pod's IAM role access to the bucket as described in
+[docs/AWS.md](docs/AWS.md#required-iam-permissions). The chart deploys a
+plain Deployment with no volumes; ticks, syncs and GitOps reconciles run on
+the replica holding the scheduling lease, so a rolling update never
+double-fires a workflow.
 
 ### Cross-agent list command
 
@@ -980,8 +946,10 @@ agents/              # agent definitions (one directory per agent)
   seihin/
     config.yaml
     prompts.yaml     # Sr. Technical Product Manager agent prompts
-commands/            # intent routing, debug/general handlers
+commands/            # intent routing, debug/general handlers, per-user context store
 config/              # env var loading
+internal/store/      # S3 state backend: cached documents, conditional writes, leases
+internal/vectors/    # S3 Vectors index client (semantic user context)
 github/              # GitHub REST API client (repos, PRs, files, workflows)
 llm/                 # LLM inference client + tool types (GitHub Models, Azure OpenAI, AWS Bedrock)
 atlassian/           # Atlassian Cloud REST API client (Jira + Confluence)
@@ -1015,9 +983,9 @@ A skill is an instruction block appended to an agent's system prompt. The
 - **Built-in** — every block of `agents/prompts.yaml` (applies to all agents)
   and every agent-specific block or override in `agents/<id>/prompts.yaml`.
   Read-only; change them in the prompt files.
-- **Custom** — written in the UI (`POST /api/skills`), stored as JSON under
-  `SKILLS_DIR`, and appended after the agent's own prompt on every Slack,
-  chat and workflow turn. A skill can target specific agents or all of them,
+- **Custom** — written in the UI (`POST /api/skills`), stored as JSON at
+  `skills/<id>.json` in the state bucket, and appended after the agent's own
+  prompt on every Slack, chat and workflow turn. A skill can target specific agents or all of them,
   and can be disabled without deleting it.
 
 ## MCP & Connectors
@@ -1027,8 +995,8 @@ page or via `POST /api/mcp`. Testing a connector performs the MCP handshake and
 `tools/list`; the discovered tools are then exposed to the allowed agents as
 `mcp_<connector>_<tool>` in every tool loop, and calls are proxied through
 `tools/call`. Header values may reference environment variables as `${NAME}`
-so tokens stay in the Secret rather than on the volume; stored literal values
-are masked in API responses. See [docs/MCP.md](docs/MCP.md) for the supported
+so tokens stay in the Secret rather than in the state bucket; stored literal
+values are masked in API responses. See [docs/MCP.md](docs/MCP.md) for the supported
 transport, limits and roadmap.
 
 ## Integrations

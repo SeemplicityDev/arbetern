@@ -68,6 +68,18 @@ type bedrockConfig struct {
 //     credentials are probed at construction so a misconfiguration surfaces at
 //     startup rather than on the first completion.
 func NewBedrockClient(ctx context.Context, region, model, apiKey string) (*Client, error) {
+	bc, err := newBedrockConfig(ctx, region, apiKey)
+	if err != nil {
+		return nil, err
+	}
+	return &Client{
+		model:      model,
+		httpClient: &http.Client{Timeout: llmRequestTimeout},
+		bedrock:    bc,
+	}, nil
+}
+
+func newBedrockConfig(ctx context.Context, region, apiKey string) (*bedrockConfig, error) {
 	bc := &bedrockConfig{region: region, apiKey: strings.TrimSpace(apiKey)}
 	if bc.apiKey == "" {
 		awsCfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(region))
@@ -80,11 +92,28 @@ func NewBedrockClient(ctx context.Context, region, model, apiKey string) (*Clien
 		bc.creds = awsCfg.Credentials
 		bc.signer = v4.NewSigner()
 	}
-	return &Client{
-		model:      model,
-		httpClient: &http.Client{Timeout: llmRequestTimeout},
-		bedrock:    bc,
-	}, nil
+	return bc, nil
+}
+
+// authorize sets the JSON headers and authenticates r for the bedrock service
+// with a bearer token when an API key is configured, otherwise with SigV4.
+func (bc *bedrockConfig) authorize(ctx context.Context, r *http.Request, body []byte) error {
+	r.Header.Set("Content-Type", "application/json")
+	r.Header.Set("Accept", "application/json")
+	if bc.apiKey != "" {
+		r.Header.Set("Authorization", "Bearer "+bc.apiKey)
+		return nil
+	}
+	creds, err := bc.creds.Retrieve(ctx)
+	if err != nil {
+		return fmt.Errorf("resolve AWS credentials: %w", err)
+	}
+	sum := sha256.Sum256(body)
+	return bc.signer.SignHTTP(ctx, creds, r, hex.EncodeToString(sum[:]), "bedrock", bc.region, time.Now())
+}
+
+func (bc *bedrockConfig) invokeURL(model string) string {
+	return fmt.Sprintf("https://bedrock-runtime.%s.amazonaws.com/model/%s/invoke", bc.region, url.PathEscape(model))
 }
 
 // useBedrock reports whether the client is configured for AWS Bedrock.
@@ -97,32 +126,16 @@ type bedrockTransport struct{ c *Client }
 
 func (t bedrockTransport) name() string { return "bedrock" }
 
-func (t bedrockTransport) endpoint(model string) string {
-	return fmt.Sprintf("https://bedrock-runtime.%s.amazonaws.com/model/%s/invoke",
-		t.c.bedrock.region, url.PathEscape(model))
-}
+func (t bedrockTransport) endpoint(model string) string { return t.c.bedrock.invokeURL(model) }
 
 func (t bedrockTransport) stampEnvelope(req *anthropicRequest, _ string) {
 	req.AnthropicVersion = bedrockAnthropicVersion
 }
 
-// authorize sets the JSON headers and authenticates the request — a bearer
-// token when a Bedrock API key is configured, otherwise SigV4. It runs on every
-// attempt (see doPostWithRetry) so a retry after a backoff carries a fresh
-// signature rather than an expired one.
+// authorize runs on every attempt (see doPostWithRetry) so a retry after a
+// backoff carries a fresh signature rather than an expired one.
 func (t bedrockTransport) authorize(ctx context.Context, r *http.Request, body []byte) error {
-	r.Header.Set("Content-Type", "application/json")
-	r.Header.Set("Accept", "application/json")
-	if t.c.bedrock.apiKey != "" {
-		r.Header.Set("Authorization", "Bearer "+t.c.bedrock.apiKey)
-		return nil
-	}
-	creds, err := t.c.bedrock.creds.Retrieve(ctx)
-	if err != nil {
-		return fmt.Errorf("resolve AWS credentials: %w", err)
-	}
-	sum := sha256.Sum256(body)
-	return t.c.bedrock.signer.SignHTTP(ctx, creds, r, hex.EncodeToString(sum[:]), "bedrock", t.c.bedrock.region, time.Now())
+	return t.c.bedrock.authorize(ctx, r, body)
 }
 
 // doBedrock calls Bedrock's Anthropic Messages runtime for Claude models.

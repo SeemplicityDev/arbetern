@@ -51,7 +51,7 @@ arbetern/
 
 ### Workflows
 
-Each workflow JSON has the same shape as the on-disk registry descriptor,
+Each workflow JSON has the same shape as the stored registry descriptor,
 minus run-history fields (which are ignored on read and preserved across
 reconciles).
 
@@ -72,7 +72,7 @@ reconciles).
 
 | Field         | Required          | Notes                                                                                              |
 |---------------|-------------------|----------------------------------------------------------------------------------------------------|
-| `id`          | yes               | Stable identifier (also used as the on-disk filename inside the pod). Hex-ish: `[a-z0-9-]{1,63}`.  |
+| `id`          | yes               | Stable identifier (also the object name in the state bucket). Hex-ish: `[a-z0-9-]{1,63}`.  |
 | `agent`       | recommended       | Must match the parent directory name. The directory wins on conflict.                              |
 | `name`        | yes               | Human-readable title shown in `/arbetern list workflows` and the UI.                               |
 | `short_name`  | optional          | Slugified from `name` when omitted.                                                                |
@@ -185,7 +185,7 @@ Every poll the syncer:
 2. Reads every `*.json`, parses it, and keys the result by `(agent, id)`.
 3. For each desired workflow, calls `Registry.Upsert` — either creating a
    new workflow or applying any field that differs (a content fingerprint
-   skips no-op writes so the on-disk JSON and tick goroutine are not
+   skips no-op writes so the stored JSON and tick goroutine are not
    bounced when nothing changed).
 4. If `prune` is enabled, finds every locally-stored workflow that was
    previously synced from this source (`source = "gitops"`) but is no
@@ -275,7 +275,7 @@ data:
   DASHBOARDS_GITOPS_PRUNE: "true"
 ---
 apiVersion: apps/v1
-kind: StatefulSet
+kind: Deployment
 metadata:
   name: arbetern
 spec:

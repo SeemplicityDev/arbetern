@@ -1,8 +1,8 @@
 // Package workflows provides a lightweight scheduled-agent engine for arbetern.
 //
-// Each workflow is a small JSON descriptor stored at
+// Each workflow is a small JSON descriptor stored in the state bucket at
 //
-//	<WORKFLOWS_DIR>/<agent>/<workflow-id>.json
+//	<Prefix><agent>/<workflow-id>.json
 //
 // It owns a natural-language prompt (or an ordered list of task prompts) and
 // a trigger (schedule, on_success of another workflow, on_failure of another
@@ -27,15 +27,20 @@
 //
 // Each run's outcome is appended to the descriptor so the serving layer can
 // render an HTML history without touching the integrations directly.
+//
+// Runners only tick on the replica holding the scheduling lease; every
+// replica keeps its cache in step with the bucket and reconciles runners
+// from the changes it sees, and each run takes a per-workflow lease so two
+// replicas never execute the same workflow at once.
 package workflows
 
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
-	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -50,8 +55,13 @@ import (
 )
 
 const (
-	// DefaultDir is used when WORKFLOWS_DIR is unset.
-	DefaultDir = "./data/workflows"
+	// Prefix is the object prefix workflow descriptors are stored under.
+	Prefix = "workflows/"
+
+	// runLeaseTTL bounds how long a crashed replica blocks a workflow's next run.
+	runLeaseTTL = 5 * time.Minute
+	// persistTimeout bounds the write of a finished run's outcome.
+	persistTimeout = 30 * time.Second
 
 	// DefaultCron is the cron expression used when a scheduled workflow is
 	// created without an explicit one (every 5 minutes from runner start).
@@ -243,39 +253,41 @@ type runner struct {
 	busy atomic.Int32
 }
 
-// Registry is the thread-safe in-memory index of workflows plus their goroutines.
+// Registry is the cached view of the stored workflows plus their goroutines.
 type Registry struct {
+	docs *store.Documents[Workflow]
+	b    *store.Backend
+
 	mu       sync.RWMutex
-	dir      string
 	executor Executor
-	items    map[string]*Workflow // key: agent/id
-	runners  map[string]*runner   // key: agent/id
+	runners  map[string]*runner // key: agent/id
 	// baseCtx is the long-lived registry context, set by StartAllEnabled.
 	// Runner goroutines derive their context from this, NOT from per-request
 	// contexts passed to Create/Update — otherwise the HTTP handler returning
 	// would cancel the runner and any in-flight tick.
 	baseCtx context.Context
+	// active is true between StartAllEnabled and StopAll, i.e. while this
+	// replica holds the scheduling lease. Runners are only started while active.
+	active bool
 }
 
-// New creates a Registry rooted at dir. It creates the directory if missing.
-func New(dir string, exec Executor) (*Registry, error) {
-	if dir == "" {
-		dir = DefaultDir
-	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return nil, fmt.Errorf("create workflows dir: %w", err)
-	}
-	r := &Registry{
-		dir:      dir,
+// New creates a Registry over b. Call LoadAll before serving.
+func New(b *store.Backend, exec Executor) *Registry {
+	return &Registry{
+		docs: store.NewDocuments(b, Prefix, func(w *Workflow) error {
+			if w.ID == "" || w.Agent == "" || !idValidRe.MatchString(w.ID) || !agentValidRe.MatchString(w.Agent) {
+				return fmt.Errorf("invalid workflow descriptor")
+			}
+			return nil
+		}),
+		b:        b,
 		executor: exec,
-		items:    make(map[string]*Workflow),
 		runners:  make(map[string]*runner),
 	}
-	return r, nil
 }
 
-// Dir returns the root directory managed by the registry.
-func (r *Registry) Dir() string { return r.dir }
+// Count is the number of stored workflows.
+func (r *Registry) Count() int { return r.docs.Len() }
 
 // SetExecutor installs the executor post-construction. Useful when the
 // executor depends on components (e.g. the router map) that are built after
@@ -295,45 +307,65 @@ var (
 	idValidRe    = store.IDRe
 )
 
-// LoadAll scans the workflows directory and loads each workflow into memory.
-// It does NOT start tick goroutines — StartAllEnabled handles that once the
-// executor has been wired up. Invalid files are logged and skipped; they do
-// not prevent startup.
+// LoadAll loads every stored workflow into the cache. It does NOT start tick
+// goroutines — StartAllEnabled handles that once the executor has been wired
+// up. Invalid documents are logged and skipped; they do not prevent startup.
 func (r *Registry) LoadAll(ctx context.Context) error {
-	entries, err := os.ReadDir(r.dir)
-	if err != nil {
-		return fmt.Errorf("read workflows dir: %w", err)
+	if err := r.docs.Load(ctx); err != nil {
+		return fmt.Errorf("load workflows: %w", err)
 	}
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
-		}
-		agent := e.Name()
-		if !agentValidRe.MatchString(agent) {
-			continue
-		}
-		agentDir := filepath.Join(r.dir, agent)
-		files, err := os.ReadDir(agentDir)
-		if err != nil {
-			continue
-		}
-		for _, f := range files {
-			if f.IsDir() || !strings.HasSuffix(f.Name(), ".json") {
-				continue
-			}
-			path := filepath.Join(agentDir, f.Name())
-			w, err := readFile(path)
-			if err != nil {
-				log.Printf("[workflows] skipping %s: %v", path, err)
-				continue
-			}
-			r.mu.Lock()
-			r.items[key(w.Agent, w.ID)] = w
-			r.mu.Unlock()
-			log.Printf("[workflows] loaded %s/%s (%q, pattern=%s, enabled=%t)", w.Agent, w.ID, w.Name, w.Pattern(), w.Enabled)
-		}
-	}
+	r.docs.Range(func(_ string, w *Workflow) {
+		log.Printf("[workflows] loaded %s/%s (%q, pattern=%s, enabled=%t)", w.Agent, w.ID, w.Name, w.Pattern(), w.Enabled)
+	})
 	return nil
+}
+
+// StartRefresh keeps the cache in step with workflows written by other
+// replicas every interval, and reconciles runners on the replica holding the
+// scheduling lease.
+func (r *Registry) StartRefresh(ctx context.Context, interval time.Duration) {
+	r.docs.StartRefresh(ctx, interval, r.applyChanges)
+}
+
+func (r *Registry) applyChanges(changes []store.Change[Workflow]) {
+	r.mu.RLock()
+	active := r.active
+	r.mu.RUnlock()
+	for _, c := range changes {
+		switch {
+		case c.New == nil:
+			if c.Old != nil {
+				r.stopRunner(c.Old.Agent, c.Old.ID)
+			}
+		case !active:
+		case c.Old == nil:
+			if c.New.Enabled {
+				r.startRunner(c.New, c.New.Source != "gitops")
+			}
+		default:
+			r.reconcileRunner(c.Old, c.New)
+		}
+	}
+}
+
+// reconcileRunner restarts or stops the runner of a workflow whose stored
+// descriptor changed from orig to updated. Non-scheduling edits (name,
+// description, prompt, tasks) are picked up on the next tick because runOnce
+// re-reads the stored workflow, so the ticker is left alone — cancelling it
+// would also kill any in-flight run.
+func (r *Registry) reconcileRunner(orig, updated *Workflow) {
+	scheduleChanged := orig.Cron != updated.Cron ||
+		orig.Trigger.Type != updated.Trigger.Type ||
+		orig.Trigger.Ref != updated.Trigger.Ref
+	enabledChanged := orig.Enabled != updated.Enabled
+	switch {
+	case !updated.Enabled:
+		if enabledChanged {
+			r.stopRunner(updated.Agent, updated.ID)
+		}
+	case scheduleChanged || enabledChanged:
+		r.startRunner(updated, false)
+	}
 }
 
 // CreateOpts captures the full set of knobs for Create. Fields left empty
@@ -413,12 +445,9 @@ func (r *Registry) Create(ctx context.Context, opts CreateOpts) (*Workflow, erro
 		CreatedAt:   time.Now().UTC().Format(time.RFC3339),
 		Enabled:     true,
 	}
-	if err := r.persist(w); err != nil {
+	if err := r.docs.Create(ctx, store.Key(opts.Agent, id), w); err != nil {
 		return nil, err
 	}
-	r.mu.Lock()
-	r.items[key(opts.Agent, id)] = w
-	r.mu.Unlock()
 	r.startRunner(w, true)
 	log.Printf("[workflows] created %s/%s (%q, pattern=%s, cron=%s)", opts.Agent, id, opts.Name, w.Pattern(), w.Cron)
 	return w, nil
@@ -426,37 +455,32 @@ func (r *Registry) Create(ctx context.Context, opts CreateOpts) (*Workflow, erro
 
 // Get returns a copy of the stored workflow, or (nil,false) if missing.
 func (r *Registry) Get(agent, id string) (*Workflow, bool) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	w, ok := r.items[key(agent, id)]
+	w, ok := r.docs.Get(store.Key(agent, id))
 	if !ok {
 		return nil, false
 	}
-	cp := *w
-	cp.Running = r.isRunning(agent, id)
-	return &cp, true
+	w.Running = r.isRunning(agent, id)
+	return w, true
 }
 
 // List returns all workflows, optionally filtered by agent, sorted by creation time asc.
 func (r *Registry) List(agent string) []*Workflow {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	out := make([]*Workflow, 0, len(r.items))
-	for _, w := range r.items {
+	out := make([]*Workflow, 0)
+	r.docs.Range(func(_ string, w *Workflow) {
 		if agent != "" && w.Agent != agent {
-			continue
+			return
 		}
-		cp := *w
-		cp.Running = r.isRunning(w.Agent, w.ID)
-		out = append(out, &cp)
-	}
+		w.Running = r.isRunning(w.Agent, w.ID)
+		out = append(out, w)
+	})
 	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt < out[j].CreatedAt })
 	return out
 }
 
-// isRunning reports whether this workflow has a tick in flight. Caller must
-// already hold r.mu (read or write).
+// isRunning reports whether this replica has a tick of the workflow in flight.
 func (r *Registry) isRunning(agent, id string) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	run := r.runners[key(agent, id)]
 	return run != nil && run.busy.Load() != 0
 }
@@ -482,18 +506,30 @@ type UpdateOpts struct {
 // scheduled run. Run history, last-run timestamp, and created metadata are
 // preserved. Fields left as nil pointers are untouched.
 func (r *Registry) Update(ctx context.Context, agent, id string, opts UpdateOpts) (*Workflow, error) {
-	r.mu.Lock()
-	orig, ok := r.items[key(agent, id)]
-	if !ok {
-		r.mu.Unlock()
+	var orig Workflow
+	updated, err := r.docs.Update(ctx, store.Key(agent, id), func(w *Workflow) error {
+		orig = *w
+		return applyUpdate(w, opts)
+	})
+	if errors.Is(err, store.ErrNotFound) {
 		return nil, fmt.Errorf("workflow %s/%s not found", agent, id)
 	}
-	updated := *orig // copy, then mutate, then swap in under the lock
-	r.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	// Pass runInitial=false so the edit does NOT fire an immediate tick
+	// (previous behaviour caused every save to trigger a new run, which
+	// also got killed by the HTTP request context).
+	r.reconcileRunner(&orig, updated)
+	log.Printf("[workflows] updated %s/%s (%q, pattern=%s, cron=%s, enabled=%t)",
+		agent, id, updated.Name, updated.Pattern(), updated.Cron, updated.Enabled)
+	return updated, nil
+}
 
+func applyUpdate(updated *Workflow, opts UpdateOpts) error {
 	if opts.Name != nil {
 		if strings.TrimSpace(*opts.Name) == "" {
-			return nil, fmt.Errorf("workflow name cannot be empty")
+			return fmt.Errorf("workflow name cannot be empty")
 		}
 		updated.Name = *opts.Name
 	}
@@ -503,10 +539,10 @@ func (r *Registry) Update(ctx context.Context, agent, id string, opts UpdateOpts
 	if opts.Cron != nil {
 		v := strings.TrimSpace(*opts.Cron)
 		if v == "" {
-			return nil, fmt.Errorf("cron expression cannot be empty")
+			return fmt.Errorf("cron expression cannot be empty")
 		}
 		if _, err := cron.ParseStandard(v); err != nil {
-			return nil, fmt.Errorf("invalid cron %q: %w", v, err)
+			return fmt.Errorf("invalid cron %q: %w", v, err)
 		}
 		updated.Cron = v
 	}
@@ -516,13 +552,13 @@ func (r *Registry) Update(ctx context.Context, agent, id string, opts UpdateOpts
 	if opts.Tasks != nil {
 		for i, t := range *opts.Tasks {
 			if strings.TrimSpace(t.Name) == "" || strings.TrimSpace(t.Prompt) == "" {
-				return nil, fmt.Errorf("task %d requires non-empty name and prompt", i+1)
+				return fmt.Errorf("task %d requires non-empty name and prompt", i+1)
 			}
 		}
 		updated.Tasks = *opts.Tasks
 	}
 	if strings.TrimSpace(updated.Prompt) == "" && len(updated.Tasks) == 0 {
-		return nil, fmt.Errorf("workflow requires either prompt or at least one task after update")
+		return fmt.Errorf("workflow requires either prompt or at least one task after update")
 	}
 	if opts.Trigger != nil {
 		trig := *opts.Trigger
@@ -532,12 +568,12 @@ func (r *Registry) Update(ctx context.Context, agent, id string, opts UpdateOpts
 			trig.Ref = ""
 		case TriggerOnSuccess, TriggerOnFailure:
 			if !strings.Contains(trig.Ref, "/") {
-				return nil, fmt.Errorf("trigger ref must be '<agent>/<id>' for %s trigger", trig.Type)
+				return fmt.Errorf("trigger ref must be '<agent>/<id>' for %s trigger", trig.Type)
 			}
 		case TriggerManual:
 			trig.Ref = ""
 		default:
-			return nil, fmt.Errorf("unknown trigger type %q", trig.Type)
+			return fmt.Errorf("unknown trigger type %q", trig.Type)
 		}
 		updated.Trigger = trig
 	}
@@ -550,45 +586,7 @@ func (r *Registry) Update(ctx context.Context, agent, id string, opts UpdateOpts
 			updated.DisabledReason = ""
 		}
 	}
-
-	if err := r.persist(&updated); err != nil {
-		return nil, err
-	}
-	r.mu.Lock()
-	r.items[key(agent, id)] = &updated
-	r.mu.Unlock()
-
-	// Decide whether the tick goroutine actually needs to be restarted.
-	// Non-scheduling edits (name, description, prompt, tasks) are picked up
-	// on the next tick because runOnce re-reads the stored workflow, so
-	// there is no reason to cancel the ticker — cancelling it would also
-	// kill any in-flight manual run (its ctx is derived from the runner's).
-	scheduleChanged := orig.Cron != updated.Cron ||
-		orig.Trigger.Type != updated.Trigger.Type ||
-		orig.Trigger.Ref != updated.Trigger.Ref
-	enabledChanged := orig.Enabled != updated.Enabled
-
-	if !updated.Enabled {
-		// Disabled: stop any running ticker and leave the entry in place.
-		if enabledChanged {
-			r.mu.Lock()
-			if run, ok := r.runners[key(agent, id)]; ok {
-				run.cancel()
-				delete(r.runners, key(agent, id))
-			}
-			r.mu.Unlock()
-		}
-	} else if scheduleChanged || enabledChanged {
-		// Restart the runner so the new schedule takes effect. Pass
-		// runInitial=false so the edit does NOT fire an immediate tick
-		// (previous behaviour caused every save to trigger a new run,
-		// which also got killed by the HTTP request context).
-		r.startRunner(&updated, false)
-	}
-	log.Printf("[workflows] updated %s/%s (%q, pattern=%s, cron=%s, enabled=%t)",
-		agent, id, updated.Name, updated.Pattern(), updated.Cron, updated.Enabled)
-	cp := updated
-	return &cp, nil
+	return nil
 }
 
 // UpsertSpec is the declarative shape used by id-stable callers (e.g.
@@ -661,11 +659,8 @@ func (r *Registry) Upsert(ctx context.Context, spec UpsertSpec) (w *Workflow, ch
 		shortName = slugify(spec.Name)
 	}
 
-	r.mu.Lock()
-	orig, exists := r.items[key(spec.Agent, spec.ID)]
-	r.mu.Unlock()
-
-	if !exists {
+	k := store.Key(spec.Agent, spec.ID)
+	if _, exists := r.docs.Get(k); !exists {
 		w := &Workflow{
 			ID:          spec.ID,
 			Agent:       spec.Agent,
@@ -683,86 +678,68 @@ func (r *Registry) Upsert(ctx context.Context, spec UpsertSpec) (w *Workflow, ch
 			Source:      spec.Source,
 			SourceRef:   spec.SourceRef,
 		}
-		if err := r.persist(w); err != nil {
+		err := r.docs.Create(ctx, k, w)
+		if err == nil {
+			if w.Enabled {
+				r.startRunner(w, false)
+			}
+			log.Printf("[workflows] upsert created %s/%s (%q, source=%s)", spec.Agent, spec.ID, spec.Name, spec.Source)
+			return w, true, nil
+		}
+		if !errors.Is(err, store.ErrConflict) {
 			return nil, false, err
 		}
-		r.mu.Lock()
-		r.items[key(spec.Agent, spec.ID)] = w
-		r.mu.Unlock()
-		if w.Enabled {
-			r.startRunner(w, false)
-		}
-		log.Printf("[workflows] upsert created %s/%s (%q, source=%s)", spec.Agent, spec.ID, spec.Name, spec.Source)
-		return w, true, nil
 	}
 
-	updated := *orig
-	scheduleChanged := updated.Cron != cronExpr ||
-		updated.Trigger.Type != trig.Type ||
-		updated.Trigger.Ref != trig.Ref
-	enabledChanged := updated.Enabled != spec.Enabled
-
-	// Distinguish no-op from actual change before persisting.
+	// Distinguish no-op from actual change before writing.
 	specHash := upsertFingerprint(spec, cronExpr, shortName, trig)
-	currentHash := upsertFingerprint(specFromWorkflow(orig), orig.Cron, orig.ShortName, orig.Trigger)
-	if specHash == currentHash {
-		return orig, false, nil
+	var orig Workflow
+	updated, err := r.docs.Update(ctx, k, func(w *Workflow) error {
+		orig = *w
+		if upsertFingerprint(specFromWorkflow(w), w.Cron, w.ShortName, w.Trigger) == specHash {
+			return errUnchanged
+		}
+		w.Name = spec.Name
+		w.ShortName = shortName
+		w.Description = spec.Description
+		w.Cron = cronExpr
+		w.Prompt = spec.Prompt
+		w.Tasks = append([]Task(nil), spec.Tasks...)
+		w.Model = spec.Model
+		w.Trigger = trig
+		w.Enabled = spec.Enabled
+		w.Source = spec.Source
+		w.SourceRef = spec.SourceRef
+		if spec.Enabled {
+			// Re-enable clears any auto-disable banner.
+			w.ConsecutiveFailures = 0
+			w.DisabledReason = ""
+		}
+		return nil
+	})
+	if errors.Is(err, errUnchanged) {
+		return &orig, false, nil
 	}
-
-	updated.Name = spec.Name
-	updated.ShortName = shortName
-	updated.Description = spec.Description
-	updated.Cron = cronExpr
-	updated.Prompt = spec.Prompt
-	updated.Tasks = append([]Task(nil), spec.Tasks...)
-	updated.Model = spec.Model
-	updated.Trigger = trig
-	updated.Enabled = spec.Enabled
-	updated.Source = spec.Source
-	updated.SourceRef = spec.SourceRef
-	if spec.Enabled {
-		// Re-enable clears any auto-disable banner.
-		updated.ConsecutiveFailures = 0
-		updated.DisabledReason = ""
-	}
-
-	if err := r.persist(&updated); err != nil {
+	if err != nil {
 		return nil, false, err
 	}
-	r.mu.Lock()
-	r.items[key(spec.Agent, spec.ID)] = &updated
-	r.mu.Unlock()
-
-	if !updated.Enabled {
-		if enabledChanged {
-			r.mu.Lock()
-			if run, ok := r.runners[key(spec.Agent, spec.ID)]; ok {
-				run.cancel()
-				delete(r.runners, key(spec.Agent, spec.ID))
-			}
-			r.mu.Unlock()
-		}
-	} else if scheduleChanged || enabledChanged {
-		r.startRunner(&updated, false)
-	}
+	r.reconcileRunner(&orig, updated)
 	log.Printf("[workflows] upsert updated %s/%s (%q, source=%s)", spec.Agent, spec.ID, spec.Name, spec.Source)
-	cp := updated
-	return &cp, true, nil
+	return updated, true, nil
 }
 
-// ListBySource returns shallow copies of workflows whose Source equals src.
+var errUnchanged = errors.New("unchanged")
+
+// ListBySource returns copies of workflows whose Source equals src.
 func (r *Registry) ListBySource(src string) []*Workflow {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
 	out := make([]*Workflow, 0)
-	for _, w := range r.items {
+	r.docs.Range(func(_ string, w *Workflow) {
 		if w.Source != src {
-			continue
+			return
 		}
-		cp := *w
-		cp.Running = r.isRunning(w.Agent, w.ID)
-		out = append(out, &cp)
-	}
+		w.Running = r.isRunning(w.Agent, w.ID)
+		out = append(out, w)
+	})
 	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt < out[j].CreatedAt })
 	return out
 }
@@ -812,15 +789,13 @@ func specFromWorkflow(w *Workflow) UpsertSpec {
 	}
 }
 
-// Delete stops the tick goroutine, removes the file, and deletes from memory.
+// Delete stops the tick goroutine and removes the stored descriptor.
 func (r *Registry) Delete(agent, id string) error {
-	r.mu.Lock()
-	w, ok := r.items[key(agent, id)]
-	if !ok {
-		r.mu.Unlock()
+	k := store.Key(agent, id)
+	if _, ok := r.docs.Get(k); !ok {
 		return fmt.Errorf("workflow %s/%s not found", agent, id)
 	}
-	delete(r.items, key(agent, id))
+	r.mu.Lock()
 	run := r.runners[key(agent, id)]
 	delete(r.runners, key(agent, id))
 	r.mu.Unlock()
@@ -832,20 +807,18 @@ func (r *Registry) Delete(agent, id string) error {
 		case <-time.After(2 * time.Second):
 		}
 	}
-	path, err := r.pathFor(w)
-	if err != nil {
-		return err
-	}
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("remove workflow file: %w", err)
+	if err := r.docs.Delete(context.Background(), k); err != nil {
+		return fmt.Errorf("remove workflow: %w", err)
 	}
 	log.Printf("[workflows] deleted %s/%s", agent, id)
 	return nil
 }
 
-// StopAll cancels every tick goroutine. Safe to call at shutdown.
+// StopAll cancels every tick goroutine and stops new ones from starting until
+// StartAllEnabled runs again. Safe to call at shutdown.
 func (r *Registry) StopAll() {
 	r.mu.Lock()
+	r.active = false
 	runs := r.runners
 	r.runners = make(map[string]*runner)
 	r.mu.Unlock()
@@ -854,29 +827,41 @@ func (r *Registry) StopAll() {
 	}
 }
 
-// StartAllEnabled launches runners for every enabled workflow already loaded.
-// Used when the executor is installed after LoadAll. This is the server-boot
-// entry point, so we pass runInitial=false — loading workflows into memory
-// on startup should NOT fire an immediate tick. Ticks will fire on their
-// normal schedule (or via manual "run now" from the UI).
+func (r *Registry) stopRunner(agent, id string) {
+	r.mu.Lock()
+	run, ok := r.runners[key(agent, id)]
+	if ok {
+		delete(r.runners, key(agent, id))
+	}
+	r.mu.Unlock()
+	if ok {
+		run.cancel()
+	}
+}
+
+// StartAllEnabled launches runners for every enabled workflow already loaded
+// and marks this replica as the one that ticks. This is the server-boot (and
+// lease-acquired) entry point, so we pass runInitial=false — loading
+// workflows on startup should NOT fire an immediate tick. Ticks will fire on
+// their normal schedule (or via manual "run now" from the UI).
 func (r *Registry) StartAllEnabled(ctx context.Context) {
 	r.mu.Lock()
 	r.baseCtx = ctx
-	list := make([]*Workflow, 0, len(r.items))
-	for _, w := range r.items {
-		if w.Enabled {
-			cp := *w
-			list = append(list, &cp)
-		}
-	}
+	r.active = true
 	r.mu.Unlock()
-	for _, w := range list {
-		r.startRunner(w, false)
-	}
+	r.docs.Range(func(_ string, w *Workflow) {
+		if w.Enabled {
+			r.startRunner(w, false)
+		}
+	})
 }
 
 func (r *Registry) startRunner(w *Workflow, runInitial bool) {
 	r.mu.Lock()
+	if !r.active {
+		r.mu.Unlock()
+		return
+	}
 	if old, ok := r.runners[key(w.Agent, w.ID)]; ok {
 		old.cancel()
 	}
@@ -979,10 +964,7 @@ func (r *Registry) startRunner(w *Workflow, runInitial bool) {
 // Returns the run's result (or an error). Used by manual API invocations
 // and by event-triggered listeners.
 func (r *Registry) RunOnce(ctx context.Context, agent, id, trigger string) (string, error) {
-	r.mu.RLock()
-	_, ok := r.items[key(agent, id)]
-	r.mu.RUnlock()
-	if !ok {
+	if _, ok := r.docs.Get(store.Key(agent, id)); !ok {
 		return "", fmt.Errorf("workflow %s/%s not found", agent, id)
 	}
 	return r.runOnce(ctx, agent, id, trigger)
@@ -991,20 +973,21 @@ func (r *Registry) RunOnce(ctx context.Context, agent, id, trigger string) (stri
 // runOnce performs the actual execution. For multi-task workflows each task
 // is executed in order with prior outputs threaded into the prompt.
 //
-// A per-workflow `busy` try-lock prevents the same workflow from running
-// concurrently with itself. Overlapping triggers are skipped with a logged
-// warning — this protects against double-posts, double-PRs, and persistence
-// races that would otherwise happen if a slow tick (or manual /run)
+// A per-workflow `busy` try-lock on this replica plus a per-workflow lease in
+// the bucket prevent the same workflow from running concurrently with
+// itself, here or on another replica. Overlapping triggers are skipped with
+// a logged warning — this protects against double-posts, double-PRs, and
+// write races that would otherwise happen if a slow tick (or manual /run)
 // overlapped another trigger.
 func (r *Registry) runOnce(ctx context.Context, agent, id, triggeredBy string) (string, error) {
-	r.mu.RLock()
-	orig, ok := r.items[key(agent, id)]
-	exec := r.executor
-	run := r.runners[key(agent, id)]
-	r.mu.RUnlock()
+	orig, ok := r.docs.Get(store.Key(agent, id))
 	if !ok {
 		return "", fmt.Errorf("workflow %s/%s not found", agent, id)
 	}
+	r.mu.RLock()
+	exec := r.executor
+	run := r.runners[key(agent, id)]
+	r.mu.RUnlock()
 	if exec == nil {
 		return "", fmt.Errorf("workflow executor not configured")
 	}
@@ -1014,6 +997,18 @@ func (r *Registry) runOnce(ctx context.Context, agent, id, triggeredBy string) (
 			return "", fmt.Errorf("workflow %s/%s is already running", agent, id)
 		}
 		defer run.busy.Store(0)
+	}
+	lease := store.NewLease(r.b, "locks/workflows/"+agent+"/"+id, store.InstanceID(), runLeaseTTL)
+	held, release, acquired, err := lease.Acquire(ctx)
+	switch {
+	case err != nil:
+		log.Printf("[workflows] %s/%s run lease unavailable, continuing without it: %v", agent, id, err)
+	case !acquired:
+		log.Printf("[workflows] skip %s/%s (%s): running on another replica", agent, id, triggeredBy)
+		return "", fmt.Errorf("workflow %s/%s is already running", agent, id)
+	default:
+		defer release()
+		ctx = held
 	}
 	w := *orig
 	if triggeredBy == "" {
@@ -1080,60 +1075,52 @@ func (r *Registry) runOnce(ctx context.Context, agent, id, triggeredBy string) (
 			agent, id, duration.Round(time.Millisecond), len(finalResult))
 	}
 
-	w.LastRun = entry.StartedAt
-	w.LastResult = finalResult
-	if firstError != nil {
-		w.LastError = firstError.Error()
-		w.ConsecutiveFailures++
-	} else {
-		w.LastError = ""
-		w.ConsecutiveFailures = 0
-		// A successful run clears any prior auto-disable reason. (It is
-		// only actually set when Enabled=false, so a clean success after a
-		// user re-enables the workflow will wipe the stale banner.)
-		w.DisabledReason = ""
-	}
-
-	// Auto-disable after too many consecutive failures. Only applies to
-	// workflows that are currently enabled — we don't want to clobber a
-	// user's manual pause with an auto-disable reason.
+	// Record the outcome against the latest stored descriptor so an edit made
+	// while the tick was running (here or on another replica) is kept. The
+	// write uses its own context: the run's may already be cancelled.
+	pctx, cancel := context.WithTimeout(context.Background(), persistTimeout)
+	defer cancel()
 	autoDisabled := false
-	if w.Enabled && w.ConsecutiveFailures >= MaxConsecutiveFailures {
-		w.Enabled = false
-		w.DisabledReason = fmt.Sprintf(
-			"auto-disabled after %d consecutive failed ticks. Last error: %s. "+
-				"Re-enable via update_workflow once the underlying issue is fixed.",
-			w.ConsecutiveFailures, w.LastError)
-		autoDisabled = true
-		log.Printf("[workflows] AUTO-DISABLED %s/%s after %d consecutive failures: %s",
-			agent, id, w.ConsecutiveFailures, w.LastError)
-	}
-
-	w.Runs = append([]RunLog{entry}, w.Runs...)
-	if len(w.Runs) > MaxRunHistory {
-		w.Runs = w.Runs[:MaxRunHistory]
-	}
-
-	r.mu.Lock()
-	r.items[key(agent, id)] = &w
-	var stopRun *runner
-	if autoDisabled {
-		// Detach and cancel the runner AFTER we've released the write lock
-		// so the cancel doesn't contend with this goroutine's own unlock.
-		// The runner goroutine itself will exit on ctx.Done(); our defer on
-		// run.busy.Store(0) above already keeps the try-lock consistent.
-		if old, ok := r.runners[key(agent, id)]; ok {
-			stopRun = old
-			delete(r.runners, key(agent, id))
+	_, perr := r.docs.Update(pctx, store.Key(agent, id), func(w *Workflow) error {
+		w.LastRun = entry.StartedAt
+		w.LastResult = finalResult
+		if firstError != nil {
+			w.LastError = firstError.Error()
+			w.ConsecutiveFailures++
+		} else {
+			w.LastError = ""
+			w.ConsecutiveFailures = 0
+			// A successful run clears any prior auto-disable reason. (It is
+			// only actually set when Enabled=false, so a clean success after a
+			// user re-enables the workflow will wipe the stale banner.)
+			w.DisabledReason = ""
 		}
-	}
-	r.mu.Unlock()
-	if stopRun != nil {
-		stopRun.cancel()
-	}
-
-	if perr := r.persist(&w); perr != nil {
+		// Auto-disable after too many consecutive failures. Only applies to
+		// workflows that are currently enabled — we don't want to clobber a
+		// user's manual pause with an auto-disable reason.
+		autoDisabled = false
+		if w.Enabled && w.ConsecutiveFailures >= MaxConsecutiveFailures {
+			w.Enabled = false
+			w.DisabledReason = fmt.Sprintf(
+				"auto-disabled after %d consecutive failed ticks. Last error: %s. "+
+					"Re-enable via update_workflow once the underlying issue is fixed.",
+				w.ConsecutiveFailures, w.LastError)
+			autoDisabled = true
+		}
+		w.Runs = append([]RunLog{entry}, w.Runs...)
+		if len(w.Runs) > MaxRunHistory {
+			w.Runs = w.Runs[:MaxRunHistory]
+		}
+		return nil
+	})
+	if perr != nil {
 		log.Printf("[workflows] persist %s/%s failed: %v", agent, id, perr)
+	} else if autoDisabled {
+		log.Printf("[workflows] AUTO-DISABLED %s/%s after %d consecutive failures: %v",
+			agent, id, MaxConsecutiveFailures, firstError)
+		// The runner goroutine exits on ctx.Done(); our defer on
+		// run.busy.Store(0) above already keeps the try-lock consistent.
+		r.stopRunner(agent, id)
 	}
 
 	// Emit event to any listener workflows.
@@ -1152,16 +1139,11 @@ func (r *Registry) fireListeners(parent context.Context, srcAgent, srcID string,
 	}
 	ref := srcAgent + "/" + srcID
 	var listeners []struct{ agent, id string }
-	r.mu.RLock()
-	for _, w := range r.items {
-		if !w.Enabled {
-			continue
-		}
-		if w.Trigger.Type == wantType && w.Trigger.Ref == ref {
+	r.docs.Range(func(_ string, w *Workflow) {
+		if w.Enabled && w.Trigger.Type == wantType && w.Trigger.Ref == ref {
 			listeners = append(listeners, struct{ agent, id string }{w.Agent, w.ID})
 		}
-	}
-	r.mu.RUnlock()
+	})
 	for _, l := range listeners {
 		agent, id := l.agent, l.id
 		safego.Go("workflows: listener "+agent+"/"+id, func() {
@@ -1201,23 +1183,6 @@ func withClock(prompt string) string {
 		now.Weekday(),
 		prompt,
 	)
-}
-
-func (r *Registry) persist(w *Workflow) error {
-	return store.WriteJSON(r.dir, w.Agent, w.ID, w)
-}
-
-func (r *Registry) pathFor(w *Workflow) (string, error) {
-	return store.PathFor(r.dir, w.Agent, w.ID)
-}
-
-func readFile(path string) (*Workflow, error) {
-	return store.ReadJSON[Workflow](path, func(w *Workflow) error {
-		if w.ID == "" || w.Agent == "" || !idValidRe.MatchString(w.ID) || !agentValidRe.MatchString(w.Agent) {
-			return fmt.Errorf("invalid workflow descriptor")
-		}
-		return nil
-	})
 }
 
 func newID() (string, error) { return store.NewID() }

@@ -34,6 +34,8 @@ import (
 	"github.com/justmike1/arbetern/github"
 	"github.com/justmike1/arbetern/google"
 	"github.com/justmike1/arbetern/internal/safego"
+	"github.com/justmike1/arbetern/internal/store"
+	"github.com/justmike1/arbetern/internal/vectors"
 	"github.com/justmike1/arbetern/llm"
 	"github.com/justmike1/arbetern/mcp"
 	"github.com/justmike1/arbetern/nvd"
@@ -202,6 +204,14 @@ func (c *changelogCache) get(ctx context.Context) ([]github.CommitSummary, error
 // errGitOpsDisabled is returned by the gitops sync HTTP handler when no
 // syncer is configured for that kind (e.g. WORKFLOWS_GITOPS_REPO unset).
 var errGitOpsDisabled = errors.New("gitops sync is not enabled for this kind")
+
+const (
+	// stateRefreshInterval is how often each replica reconciles its caches
+	// with the state bucket.
+	stateRefreshInterval = 30 * time.Second
+	// schedulerLeaseTTL bounds how long a crashed leader blocks scheduling.
+	schedulerLeaseTTL = 30 * time.Second
+)
 
 // registerGitOpsRoutes mounts the per-kind GitOps inspection endpoints on
 // apiMux:
@@ -795,6 +805,60 @@ func buildWorkflowsMessage(reg *workflows.Registry, agents []prompts.AgentConfig
 	}
 	fmt.Fprintf(&b, "_%d workflow%s total._", total, plural(total))
 	return b.String()
+}
+
+// openVectorIndex connects the optional S3 Vectors index that turns the
+// per-user context into a semantic memory. A misconfiguration disables the
+// index and logs why; the store then falls back to recency.
+func openVectorIndex(ctx context.Context, cfg *config.Config) *vectors.Index {
+	if cfg.VectorsIndexARN == "" {
+		return nil
+	}
+	embedder, err := buildEmbedder(ctx, cfg)
+	if err != nil {
+		log.Printf("Vector index disabled (embedding model misconfigured): %v", err)
+		return nil
+	}
+	index, err := vectors.Open(ctx, cfg.VectorsIndexARN, embedder)
+	if err != nil {
+		log.Printf("Vector index disabled: %v", err)
+		return nil
+	}
+	log.Printf("Vector index enabled: %s (metric %s, %s @ %d dims)", index.ARN(), index.Metric(), embedder.Model(), embedder.Dimensions())
+	return index
+}
+
+// buildEmbedder picks the embeddings backend from the model name: Amazon
+// Titan models go through Bedrock, anything else through the Azure OpenAI or
+// GitHub Models embeddings endpoint the deployment already authenticates to.
+func buildEmbedder(ctx context.Context, cfg *config.Config) (*llm.Embedder, error) {
+	model := cfg.EmbeddingModel
+	if model == "" {
+		model = "amazon.titan-embed-text-v2:0"
+	}
+	dims := cfg.EmbeddingDimensions
+	if dims == 0 {
+		dims = llm.DefaultEmbeddingDimensions(model)
+	}
+	if dims == 0 {
+		return nil, fmt.Errorf("EMBEDDING_DIMENSIONS is required for model %q", model)
+	}
+	switch {
+	case strings.HasPrefix(strings.ToLower(model), "amazon."):
+		region := cfg.BedrockRegion
+		if region == "" {
+			region = cfg.AWSRegion
+		}
+		if region == "" {
+			region, _ = vectors.RegionOf(cfg.VectorsIndexARN)
+		}
+		return llm.NewBedrockEmbedder(ctx, region, model, cfg.BedrockAPIKey, dims)
+	case cfg.UseAzure():
+		return llm.NewAzureEmbedder(cfg.AzureEndpoint, cfg.AzureAPIKey, model, dims), nil
+	case cfg.GitHubToken != "":
+		return llm.NewGitHubEmbedder(cfg.GitHubToken, model, dims), nil
+	}
+	return nil, fmt.Errorf("no embeddings backend available for model %q", model)
 }
 
 // workflowExecutor implements workflows.Executor by dispatching to the
@@ -1772,17 +1836,26 @@ func main() {
 	sessions := commands.NewSessionStore(cfg.ThreadSessionTTL)
 	log.Printf("Thread session TTL: %s", cfg.ThreadSessionTTL)
 
+	// State backend: every registry below reads and writes the S3 bucket and
+	// keeps only a cache in memory, so any replica can serve any request and a
+	// restart loses nothing.
+	bootCtx, cancelBoot := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancelBoot()
+	backend, err := store.Open(bootCtx, cfg.StateBackendARN)
+	if err != nil {
+		log.Fatalf("state backend: %v", err)
+	}
+	log.Printf("State backend: %s (region %s, instance %s)", backend, backend.Region(), store.InstanceID())
+	vectorIndex := openVectorIndex(bootCtx, cfg)
+
 	// Per-user context store. Populated after every Slack request (DMs,
 	// channels, and in-thread follow-ups all flow through the same
 	// handlers) and read back into the system prompt on every subsequent
-	// request so the agent can recognise recurring user topics. When
-	// USER_CONTEXT_DIR points at the chart's persistent mount the files
-	// survive pod restarts; otherwise a temp dir is used (dev only).
-	// Files older than the retention window are garbage collected.
-	userContextDir := os.Getenv("USER_CONTEXT_DIR")
-	userContextStore := commands.NewUserContextStore(userContextDir)
-	log.Printf("User-context store: %s (TTL=%s)", userContextStore.BaseDir(), commands.UserContextTTL)
-	userContextStore.StartGC(context.Background(), time.Hour)
+	// request so the agent can recognise recurring user topics. With a
+	// vector index attached, the turns shown are the ones relevant to the
+	// current question rather than simply the latest.
+	userContextStore := commands.NewUserContextStore(backend, vectorIndex)
+	log.Printf("User-context store: %suser-context/ (TTL=%s, semantic=%t)", backend, commands.UserContextTTL, userContextStore.Semantic())
 
 	// RBAC: build agentID → allowedTeams map and group membership cache.
 	agentRBAC := make(map[string][]string, len(agents))
@@ -1801,10 +1874,9 @@ func main() {
 	routers := make(map[string]*commands.Router, len(agents))
 
 	// Dashboards registry: background sync of LLM-created data dashboards.
-	dashDir := cfg.DashboardsDir
-	if dashDir == "" {
-		dashDir = dashboards.DefaultDir
-	}
+	// Boot only loads state; the sync tickers start once this replica holds
+	// the scheduling lease (see the election below), and never fire an
+	// immediate sync — that would hammer every upstream on startup.
 	dashExec := dashboards.NewExecutor(dashboards.Clients{
 		Jira:    jiraClient,
 		SF:      sfClient,
@@ -1812,68 +1884,50 @@ func main() {
 		Datadog: datadogClients,
 		GitHub:  ghClient,
 	})
-	dashRegistry, err := dashboards.New(dashDir, dashExec)
-	if err != nil {
-		log.Fatalf("failed to init dashboards registry: %v", err)
+	dashRegistry := dashboards.New(backend, dashExec)
+	if err := dashRegistry.LoadAll(bootCtx); err != nil {
+		log.Fatalf("failed to load dashboards: %v", err)
 	}
-	if err := dashRegistry.LoadAll(context.Background()); err != nil {
-		log.Printf("warn: failed to load existing dashboards: %v", err)
-	}
-	// Kick off the scheduled-sync tickers for every dashboard loaded from
-	// disk, but do NOT trigger an immediate sync — server boot should only
-	// load state into memory and start timers, not hammer every upstream on
-	// startup. Ticks will fire on their normal schedule.
-	dashRegistry.StartAll(context.Background())
 	defer dashRegistry.StopAll()
 
-	// Workflows registry: scheduled LLM tool-loop runs.
-	// The executor is wired below once the routers map is populated, so tick
-	// goroutines are not started at LoadAll time — we call StartAllEnabled
-	// afterwards.
-	wfDir := cfg.WorkflowsDir
-	if wfDir == "" {
-		wfDir = workflows.DefaultDir
-	}
-	wfRegistry, err := workflows.New(wfDir, nil)
-	if err != nil {
-		log.Fatalf("failed to init workflows registry: %v", err)
-	}
-	if err := wfRegistry.LoadAll(context.Background()); err != nil {
-		log.Printf("warn: failed to load existing workflows: %v", err)
+	// Workflows registry: scheduled LLM tool-loop runs. The executor is wired
+	// below once the routers map is populated.
+	wfRegistry := workflows.New(backend, nil)
+	if err := wfRegistry.LoadAll(bootCtx); err != nil {
+		log.Fatalf("failed to load workflows: %v", err)
 	}
 	defer wfRegistry.StopAll()
 
 	// Usage & Billing store: aggregates LLM token cost of every Slack,
-	// workflow, and chat turn on the persistent volume. Flushed periodically.
-	billingStore, err := billing.New(cfg.BillingDir)
+	// workflow, and chat turn and merges it into the bucket periodically.
+	billingStore, err := billing.New(bootCtx, backend)
 	if err != nil {
 		log.Fatalf("failed to init billing store: %v", err)
 	}
-	log.Printf("Usage & billing store: %s", billingStore.Dir())
+	log.Printf("Usage & billing store: %sbilling/ (%d month(s))", backend, billingStore.Months())
 	billingStop := make(chan struct{})
-	billingStore.StartFlusher(billingStop)
+	billingDone := billingStore.StartFlusher(billingStop)
 	userNames := newUserNameCache(24 * time.Hour)
 	billingStore.SetUserNameResolver(func(id string) string { return userNames.resolve(slackClient, id) })
 	billing.StartPriceSync(billingStop)
-	defer close(billingStop)
 
 	agentIDs := make([]string, 0, len(agents))
 	for _, a := range agents {
 		agentIDs = append(agentIDs, a.ID)
 	}
-	skillRegistry, err := skills.New(cfg.SkillsDir)
+	skillRegistry, err := skills.New(bootCtx, backend)
 	if err != nil {
-		log.Fatalf("failed to init skills registry: %v", err)
+		log.Fatalf("failed to load skills: %v", err)
 	}
 	skillRegistry.SetKnownAgents(agentIDs)
 	skillRegistry.SetBuiltin(func() []skills.Skill { return builtinSkills(agents) })
-	log.Printf("Skills store: %s", skillRegistry.Dir())
-	mcpRegistry, err := mcp.New(cfg.MCPDir)
+	log.Printf("Skills store: %sskills/ (%d custom skill(s))", backend, skillRegistry.Count())
+	mcpRegistry, err := mcp.New(bootCtx, backend)
 	if err != nil {
-		log.Fatalf("failed to init MCP registry: %v", err)
+		log.Fatalf("failed to load MCP connectors: %v", err)
 	}
 	mcpRegistry.SetKnownAgents(agentIDs)
-	log.Printf("MCP connectors store: %s (%d connector(s))", mcpRegistry.Dir(), len(mcpRegistry.List()))
+	log.Printf("MCP connectors store: %smcp/ (%d connector(s))", backend, mcpRegistry.Count())
 
 	for _, agent := range agents {
 		ap, err := prompts.LoadAgent(agent.ID)
@@ -1933,11 +1987,11 @@ func main() {
 
 	// Centralized per-agent chat (UI-driven). Disabled per agent by default;
 	// enabled via `chat_enabled: true` in the agent's config.yaml. There is no
-	// user auth yet, so each agent has a single shared transcript persisted to
-	// disk that every viewer sees. The responder replays recent history and
-	// runs the agent's full tool loop (RunChat) so the chat can use the same
-	// integrations as a Slack command.
-	chatRegistry := chat.New(cfg.ChatDir, func(ctx context.Context, agentID, user string, history []chat.Message, userMessage string) (string, error) {
+	// user auth yet, so each agent's conversations are shared by every viewer.
+	// The responder replays recent history and runs the agent's full tool
+	// loop (RunChat) so the chat can use the same integrations as a Slack
+	// command.
+	chatRegistry := chat.New(backend, func(ctx context.Context, agentID, user string, history []chat.Message, userMessage string) (string, error) {
 		router := routers[agentID]
 		if router == nil {
 			return "", fmt.Errorf("no router configured for agent %q", agentID)
@@ -1958,6 +2012,10 @@ func main() {
 		// attribute a created Jira ticket's reporter to the requester.
 		return router.RunChat(ctx, user, msgs, userMessage)
 	})
+	if err := chatRegistry.Load(bootCtx); err != nil {
+		log.Fatalf("failed to load chat transcripts: %v", err)
+	}
+	log.Printf("Chat store: %schat/ (%d conversation(s))", backend, chatRegistry.Count())
 	for _, agent := range agents {
 		chatRegistry.SetEnabled(agent.ID, agent.ChatEnabled)
 		if agent.ChatEnabled {
@@ -1965,9 +2023,6 @@ func main() {
 		}
 	}
 
-	// Retention sweeper: delete chat conversations inactive for longer than
-	// CHAT_RETENTION (default one week) across all agents. Runs hourly.
-	chatRegistry.StartRetention(context.Background(), cfg.ChatRetention, time.Hour)
 	log.Printf("Chat retention: conversations inactive for >%s are auto-deleted", cfg.ChatRetention)
 
 	// Per-agent UI/chat RBAC. allowed_emails (OAuth-proxy-verified email) is the
@@ -2251,10 +2306,9 @@ func main() {
 	skillRegistry.RegisterRoutes(apiMux, clientEmail)
 	mcpRegistry.RegisterRoutes(apiMux, clientEmail)
 
-	// Wire the workflow executor now that routers are built, then kick off
-	// tick goroutines for every workflow that was loaded from disk.
+	// Wire the workflow executor now that routers are built. Tick goroutines
+	// start when this replica acquires the scheduling lease below.
 	wfRegistry.SetExecutor(&workflowExecutor{routers: routers})
-	wfRegistry.StartAllEnabled(context.Background())
 
 	// Wire the dashboard prompt renderer now that routers are built. Prompt
 	// dashboards (and their per-input instances) render through the owning
@@ -2281,8 +2335,6 @@ func main() {
 				log.Printf("warn: gitops sync init failed: %v", err)
 			} else {
 				wfSyncer = s
-				wfSyncer.Start(context.Background())
-				defer wfSyncer.Stop()
 			}
 		}
 	}
@@ -2316,8 +2368,6 @@ func main() {
 				log.Printf("warn: dashboards gitops sync init failed: %v", err)
 			} else {
 				dashSyncer = s
-				dashSyncer.Start(context.Background())
-				defer dashSyncer.Stop()
 			}
 		}
 	}
@@ -2331,6 +2381,43 @@ func main() {
 			return errGitOpsDisabled
 		}
 		return dashSyncer.SyncNow(ctx)
+	})
+
+	// Every replica keeps its caches in step with the bucket so UI reads and
+	// tool calls see what other replicas wrote.
+	for _, start := range []func(context.Context, time.Duration){
+		wfRegistry.StartRefresh, dashRegistry.StartRefresh, chatRegistry.StartRefresh,
+		skillRegistry.StartRefresh, mcpRegistry.StartRefresh,
+	} {
+		start(context.Background(), stateRefreshInterval)
+	}
+
+	// Scheduling lease: one replica at a time runs workflow tickers, dashboard
+	// syncs, GitOps reconciles and retention sweeps. Every replica serves
+	// Slack, chat and the UI; its writes land in the bucket and the leader
+	// picks them up on its next refresh.
+	leaderCtx, cancelLeader := context.WithCancel(context.Background())
+	leaderDone := make(chan struct{})
+	safego.Go("scheduling lease", func() {
+		defer close(leaderDone)
+		lease := store.NewLease(backend, "locks/scheduler", store.InstanceID(), schedulerLeaseTTL)
+		store.RunElection(leaderCtx, lease, func(held context.Context) {
+			log.Printf("[lease] %s is scheduling", store.InstanceID())
+			wfRegistry.StartAllEnabled(held)
+			dashRegistry.StartAll(held)
+			if wfSyncer != nil {
+				wfSyncer.Start(held)
+			}
+			if dashSyncer != nil {
+				dashSyncer.Start(held)
+			}
+			chatRegistry.StartRetention(held, cfg.ChatRetention, time.Hour)
+			userContextStore.StartGC(held, time.Hour)
+			<-held.Done()
+			wfRegistry.StopAll()
+			dashRegistry.StopAll()
+			log.Printf("[lease] %s stopped scheduling", store.InstanceID())
+		})
 	})
 
 	log.Printf("arbetern server starting on :%s", cfg.Port)
@@ -2377,6 +2464,18 @@ func main() {
 	defer cancel()
 	if err := srv.Shutdown(ctx); err != nil {
 		log.Fatalf("graceful shutdown failed: %v", err)
+	}
+	// Hand the scheduling lease over right away rather than letting it expire,
+	// then merge the last buffered usage into the bucket.
+	cancelLeader()
+	select {
+	case <-leaderDone:
+	case <-time.After(10 * time.Second):
+	}
+	close(billingStop)
+	select {
+	case <-billingDone:
+	case <-time.After(30 * time.Second):
 	}
 	log.Println("server stopped")
 }

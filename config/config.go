@@ -186,12 +186,17 @@ type Config struct {
 	AzureAuthorityHost  string
 	AzureManagementHost string
 
-	DashboardsDir string // Directory where dashboard JSON snapshots are persisted.
-	WorkflowsDir  string // Directory where workflow JSON snapshots are persisted.
-	ChatDir       string // Directory where per-agent chat transcripts are persisted.
-	BillingDir    string // Directory where LLM usage/cost aggregates are persisted.
-	SkillsDir     string // Directory where custom skills are persisted.
-	MCPDir        string // Directory where MCP connectors are persisted.
+	// StateBackendARN names the S3 bucket, and optional key prefix, that holds
+	// every piece of service state: arn:aws:s3:::bucket[/prefix],
+	// s3://bucket[/prefix] or bucket[/prefix]. Set from S3_BACKEND_ARN.
+	StateBackendARN string
+
+	// VectorsIndexARN is an optional S3 Vectors index that turns the per-user
+	// context into a semantic memory. EmbeddingModel produces its vectors;
+	// EmbeddingDimensions must match the index and defaults per model.
+	VectorsIndexARN     string
+	EmbeddingModel      string
+	EmbeddingDimensions int
 
 	// ChatRetention is how long a UI chat conversation is kept after its last
 	// activity before it is deleted by the background sweeper. Applies to all
@@ -447,12 +452,9 @@ func Load() (*Config, error) {
 		BedrockRegion:       strings.TrimSpace(os.Getenv("BEDROCK_REGION")),
 		AzureAuthorityHost:  os.Getenv("AZURE_AUTHORITY_HOST"),
 		AzureManagementHost: os.Getenv("AZURE_MANAGEMENT_HOST"),
-		DashboardsDir:       os.Getenv("DASHBOARDS_DIR"),
-		WorkflowsDir:        os.Getenv("WORKFLOWS_DIR"),
-		ChatDir:             os.Getenv("CHAT_DIR"),
-		BillingDir:          os.Getenv("BILLING_DIR"),
-		SkillsDir:           os.Getenv("SKILLS_DIR"),
-		MCPDir:              os.Getenv("MCP_DIR"),
+		StateBackendARN:     strings.TrimSpace(os.Getenv("S3_BACKEND_ARN")),
+		VectorsIndexARN:     strings.TrimSpace(os.Getenv("S3_VECTORS_INDEX_ARN")),
+		EmbeddingModel:      strings.TrimSpace(os.Getenv("EMBEDDING_MODEL")),
 
 		WorkflowsGitOpsOwner:    os.Getenv("WORKFLOWS_GITOPS_OWNER"),
 		WorkflowsGitOpsRepo:     os.Getenv("WORKFLOWS_GITOPS_REPO"),
@@ -494,6 +496,16 @@ func Load() (*Config, error) {
 	}
 	if cfg.SlackSigningSecret == "" {
 		return nil, fmt.Errorf("SLACK_SIGNING_SECRET is required")
+	}
+	if cfg.StateBackendARN == "" {
+		return nil, fmt.Errorf("S3_BACKEND_ARN is required")
+	}
+	if s := strings.TrimSpace(os.Getenv("EMBEDDING_DIMENSIONS")); s != "" {
+		n, err := strconv.Atoi(s)
+		if err != nil || n <= 0 {
+			return nil, fmt.Errorf("invalid EMBEDDING_DIMENSIONS %q: must be a positive integer", s)
+		}
+		cfg.EmbeddingDimensions = n
 	}
 
 	// A GitHub token, Azure credentials, or a Bedrock region is required for

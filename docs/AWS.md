@@ -1,15 +1,17 @@
 # AWS Integration
 
-Arbetern integrates with two AWS services so agents and scheduled workflows
-can work with them without leaving Slack:
+Arbetern uses AWS in three ways:
 
+- **State backend (required)** — every piece of service state lives in the
+  S3 bucket named by `S3_BACKEND_ARN`; optionally an S3 Vectors index turns
+  the per-user context into a semantic memory. See [STATE.md](STATE.md).
 - **Cost Explorer** — report on spend, project forward, and break costs down
   by service / account / region.
-- **S3** — read, write, and list objects (for example persisting a daily
-  CSV report, or reading back a manifest).
+- **S3 tools** — read, write, and list objects from agents and workflows (for
+  example persisting a daily CSV report, or reading back a manifest).
 
-Both services reuse the standard SDK credential chain, so adding more
-services later (CloudWatch, EC2, …) reuses the same auth plumbing.
+All of them reuse the standard SDK credential chain, so adding more services
+later (CloudWatch, EC2, …) reuses the same auth plumbing.
 
 > **Bedrock is separate.** AWS **Bedrock** can also serve the agents' underlying
 > LLM (Claude), but that is an *inference backend*, not one of the integration
@@ -44,8 +46,9 @@ section below.
 | `AWS_WEB_IDENTITY_TOKEN_FILE`, `AWS_ROLE_ARN` | no | Set automatically on EKS when IRSA is configured on the service account |
 | `AWS_REGION` | no | Region used to sign Cost Explorer SigV4 calls. Default `us-east-1` (the only region that hosts the CE endpoint). Cost data returned is account-global regardless of this value |
 
-Arbetern only enables the AWS tools (Cost Explorer **and** S3) when at least
-one of these looks present (`AWS_ACCESS_KEY_ID`, `AWS_PROFILE`,
+The state backend resolves credentials at boot and refuses to start without
+them. The AWS *tools* (Cost Explorer **and** S3) are only enabled when at
+least one of these looks present (`AWS_ACCESS_KEY_ID`, `AWS_PROFILE`,
 `AWS_WEB_IDENTITY_TOKEN_FILE`, `AWS_ROLE_ARN`,
 `AWS_SHARED_CREDENTIALS_FILE`). On startup the server calls
 `Credentials.Retrieve()` so misconfiguration fails loudly with a log line
@@ -57,13 +60,45 @@ AWS integration misconfigured (tools will be unavailable): ...
 
 ## Required IAM Permissions
 
-Attach the following IAM policy to the user / role arbetern runs as:
+Attach the following IAM policy to the user / role arbetern runs as. The
+first two statements are required (state backend); the rest depend on the
+features you use.
 
 ```json
 {
   "Version": "2012-10-17",
   "Statement": [
     {
+      "Sid": "StateBucket",
+      "Effect": "Allow",
+      "Action": ["s3:ListBucket"],
+      "Resource": "arn:aws:s3:::acme-arbetern-state"
+    },
+    {
+      "Sid": "StateObjects",
+      "Effect": "Allow",
+      "Action": ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"],
+      "Resource": "arn:aws:s3:::acme-arbetern-state/prod/*"
+    },
+    {
+      "Sid": "SemanticUserContext",
+      "Effect": "Allow",
+      "Action": [
+        "s3vectors:GetIndex",
+        "s3vectors:PutVectors",
+        "s3vectors:QueryVectors",
+        "s3vectors:DeleteVectors"
+      ],
+      "Resource": "arn:aws:s3vectors:eu-central-1:123456789012:bucket/acme-arbetern-vectors/index/user-context"
+    },
+    {
+      "Sid": "EmbeddingModel",
+      "Effect": "Allow",
+      "Action": ["bedrock:InvokeModel"],
+      "Resource": "arn:aws:bedrock:eu-central-1::foundation-model/amazon.titan-embed-text-v2:0"
+    },
+    {
+      "Sid": "CostExplorer",
       "Effect": "Allow",
       "Action": [
         "ce:GetCostAndUsage",
@@ -73,35 +108,37 @@ Attach the following IAM policy to the user / role arbetern runs as:
       "Resource": "*"
     },
     {
+      "Sid": "S3Tools",
       "Effect": "Allow",
-      "Action": [
-        "s3:GetObject",
-        "s3:PutObject"
-      ],
+      "Action": ["s3:GetObject", "s3:PutObject"],
       "Resource": "arn:aws:s3:::your-bucket/*"
     },
     {
+      "Sid": "S3ToolsList",
       "Effect": "Allow",
-      "Action": [
-        "s3:ListBucket"
-      ],
+      "Action": ["s3:ListBucket"],
       "Resource": "arn:aws:s3:::your-bucket"
     }
   ]
 }
 ```
 
+> **State bucket:** match `StateBucket` / `StateObjects` to `S3_BACKEND_ARN`
+> — the object statement covers the key prefix (or `/*` for the bucket root).
+> Conditional writes (`If-Match`, `If-None-Match`) need no extra actions.
+> Drop `SemanticUserContext` and `EmbeddingModel` when `S3_VECTORS_INDEX_ARN`
+> is unset.
+
 > **Billing note:** every Cost Explorer API call costs **$0.01**. Scheduled
 > workflows that grouped- or filter-pivot aggressively can rack up real
 > dollars — prefer one grouped call over N filtered calls, and avoid
 > looping over services.
 
-> **S3 scope:** the `s3:*` statements above are only needed if you use the
-> S3 tools. Replace `your-bucket` with the bucket(s) arbetern should
+> **S3 tools scope:** `S3Tools` / `S3ToolsList` are only needed if agents use
+> the `aws_s3_*` tools. Replace `your-bucket` with the bucket(s) they should
 > read/write — `s3:ListBucket` is granted on the bucket ARN, while
 > `s3:GetObject` / `s3:PutObject` are granted on the objects ARN (`/*`).
-> Grant only the buckets you actually need; drop the block entirely to run
-> Cost Explorer only.
+> Grant only the buckets you actually need.
 
 ## Helm Deployment
 
@@ -114,7 +151,11 @@ cluster's OIDC provider, then annotate the arbetern service account:
 serviceAccount:
   create: true
   annotations:
-    eks.amazonaws.com/role-arn: arn:aws:iam::123456789012:role/arbetern-cost-explorer
+    eks.amazonaws.com/role-arn: arn:aws:iam::123456789012:role/arbetern
+
+state:
+  s3:
+    arn: arn:aws:s3:::acme-arbetern-state/prod
 
 env:
   # optional — default us-east-1
@@ -264,6 +305,12 @@ web UI (the pencil button on `/<agent>/workflow/<id>`).
 **`AccessDeniedException: ... is not authorized to perform: ce:GetCostAndUsage`**
 - The IAM policy is missing one of the three required actions. Verify with
   `aws iam simulate-principal-policy`.
+
+**`state backend: resolve region of bucket …` or `AccessDenied` at boot**
+- The pod cannot reach the state bucket. Check `S3_BACKEND_ARN` and that the
+  role has `s3:ListBucket` on the bucket plus `s3:GetObject` /
+  `s3:PutObject` / `s3:DeleteObject` on the prefix. The process exits until
+  this is fixed — it never runs without its state.
 
 **`AccessDenied` from an `aws_s3_*` tool**
 - The IAM policy is missing `s3:GetObject` / `s3:PutObject` (objects ARN

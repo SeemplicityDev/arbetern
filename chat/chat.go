@@ -7,11 +7,11 @@
 // independent conversations: a left-bar history of titled threads plus a "New
 // chat" action. There is no per-user authentication in arbetern yet, so the
 // conversations are deliberately *centralized* — every viewer shares the same
-// list of threads, and they are persisted to disk so they survive restarts.
-// Each turn records a display name for context: when an upstream OAuth proxy is
-// in front, the proxy-verified email of the sender is recorded; otherwise it is
-// an optional free-text name. Either way it grants no access — access is
-// enforced separately by the authorizer.
+// list of threads, and they are stored in the state bucket so they survive
+// restarts. Each turn records a display name for context: when an upstream
+// OAuth proxy is in front, the proxy-verified email of the sender is recorded;
+// otherwise it is an optional free-text name. Either way it grants no access —
+// access is enforced separately by the authorizer.
 package chat
 
 import (
@@ -20,7 +20,6 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -30,11 +29,11 @@ import (
 	"github.com/justmike1/arbetern/internal/store"
 )
 
-// DefaultDir is used when CHAT_DIR is unset.
-const DefaultDir = "./data/chat"
+// Prefix is the object prefix transcripts are stored under.
+const Prefix = "chat/"
 
-// maxMessages caps the persisted transcript length per conversation so the
-// history file (and the LLM context we replay) cannot grow without bound.
+// maxMessages caps the stored transcript length per conversation so the
+// document (and the LLM context we replay) cannot grow without bound.
 const maxMessages = 500
 
 // historyContextLimit bounds how many prior messages are replayed to the LLM
@@ -59,8 +58,8 @@ type Message struct {
 // in main using the shared LLM client and the agent's system prompt.
 type Responder func(ctx context.Context, agent, user string, history []Message, userMessage string) (string, error)
 
-// transcript is the on-disk shape of a single conversation. Each agent may
-// have many, stored at <root>/<agent>/<id>.json.
+// transcript is the stored shape of a single conversation, kept at
+// <Prefix><agent>/<id>.json.
 type transcript struct {
 	ID        string    `json:"id"`
 	Agent     string    `json:"agent"`
@@ -80,10 +79,10 @@ type ConversationSummary struct {
 	MessageCount int       `json:"message_count"`
 }
 
-// Registry persists per-agent chat transcripts on disk and tracks which agents
-// have chat enabled. All operations are safe for concurrent use.
+// Registry serves per-agent chat transcripts from the state bucket and tracks
+// which agents have chat enabled. All operations are safe for concurrent use.
 type Registry struct {
-	root    string
+	docs    *store.Documents[transcript]
 	respond Responder
 
 	mu          sync.Mutex
@@ -92,14 +91,27 @@ type Registry struct {
 	resolveUser func(req *http.Request) string
 }
 
-// New constructs a Registry rooted at dir (falling back to DefaultDir when
-// empty). respond is invoked to generate assistant replies.
-func New(dir string, respond Responder) *Registry {
-	if dir == "" {
-		dir = DefaultDir
-	}
-	return &Registry{root: dir, respond: respond, enabled: make(map[string]bool)}
+// New constructs a Registry over b. respond is invoked to generate assistant
+// replies. Call Load before serving.
+func New(b *store.Backend, respond Responder) *Registry {
+	return &Registry{docs: store.NewDocuments[transcript](b, Prefix, nil), respond: respond, enabled: make(map[string]bool)}
 }
+
+// Load reads every stored conversation into the cache.
+func (r *Registry) Load(ctx context.Context) error {
+	if err := r.docs.Load(ctx); err != nil {
+		return fmt.Errorf("load chat transcripts: %w", err)
+	}
+	return nil
+}
+
+// StartRefresh picks up conversations written by other replicas every interval.
+func (r *Registry) StartRefresh(ctx context.Context, interval time.Duration) {
+	r.docs.StartRefresh(ctx, interval, nil)
+}
+
+// Count is the number of stored conversations.
+func (r *Registry) Count() int { return r.docs.Len() }
 
 // SetEnabled records whether chat is enabled for an agent.
 func (r *Registry) SetEnabled(agent string, enabled bool) {
@@ -160,36 +172,25 @@ func (r *Registry) userFor(req *http.Request) string {
 	return fn(req)
 }
 
+// splitKey returns the agent and conversation id encoded in a document key.
+func splitKey(key string) (agent, id string) {
+	agent, rest, _ := strings.Cut(key, "/")
+	return agent, strings.TrimSuffix(rest, ".json")
+}
+
 // ListConversations returns summaries of an agent's conversations, most
 // recently updated first. Returns an empty slice when the agent has none.
 func (r *Registry) ListConversations(agent string) ([]ConversationSummary, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	dir, err := store.AgentDir(r.root, agent)
-	if err != nil {
-		return nil, err
+	if !store.AgentRe.MatchString(agent) {
+		return nil, fmt.Errorf("invalid agent %q", agent)
 	}
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return []ConversationSummary{}, nil
+	out := []ConversationSummary{}
+	r.docs.Range(func(key string, t *transcript) {
+		a, id := splitKey(key)
+		if a != agent {
+			return
 		}
-		return nil, err
-	}
-	out := make([]ConversationSummary, 0, len(entries))
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-		name := e.Name()
-		if !strings.HasSuffix(name, ".json") || strings.HasSuffix(name, ".tmp") {
-			continue
-		}
-		id := strings.TrimSuffix(name, ".json")
-		t, err := r.readLocked(agent, id)
-		if err != nil || t == nil {
-			continue
-		}
+		normalize(t, a, id)
 		out = append(out, ConversationSummary{
 			ID:           t.ID,
 			Title:        t.Title,
@@ -197,23 +198,21 @@ func (r *Registry) ListConversations(agent string) ([]ConversationSummary, error
 			UpdatedAt:    t.UpdatedAt,
 			MessageCount: len(t.Messages),
 		})
-	}
+	})
 	sort.Slice(out, func(i, j int) bool { return out[i].UpdatedAt.After(out[j].UpdatedAt) })
 	return out, nil
 }
 
-// CreateConversation starts a new, empty conversation for an agent and
-// persists it so it appears in the history sidebar immediately.
-func (r *Registry) CreateConversation(agent string) (*transcript, error) {
+// CreateConversation starts a new, empty conversation for an agent and stores
+// it so it appears in the history sidebar immediately.
+func (r *Registry) CreateConversation(ctx context.Context, agent string) (*transcript, error) {
 	id, err := store.NewID()
 	if err != nil {
 		return nil, err
 	}
 	now := time.Now().UTC()
 	t := &transcript{ID: id, Agent: agent, Title: "New chat", CreatedAt: now, UpdatedAt: now, Messages: []Message{}}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if err := r.writeLocked(t); err != nil {
+	if err := r.docs.Create(ctx, store.Key(agent, id), t); err != nil {
 		return nil, err
 	}
 	return t, nil
@@ -221,47 +220,39 @@ func (r *Registry) CreateConversation(agent string) (*transcript, error) {
 
 // Conversation returns a single conversation (nil when it does not exist).
 func (r *Registry) Conversation(agent, id string) (*transcript, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.readLocked(agent, id)
+	t, ok := r.docs.Get(store.Key(agent, id))
+	if !ok {
+		return nil, nil
+	}
+	normalize(t, agent, id)
+	return t, nil
 }
 
 // DeleteConversation removes a conversation. Deleting a missing conversation is
 // a no-op.
-func (r *Registry) DeleteConversation(agent, id string) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	path, err := store.PathFor(r.root, agent, id)
-	if err != nil {
-		return err
-	}
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		return err
-	}
-	return nil
+func (r *Registry) DeleteConversation(ctx context.Context, agent, id string) error {
+	return r.docs.Delete(ctx, store.Key(agent, id))
 }
 
 // RenameConversation sets a conversation's title. Returns nil when the
 // conversation does not exist.
-func (r *Registry) RenameConversation(agent, id, title string) (*transcript, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	t, err := r.readLocked(agent, id)
-	if err != nil || t == nil {
-		return nil, err
+func (r *Registry) RenameConversation(ctx context.Context, agent, id, title string) (*transcript, error) {
+	t, err := r.docs.Update(ctx, store.Key(agent, id), func(t *transcript) error {
+		normalize(t, agent, id)
+		t.Title = title
+		t.UpdatedAt = time.Now().UTC()
+		return nil
+	})
+	if errors.Is(err, store.ErrNotFound) {
+		return nil, nil
 	}
-	t.Title = title
-	t.UpdatedAt = time.Now().UTC()
-	if err := r.writeLocked(t); err != nil {
-		return nil, err
-	}
-	return t, nil
+	return t, err
 }
 
 // StartRetention launches a background sweeper that deletes conversations whose
 // last activity is older than retention, across all agents. It runs once
 // immediately and then every interval until ctx is cancelled. A non-positive
-// retention disables the sweeper. Safe to call once at startup.
+// retention disables the sweeper.
 func (r *Registry) StartRetention(ctx context.Context, retention, interval time.Duration) {
 	if retention <= 0 {
 		return
@@ -270,7 +261,7 @@ func (r *Registry) StartRetention(ctx context.Context, retention, interval time.
 		interval = time.Hour
 	}
 	purge := func() {
-		safego.Run("chat: purge expired", func() { r.purgeExpired(retention) })
+		safego.Run("chat: purge expired", func() { r.purgeExpired(ctx, retention) })
 	}
 	safego.Go("chat: purge loop", func() {
 		ticker := time.NewTicker(interval)
@@ -288,80 +279,35 @@ func (r *Registry) StartRetention(ctx context.Context, retention, interval time.
 }
 
 // purgeExpired deletes every conversation (for every agent) whose UpdatedAt is
-// older than now-retention. Errors on individual files are logged and skipped
-// so one bad file cannot stall the sweep.
-func (r *Registry) purgeExpired(retention time.Duration) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
+// older than now-retention. Errors on individual documents are logged and
+// skipped so one bad document cannot stall the sweep.
+func (r *Registry) purgeExpired(ctx context.Context, retention time.Duration) {
 	cutoff := time.Now().UTC().Add(-retention)
-	agents, err := os.ReadDir(r.root)
-	if err != nil {
-		if !os.IsNotExist(err) {
-			log.Printf("chat retention: read root %q: %v", r.root, err)
+	var expired []string
+	r.docs.Range(func(key string, t *transcript) {
+		a, id := splitKey(key)
+		normalize(t, a, id)
+		if t.UpdatedAt.Before(cutoff) {
+			expired = append(expired, key)
 		}
-		return
-	}
+	})
 	removed := 0
-	for _, ad := range agents {
-		if !ad.IsDir() {
+	for _, key := range expired {
+		if err := r.docs.Delete(ctx, key); err != nil {
+			log.Printf("chat retention: delete %s: %v", key, err)
 			continue
 		}
-		agent := ad.Name()
-		dir, err := store.AgentDir(r.root, agent)
-		if err != nil {
-			log.Printf("chat retention: skip agent dir %q: %v", agent, err)
-			continue
-		}
-		entries, err := os.ReadDir(dir)
-		if err != nil {
-			log.Printf("chat retention: read agent dir %q: %v", agent, err)
-			continue
-		}
-		for _, e := range entries {
-			name := e.Name()
-			if e.IsDir() || !strings.HasSuffix(name, ".json") || strings.HasSuffix(name, ".tmp") {
-				continue
-			}
-			id := strings.TrimSuffix(name, ".json")
-			t, err := r.readLocked(agent, id)
-			if err != nil || t == nil {
-				continue
-			}
-			if t.UpdatedAt.Before(cutoff) {
-				path, err := store.PathFor(r.root, agent, id)
-				if err != nil {
-					log.Printf("chat retention: skip %s/%s: %v", agent, id, err)
-					continue
-				}
-				if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-					log.Printf("chat retention: delete %s/%s: %v", agent, id, err)
-					continue
-				}
-				removed++
-			}
-		}
+		removed++
 	}
 	if removed > 0 {
 		log.Printf("chat retention: removed %d conversation(s) inactive for >%s", removed, retention)
 	}
 }
 
-// readLocked reads one conversation from disk, normalizing any legacy or
-// partial record (e.g. the pre-multi-conversation single history.json) so
-// callers always receive a complete transcript. Callers must hold r.mu.
-func (r *Registry) readLocked(agent, id string) (*transcript, error) {
-	path, err := store.PathFor(r.root, agent, id)
-	if err != nil {
-		return nil, err
-	}
-	t, err := store.ReadJSON[transcript](path, nil)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, err
-	}
+// normalize fills in any legacy or partial record (e.g. the
+// pre-multi-conversation single history.json) so callers always receive a
+// complete transcript.
+func normalize(t *transcript, agent, id string) {
 	if t.ID == "" {
 		t.ID = id
 	}
@@ -385,49 +331,46 @@ func (r *Registry) readLocked(agent, id string) (*transcript, error) {
 			t.UpdatedAt = t.CreatedAt
 		}
 	}
-	return t, nil
+	if t.Messages == nil {
+		t.Messages = []Message{}
+	}
 }
 
-// writeLocked persists a conversation, trimming to maxMessages. Callers must
-// hold r.mu.
-func (r *Registry) writeLocked(t *transcript) error {
+func trimMessages(t *transcript) {
 	if len(t.Messages) > maxMessages {
 		t.Messages = t.Messages[len(t.Messages)-maxMessages:]
 	}
-	return store.WriteJSON(r.root, t.Agent, t.ID, t)
 }
 
 // Post appends the user's message to the given conversation, asks the responder
-// for a reply, appends the reply, persists, and returns the assistant message.
-// The user's turn is persisted before the (slow) LLM call so it is never lost.
-// Returns ErrNotFound when the conversation does not exist.
+// for a reply, appends the reply, and returns the assistant message. The
+// user's turn is stored before the (slow) LLM call so it is never lost, and
+// each write re-reads the latest transcript so a concurrent Post's turns are
+// not clobbered. Returns ErrNotFound when the conversation does not exist.
 func (r *Registry) Post(ctx context.Context, agent, id, user, message string) (Message, error) {
 	if r.respond == nil {
 		return Message{}, fmt.Errorf("chat responder not configured")
 	}
-
-	r.mu.Lock()
-	t, err := r.readLocked(agent, id)
-	if err != nil {
-		r.mu.Unlock()
-		return Message{}, err
-	}
-	if t == nil {
-		r.mu.Unlock()
+	key := store.Key(agent, id)
+	var contextMsgs []Message
+	_, err := r.docs.Update(ctx, key, func(t *transcript) error {
+		normalize(t, agent, id)
+		contextMsgs = trimContext(t.Messages)
+		now := time.Now().UTC()
+		t.Messages = append(t.Messages, Message{Role: "user", User: user, Content: message, Time: now})
+		if t.Title == "" || t.Title == "New chat" {
+			t.Title = deriveTitle(message)
+		}
+		t.UpdatedAt = now
+		trimMessages(t)
+		return nil
+	})
+	if errors.Is(err, store.ErrNotFound) {
 		return Message{}, ErrNotFound
 	}
-	contextMsgs := trimContext(t.Messages)
-	now := time.Now().UTC()
-	t.Messages = append(t.Messages, Message{Role: "user", User: user, Content: message, Time: now})
-	if t.Title == "" || t.Title == "New chat" {
-		t.Title = deriveTitle(message)
-	}
-	t.UpdatedAt = now
-	if err := r.writeLocked(t); err != nil {
-		r.mu.Unlock()
+	if err != nil {
 		return Message{}, err
 	}
-	r.mu.Unlock()
 
 	reply, err := r.respond(ctx, agent, user, contextMsgs, message)
 	if err != nil {
@@ -435,19 +378,17 @@ func (r *Registry) Post(ctx context.Context, agent, id, user, message string) (M
 	}
 	assistantMsg := Message{Role: "assistant", Content: reply, Time: time.Now().UTC()}
 
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	// Re-read so a concurrent Post's turns are not clobbered.
-	current, err := r.readLocked(agent, id)
-	if err != nil {
-		return Message{}, err
-	}
-	if current == nil {
+	_, err = r.docs.Update(ctx, key, func(t *transcript) error {
+		normalize(t, agent, id)
+		t.Messages = append(t.Messages, assistantMsg)
+		t.UpdatedAt = assistantMsg.Time
+		trimMessages(t)
+		return nil
+	})
+	if errors.Is(err, store.ErrNotFound) {
 		return Message{}, ErrNotFound
 	}
-	current.Messages = append(current.Messages, assistantMsg)
-	current.UpdatedAt = assistantMsg.Time
-	if err := r.writeLocked(current); err != nil {
+	if err != nil {
 		return Message{}, err
 	}
 	return assistantMsg, nil

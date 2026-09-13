@@ -1,38 +1,35 @@
 package commands
 
-// readPersistentUserContext returns the on-disk per-user context for this
-// agent, or empty string if no store is configured or no file exists yet.
-func (h *GeneralHandler) readPersistentUserContext(userID string) string {
+import "context"
+
+// readPersistentUserContext returns the stored per-user context for this
+// agent relevant to question, or "" when no store is configured.
+func (h *GeneralHandler) readPersistentUserContext(ctx context.Context, userID, question string) string {
 	if h.userContextStore == nil || h.agentID == "" || userID == "" {
 		return ""
 	}
-	return h.userContextStore.Read(h.agentID, userID)
+	return h.userContextStore.Context(ctx, h.agentID, userID, question)
 }
 
-// persistUserContext appends a (question, answer) turn to the user's
-// context file. Called once per fully-completed request; errors are
-// swallowed by the store and logged internally.
-func (h *GeneralHandler) persistUserContext(userID, question, answer string) {
+// persistUserContext records a (question, answer) turn for the user. Called
+// once per fully-completed request; errors are logged inside the store.
+func (h *GeneralHandler) persistUserContext(ctx context.Context, userID, question, answer string) {
 	if h.userContextStore == nil || h.agentID == "" || userID == "" {
 		return
 	}
-	h.userContextStore.Append(h.agentID, userID, question, answer)
+	h.userContextStore.Append(ctx, h.agentID, userID, question, answer)
 }
 
-// readPersistentUserContext returns the on-disk per-user context for this
-// agent, or empty string if no store is configured.
-func (h *DebugHandler) readPersistentUserContext(userID string) string {
+func (h *DebugHandler) readPersistentUserContext(ctx context.Context, userID, question string) string {
 	if h.userContextStore == nil || h.agentID == "" || userID == "" {
 		return ""
 	}
-	return h.userContextStore.Read(h.agentID, userID)
+	return h.userContextStore.Context(ctx, h.agentID, userID, question)
 }
 
-// persistUserContext appends a (question, answer) turn to the user's
-// context file.
-func (h *DebugHandler) persistUserContext(userID, question, answer string) {
+func (h *DebugHandler) persistUserContext(ctx context.Context, userID, question, answer string) {
 	if h.userContextStore == nil || h.agentID == "" || userID == "" {
 		return
 	}
-	h.userContextStore.Append(h.agentID, userID, question, answer)
+	h.userContextStore.Append(ctx, h.agentID, userID, question, answer)
 }

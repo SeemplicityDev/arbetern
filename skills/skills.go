@@ -1,18 +1,17 @@
 // Package skills manages instruction blocks appended to agent system prompts.
 // Built-in skills mirror the prompt files shipped with each agent and are
-// read-only; custom skills are created from the management UI, persisted as
-// JSON under SKILLS_DIR, and injected into the prompts of the agents they
-// target.
+// read-only; custom skills are created from the management UI, stored under
+// Prefix in the state bucket, and injected into the prompts of the agents
+// they target.
 package skills
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
-	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -21,8 +20,8 @@ import (
 	"github.com/justmike1/arbetern/internal/store"
 )
 
-// DefaultDir is used when SKILLS_DIR is unset.
-const DefaultDir = "./data/skills"
+// Prefix is the object prefix custom skills are stored under.
+const Prefix = "skills/"
 
 const (
 	KindBuiltin = "builtin"
@@ -66,43 +65,49 @@ var (
 	ErrReadOnly = errors.New("built-in skills are defined in the agent prompt files and cannot be changed here")
 )
 
-// Registry holds custom skills in memory, mirrored to disk, plus a provider
-// for the built-in ones derived from prompt files.
+// Registry serves custom skills from the state bucket plus the read-only
+// built-in ones derived from prompt files.
 type Registry struct {
-	dir string
+	docs *store.Documents[Skill]
 
 	mu          sync.RWMutex
-	custom      map[string]*Skill
 	builtin     func() []Skill
 	knownAgents map[string]bool
 }
 
-// New constructs a Registry rooted at dir and loads existing custom skills.
-func New(dir string) (*Registry, error) {
-	if dir == "" {
-		dir = DefaultDir
+// New loads the custom skills stored under Prefix.
+func New(ctx context.Context, b *store.Backend) (*Registry, error) {
+	r := &Registry{
+		docs: store.NewDocuments(b, Prefix, func(s *Skill) error {
+			if s.ID == "" || !store.IDRe.MatchString(s.ID) {
+				return errors.New("missing or invalid id")
+			}
+			return nil
+		}),
+		knownAgents: map[string]bool{},
 	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return nil, fmt.Errorf("create skills dir: %w", err)
-	}
-	r := &Registry{dir: dir, custom: map[string]*Skill{}, knownAgents: map[string]bool{}}
-	paths, _ := filepath.Glob(filepath.Join(dir, "*.json"))
-	for _, p := range paths {
-		s, err := store.ReadJSON[Skill](p, nil)
-		if err != nil || s == nil || s.ID == "" || !store.IDRe.MatchString(s.ID) {
-			continue
-		}
-		s.Kind = KindCustom
-		if s.Scope == "" {
-			s.Scope = scopeFor(s.Agents)
-		}
-		r.custom[s.ID] = s
+	if err := r.docs.Load(ctx); err != nil {
+		return nil, fmt.Errorf("load skills: %w", err)
 	}
 	return r, nil
 }
 
-// Dir returns the directory backing the registry.
-func (r *Registry) Dir() string { return r.dir }
+// StartRefresh picks up skills written by other replicas every interval.
+func (r *Registry) StartRefresh(ctx context.Context, interval time.Duration) {
+	r.docs.StartRefresh(ctx, interval, nil)
+}
+
+// Count is the number of custom skills.
+func (r *Registry) Count() int { return r.docs.Len() }
+
+func docKey(id string) string { return id + ".json" }
+
+func normalize(s *Skill) {
+	s.Kind = KindCustom
+	if s.Scope == "" {
+		s.Scope = scopeFor(s.Agents)
+	}
+}
 
 // SetBuiltin installs the provider of read-only skills derived from prompts.
 func (r *Registry) SetBuiltin(fn func() []Skill) {
@@ -125,35 +130,33 @@ func (r *Registry) SetKnownAgents(ids []string) {
 // custom skills sorted by name.
 func (r *Registry) List() []Skill {
 	r.mu.RLock()
-	defer r.mu.RUnlock()
+	builtin := r.builtin
+	r.mu.RUnlock()
 	var out []Skill
-	if r.builtin != nil {
-		out = append(out, r.builtin()...)
+	if builtin != nil {
+		out = append(out, builtin()...)
 	}
-	custom := make([]Skill, 0, len(r.custom))
-	for _, s := range r.custom {
+	var custom []Skill
+	r.docs.Range(func(_ string, s *Skill) {
+		normalize(s)
 		custom = append(custom, *s)
-	}
+	})
 	sort.Slice(custom, func(i, j int) bool { return strings.ToLower(custom[i].Name) < strings.ToLower(custom[j].Name) })
 	return append(out, custom...)
 }
 
 // Get returns a custom skill by ID.
 func (r *Registry) Get(id string) (*Skill, bool) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	s, ok := r.custom[id]
+	s, ok := r.docs.Get(docKey(id))
 	if !ok {
 		return nil, false
 	}
-	cp := *s
-	return &cp, true
+	normalize(s)
+	return s, true
 }
 
-// Create validates and persists a new custom skill.
-func (r *Registry) Create(in Skill) (*Skill, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+// Create validates and stores a new custom skill.
+func (r *Registry) Create(ctx context.Context, in Skill) (*Skill, error) {
 	s := Skill{
 		Name:         strings.TrimSpace(in.Name),
 		Description:  strings.TrimSpace(in.Description),
@@ -165,7 +168,7 @@ func (r *Registry) Create(in Skill) (*Skill, error) {
 		CreatedBy:    strings.TrimSpace(in.CreatedBy),
 		CreatedAt:    time.Now().UTC().Format(time.RFC3339),
 	}
-	if err := r.validateLocked(&s); err != nil {
+	if err := r.validate(&s); err != nil {
 		return nil, err
 	}
 	id, err := store.NewID()
@@ -174,82 +177,71 @@ func (r *Registry) Create(in Skill) (*Skill, error) {
 	}
 	s.ID = id
 	s.Scope = scopeFor(s.Agents)
-	if err := r.persistLocked(&s); err != nil {
+	if err := r.docs.Create(ctx, docKey(id), &s); err != nil {
 		return nil, err
 	}
-	r.custom[s.ID] = &s
 	cp := s
 	return &cp, nil
 }
 
 // Update applies a partial change to a custom skill.
-func (r *Registry) Update(id string, p Patch) (*Skill, error) {
+func (r *Registry) Update(ctx context.Context, id string, p Patch) (*Skill, error) {
 	if strings.HasPrefix(id, "builtin-") {
 		return nil, ErrReadOnly
 	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	cur, ok := r.custom[id]
-	if !ok {
+	s, err := r.docs.Update(ctx, docKey(id), func(s *Skill) error {
+		normalize(s)
+		if p.Name != nil {
+			s.Name = strings.TrimSpace(*p.Name)
+		}
+		if p.Description != nil {
+			s.Description = strings.TrimSpace(*p.Description)
+		}
+		if p.Instructions != nil {
+			s.Instructions = strings.TrimSpace(*p.Instructions)
+		}
+		if p.Agents != nil {
+			s.Agents = normalizeAgents(*p.Agents)
+		}
+		if p.Enabled != nil {
+			s.Enabled = *p.Enabled
+		}
+		if err := r.validate(s); err != nil {
+			return err
+		}
+		s.Scope = scopeFor(s.Agents)
+		s.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+		return nil
+	})
+	if errors.Is(err, store.ErrNotFound) {
 		return nil, ErrNotFound
 	}
-	s := *cur
-	if p.Name != nil {
-		s.Name = strings.TrimSpace(*p.Name)
-	}
-	if p.Description != nil {
-		s.Description = strings.TrimSpace(*p.Description)
-	}
-	if p.Instructions != nil {
-		s.Instructions = strings.TrimSpace(*p.Instructions)
-	}
-	if p.Agents != nil {
-		s.Agents = normalizeAgents(*p.Agents)
-	}
-	if p.Enabled != nil {
-		s.Enabled = *p.Enabled
-	}
-	if err := r.validateLocked(&s); err != nil {
-		return nil, err
-	}
-	s.Scope = scopeFor(s.Agents)
-	s.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
-	if err := r.persistLocked(&s); err != nil {
-		return nil, err
-	}
-	r.custom[id] = &s
-	cp := s
-	return &cp, nil
+	return s, err
 }
 
-// Delete removes a custom skill from memory and disk.
-func (r *Registry) Delete(id string) error {
+// Delete removes a custom skill.
+func (r *Registry) Delete(ctx context.Context, id string) error {
 	if strings.HasPrefix(id, "builtin-") {
 		return ErrReadOnly
 	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if _, ok := r.custom[id]; !ok {
+	if _, ok := r.docs.Get(docKey(id)); !ok {
 		return ErrNotFound
 	}
-	if err := os.Remove(filepath.Join(r.dir, id+".json")); err != nil && !os.IsNotExist(err) {
+	if err := r.docs.Delete(ctx, docKey(id)); err != nil {
 		return fmt.Errorf("delete skill: %w", err)
 	}
-	delete(r.custom, id)
 	return nil
 }
 
 // Instructions returns the prompt blocks of every enabled custom skill that
 // applies to agentID, in name order.
 func (r *Registry) Instructions(agentID string) []string {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
 	var list []*Skill
-	for _, s := range r.custom {
+	r.docs.Range(func(_ string, s *Skill) {
 		if s.Enabled && appliesTo(s, agentID) {
 			list = append(list, s)
 		}
-	}
+	})
 	sort.Slice(list, func(i, j int) bool { return strings.ToLower(list[i].Name) < strings.ToLower(list[j].Name) })
 	out := make([]string, 0, len(list))
 	for _, s := range list {
@@ -292,7 +284,7 @@ func normalizeAgents(in []string) []string {
 	return out
 }
 
-func (r *Registry) validateLocked(s *Skill) error {
+func (r *Registry) validate(s *Skill) error {
 	switch {
 	case s.Name == "":
 		return errors.New("name is required")
@@ -305,6 +297,8 @@ func (r *Registry) validateLocked(s *Skill) error {
 	case len(s.Instructions) > maxInstructionsLen:
 		return fmt.Errorf("instructions must be at most %d characters", maxInstructionsLen)
 	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	if len(r.knownAgents) > 0 {
 		for _, a := range s.Agents {
 			if !r.knownAgents[a] {
@@ -313,10 +307,6 @@ func (r *Registry) validateLocked(s *Skill) error {
 		}
 	}
 	return nil
-}
-
-func (r *Registry) persistLocked(s *Skill) error {
-	return store.WriteJSONAt(r.dir, filepath.Join(r.dir, s.ID+".json"), s)
 }
 
 // Humanize turns a prompt key like "slack_formatting" into "Slack formatting".
@@ -367,7 +357,7 @@ func (r *Registry) RegisterRoutes(apiMux *http.ServeMux, userFor func(*http.Requ
 			if userFor != nil {
 				in.CreatedBy = userFor(req)
 			}
-			s, err := r.Create(in)
+			s, err := r.Create(req.Context(), in)
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
@@ -393,14 +383,14 @@ func (r *Registry) RegisterRoutes(apiMux *http.ServeMux, userFor func(*http.Requ
 				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
 			}
-			s, err := r.Update(id, p)
+			s, err := r.Update(req.Context(), id, p)
 			if err != nil {
 				http.Error(w, err.Error(), statusFor(err))
 				return
 			}
 			writeJSON(w, http.StatusOK, s)
 		case http.MethodDelete:
-			if err := r.Delete(id); err != nil {
+			if err := r.Delete(req.Context(), id); err != nil {
 				http.Error(w, err.Error(), statusFor(err))
 				return
 			}

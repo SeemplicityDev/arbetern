@@ -315,7 +315,7 @@ func (h *GeneralHandler) Execute(channelID, userID, text, responseURL, auditTS s
 	if history != "" {
 		systemMsg += fmt.Sprintf("\n\nPrevious conversation with this user:\n%s", history)
 	}
-	if persistent := h.readPersistentUserContext(userID); persistent != "" {
+	if persistent := h.readPersistentUserContext(ctx, userID, text); persistent != "" {
 		systemMsg += fmt.Sprintf("\n\nRecurring topics this user has asked about previously (may hint at current intent):\n%s", persistent)
 	}
 	if channelContext != "" && channelContext != "(no recent messages)" {
@@ -471,7 +471,7 @@ func (h *GeneralHandler) Execute(channelID, userID, text, responseURL, auditTS s
 
 			log.Printf("[user=%s channel=%s] general query completed successfully", userID, channelID)
 			h.memory.SetAssistantResponse(channelID, userID, choice.Message.Content)
-			h.persistUserContext(userID, text, choice.Message.Content)
+			h.persistUserContext(ctx, userID, text, choice.Message.Content)
 			stamp := llm.FormatUsageStamp(&totalUsage, activeClient.Model())
 			// If we already replied in a specific thread, don't send a redundant follow-up.
 			if repliedInThread {

@@ -1,6 +1,6 @@
 // Package mcp registers Model Context Protocol servers as connectors, stores
-// them under MCP_DIR, discovers their tools, and exposes those tools to the
-// agents allowed to use each connector.
+// them under Prefix in the state bucket, discovers their tools, and exposes
+// those tools to the agents allowed to use each connector.
 package mcp
 
 import (
@@ -11,8 +11,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"os"
-	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -22,8 +20,8 @@ import (
 	"github.com/justmike1/arbetern/internal/store"
 )
 
-// DefaultDir is used when MCP_DIR is unset.
-const DefaultDir = "./data/mcp"
+// Prefix is the object prefix connectors are stored under.
+const Prefix = "mcp/"
 
 const (
 	TransportHTTP = "http"
@@ -108,40 +106,46 @@ func (t AgentTool) Schema() json.RawMessage {
 	return s
 }
 
-// Registry holds connectors in memory, mirrored to disk.
+// Registry serves connectors from the state bucket.
 type Registry struct {
-	dir string
+	docs *store.Documents[Connector]
 
 	mu          sync.RWMutex
-	items       map[string]*Connector
 	knownAgents map[string]bool
 }
 
-// New constructs a Registry rooted at dir and loads existing connectors.
-func New(dir string) (*Registry, error) {
-	if dir == "" {
-		dir = DefaultDir
+// New loads the connectors stored under Prefix.
+func New(ctx context.Context, b *store.Backend) (*Registry, error) {
+	r := &Registry{
+		docs: store.NewDocuments(b, Prefix, func(c *Connector) error {
+			if c.ID == "" || !store.IDRe.MatchString(c.ID) {
+				return errors.New("missing or invalid id")
+			}
+			return nil
+		}),
+		knownAgents: map[string]bool{},
 	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return nil, fmt.Errorf("create mcp dir: %w", err)
-	}
-	r := &Registry{dir: dir, items: map[string]*Connector{}, knownAgents: map[string]bool{}}
-	paths, _ := filepath.Glob(filepath.Join(dir, "*.json"))
-	for _, p := range paths {
-		c, err := store.ReadJSON[Connector](p, nil)
-		if err != nil || c == nil || c.ID == "" || !store.IDRe.MatchString(c.ID) {
-			continue
-		}
-		if c.Transport == "" {
-			c.Transport = TransportHTTP
-		}
-		r.items[c.ID] = c
+	if err := r.docs.Load(ctx); err != nil {
+		return nil, fmt.Errorf("load mcp connectors: %w", err)
 	}
 	return r, nil
 }
 
-// Dir returns the directory backing the registry.
-func (r *Registry) Dir() string { return r.dir }
+// StartRefresh picks up connectors written by other replicas every interval.
+func (r *Registry) StartRefresh(ctx context.Context, interval time.Duration) {
+	r.docs.StartRefresh(ctx, interval, nil)
+}
+
+// Count is the number of registered connectors.
+func (r *Registry) Count() int { return r.docs.Len() }
+
+func docKey(id string) string { return id + ".json" }
+
+func normalize(c *Connector) {
+	if c.Transport == "" {
+		c.Transport = TransportHTTP
+	}
+}
 
 // SetKnownAgents restricts the agent IDs a connector may target.
 func (r *Registry) SetKnownAgents(ids []string) {
@@ -155,32 +159,28 @@ func (r *Registry) SetKnownAgents(ids []string) {
 
 // List returns every connector with header values masked, sorted by name.
 func (r *Registry) List() []Connector {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	out := make([]Connector, 0, len(r.items))
-	for _, c := range r.items {
+	var out []Connector
+	r.docs.Range(func(_ string, c *Connector) {
+		normalize(c)
 		out = append(out, c.public())
-	}
+	})
 	sort.Slice(out, func(i, j int) bool { return strings.ToLower(out[i].Name) < strings.ToLower(out[j].Name) })
 	return out
 }
 
 // Get returns a connector with header values masked.
 func (r *Registry) Get(id string) (*Connector, bool) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	c, ok := r.items[id]
+	c, ok := r.docs.Get(docKey(id))
 	if !ok {
 		return nil, false
 	}
+	normalize(c)
 	p := c.public()
 	return &p, true
 }
 
-// Create validates and persists a new connector.
-func (r *Registry) Create(in Connector) (*Connector, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+// Create validates and stores a new connector.
+func (r *Registry) Create(ctx context.Context, in Connector) (*Connector, error) {
 	c := Connector{
 		Name:        strings.TrimSpace(in.Name),
 		Description: strings.TrimSpace(in.Description),
@@ -192,7 +192,7 @@ func (r *Registry) Create(in Connector) (*Connector, error) {
 		CreatedBy:   strings.TrimSpace(in.CreatedBy),
 		CreatedAt:   time.Now().UTC().Format(time.RFC3339),
 	}
-	if err := r.validateLocked(&c); err != nil {
+	if err := r.validate(&c); err != nil {
 		return nil, err
 	}
 	id, err := store.NewID()
@@ -200,87 +200,78 @@ func (r *Registry) Create(in Connector) (*Connector, error) {
 		return nil, err
 	}
 	c.ID = id
-	if err := r.persistLocked(&c); err != nil {
+	if err := r.docs.Create(ctx, docKey(id), &c); err != nil {
 		return nil, err
 	}
-	r.items[c.ID] = &c
 	p := c.public()
 	return &p, nil
 }
 
 // Update applies a partial change. A changed URL or headers clears the
 // discovered tools until the connector is tested again.
-func (r *Registry) Update(id string, p Patch) (*Connector, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	cur, ok := r.items[id]
-	if !ok {
+func (r *Registry) Update(ctx context.Context, id string, p Patch) (*Connector, error) {
+	c, err := r.docs.Update(ctx, docKey(id), func(c *Connector) error {
+		normalize(c)
+		if p.Name != nil {
+			c.Name = strings.TrimSpace(*p.Name)
+		}
+		if p.Description != nil {
+			c.Description = strings.TrimSpace(*p.Description)
+		}
+		endpointChanged := false
+		if p.URL != nil && strings.TrimSpace(*p.URL) != c.URL {
+			c.URL = strings.TrimSpace(*p.URL)
+			endpointChanged = true
+		}
+		if p.Headers != nil {
+			c.Headers = cleanHeaders(*p.Headers, c.Headers)
+			endpointChanged = true
+		}
+		if p.Agents != nil {
+			c.Agents = normalizeAgents(*p.Agents)
+		}
+		if p.Enabled != nil {
+			c.Enabled = *p.Enabled
+		}
+		if endpointChanged {
+			c.Tools = nil
+			c.ServerName, c.ServerVersion, c.ProtocolVersion = "", "", ""
+			c.LastCheck, c.LastError = "", ""
+		}
+		if err := r.validate(c); err != nil {
+			return err
+		}
+		c.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+		return nil
+	})
+	if errors.Is(err, store.ErrNotFound) {
 		return nil, ErrNotFound
 	}
-	c := *cur
-	if p.Name != nil {
-		c.Name = strings.TrimSpace(*p.Name)
-	}
-	if p.Description != nil {
-		c.Description = strings.TrimSpace(*p.Description)
-	}
-	endpointChanged := false
-	if p.URL != nil && strings.TrimSpace(*p.URL) != c.URL {
-		c.URL = strings.TrimSpace(*p.URL)
-		endpointChanged = true
-	}
-	if p.Headers != nil {
-		c.Headers = cleanHeaders(*p.Headers, cur.Headers)
-		endpointChanged = true
-	}
-	if p.Agents != nil {
-		c.Agents = normalizeAgents(*p.Agents)
-	}
-	if p.Enabled != nil {
-		c.Enabled = *p.Enabled
-	}
-	if endpointChanged {
-		c.Tools = nil
-		c.ServerName, c.ServerVersion, c.ProtocolVersion = "", "", ""
-		c.LastCheck, c.LastError = "", ""
-	}
-	if err := r.validateLocked(&c); err != nil {
+	if err != nil {
 		return nil, err
 	}
-	c.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
-	if err := r.persistLocked(&c); err != nil {
-		return nil, err
-	}
-	r.items[id] = &c
 	pub := c.public()
 	return &pub, nil
 }
 
-// Delete removes a connector from memory and disk.
-func (r *Registry) Delete(id string) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if _, ok := r.items[id]; !ok {
+// Delete removes a connector.
+func (r *Registry) Delete(ctx context.Context, id string) error {
+	if _, ok := r.docs.Get(docKey(id)); !ok {
 		return ErrNotFound
 	}
-	if err := os.Remove(filepath.Join(r.dir, id+".json")); err != nil && !os.IsNotExist(err) {
+	if err := r.docs.Delete(ctx, docKey(id)); err != nil {
 		return fmt.Errorf("delete connector: %w", err)
 	}
-	delete(r.items, id)
 	return nil
 }
 
 // Test performs the MCP handshake and tool discovery, recording the outcome
 // on the connector. A failed probe is stored as LastError, not returned.
 func (r *Registry) Test(ctx context.Context, id string) (*Connector, error) {
-	r.mu.RLock()
-	cur, ok := r.items[id]
+	snapshot, ok := r.docs.Get(docKey(id))
 	if !ok {
-		r.mu.RUnlock()
 		return nil, ErrNotFound
 	}
-	snapshot := *cur
-	r.mu.RUnlock()
 
 	ctx, cancel := context.WithTimeout(ctx, discoveryTimeout)
 	defer cancel()
@@ -291,22 +282,23 @@ func (r *Registry) Test(ctx context.Context, id string) (*Connector, error) {
 		tools, err = client.ListTools(ctx)
 	}
 
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	c, ok := r.items[id]
-	if !ok {
-		return nil, ErrNotFound
-	}
-	c.LastCheck = time.Now().UTC().Format(time.RFC3339)
-	if err != nil {
-		c.LastError = err.Error()
-	} else {
+	c, uerr := r.docs.Update(ctx, docKey(id), func(c *Connector) error {
+		normalize(c)
+		c.LastCheck = time.Now().UTC().Format(time.RFC3339)
+		if err != nil {
+			c.LastError = err.Error()
+			return nil
+		}
 		c.LastError = ""
 		c.Tools = tools
 		c.ServerName, c.ServerVersion, c.ProtocolVersion = info.Name, info.Version, info.ProtocolVersion
+		return nil
+	})
+	if errors.Is(uerr, store.ErrNotFound) {
+		return nil, ErrNotFound
 	}
-	if perr := r.persistLocked(c); perr != nil {
-		return nil, perr
+	if uerr != nil {
+		return nil, uerr
 	}
 	p := c.public()
 	return &p, nil
@@ -315,19 +307,16 @@ func (r *Registry) Test(ctx context.Context, id string) (*Connector, error) {
 // ToolsFor returns the tools of every enabled connector agentID may use, each
 // with a unique LLM-safe name.
 func (r *Registry) ToolsFor(agentID string) []AgentTool {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	ids := make([]string, 0, len(r.items))
-	for id, c := range r.items {
+	var eligible []*Connector
+	r.docs.Range(func(_ string, c *Connector) {
 		if c.Enabled && c.LastError == "" && len(c.Tools) > 0 && appliesTo(c, agentID) {
-			ids = append(ids, id)
+			eligible = append(eligible, c)
 		}
-	}
-	sort.Strings(ids)
+	})
+	sort.Slice(eligible, func(i, j int) bool { return eligible[i].ID < eligible[j].ID })
 	var out []AgentTool
 	taken := map[string]bool{}
-	for _, id := range ids {
-		c := r.items[id]
+	for _, c := range eligible {
 		prefix := "mcp_" + store.Slugify(c.Name, "server")
 		for _, t := range c.Tools {
 			name := llmToolName(prefix, t.Name, taken)
@@ -341,18 +330,14 @@ func (r *Registry) ToolsFor(agentID string) []AgentTool {
 // Call invokes a tool on a connector and returns its text output. A tool-side
 // error is returned as text prefixed with "Error" so the model can react.
 func (r *Registry) Call(ctx context.Context, connectorID, tool string, args json.RawMessage) (string, error) {
-	r.mu.RLock()
-	c, ok := r.items[connectorID]
+	c, ok := r.docs.Get(docKey(connectorID))
 	if !ok {
-		r.mu.RUnlock()
 		return "", ErrNotFound
 	}
 	if !c.Enabled {
-		r.mu.RUnlock()
 		return "", ErrDisabled
 	}
 	snapshot := *c
-	r.mu.RUnlock()
 
 	ctx, cancel := context.WithTimeout(ctx, callTimeout)
 	defer cancel()
@@ -444,7 +429,7 @@ func cleanHeaders(in, previous map[string]string) map[string]string {
 	return out
 }
 
-func (r *Registry) validateLocked(c *Connector) error {
+func (r *Registry) validate(c *Connector) error {
 	switch {
 	case c.Name == "":
 		return errors.New("name is required")
@@ -464,6 +449,8 @@ func (r *Registry) validateLocked(c *Connector) error {
 			return fmt.Errorf("invalid header name %q", k)
 		}
 	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	if len(r.knownAgents) > 0 {
 		for _, a := range c.Agents {
 			if !r.knownAgents[a] {
@@ -472,10 +459,6 @@ func (r *Registry) validateLocked(c *Connector) error {
 		}
 	}
 	return nil
-}
-
-func (r *Registry) persistLocked(c *Connector) error {
-	return store.WriteJSONAt(r.dir, filepath.Join(r.dir, c.ID+".json"), c)
 }
 
 var toolNameRe = regexp.MustCompile(`[^a-zA-Z0-9_-]+`)
@@ -517,7 +500,7 @@ func (r *Registry) RegisterRoutes(apiMux *http.ServeMux, userFor func(*http.Requ
 			if userFor != nil {
 				in.CreatedBy = userFor(req)
 			}
-			c, err := r.Create(in)
+			c, err := r.Create(req.Context(), in)
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
@@ -543,14 +526,14 @@ func (r *Registry) RegisterRoutes(apiMux *http.ServeMux, userFor func(*http.Requ
 				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
 			}
-			c, err := r.Update(id, p)
+			c, err := r.Update(req.Context(), id, p)
 			if err != nil {
 				http.Error(w, err.Error(), statusFor(err))
 				return
 			}
 			writeJSON(w, http.StatusOK, c)
 		case http.MethodDelete:
-			if err := r.Delete(id); err != nil {
+			if err := r.Delete(req.Context(), id); err != nil {
 				http.Error(w, err.Error(), statusFor(err))
 				return
 			}

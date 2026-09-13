@@ -111,9 +111,26 @@ let skillFilter = 'all';
 let mcpData = null;
 
 function escapeHtml(str) {
-  const d = document.createElement('div');
-  d.textContent = str == null ? '' : String(str);
-  return d.innerHTML;
+  return String(str == null ? '' : str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+// Agent and descriptor ids are validated server-side against this alphabet;
+// anything else is never interpolated into markup.
+const SAFE_ID_RE = /^[a-z0-9][a-z0-9-]{0,62}$/;
+function safeId(id) {
+  return typeof id === 'string' && SAFE_ID_RE.test(id) ? id : null;
+}
+
+function elem(tag, className, text) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text != null) node.textContent = text;
+  return node;
 }
 
 function httpError(status) {
@@ -1104,34 +1121,42 @@ function renderAgents(agents) {
 
 function applyAgentExtras() {
   document.querySelectorAll('#agents-grid .agent-card').forEach(card => {
-    const id = card.getAttribute('data-agent-id');
-    if (!id) return;
+    // Resolve the card back to the agent record instead of trusting the
+    // attribute text, so only ids the API returned reach the markup.
+    const agent = agentById(card.getAttribute('data-agent-id'));
+    if (!agent) return;
     card.querySelectorAll('.agent-dashboards, .agent-workflows').forEach(el => el.remove());
-    card.insertAdjacentHTML('beforeend', renderAgentDashboards(id) + renderAgentWorkflows(id));
+    card.insertAdjacentHTML('beforeend', renderAgentDashboards(agent.id) + renderAgentWorkflows(agent.id));
   });
 }
 
 function renderAgentDashboards(agentId) {
-  const list = (AGENT_DASHBOARDS[agentId] || []);
+  const aid = safeId(agentId);
+  const list = aid ? (AGENT_DASHBOARDS[aid] || []) : [];
   if (list.length === 0) return '';
   const chips = list.map(d => {
+    const did = safeId(d.id);
+    if (!did) return '';
     const label = escapeHtml(d.short_name || d.name || d.id);
-    const url = `/${agentId}/dashboard/${encodeURIComponent(d.id)}`;
+    const url = `/${aid}/dashboard/${did}`;
     const title = escapeHtml(d.name + (d.description ? ' — ' + d.description : ''));
-    return `<a class="agent-dashboard-chip" href="${url}" target="_blank" rel="noopener" title="${title}" onclick="event.stopPropagation()">${label}<button class="dash-delete" title="Delete dashboard" onclick="event.preventDefault();event.stopPropagation();deleteDashboard('${agentId}','${d.id}');">×</button></a>`;
+    return `<a class="agent-dashboard-chip" href="${url}" target="_blank" rel="noopener" title="${title}" onclick="event.stopPropagation()">${label}<button class="dash-delete" title="Delete dashboard" onclick="event.preventDefault();event.stopPropagation();deleteDashboard('${aid}','${did}');">×</button></a>`;
   }).join('');
   return `<div class="agent-dashboards"><div class="agent-dashboards-label">Available dashboards</div><div class="agent-dashboards-list">${chips}</div></div>`;
 }
 
 function renderAgentWorkflows(agentId) {
-  const list = (AGENT_WORKFLOWS[agentId] || []);
+  const aid = safeId(agentId);
+  const list = aid ? (AGENT_WORKFLOWS[aid] || []) : [];
   if (list.length === 0) return '';
   const chips = list.map(w => {
+    const wid = safeId(w.id);
+    if (!wid) return '';
     const label = escapeHtml(w.short_name || w.name || w.id);
-    const url = `/${agentId}/workflow/${encodeURIComponent(w.id)}`;
+    const url = `/${aid}/workflow/${wid}`;
     const title = escapeHtml(w.name + (w.description ? ' — ' + w.description : '') + ' · cron ' + (w.cron || '—'));
     const cls = w.last_error ? ' err' : '';
-    return `<a class="agent-workflow-chip${cls}" href="${url}" target="_blank" rel="noopener" title="${title}" onclick="event.stopPropagation()">${label}<button class="wf-delete" title="Delete workflow" onclick="event.preventDefault();event.stopPropagation();deleteWorkflow('${agentId}','${w.id}');">×</button></a>`;
+    return `<a class="agent-workflow-chip${cls}" href="${url}" target="_blank" rel="noopener" title="${title}" onclick="event.stopPropagation()">${label}<button class="wf-delete" title="Delete workflow" onclick="event.preventDefault();event.stopPropagation();deleteWorkflow('${aid}','${wid}');">×</button></a>`;
   }).join('');
   return `<div class="agent-workflows"><div class="agent-workflows-label">Scheduled workflows</div><div class="agent-workflows-list">${chips}</div></div>`;
 }
@@ -1300,25 +1325,39 @@ function populateAgentSelect() {
   if (chatAgentId) sel.value = chatAgentId;
 }
 
+// Built with DOM nodes rather than markup: titles are user text and the agent
+// id can come from the URL, so neither is ever parsed as HTML.
 function renderConvList(list) {
   const box = document.getElementById('fs-conv-list');
+  box.replaceChildren();
   if (!list || list.length === 0) {
-    box.innerHTML = '<div class="chat-empty">No conversations yet.</div>';
+    box.appendChild(elem('div', 'chat-empty', 'No conversations yet.'));
     return;
   }
-  box.innerHTML = list.map(c => {
-    const active = c.id === chatConvId ? ' active' : '';
-    const title = escapeHtml(c.title || 'New chat');
-    return `
-      <div class="fs-conv${active}" onclick="selectConversation('${chatAgentId}','${c.id}')">
-        <div class="fs-conv-info">
-          <div class="fs-conv-name">${title}</div>
-          <div class="fs-conv-sub">${timeAgo(c.updated_at)} · ${plural(c.message_count, 'msg')}</div>
-        </div>
-        <button class="fs-conv-action" title="Rename" onclick="event.stopPropagation();renameConversationPrompt('${c.id}', this)">&#x270e;</button>
-        <button class="fs-conv-action" title="Delete" onclick="event.stopPropagation();removeConversation('${c.id}')">&#x1f5d1;</button>
-      </div>`;
-  }).join('');
+  const agent = chatAgentId;
+  for (const c of list) {
+    const row = elem('div', 'fs-conv' + (c.id === chatConvId ? ' active' : ''));
+    row.addEventListener('click', () => selectConversation(agent, c.id));
+
+    const info = elem('div', 'fs-conv-info');
+    info.append(
+      elem('div', 'fs-conv-name', c.title || 'New chat'),
+      elem('div', 'fs-conv-sub', `${timeAgo(c.updated_at)} · ${plural(c.message_count, 'msg')}`),
+    );
+
+    const rename = elem('button', 'fs-conv-action', '\u270e');
+    rename.type = 'button';
+    rename.title = 'Rename';
+    rename.addEventListener('click', e => { e.stopPropagation(); renameConversationPrompt(c.id, rename); });
+
+    const remove = elem('button', 'fs-conv-action', '\u{1f5d1}');
+    remove.type = 'button';
+    remove.title = 'Delete';
+    remove.addEventListener('click', e => { e.stopPropagation(); removeConversation(c.id); });
+
+    row.append(info, rename, remove);
+    box.appendChild(row);
+  }
 }
 
 async function refreshConvList(agent) {
@@ -1334,6 +1373,7 @@ async function refreshConvList(agent) {
 async function selectFullChatAgent(id, convId) {
   const agent = agentById(id);
   if (!agent) return;
+  id = agent.id;
   chatAgentId = id;
   chatConvId = null;
   chatFull = true;

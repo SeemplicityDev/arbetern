@@ -95,7 +95,7 @@ func (r *Registry) handleCollection(w http.ResponseWriter, req *http.Request, ag
 		writeJSON(w, http.StatusOK, list)
 
 	case http.MethodPost:
-		conv, err := r.CreateConversation(agent)
+		conv, err := r.CreateConversation(req.Context(), agent)
 		if err != nil {
 			http.Error(w, "failed to create conversation", http.StatusInternalServerError)
 			return
@@ -177,7 +177,7 @@ func (r *Registry) handleConversation(w http.ResponseWriter, req *http.Request, 
 		if len(title) > 120 {
 			title = title[:120]
 		}
-		conv, err := r.RenameConversation(agent, id, title)
+		conv, err := r.RenameConversation(req.Context(), agent, id, title)
 		if err != nil {
 			http.Error(w, "failed to rename conversation", http.StatusInternalServerError)
 			return
@@ -189,7 +189,7 @@ func (r *Registry) handleConversation(w http.ResponseWriter, req *http.Request, 
 		writeJSON(w, http.StatusOK, conv)
 
 	case http.MethodDelete:
-		if err := r.DeleteConversation(agent, id); err != nil {
+		if err := r.DeleteConversation(req.Context(), agent, id); err != nil {
 			http.Error(w, "failed to delete conversation", http.StatusInternalServerError)
 			return
 		}
