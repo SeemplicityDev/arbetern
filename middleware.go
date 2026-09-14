@@ -73,13 +73,30 @@ func fromTrustedProxy(r *http.Request) bool {
 	return ipInAny(net.ParseIP(directPeerIP(r)), trustedProxies)
 }
 
-// clientIP returns the address to make access decisions on. X-Forwarded-For is
-// only consulted when the immediate peer is a trusted proxy, and then it is
-// walked from the right, skipping trusted hops — a client-supplied prefix
-// cannot reach the front of that walk, so the header cannot be spoofed past
-// the gate.
+// clientIP returns the address to make access decisions on.
+//
+// With TRUSTED_PROXY_CIDRS configured, X-Forwarded-For is read only from those
+// peers and walked from the right, skipping trusted hops — a client-supplied
+// prefix cannot reach the front of that walk, so the header cannot be spoofed
+// past the gate.
+//
+// With it unset the leftmost hop is used, which is spoofable. That is the
+// reason TRUSTED_PROXY_CIDRS exists, but a load balancer in front is the normal
+// deployment: refusing the header here would resolve every real client to the
+// balancer's own address and deny everyone the UI_ALLOWED_CIDRS gate is meant
+// to admit. Startup warns when the gate is on and no proxy is trusted.
 func clientIP(r *http.Request) string {
 	peer := directPeerIP(r)
+	if len(trustedProxies) == 0 {
+		xff := strings.TrimSpace(r.Header.Get("X-Forwarded-For"))
+		if xff == "" {
+			return peer
+		}
+		if i := strings.Index(xff, ","); i != -1 {
+			return strings.TrimSpace(xff[:i])
+		}
+		return xff
+	}
 	if !fromTrustedProxy(r) {
 		return peer
 	}

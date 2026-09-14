@@ -2447,6 +2447,11 @@ func main() {
 				"Anything able to reach this pod can claim any identity and pass every allow-list. " +
 				"Set TRUSTED_PROXY_CIDRS to the address range your auth proxy connects from.")
 		}
+		if strings.TrimSpace(cfg.UIAllowedCIDRs) != "" {
+			log.Printf("WARNING: TRUSTED_PROXY_CIDRS is not set, so the UI_ALLOWED_CIDRS gate reads the first " +
+				"X-Forwarded-For entry, which a client can set. Set TRUSTED_PROXY_CIDRS to your load balancer's " +
+				"address range to take the real client from the rightmost untrusted hop instead.")
+		}
 	} else {
 		log.Printf("Identity headers trusted only from %s", cfg.TrustedProxyCIDRs)
 	}

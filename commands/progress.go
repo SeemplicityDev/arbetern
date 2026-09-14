@@ -2,6 +2,7 @@ package commands
 
 import (
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -51,6 +52,9 @@ func (p *slackProgress) publish(s progress.Snapshot) {
 		return
 	}
 	text := "_:hourglass_flowing_sand: " + s.Line(time.Now()) + "_"
+	if s.Plan != "" {
+		text += "\n" + quoteLines(s.Plan)
+	}
 	if p.ts == "" {
 		ts, err := p.slack.PostMessageInThread(p.channelID, p.threadTS, text)
 		if err != nil {
@@ -63,6 +67,16 @@ func (p *slackProgress) publish(s progress.Snapshot) {
 	if err := p.slack.UpdateMessage(p.channelID, p.ts, text); err != nil {
 		log.Printf("[progress] update failed channel=%s thread=%s: %v", p.channelID, p.threadTS, err)
 	}
+}
+
+// quoteLines renders the plan as a Slack blockquote so it reads as context
+// under the status line rather than as a second message.
+func quoteLines(s string) string {
+	lines := strings.Split(strings.TrimSpace(s), "\n")
+	for i, l := range lines {
+		lines[i] = "> " + strings.TrimSpace(l)
+	}
+	return strings.Join(lines, "\n")
 }
 
 func (p *slackProgress) done() {

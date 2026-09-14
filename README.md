@@ -292,7 +292,7 @@ When enabled, the chart automatically rewires the `ingress` backend to the proxy
 - With a single provider configured, the interstitial sign-in page is skipped and users go straight to the provider.
 - This is independent of `UI_ALLOWED_CIDRS`; you can use either or both.
 - The proxy passes the verified identity to the app as `X-Auth-Request-Email` (via `set_xauthrequest`). arbetern uses this to enforce per-agent chat access by email — see [Chat access by email](#chat-access-by-email-ui).
-- Narrow `email_domains` to your own domain. The chart ships `"yourcompany.com"` as a placeholder; `"*"` would let any account with the provider sign in.
+- Narrow `email_domains` to your own domain. The chart ships `["*"]` because that is the only value that works unconfigured, but it lets anyone the provider will authenticate reach the console shell. `configFile` is a single opaque string, so setting just that one key in your own values does nothing — copy the whole `configFile` block across and edit the line.
 
 **Set `TRUSTED_PROXY_CIDRS` when you enable the proxy.** The identity header is
 just a header: on its own the app cannot tell the proxy from any other caller,
@@ -990,7 +990,35 @@ docs/                # setup guides (Slack, GitHub PAT, Atlassian)
 
 Edit any `agents/<name>/prompts.yaml` to change LLM behavior without recompiling. Keys: `intro`, `security`, `classifier`, `debug`, `general`.
 
-Global prompts (e.g. `security`) are defined in `agents/prompts.yaml` and inherited by all agents. Agent-specific prompts override globals.
+Global prompts are defined in `agents/prompts.yaml` and inherited by every agent. Each key there is joined into every system prompt the agent builds, so a rule added to that file applies to all agents from every entry point — Slack commands, thread replies, the chat UI, scheduled workflow ticks and dashboard renders. Agent-specific prompts override globals by key.
+
+| Global key | What it governs |
+|---|---|
+| `security` | Scope policy, prompt-injection and secret-handling rules |
+| `user_identity` | How the pre-resolved requester is referenced across integrations |
+| `slack_formatting` | Slack mrkdwn output rules, brevity, bias toward action |
+| `action_first_response` | No pre-action acknowledgements; report completed results |
+| `code_comments` | Comment policy for every code change the agent authors |
+| `repo_agent_instructions` | Reading a repository's own CLAUDE.md / AGENTS.md before changing it |
+| `pull_request_updates` | Committing follow-up work onto the existing PR instead of opening another |
+| `plan_then_batch` | Plan the whole change set first, ask only where the plan forks, execute in batches, verify before handing off |
+| `clarify_before_expedition` | When an open-ended ask must pause for one round of questions |
+
+The `plan_then_batch` block exists because an unplanned agent run spreads one
+logical change across dozens of single-file commits, sometimes undoing its own
+earlier steps. It requires the agent to settle the change set before the first
+write, group commits by logical change rather than by file, leave no scratch or
+self-reverting commits, and confirm checks are green before asking for review.
+
+**Where the plan shows up.** The agent writes it as the text accompanying its
+first batch of tool calls, which costs no extra message and no round-trip. That
+text is kept in the turn — so the model can still see its own plan on round 30
+of a long loop — and is surfaced in the in-flight progress note once a turn
+passes 45 seconds, as a blockquote under the status line in Slack and under the
+pending bubble in the chat UI. A turn that finishes sooner shows nothing, so
+short tasks stay silent and the agent never has to judge whether the work is
+"big enough" to announce. The user can read the plan while the work runs and
+interrupt a wrong one early, which is the point: no approval step, no waiting.
 
 ## Skills
 

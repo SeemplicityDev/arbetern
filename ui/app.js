@@ -2048,6 +2048,8 @@ function progressLine(p) {
   const age = elapsed < 60 ? `${Math.floor(elapsed)}s` : `${Math.floor(elapsed / 60)}m`;
   let line = `Still working — ${age} elapsed`;
   if (p.tool_calls > 0) line += `, ${p.tool_calls} tool calls (last: ${p.last_tool})`;
+  // Show what the agent said it was doing, so a wrong run can be stopped early.
+  if (p.plan) line += `\n\n${p.plan}`;
   return line;
 }
 

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/justmike1/arbetern/internal/safego"
+	"github.com/justmike1/arbetern/internal/text"
 )
 
 // Snapshot is the state of a turn at one moment.
@@ -16,7 +17,14 @@ type Snapshot struct {
 	StartedAt time.Time `json:"started_at"`
 	ToolCalls int       `json:"tool_calls"`
 	LastTool  string    `json:"last_tool,omitempty"`
+	// Plan is what the model said it was about to do, taken from the text it
+	// wrote alongside its first tool calls. It lets a long turn show its
+	// intent while it runs, so the user can stop a wrong one early.
+	Plan string `json:"plan,omitempty"`
 }
+
+// maxPlanBytes keeps the plan short enough for a status message.
+const maxPlanBytes = 600
 
 // Elapsed is how long the turn has been running at now.
 func (s Snapshot) Elapsed(now time.Time) time.Duration { return now.Sub(s.StartedAt) }
@@ -48,6 +56,24 @@ type Tracker struct {
 // NewTracker starts tracking a turn that begins now.
 func NewTracker() *Tracker {
 	return &Tracker{snap: Snapshot{StartedAt: time.Now().UTC()}}
+}
+
+// SetPlan records the turn's stated plan. Only the first one is kept: later
+// rounds narrate individual steps, and replacing the plan with the latest of
+// those would turn a stable summary into churn.
+func (t *Tracker) SetPlan(plan string) {
+	if t == nil {
+		return
+	}
+	plan = strings.TrimSpace(plan)
+	if plan == "" {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.snap.Plan == "" {
+		t.snap.Plan = text.Truncate(plan, maxPlanBytes)
+	}
 }
 
 // ToolCalled records that the turn invoked the named tool.

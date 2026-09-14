@@ -357,10 +357,12 @@ oauth2-proxy:
     # `upstreams` host = arbetern Service name = Helm release name
     # (e.g. release "foo" -> http://foo-arbetern:80); adjust if yours differs.
     configFile: |-
-      # Restrict sign-in to your own domain. "*" accepts any Google account,
-      # which combined with arbetern's per-agent allow-lists still means every
-      # stranger reaches the console shell.
-      email_domains = ["yourcompany.com"]
+      # "*" accepts any account the provider will authenticate, which is the
+      # only value that works out of the box. NARROW THIS: set it to your own
+      # domain so a stranger with a Google account cannot reach the console.
+      # `configFile` is one opaque string, so a partial override does nothing —
+      # copy this whole block into your own values and edit the one line.
+      email_domains = ["*"]
       upstreams = ["http://arbetern:80"]
       # Must exceed a UI chat turn (chat.chatRequestTimeout, 5m); the 30s default
       # aborts long turns with a 502.

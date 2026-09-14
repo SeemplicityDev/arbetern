@@ -180,7 +180,11 @@ func (h *GeneralHandler) runToolLoop(ctx context.Context, lp toolLoop) (res loop
 			return res, nil
 		}
 
-		messages = append(messages, llm.ChatMessage{Role: "assistant", ToolCalls: choice.Message.ToolCalls})
+		// Keep any text the model wrote alongside its tool calls. Dropping it
+		// loses the turn's stated plan from both the transcript the model sees
+		// on later rounds and the progress the user sees while it works.
+		messages = append(messages, llm.ChatMessage{Role: "assistant", Content: choice.Message.Content, ToolCalls: choice.Message.ToolCalls})
+		lp.progress.SetPlan(choice.Message.Content)
 		res.ToolCalls += len(toolCalls)
 		for _, tc := range toolCalls {
 			lp.progress.ToolCalled(tc.Function.Name)
