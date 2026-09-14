@@ -82,14 +82,21 @@ func slackAttribution(userID, userName string) string {
 // supplied pr_body (trimmed non-empty) we use it verbatim and append a
 // one-line Slack attribution footer so reviewers still know which user /
 // workflow originated the change. Otherwise we fall back to the generic
-// template the tool historically used.
-func buildPRBody(userID, userName, supplied, fallback string) string {
-	supplied = strings.TrimSpace(supplied)
-	if supplied == "" {
-		return fallback
+// template the tool historically used. Either way the body ends with the
+// marker the console's Pull requests page looks for.
+func (h *GeneralHandler) buildPRBody(userID, userName, supplied, fallback string) string {
+	body := fallback
+	if supplied = strings.TrimSpace(supplied); supplied != "" {
+		body = supplied + "\n\n---\n_Automated via Slack by " + slackAttribution(userID, userName) + "_"
 	}
-	return supplied + "\n\n---\n_Automated via Slack by " + slackAttribution(userID, userName) + "_"
+	user := ""
+	if slackUserIDRe.MatchString(strings.TrimSpace(userID)) {
+		user = strings.TrimSpace(userID)
+	}
+	return body + "\n" + github.PRMarker(h.agentID, h.billingSource, user)
 }
+
+var slackUserIDRe = regexp.MustCompile(`^[UW][A-Z0-9]{6,}$`)
 
 // requireDescription rejects a write-tool call that arrived with a blank
 // description. description becomes the commit message, the PR title (when

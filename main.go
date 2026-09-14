@@ -61,6 +61,7 @@ var uiPages = map[string]bool{
 	"skills":       true,
 	"workflows":    true,
 	"dashboards":   true,
+	"pulls":        true,
 	"changelog":    true,
 	"billing":      true,
 }
@@ -246,6 +247,55 @@ func (c *changelogCache) get(ctx context.Context) ([]github.CommitSummary, error
 	c.data = commits
 	c.expiresAt = time.Now().Add(changelogCacheTTL)
 	return commits, nil
+}
+
+const pullsCacheTTL = time.Minute
+
+type pullsCache struct {
+	gh          *github.Client
+	knownAgents map[string]bool
+
+	mu        sync.Mutex
+	data      []github.AutomatedPR
+	expiresAt time.Time
+}
+
+func (c *pullsCache) get(ctx context.Context) ([]github.AutomatedPR, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.data != nil && time.Now().Before(c.expiresAt) {
+		return c.data, nil
+	}
+	prs, err := c.gh.ListOpenAutomatedPullRequests(ctx)
+	if err != nil {
+		if c.data != nil {
+			return c.data, nil
+		}
+		return nil, err
+	}
+	for i := range prs {
+		if prs[i].Agent == "" {
+			prs[i].Agent = c.agentFromTitle(prs[i].Title)
+		}
+	}
+	c.data = prs
+	c.expiresAt = time.Now().Add(pullsCacheTTL)
+	return prs, nil
+}
+
+func (c *pullsCache) agentFromTitle(title string) string {
+	prefix, _, ok := strings.Cut(title, ":")
+	if !ok {
+		return ""
+	}
+	prefix = strings.TrimSpace(prefix)
+	if i := strings.LastIndex(prefix, "/"); i >= 0 {
+		prefix = prefix[i+1:]
+	}
+	if c.knownAgents[prefix] {
+		return prefix
+	}
+	return ""
 }
 
 // errGitOpsDisabled is returned by the gitops sync HTTP handler when no
@@ -2477,15 +2527,39 @@ func main() {
 		_ = json.NewEncoder(w).Encode(commits)
 	})
 
-	// Fill the two caches the console reads on load that are not already warm:
-	// the commit list (a GitHub call) and the usage summary, whose first pass
-	// starts resolving Slack display names for the user leaderboards.
+	// API: open pull requests the agents authored, found by the body marker.
+	pulls := &pullsCache{gh: ghClient, knownAgents: knownAgents}
+	apiMux.HandleFunc("/api/pulls", func(w http.ResponseWriter, r *http.Request) {
+		if ghClient == nil {
+			http.Error(w, "GitHub integration not configured", http.StatusServiceUnavailable)
+			return
+		}
+		prs, err := pulls.get(r.Context())
+		if err != nil {
+			http.Error(w, fmt.Sprintf("failed to fetch pull requests: %v", err), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(prs)
+	})
+
+	// Fill the caches the console reads on load that are not already warm:
+	// the commit list and open pull requests (GitHub calls) and the usage
+	// summary, whose first pass starts resolving Slack display names for the
+	// user leaderboards.
 	if ghClient != nil {
 		safego.Go("warm: changelog", func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
 			if _, err := changelog.get(ctx); err != nil {
 				log.Printf("warn: changelog warm-up failed: %v", err)
+			}
+		})
+		safego.Go("warm: pull requests", func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			if _, err := pulls.get(ctx); err != nil {
+				log.Printf("warn: pull requests warm-up failed: %v", err)
 			}
 		})
 	}

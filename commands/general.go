@@ -3013,7 +3013,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		}
 
 		userName := h.slackUserName(userID)
-		prBody := buildPRBody(userID, userName, args.PRBody, fmt.Sprintf("Automated change requested via Slack by %s.\n\nChange: %s", slackAttribution(userID, userName), args.Description))
+		prBody := h.buildPRBody(userID, userName, args.PRBody, fmt.Sprintf("Automated change requested via Slack by %s.\n\nChange: %s", slackAttribution(userID, userName), args.Description))
 		result, err := h.branchMgr.CommitAndPR(ctx, owner, args.Repo, baseBranch, userID, args.Description, prBody, targetBranch, args.PRTitle, []string{args.Path},
 			func(branch string) error {
 				commitMsg := fmt.Sprintf("%s: %s", h.agentID, args.Description)
@@ -3057,7 +3057,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		}
 
 		userName := h.slackUserName(userID)
-		prBody := buildPRBody(userID, userName, args.PRBody, fmt.Sprintf("Automated file creation requested via Slack by %s.\n\nChange: %s\nNew file: `%s`", slackAttribution(userID, userName), args.Description, args.Path))
+		prBody := h.buildPRBody(userID, userName, args.PRBody, fmt.Sprintf("Automated file creation requested via Slack by %s.\n\nChange: %s\nNew file: `%s`", slackAttribution(userID, userName), args.Description, args.Path))
 		result, err := h.branchMgr.CommitAndPR(ctx, owner, args.Repo, baseBranch, userID, args.Description, prBody, targetBranch, args.PRTitle, []string{args.Path},
 			func(branch string) error {
 				commitMsg := fmt.Sprintf("%s: %s", h.agentID, args.Description)
@@ -3120,7 +3120,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 			userID, channelID, matches, args.Pattern, args.Repo, args.Path)
 
 		userName := h.slackUserName(userID)
-		prBody := buildPRBody(userID, userName, args.PRBody, fmt.Sprintf("Automated regex replacement requested via Slack by %s.\n\nChange: %s\nPattern: `%s` → `%s`\nMatches replaced: %d", slackAttribution(userID, userName), args.Description, args.Pattern, args.Replacement, matches))
+		prBody := h.buildPRBody(userID, userName, args.PRBody, fmt.Sprintf("Automated regex replacement requested via Slack by %s.\n\nChange: %s\nPattern: `%s` → `%s`\nMatches replaced: %d", slackAttribution(userID, userName), args.Description, args.Pattern, args.Replacement, matches))
 		result, err := h.branchMgr.CommitAndPR(ctx, owner, args.Repo, baseBranch, userID, args.Description, prBody, targetBranch, args.PRTitle, []string{args.Path},
 			func(branch string) error {
 				commitMsg := fmt.Sprintf("%s: %s", h.agentID, args.Description)

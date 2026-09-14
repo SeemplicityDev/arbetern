@@ -247,6 +247,7 @@ URL:
 | Skills | `/ui/skills` | Instruction blocks the agents follow: the built-in ones from the prompt files (read-only) plus custom skills written here and appended to the system prompts of the agents they target |
 | Workflows | `/ui/workflows` | Every workflow across agents with schedule, status, last run, run / delete actions and GitOps sync state; each opens at `/ui/<agent>/workflow/<id>` with its flow diagram, prompt or tasks, run history and editor |
 | Dashboards | `/ui/dashboards` | Every dashboard across agents (source dashboards, prompt templates, rendered reports) with sync state; each opens at `/ui/<agent>/dashboard/<id>` |
+| Pull requests | `/ui/pulls` | Open pull requests the agents authored, found by the marker every arbetern-written PR body carries: agent, requester, entry source (Slack / chat / workflow) and age, filterable by agent; ready-for-review PRs are listed first, drafts last with a draft label |
 | Changelog | `/ui/changelog` | Latest commits to the arbetern repository |
 | Usage & Billing | `/ui/billing` | Estimated LLM spend by agent, model, source, user and workflow (`/billing` redirects here) |
 
@@ -753,6 +754,13 @@ resolved once per run — GitHub does not render `<@U123>`, so without the name
 a reviewer only sees an opaque ID. The raw mention stays alongside it as the
 stable key back to the Slack profile; when the lookup fails or there is no
 Slack identity (a web-chat turn), the footer degrades to the bare mention.
+
+Every body, supplied or fallback, also ends with an invisible HTML comment —
+`<!-- arbetern agent=<agent> source=<slack|chat|workflow|dashboard> user=<slack-id> -->`,
+with unknown attributes left out. It marks the PR as arbetern-written whatever
+entry path opened it, and is how the console's Pull requests page finds the
+agents' open PRs; bodies written before it existed are recognised by the
+attribution phrases above.
 
 Only the write call that opens a PR establishes its body — later calls
 grouped into that same PR ignore their `pr_body` argument.

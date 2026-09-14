@@ -77,6 +77,10 @@
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 20v-7M11 20V5M17 20v-10M3 20h18"/></svg>
           <span>Dashboards</span>
         </a>
+        <a class="nav-item" href="/ui/pulls" data-page="pulls" title="Pull requests">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="5" r="2.2"/><circle cx="6" cy="19" r="2.2"/><circle cx="18" cy="19" r="2.2"/><path d="M6 7.2v9.6M18 16.8V10a3 3 0 0 0-3-3h-4"/><path d="M13.5 4.5 11 7l2.5 2.5"/></svg>
+          <span>Pull requests</span>
+        </a>
         <div class="nav-sep"></div>
         <a class="nav-item" href="/ui/changelog" data-page="changelog" title="Changelog">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3.5"/><path d="M2.5 12h6M15.5 12h6"/></svg>
@@ -216,6 +220,21 @@
         <div class="gitops-line" id="dash-gitops"></div>
         <p class="search-note" id="dash-search-note" hidden></p>
         <div class="list-panel list-scroll" id="dash-list"><div class="empty tall">Loading dashboards…</div></div>
+      </section>
+
+      <section class="page" data-page="pulls" hidden>
+        <div class="page-head">
+          <div>
+            <h1 class="page-title">Pull requests</h1>
+            <p class="page-desc">Open pull requests the agents authored from Slack, chat and workflow runs. Ready-for-review ones come first, drafts last; merged or closed ones drop off.</p>
+          </div>
+          <div class="page-actions">
+            <div class="pills" id="pr-filter"></div>
+            <input class="search-input" id="pr-search" type="search" placeholder="Filter by title, repo or requester…" autocomplete="off" aria-label="Filter pull requests">
+          </div>
+        </div>
+        <p class="search-note" id="pr-note" hidden></p>
+        <div class="list-panel list-scroll" id="pr-list"><div class="empty tall">Loading pull requests…</div></div>
       </section>
 
       <section class="page" data-page="workflow" hidden><div id="wf-detail"></div></section>

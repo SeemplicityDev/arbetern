@@ -72,10 +72,10 @@ const INTEGRATION_LOGOS = {
 
 const SOURCE_LABELS = { slack: 'Slack commands', chat: 'Web chat', workflow: 'Scheduled workflows', dashboard: 'Dashboard renders' };
 const SLACK_ID_RE = /^[UW][A-Z0-9]{6,}$/;
-const PAGES = ['overview', 'integrations', 'mcp', 'agents', 'chats', 'skills', 'workflows', 'dashboards', 'changelog', 'billing'];
+const PAGES = ['overview', 'integrations', 'mcp', 'agents', 'chats', 'skills', 'workflows', 'dashboards', 'pulls', 'changelog', 'billing'];
 const PAGE_TITLES = {
   overview: 'Overview', integrations: 'Integrations', mcp: 'MCP & Connectors', agents: 'Agents', chats: 'Chats',
-  skills: 'Skills', workflows: 'Workflows', dashboards: 'Dashboards', changelog: 'Changelog', billing: 'Usage & Billing',
+  skills: 'Skills', workflows: 'Workflows', dashboards: 'Dashboards', pulls: 'Pull requests', changelog: 'Changelog', billing: 'Usage & Billing',
 };
 const WINDOWS = [7, 30, 90, 0];
 const EXTRAS_CACHE_TTL_MS = 5 * 60 * 1000;
@@ -110,6 +110,9 @@ let chatsLoading = false;
 let skillsData = null;
 let skillFilter = 'all';
 let mcpData = null;
+let pullsState = { list: null, error: null };
+let prFilter = 'all';
+let prQuery = '';
 
 function escapeHtml(str) {
   return String(str == null ? '' : str)
@@ -352,7 +355,7 @@ function renderViews() {
   const painters = [
     renderOverview,
     () => { if (integrationsData) renderIntegrations(integrationsData); },
-    renderWorkflowsPage, renderDashboardsPage, renderSkillsPage, renderMCPPage, renderChatsPage, renderChanges,
+    renderWorkflowsPage, renderDashboardsPage, renderPullsPage, renderSkillsPage, renderMCPPage, renderChatsPage, renderChanges,
     () => { if (billingSummary) renderBilling(billingSummary); },
   ];
   for (const paint of painters) {
@@ -364,7 +367,7 @@ function loadPage(page) {
   switch (page) {
     case 'overview':
       renderOverview();
-      return Promise.all([loadBilling(), loadSessions(), loadIntegrations(), loadWorkflows(), loadDashboards(), loadChanges(), loadMCP()]);
+      return Promise.all([loadBilling(), loadSessions(), loadIntegrations(), loadWorkflows(), loadDashboards(), loadPulls(), loadChanges(), loadMCP()]);
     case 'integrations':
       if (integrationsData) renderIntegrations(integrationsData);
       return loadIntegrations();
@@ -376,6 +379,9 @@ function loadPage(page) {
     case 'dashboards':
       renderDashboardsPage();
       return Promise.all([loadDashboards(), loadGitops('dashboards')]);
+    case 'pulls':
+      renderPullsPage();
+      return loadPulls();
     case 'changelog':
       renderChanges();
       return loadChanges();
@@ -479,6 +485,18 @@ async function loadChanges() {
   }
   renderChanges();
   renderLatestChange();
+}
+
+async function loadPulls() {
+  if (recentlyFetched('pulls')) return;
+  try {
+    pullsState = { list: await fetchJSON('/api/pulls'), error: null };
+  } catch (err) {
+    console.warn('Failed to load pull requests:', err);
+    pullsState = { list: null, error: err };
+  }
+  renderPullsPage();
+  renderFleet();
 }
 
 async function loadSessions() {
@@ -801,6 +819,15 @@ function renderFleet() {
     rows.push(fleetRow('/ui/dashboards', 'dashboards', 'Dashboards', dashboardsData.length ? (parts || 'source dashboards') : 'none yet', fmtInt(dashboardsData.length), failing ? 'bad' : dashboardsData.length ? '' : 'off'));
   } else {
     rows.push(fleetRow('/ui/dashboards', 'dashboards', 'Dashboards', 'loading', '—', 'off'));
+  }
+  if (pullsState.list) {
+    const prs = pullsState.list;
+    const drafts = prs.filter(p => p.draft).length;
+    const stale = prs.filter(p => Date.now() - new Date(p.updated_at).getTime() > 7 * 86400000).length;
+    const sub = prs.length ? ([drafts ? plural(drafts, 'draft') : '', stale ? `${stale} idle over a week` : ''].filter(Boolean).join(' · ') || 'awaiting review') : 'none open';
+    rows.push(fleetRow('/ui/pulls', 'pulls', 'Pull requests', sub, fmtInt(prs.length), stale ? 'warn' : prs.length ? '' : 'off'));
+  } else if (!pullsState.error) {
+    rows.push(fleetRow('/ui/pulls', 'pulls', 'Pull requests', 'loading', '—', 'off'));
   }
   if (mcpData && mcpData.list) {
     const list = mcpData.list;
@@ -1135,6 +1162,69 @@ function renderChanges() {
         <div class="change-meta">${escapeHtml(c.author)} · ${c.date ? timeAgo(c.date) : ''}</div>
       </div>
     </div>`).join('');
+}
+
+/* Pull requests page */
+document.getElementById('pr-filter').addEventListener('click', e => {
+  const b = e.target.closest('.pill');
+  if (!b) return;
+  prFilter = b.dataset.agent;
+  renderPullsPage();
+});
+
+(function bindPullsSearch() {
+  const input = document.getElementById('pr-search');
+  input.addEventListener('input', () => { prQuery = input.value.trim().toLowerCase(); renderPullsPage(); });
+  input.addEventListener('keydown', e => {
+    if (e.key === 'Escape') { input.value = ''; prQuery = ''; renderPullsPage(); }
+  });
+})();
+
+function prRequester(p) {
+  if (!p.requested_by && !p.requester_id) return '<span class="muted">—</span>';
+  return `<span title="${escapeHtml(p.requester_id || '')}">${escapeHtml(p.requested_by || p.requester_id)}</span>`;
+}
+
+function renderPullsPage() {
+  const el = document.getElementById('pr-list');
+  const note = document.getElementById('pr-note');
+  if (pullsState.error) {
+    note.hidden = true;
+    el.innerHTML = emptyHtml(pullsState.error.status === 503 ? 'GitHub is not configured, so pull requests are unavailable.' : 'Pull requests are unavailable right now.', true);
+    return;
+  }
+  const list = pullsState.list;
+  if (!list) return;
+  filterPills(document.getElementById('pr-filter'), list.filter(p => p.agent), prFilter, 'data-agent');
+  if (prFilter !== 'all' && !list.some(p => p.agent === prFilter)) prFilter = 'all';
+  const words = prQuery.split(/\s+/).filter(Boolean);
+  const rows = list.filter(p => prFilter === 'all' || p.agent === prFilter).filter(p => {
+    if (!words.length) return true;
+    const hay = [p.title, p.repo, '#' + p.number, p.requested_by, p.requester_id, p.agent ? agentLabel(p.agent) : '', p.source].join('\n').toLowerCase();
+    return words.every(w => hay.includes(w));
+  });
+  note.hidden = !words.length;
+  if (words.length) note.textContent = `${plural(rows.length, 'match')} for “${prQuery}”`;
+  if (!rows.length) {
+    el.innerHTML = emptyHtml(words.length ? 'No pull request matches this filter.' : list.length ? 'No open pull requests for this agent.' : 'No open pull requests. Every PR an agent opens shows up here until it is merged or closed.', true);
+    return;
+  }
+  el.innerHTML = `<table class="data-table"><thead><tr>
+      <th>Pull request</th><th>Agent</th><th>Requested by</th><th>Source</th><th>Review</th><th>Opened</th><th>Updated</th><th></th>
+    </tr></thead><tbody>${rows.map(p => {
+      const url = escapeHtml(safeExternalUrl(p.url) || '#');
+      return `<tr>
+        <td><a href="${url}" target="_blank" rel="noopener">${escapeHtml(p.title)}</a>
+          <span class="sub">${escapeHtml(p.repo)} #${p.number}${p.comments ? ' · ' + plural(p.comments, 'comment') : ''}</span></td>
+        <td>${p.agent ? agentChip(p.agent) : '<span class="muted">—</span>'}</td>
+        <td>${prRequester(p)}</td>
+        <td>${p.source ? `<span class="tag ${escapeHtml(p.source)}">${escapeHtml(p.source)}</span>` : '<span class="muted">—</span>'}</td>
+        <td><span class="status-pill ${p.draft ? 'paused' : 'ok'}">${p.draft ? 'draft' : 'ready for review'}</span></td>
+        <td class="muted" title="${escapeHtml(new Date(p.created_at).toLocaleString())}">${timeAgo(p.created_at)}</td>
+        <td class="muted" title="${escapeHtml(new Date(p.updated_at).toLocaleString())}">${timeAgo(p.updated_at)}</td>
+        <td><div class="actions"><a class="btn-mini" href="${url}" target="_blank" rel="noopener">Open</a></div></td>
+      </tr>`;
+    }).join('')}</tbody></table>`;
 }
 
 /* Usage & Billing */
@@ -2495,7 +2585,7 @@ async function loadIdentity() {
    so each page and widget draws from memory instead of its own round trip. */
 function prefetchAll() {
   return Promise.allSettled([
-    loadIntegrations(), loadWorkflows(), loadDashboards(), loadChanges(), loadSessions(),
+    loadIntegrations(), loadWorkflows(), loadDashboards(), loadPulls(), loadChanges(), loadSessions(),
     loadBilling(), loadSkills(), loadMCP(), loadGitops('workflows'), loadGitops('dashboards'),
   ]);
 }
@@ -2504,7 +2594,7 @@ applyRoute();
 loadIdentity();
 loadAgents().then(loadChats);
 prefetchAll();
-const LIVE_PAGES = new Set(['overview', 'billing', 'workflows', 'dashboards']);
+const LIVE_PAGES = new Set(['overview', 'billing', 'workflows', 'dashboards', 'pulls']);
 setInterval(() => {
   if (document.visibilityState !== 'visible' || chatFull) return;
   if (LIVE_PAGES.has(currentPage)) loadPage(currentPage);
