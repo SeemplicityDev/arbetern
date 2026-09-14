@@ -18,6 +18,8 @@ type SlackClient interface {
 	PostMessage(channelID, text string) (string, error)
 	PostMessageInThread(channelID, threadTS, text string) (string, error)
 	PostThreadReply(channelID, threadTS, text string) error
+	UpdateMessage(channelID, ts, text string) error
+	DeleteMessage(channelID, ts string) error
 	PostBlocks(channelID, fallback string, blocks []slacklib.Block) (string, error)
 	PostThreadBlocks(channelID, threadTS, fallback string, blocks []slacklib.Block) error
 	GetPermalink(channelID, messageTS string) (string, error)

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"time"
 
 	"github.com/justmike1/arbetern/github"
 	"github.com/justmike1/arbetern/llm"
@@ -24,6 +25,7 @@ type DebugHandler struct {
 
 func (h *DebugHandler) Execute(channelID, userID, text, responseURL, auditTS string) {
 	ctx := context.Background()
+	started := time.Now()
 
 	channelContext, err := h.contextProvider.GetFreshChannelContext(channelID)
 	if err != nil {
@@ -57,6 +59,6 @@ func (h *DebugHandler) Execute(channelID, userID, text, responseURL, auditTS str
 
 	log.Printf("[user=%s channel=%s] debug analysis completed successfully", userID, channelID)
 	h.persistUserContext(ctx, userID, channelID, text, response)
-	stamp := llm.FormatUsageStamp(usage, h.modelsClient.Model())
+	stamp := llm.FormatUsageStamp(usage, h.modelsClient.Model(), time.Since(started))
 	replyOrThread(h.slackClient, channelID, responseURL, auditTS, response+stamp)
 }

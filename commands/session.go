@@ -28,6 +28,7 @@ const (
 	sessionStatsFresh   = 10 * time.Second
 	sessionTouchEvery   = 5 * time.Second
 	sessionPersistLimit = 15 * time.Second
+	sessionKeepAlive    = time.Minute
 )
 
 var sessionSegmentRe = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
@@ -74,7 +75,9 @@ type ThreadSession struct {
 	checkedAt      time.Time
 	touchedAt      time.Time
 	processing     bool
+	closed         bool
 	release        func()
+	keepalive      chan struct{}
 	ActiveBranches map[string]*ActiveBranchInfo
 }
 
@@ -101,7 +104,9 @@ func (sess *ThreadSession) applyRecord(rec *sessionRecord) {
 }
 
 // TryStartProcessing claims the thread for this request. It is false while
-// this replica or another one is still answering an earlier message.
+// this replica or another one is still answering an earlier message. The
+// session is kept alive until DoneProcessing, so a long turn never expires
+// under the user.
 func (sess *ThreadSession) TryStartProcessing() bool {
 	sess.mu.Lock()
 	defer sess.mu.Unlock()
@@ -110,9 +115,7 @@ func (sess *ThreadSession) TryStartProcessing() bool {
 	}
 	if sess.store != nil && sess.store.b != nil {
 		lease := store.NewLease(sess.store.b, sessionLockPrefix+sess.ChannelID+"/"+sess.ThreadTS, store.InstanceID(), processingLeaseTTL)
-		ctx, cancel := context.WithTimeout(context.Background(), sessionPersistLimit)
-		defer cancel()
-		_, release, ok, err := lease.Acquire(ctx)
+		_, release, ok, err := lease.Acquire(context.Background())
 		switch {
 		case err != nil:
 			log.Printf("[session] processing lease unavailable channel=%s thread=%s: %v", sess.ChannelID, sess.ThreadTS, err)
@@ -123,18 +126,30 @@ func (sess *ThreadSession) TryStartProcessing() bool {
 		}
 	}
 	sess.processing = true
+	if sess.store != nil {
+		stop := make(chan struct{})
+		sess.keepalive = stop
+		safego.Go("session: keepalive", func() { sess.store.keepAlive(sess, stop) })
+	}
 	return true
 }
 
-// DoneProcessing frees the thread for the next message.
+// DoneProcessing frees the thread for the next message and restarts the TTL
+// from the moment the reply landed.
 func (sess *ThreadSession) DoneProcessing() {
 	sess.mu.Lock()
-	release := sess.release
-	sess.release = nil
+	release, stop := sess.release, sess.keepalive
+	sess.release, sess.keepalive = nil, nil
 	sess.processing = false
 	sess.mu.Unlock()
+	if stop != nil {
+		close(stop)
+	}
 	if release != nil {
 		release()
+	}
+	if sess.store != nil {
+		sess.store.touch(sess)
 	}
 }
 
@@ -311,10 +326,27 @@ func (s *SessionStore) Lookup(channelID, threadTS string) *ThreadSession {
 	return sess
 }
 
+func (s *SessionStore) keepAlive(sess *ThreadSession, stop <-chan struct{}) {
+	t := time.NewTicker(sessionKeepAlive)
+	defer t.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-t.C:
+			s.touch(sess)
+		}
+	}
+}
+
 // touch extends the session and writes it back, at most every few seconds.
 func (s *SessionStore) touch(sess *ThreadSession) {
 	now := time.Now().UTC()
 	sess.mu.Lock()
+	if sess.closed {
+		sess.mu.Unlock()
+		return
+	}
 	sess.LastSeen = now
 	sess.expires = now.Add(s.ttl)
 	sess.checkedAt = now
@@ -339,6 +371,11 @@ func (s *SessionStore) Close(channelID, threadTS, reason string) {
 	delete(s.live, key)
 	s.misses[key] = time.Now()
 	s.mu.Unlock()
+	if sess != nil {
+		sess.mu.Lock()
+		sess.closed = true
+		sess.mu.Unlock()
+	}
 	if objKey := sessionObjectKey(channelID, threadTS); objKey != "" {
 		ctx, cancel := context.WithTimeout(context.Background(), sessionPersistLimit)
 		defer cancel()

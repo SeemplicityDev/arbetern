@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 )
 
 // Tool describes a function the LLM can invoke during a tool-use loop.
@@ -94,18 +95,22 @@ func NewToolResultMessage(toolCallID, content string) ChatMessage {
 	return ChatMessage{Role: "tool", Content: content, ToolCallID: toolCallID}
 }
 
-// FormatUsageStamp returns a short Slack-formatted line showing token usage and
-// model metadata. Enabled by default; set SHOW_USAGE_STAMP=false to disable.
-func FormatUsageStamp(u *Usage, model string) string {
+// FormatUsageStamp returns a short Slack-formatted line showing token usage,
+// model metadata and how long the turn took. Enabled by default; set
+// SHOW_USAGE_STAMP=false to disable.
+func FormatUsageStamp(u *Usage, model string, elapsed time.Duration) string {
 	if u == nil || u.TotalTokens == 0 {
 		return ""
 	}
 	if strings.EqualFold(strings.TrimSpace(os.Getenv("SHOW_USAGE_STAMP")), "false") {
 		return ""
 	}
+	stamp := fmt.Sprintf("\n\n_:bar_chart: %s | tokens: %d", model, u.TotalTokens)
 	if u.PromptTokens > 0 || u.CompletionTokens > 0 {
-		return fmt.Sprintf("\n\n_:bar_chart: %s | tokens: %d (in: %d, out: %d)_",
-			model, u.TotalTokens, u.PromptTokens, u.CompletionTokens)
+		stamp += fmt.Sprintf(" (in: %d, out: %d)", u.PromptTokens, u.CompletionTokens)
 	}
-	return fmt.Sprintf("\n\n_:bar_chart: %s | tokens: %d_", model, u.TotalTokens)
+	if elapsed > 0 {
+		stamp += " | " + elapsed.Round(time.Second).String()
+	}
+	return stamp + "_"
 }

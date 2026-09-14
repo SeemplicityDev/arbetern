@@ -92,6 +92,23 @@ func (c *Client) PostMessageInThread(channelID, threadTS, text string) (string, 
 	return ts, nil
 }
 
+// UpdateMessage replaces the text of an existing message.
+func (c *Client) UpdateMessage(channelID, ts, text string) error {
+	_, _, _, err := c.api.UpdateMessage(channelID, ts, slack.MsgOptionText(text, false))
+	if err != nil {
+		return fmt.Errorf("failed to update message: %w", err)
+	}
+	return nil
+}
+
+// DeleteMessage removes a message the bot posted.
+func (c *Client) DeleteMessage(channelID, ts string) error {
+	if _, _, err := c.api.DeleteMessage(channelID, ts); err != nil {
+		return fmt.Errorf("failed to delete message: %w", err)
+	}
+	return nil
+}
+
 func (c *Client) PostThreadReply(channelID, threadTS, text string) error {
 	_, _, err := c.api.PostMessage(channelID,
 		slack.MsgOptionText(text, false),

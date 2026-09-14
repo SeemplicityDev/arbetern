@@ -1476,7 +1476,10 @@ func parseCheckRunID(checkRunURL string) int64 {
 	return id
 }
 
-const maxJobLogSize = 16000
+const (
+	maxJobLogSize     = 16000
+	maxJobLogDownload = 32 << 20
+)
 
 // getJobLogs downloads the plain-text log for a specific job run.
 func (c *Client) getJobLogs(ctx context.Context, owner, repo string, jobID int64) (string, error) {
@@ -1491,17 +1494,43 @@ func (c *Client) getJobLogs(ctx context.Context, owner, repo string, jobID int64
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxJobLogSize+1))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxJobLogDownload))
 	if err != nil {
 		return "", fmt.Errorf("failed to read job logs: %w", err)
 	}
+	return trimJobLog(string(body), maxJobLogSize), nil
+}
 
-	content := string(body)
-	if len(content) > maxJobLogSize {
-		// Keep the tail — the error is usually at the end.
-		content = "... (log truncated, showing last portion) ...\n" + content[len(content)-maxJobLogSize:]
+var logTimestampRe = regexp.MustCompile(`(?m)^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+Z `)
+
+// trimJobLog strips per-line timestamps and, when the log is longer than
+// limit, keeps the tail plus a window around the first ##[error] marker so the
+// failing step's output survives even when post-job steps follow it.
+func trimJobLog(content string, limit int) string {
+	content = logTimestampRe.ReplaceAllString(content, "")
+	if len(content) <= limit {
+		return content
 	}
-	return content, nil
+	tailStart := len(content) - limit
+	errAt := strings.Index(content, "##[error]")
+	if errAt < 0 || errAt >= tailStart {
+		return "... (log truncated, showing last portion) ...\n" + content[tailStart:]
+	}
+	winStart := lineStart(content, max(0, errAt-limit/4))
+	winEnd := min(tailStart, winStart+limit/2)
+	tailStart = len(content) - (limit - (winEnd - winStart))
+	if tailStart <= winEnd {
+		return "... (log truncated) ...\n" + content[winStart:]
+	}
+	return "... (log truncated) ...\n" + content[winStart:winEnd] +
+		"\n... (skipped) ...\n" + content[lineStart(content, tailStart):]
+}
+
+func lineStart(s string, at int) int {
+	if i := strings.LastIndexByte(s[:at], '\n'); i >= 0 {
+		return i + 1
+	}
+	return 0
 }
 
 func FormatWorkflowRunSummary(s *WorkflowRunSummary) string {

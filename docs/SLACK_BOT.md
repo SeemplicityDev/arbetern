@@ -193,6 +193,8 @@ env:
 - When a slash command is executed, arbetern posts an audit message (creating a thread) and opens a **thread session**
 - The session stays active for `THREAD_SESSION_TTL` (default: 7 minutes), refreshed on every message; it is stored in the state bucket, so with several replicas any of them can answer the follow-up
 - Any user reply in that thread is automatically routed through the same agent — no `/command` prefix needed
+- While the bot is working on a request the session cannot expire; the TTL restarts when the reply is posted
+- A request that runs longer than about a minute gets one `Still working` reply in the thread, edited in place with the elapsed time and tool activity and removed when the answer lands
 - After the TTL expires with no activity, the session closes and new thread replies are ignored
 
 ### Troubleshooting

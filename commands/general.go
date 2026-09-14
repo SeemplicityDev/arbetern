@@ -287,6 +287,9 @@ func (h *GeneralHandler) recordUsage(model, userID string, u llm.Usage, comp llm
 
 func (h *GeneralHandler) Execute(channelID, userID, text, responseURL, auditTS string) {
 	ctx := context.Background()
+	started := time.Now()
+	progress := startProgressReporter(h.slackClient, channelID, auditTS)
+	defer progress.done()
 	h.currentChannelID = channelID
 	h.currentAuditTS = auditTS
 	h.aggregateCache = nil
@@ -384,7 +387,7 @@ func (h *GeneralHandler) Execute(channelID, userID, text, responseURL, auditTS s
 				userID, channelID, truncatedCall.Function.Name, choice.FinishReason, truncatedToolRounds, maxTruncatedToolRounds, len(toolCalls))
 			if truncatedToolRounds > maxTruncatedToolRounds {
 				fallback := "I stopped here: my tool calls kept getting cut off at the output limit, and I won't run a half-written change (that is how a PR ends up with no title or description). Try narrowing the request — one file or one change at a time."
-				stamp := llm.FormatUsageStamp(&totalUsage, activeClient.Model())
+				stamp := llm.FormatUsageStamp(&totalUsage, activeClient.Model(), time.Since(started))
 				if repliedInThread {
 					if stamp != "" {
 						_ = h.slackClient.PostThreadReply(channelID, auditTS, stamp)
@@ -443,7 +446,7 @@ func (h *GeneralHandler) Execute(channelID, userID, text, responseURL, auditTS s
 			if strings.TrimSpace(choice.Message.Content) == "" {
 				log.Printf("[user=%s channel=%s] general query ended with empty content after %d retries (finish=%q); replying with fallback", userID, channelID, emptyResponseRetries, choice.FinishReason)
 				fallback := "I couldn't complete this request — it looks like it was too large to finish in one pass (my response kept hitting the output limit). Try breaking it into smaller steps and I'll pick it up from there."
-				stamp := llm.FormatUsageStamp(&totalUsage, activeClient.Model())
+				stamp := llm.FormatUsageStamp(&totalUsage, activeClient.Model(), time.Since(started))
 				if repliedInThread {
 					if stamp != "" {
 						_ = h.slackClient.PostThreadReply(channelID, auditTS, stamp)
@@ -466,7 +469,7 @@ func (h *GeneralHandler) Execute(channelID, userID, text, responseURL, auditTS s
 
 			log.Printf("[user=%s channel=%s] general query completed successfully", userID, channelID)
 			h.persistUserContext(ctx, userID, channelID, text, choice.Message.Content)
-			stamp := llm.FormatUsageStamp(&totalUsage, activeClient.Model())
+			stamp := llm.FormatUsageStamp(&totalUsage, activeClient.Model(), time.Since(started))
 			// If we already replied in a specific thread, don't send a redundant follow-up.
 			if repliedInThread {
 				log.Printf("[user=%s channel=%s] skipping reply (already replied in thread)", userID, channelID)
@@ -489,6 +492,7 @@ func (h *GeneralHandler) Execute(channelID, userID, text, responseURL, auditTS s
 		for _, tc := range toolCalls {
 			log.Printf("[user=%s channel=%s] LLM called tool: %s(%s)", userID, channelID, tc.Function.Name, redactToolArgsForLog(tc.Function.Name, tc.Function.Arguments))
 			toolCallsMade = true
+			progress.toolCalled(tc.Function.Name)
 			result := h.executeTool(ctx, channelID, userID, auditTS, tc.Function.Name, tc.Function.Arguments)
 			result = stripPreconditionPrefix(result)
 			messages = append(messages, llm.NewToolResultMessage(tc.ID, result))
