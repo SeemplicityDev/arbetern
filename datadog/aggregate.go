@@ -8,7 +8,6 @@ import (
 	"time"
 )
 
-// --------------------------------------------------------------------------
 // Logs Aggregate API (v2) — server-side aggregations & percentiles
 //
 // Unlike SearchLogs (which returns raw log entries capped at a small page
@@ -20,7 +19,6 @@ import (
 // Requires the measured attribute (e.g. @duration) to be registered as a
 // "measure" facet in Datadog Logs config, and any group_by attribute
 // (e.g. @http.method, @http.status_code) to be a facet.
-// --------------------------------------------------------------------------
 
 // AggregateCompute is one server-side computation. Aggregation is one of
 // count, cardinality, avg, sum, min, max, median, pc75, pc90, pc95, pc98, pc99.

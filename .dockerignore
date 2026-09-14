@@ -1,0 +1,10 @@
+.git
+.github
+.claude
+*.local.values.yaml
+docs/
+screenshots/
+assets/
+*.md
+!README.md
+.DS_Store

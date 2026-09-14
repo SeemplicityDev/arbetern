@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/justmike1/arbetern/internal/httpx"
 	"github.com/justmike1/arbetern/internal/store"
 )
 
@@ -461,9 +462,18 @@ func (r *Registry) validate(c *Connector) error {
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 		return errors.New("url must be an absolute http(s) URL")
 	}
-	for k := range c.Headers {
+	if err := httpx.ValidateURL(c.URL); err != nil {
+		return err
+	}
+	for k, v := range c.Headers {
 		if !headerNameRe.MatchString(k) {
 			return fmt.Errorf("invalid header name %q", k)
+		}
+		for _, ref := range EnvRefs(v) {
+			if !EnvAllowed(ref) {
+				return fmt.Errorf("header %q references ${%s}, which connectors may not read; "+
+					"only MCP_* variables and those listed in MCP_ALLOWED_ENV are available", k, ref)
+			}
 		}
 	}
 	r.mu.RLock()
@@ -508,7 +518,7 @@ func (r *Registry) RegisterRoutes(apiMux *http.ServeMux, userFor func(*http.Requ
 	apiMux.HandleFunc("/api/mcp", func(w http.ResponseWriter, req *http.Request) {
 		switch req.Method {
 		case http.MethodGet:
-			writeJSON(w, http.StatusOK, r.List())
+			httpx.WriteJSON(w, http.StatusOK, r.List())
 		case http.MethodPost:
 			if !r.authorized(req) {
 				http.Error(w, ErrForbidden.Error(), http.StatusForbidden)
@@ -527,7 +537,7 @@ func (r *Registry) RegisterRoutes(apiMux *http.ServeMux, userFor func(*http.Requ
 				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
 			}
-			writeJSON(w, http.StatusCreated, c)
+			httpx.WriteJSON(w, http.StatusCreated, c)
 		default:
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		}
@@ -545,7 +555,7 @@ func (r *Registry) RegisterRoutes(apiMux *http.ServeMux, userFor func(*http.Requ
 				http.Error(w, ErrNotFound.Error(), http.StatusNotFound)
 				return
 			}
-			writeJSON(w, http.StatusOK, c)
+			httpx.WriteJSON(w, http.StatusOK, c)
 		case http.MethodPatch, http.MethodPut:
 			var p Patch
 			if err := decodeBody(req, &p); err != nil {
@@ -557,7 +567,7 @@ func (r *Registry) RegisterRoutes(apiMux *http.ServeMux, userFor func(*http.Requ
 				http.Error(w, err.Error(), statusFor(err))
 				return
 			}
-			writeJSON(w, http.StatusOK, c)
+			httpx.WriteJSON(w, http.StatusOK, c)
 		case http.MethodDelete:
 			if err := r.Delete(req.Context(), id); err != nil {
 				http.Error(w, err.Error(), statusFor(err))
@@ -582,7 +592,7 @@ func (r *Registry) RegisterRoutes(apiMux *http.ServeMux, userFor func(*http.Requ
 			http.Error(w, err.Error(), statusFor(err))
 			return
 		}
-		writeJSON(w, http.StatusOK, c)
+		httpx.WriteJSON(w, http.StatusOK, c)
 	})
 }
 
@@ -600,11 +610,4 @@ func decodeBody(req *http.Request, v any) error {
 		return fmt.Errorf("invalid JSON body: %w", err)
 	}
 	return nil
-}
-
-func writeJSON(w http.ResponseWriter, status int, v any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Cache-Control", "no-store")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(v)
 }

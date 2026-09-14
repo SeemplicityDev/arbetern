@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+
+	"github.com/justmike1/arbetern/internal/text"
 )
 
 // FormatCostAndUsage returns a Slack-friendly rendering of a CostAndUsageResult.
@@ -48,7 +50,7 @@ func FormatCostAndUsage(r *CostAndUsageResult) string {
 				limit = len(sorted)
 			}
 			for _, kv := range sorted[:limit] {
-				fmt.Fprintf(&sb, "%-50s %12s\n", truncate(kv.k, 50), money(kv.v, p.Unit))
+				fmt.Fprintf(&sb, "%-50s %12s\n", text.Truncate(kv.k, 50), money(kv.v, p.Unit))
 			}
 			if len(sorted) > limit {
 				var rest float64
@@ -160,14 +162,4 @@ func firstUnit(periods []CostPeriod) string {
 		}
 	}
 	return "USD"
-}
-
-func truncate(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	if n < 1 {
-		return ""
-	}
-	return s[:n-1] + "…"
 }

@@ -16,6 +16,8 @@ import (
 	"github.com/justmike1/arbetern/internal/safego"
 	"github.com/justmike1/arbetern/internal/store"
 	"github.com/justmike1/arbetern/internal/vectors"
+
+	"github.com/justmike1/arbetern/internal/text"
 )
 
 // UserContextStore keeps a rolling log of per-user, per-agent turns in the
@@ -393,8 +395,8 @@ func (s *UserContextStore) Append(ctx context.Context, agentID, userID, channelI
 	if key == "" {
 		return
 	}
-	question = truncate(strings.TrimSpace(question), userContextMaxQuestionLen)
-	answer = truncate(strings.TrimSpace(answer), userContextMaxAnswerLen)
+	question = text.Truncate(strings.TrimSpace(question), userContextMaxQuestionLen)
+	answer = text.Truncate(strings.TrimSpace(answer), userContextMaxAnswerLen)
 	if question == "" && answer == "" {
 		return
 	}
@@ -484,13 +486,6 @@ func (s *UserContextStore) update(ctx context.Context, key string, fn func(*user
 		return nil
 	}
 	return store.ErrConflict
-}
-
-func truncate(s string, max int) string {
-	if len(s) <= max {
-		return s
-	}
-	return s[:max] + "…"
 }
 
 // StartGC removes the documents (and vectors) of users inactive for longer

@@ -32,6 +32,11 @@ const (
 	// Response body size limits for io.LimitReader.
 	maxResponseBody     = 10 << 20 // 10 MB — general API responses
 	maxAuthResponseBody = 5 << 20  // 5 MB  — OAuth / token responses
+	// httpTimeout bounds every Jira and Confluence call. Without it a stalled
+	// connection pins the calling goroutine for the life of the process, and
+	// these methods carry no context to cancel from. Generous because a broad
+	// JQL search over a large site is legitimately slow.
+	httpTimeout = 60 * time.Second
 
 	// Pagination page sizes.
 	jiraPageSize             = 100 // Jira caps maxResults at 100 per page
@@ -73,7 +78,7 @@ func NewClient(baseURL, email, apiToken, defaultProject string) *Client {
 		email:      email,
 		apiToken:   apiToken,
 		projectKey: defaultProject,
-		httpClient: &http.Client{},
+		httpClient: &http.Client{Timeout: httpTimeout},
 		mode:       authBasic,
 		connected:  true,
 	}
@@ -90,7 +95,7 @@ func NewOAuthClient(baseURL, clientID, clientSecret, defaultProject string) *Cli
 		clientID:     clientID,
 		clientSecret: clientSecret,
 		projectKey:   defaultProject,
-		httpClient:   &http.Client{},
+		httpClient:   &http.Client{Timeout: httpTimeout},
 		mode:         authOAuth,
 	}
 

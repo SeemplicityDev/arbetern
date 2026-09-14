@@ -1,6 +1,5 @@
 package llm
 
-// ---------------------------------------------------------------------------
 // AWS Bedrock transport for the Anthropic Messages API.
 //
 // Bedrock's Claude runtime speaks the same Messages protocol as Azure Foundry,
@@ -18,10 +17,9 @@ package llm
 //         credential chain (env vars, shared profile, EKS IRSA / IMDS) — the
 //         same chain the cost-explorer integration uses.
 //
-// Model IDs carry an "anthropic." provider prefix, e.g. "anthropic.claude-opus-4-8";
+// Model IDs carry an "anthropic." provider prefix, e.g. "anthropic.claude-opus-5";
 // most accounts use a cross-region inference profile such as
-// "us.anthropic.claude-opus-4-8".
-// ---------------------------------------------------------------------------
+// "us.anthropic.claude-opus-5".
 
 import (
 	"context"
@@ -58,7 +56,7 @@ type bedrockConfig struct {
 // NewBedrockClient creates an LLM client backed by Amazon Bedrock's Anthropic
 // Messages runtime. region must be a region where the model or inference profile
 // is available; model is the Bedrock model or inference-profile ID (e.g.
-// "anthropic.claude-opus-4-8" or "us.anthropic.claude-opus-4-8").
+// "anthropic.claude-opus-5" or "us.anthropic.claude-opus-5").
 //
 // Authentication:
 //   - A non-empty apiKey (a Bedrock API key, i.e. AWS_BEARER_TOKEN_BEDROCK) is

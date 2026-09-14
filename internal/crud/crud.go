@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/justmike1/arbetern/internal/httpx"
 	"github.com/justmike1/arbetern/internal/store"
 )
 
@@ -35,6 +36,38 @@ type Spec struct {
 	// once the response has been written; false to fall through to the
 	// built-in 404/405.
 	Custom func(w http.ResponseWriter, req *http.Request, agent, id string, subpath []string) bool
+
+	// Authorize gates every request that changes state or triggers a run. It
+	// receives the owning agent so the check can use that agent's allow-lists:
+	// editing or running a workflow drives that agent's tools, so it needs the
+	// same permission as using the agent. A nil Authorize allows everything.
+	Authorize func(req *http.Request, agent string) bool
+}
+
+// writes reports whether the method changes state or starts work.
+func writes(method string) bool {
+	switch method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+		return false
+	}
+	return true
+}
+
+// permit applies the same-origin check and the Spec authorizer to a
+// state-changing request, writing the rejection itself when it fails.
+func (spec Spec) permit(w http.ResponseWriter, req *http.Request, agent string) bool {
+	if !writes(req.Method) {
+		return true
+	}
+	if err := httpx.CheckSameOrigin(req); err != nil {
+		http.Error(w, err.Error(), http.StatusForbidden)
+		return false
+	}
+	if spec.Authorize != nil && !spec.Authorize(req, agent) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return false
+	}
+	return true
 }
 
 // Mount wires the per-agent routes and the API routes:
@@ -114,6 +147,9 @@ func handleAPIItem(spec Spec, w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	sub := parts[2:]
+	if !spec.permit(w, req, agent) {
+		return
+	}
 
 	// Sub-resources (e.g. /<id>/run) always go through Custom.
 	if len(sub) > 0 {

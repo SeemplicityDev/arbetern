@@ -35,20 +35,70 @@ func parseCIDRs(raw string) []*net.IPNet {
 	return nets
 }
 
-func clientIP(r *http.Request) string {
-	// X-Forwarded-For can contain multiple IPs; the first is the original client.
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		if idx := strings.Index(xff, ","); idx != -1 {
-			return strings.TrimSpace(xff[:idx])
-		}
-		return strings.TrimSpace(xff)
+// trustedProxies are the peers whose X-Forwarded-For and identity headers are
+// believed. Set once at startup from TRUSTED_PROXY_CIDRS; empty means no peer
+// is trusted and forwarded headers are ignored for IP decisions.
+var trustedProxies []*net.IPNet
+
+// setTrustedProxies installs the trusted-proxy list. Call before serving.
+func setTrustedProxies(nets []*net.IPNet) { trustedProxies = nets }
+
+func ipInAny(ip net.IP, nets []*net.IPNet) bool {
+	if ip == nil {
+		return false
 	}
-	// Fall back to direct connection IP.
+	for _, n := range nets {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+// directPeerIP is the address the connection actually came from.
+func directPeerIP(r *http.Request) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		return r.RemoteAddr
 	}
 	return host
+}
+
+// fromTrustedProxy reports whether the immediate peer is an allowed proxy.
+// With no list configured nothing is trusted.
+func fromTrustedProxy(r *http.Request) bool {
+	if len(trustedProxies) == 0 {
+		return false
+	}
+	return ipInAny(net.ParseIP(directPeerIP(r)), trustedProxies)
+}
+
+// clientIP returns the address to make access decisions on. X-Forwarded-For is
+// only consulted when the immediate peer is a trusted proxy, and then it is
+// walked from the right, skipping trusted hops — a client-supplied prefix
+// cannot reach the front of that walk, so the header cannot be spoofed past
+// the gate.
+func clientIP(r *http.Request) string {
+	peer := directPeerIP(r)
+	if !fromTrustedProxy(r) {
+		return peer
+	}
+	hops := strings.Split(r.Header.Get("X-Forwarded-For"), ",")
+	for i := len(hops) - 1; i >= 0; i-- {
+		h := strings.TrimSpace(hops[i])
+		if h == "" {
+			continue
+		}
+		ip := net.ParseIP(h)
+		if ip == nil {
+			break
+		}
+		if ipInAny(ip, trustedProxies) {
+			continue
+		}
+		return h
+	}
+	return peer
 }
 
 // globalIPGate returns a middleware that denies every request by default and

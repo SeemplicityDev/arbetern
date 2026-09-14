@@ -25,8 +25,9 @@ import (
 //	DELETE /api/workflows/<agent>/<id>       → delete
 //	POST   /api/workflows/<agent>/<id>/run   → run now (returns 202)
 //
-// Access control is enforced upstream by the global IP gate in main.
-func (r *Registry) RegisterRoutes(mux *http.ServeMux, apiMux *http.ServeMux, knownAgents map[string]bool) {
+// State-changing verbs additionally require the caller to pass the owning
+// agent's allow-lists, via the authorize callback supplied by main.
+func (r *Registry) RegisterRoutes(mux *http.ServeMux, apiMux *http.ServeMux, knownAgents map[string]bool, authorize func(*http.Request, string) bool) {
 	crud.Mount(mux, apiMux, knownAgents, crud.Spec{
 		Kind:       "workflow",
 		KindPlural: "workflows",
@@ -43,7 +44,8 @@ func (r *Registry) RegisterRoutes(mux *http.ServeMux, apiMux *http.ServeMux, kno
 		Delete: func(agent, id string) error {
 			return r.Delete(agent, id)
 		},
-		Custom: r.handleCustom,
+		Custom:    r.handleCustom,
+		Authorize: authorize,
 	})
 }
 
@@ -89,11 +91,17 @@ func (r *Registry) handleCustom(w http.ResponseWriter, req *http.Request, agent,
 	return false
 }
 
+// maxUpdateBytes bounds a workflow edit payload. A workflow carries a prompt
+// and a task list, so it is larger than a typical form post but nowhere near
+// unbounded.
+const maxUpdateBytes = 256 << 10
+
 // handleAPIUpdate applies a partial edit to a workflow from the UI. Body is a
 // JSON object; only the keys actually present in the payload are treated as
 // intentional edits (mirrors update_workflow tool semantics so a missing
 // field means "unchanged" rather than "clear").
 func (r *Registry) handleAPIUpdate(agent, id string, w http.ResponseWriter, req *http.Request) {
+	req.Body = http.MaxBytesReader(w, req.Body, maxUpdateBytes)
 	// Reject UI edits to gitops-managed workflows. Toggling enabled is the
 	// only allowed mutation; everything else is reverted on the next reconcile.
 	if existing, ok := r.Get(agent, id); ok && existing.Source == "gitops" {

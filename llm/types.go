@@ -43,6 +43,12 @@ type ChatMessage struct {
 	Content    string     `json:"content,omitempty"`
 	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
 	ToolCallID string     `json:"tool_call_id,omitempty"`
+	// Volatile marks system content that changes from one turn to the next
+	// (retrieved memory, recent channel messages, freshly fetched logs). It is
+	// emitted after the prompt-cache breakpoint so it cannot invalidate the
+	// cached prefix. Ignored by backends without prompt caching, which simply
+	// concatenate it onto the system prompt as before.
+	Volatile bool `json:"-"`
 }
 
 // Usage tracks token consumption from a single LLM API call.
@@ -55,12 +61,18 @@ type Usage struct {
 	// cheaper than fresh PromptTokens, so they are tracked separately for
 	// accurate cost estimation. Not included in PromptTokens.
 	CachedPromptTokens int `json:"cached_prompt_tokens,omitempty"`
+	// CacheWriteTokens are prompt tokens written into the provider's cache on
+	// this call. They cost *more* than fresh input (Anthropic charges 1.25x at
+	// the 5-minute TTL), so they are priced separately rather than folded into
+	// PromptTokens. Not included in PromptTokens.
+	CacheWriteTokens int `json:"cache_write_tokens,omitempty"`
 }
 
 // Add accumulates another round's usage.
 func (u *Usage) Add(o Usage) {
 	u.PromptTokens += o.PromptTokens
 	u.CachedPromptTokens += o.CachedPromptTokens
+	u.CacheWriteTokens += o.CacheWriteTokens
 	u.CompletionTokens += o.CompletionTokens
 	u.TotalTokens += o.TotalTokens
 }
@@ -102,6 +114,12 @@ type ChatResponse struct {
 // NewChatMessage creates a ChatMessage with the given role and content.
 func NewChatMessage(role, content string) ChatMessage {
 	return ChatMessage{Role: role, Content: content}
+}
+
+// NewVolatileSystemMessage creates system content that is expected to differ
+// on every turn. See ChatMessage.Volatile.
+func NewVolatileSystemMessage(content string) ChatMessage {
+	return ChatMessage{Role: "system", Content: content, Volatile: true}
 }
 
 // NewToolResultMessage creates a tool-result message that feeds a function

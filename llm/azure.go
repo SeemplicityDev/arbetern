@@ -1,6 +1,5 @@
 package llm
 
-// ---------------------------------------------------------------------------
 // Azure Responses API protocol types and conversion helpers.
 //
 // The Responses API (/openai/responses) is the modern Azure OpenAI endpoint
@@ -11,7 +10,6 @@ package llm
 // The helpers in this file translate between the internal ChatMessage/Tool
 // types and the Responses API wire format so the rest of the codebase can
 // stay backend-agnostic.
-// ---------------------------------------------------------------------------
 
 import (
 	"encoding/json"

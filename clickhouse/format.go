@@ -5,6 +5,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/justmike1/arbetern/internal/text"
 )
 
 const (
@@ -82,7 +84,7 @@ func FormatUsageCost(r *UsageCostReport) string {
 	cells := make([][]string, 0, len(display))
 	for _, row := range display {
 		cells = append(cells, []string{
-			truncate(row.name, maxColWidth),
+			text.Truncate(row.name, maxColWidth),
 			row.typ,
 			commify(row.totalCHC),
 		})
@@ -225,18 +227,6 @@ func plural(n int) string {
 	return "ies"
 }
 
-// truncate shortens s to at most max characters, appending an ellipsis when it
-// cuts.
-func truncate(s string, max int) string {
-	if max <= 0 || len(s) <= max {
-		return s
-	}
-	if max <= 1 {
-		return s[:max]
-	}
-	return s[:max-1] + "…"
-}
-
 // FormatSQLResult renders a query result as a Slack-friendly table. A scalar
 // result (one row, one column — e.g. a count) is rendered as a one-line
 // headline instead.
@@ -258,7 +248,7 @@ func FormatSQLResult(r *SQLQueryResult) string {
 
 	headers := make([]string, len(r.Columns))
 	for i, col := range r.Columns {
-		headers[i] = truncate(col.Name, maxColWidth)
+		headers[i] = text.Truncate(col.Name, maxColWidth)
 	}
 
 	cells := make([][]string, 0, len(r.Rows))
@@ -266,7 +256,7 @@ func FormatSQLResult(r *SQLQueryResult) string {
 		out := make([]string, len(headers))
 		for i := range headers {
 			if i < len(row) {
-				out[i] = truncate(row[i], maxColWidth)
+				out[i] = text.Truncate(row[i], maxColWidth)
 			}
 		}
 		cells = append(cells, out)

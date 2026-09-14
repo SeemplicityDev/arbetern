@@ -65,7 +65,7 @@ Bayes.
 
 ### Prerequisites
 
-- Go 1.26+
+- Go 1.26.8+ (the container image builds with Go 1.27)
 - A Slack app with a slash command pointing to `/<agent>/webhook` (see [docs/SLACK_BOT.md](docs/SLACK_BOT.md))
 - A GitHub PAT with repo access (see [docs/GITHUB_PAT.md](docs/GITHUB_PAT.md))
 - (Optional) Azure OpenAI credentials or an AWS Bedrock region for LLM inference
@@ -96,14 +96,14 @@ present. When more than one is configured, precedence is **Bedrock → Azure Ope
 |---|---|---|
 | **GitHub Models** (default) | `GITHUB_TOKEN` | `openai/gpt-4o`, `meta/llama-3.1-405b-instruct`, … |
 | **Azure OpenAI** | `AZURE_OPEN_AI_ENDPOINT` + `AZURE_API_KEY` | your deployment name (`gpt-4o`, `gpt-5.x`, `claude-*` for Foundry) |
-| **AWS Bedrock** | `BEDROCK_REGION` | Bedrock model / inference-profile ID, e.g. `anthropic.claude-opus-4-8` or the cross-region profile `us.anthropic.claude-opus-4-8` |
+| **AWS Bedrock** | `BEDROCK_REGION` | Bedrock model / inference-profile ID, e.g. `anthropic.claude-opus-5` or the cross-region profile `us.anthropic.claude-opus-5` |
 
 **AWS Bedrock** serves Claude models through the same Anthropic Messages
 protocol the app already uses for Azure Foundry, so prompt caching
 (`LLM_PROMPT_CACHE`), usage/billing, and Headroom compression all work
 unchanged. Set `BEDROCK_REGION` to a region where the model is available and
 `GENERAL_MODEL` to its Bedrock ID (most accounts need the cross-region inference
-profile, e.g. `us.anthropic.claude-opus-4-8`). `BEDROCK_REGION` is independent
+profile, e.g. `us.anthropic.claude-opus-5`). `BEDROCK_REGION` is independent
 of `AWS_REGION` (which only signs Cost Explorer calls).
 
 Authentication is one of two schemes, and the target principal/key needs
@@ -125,7 +125,13 @@ Authentication is one of two schemes, and the target principal/key needs
 | `LLM_PROMPT_CACHE` | Enable Anthropic prompt caching of the static prefix (tool schemas + system prompt) and the rolling conversation tail, so long tool-loops re-read shared context at the provider's ~0.1x cache rate instead of full price. Quality-neutral. Default `true`; set `false` as a kill-switch |
 | `SHOW_USAGE_STAMP` | Append model/token usage metadata to Slack replies. Default `true` |
 | `UI_ALLOWED_CIDRS` | Comma-separated CIDRs allowed to access the UI |
+| `TRUSTED_PROXY_CIDRS` | Peers whose `X-Auth-Request-Email` and `X-Forwarded-For` headers are believed, e.g. `10.0.0.0/8`. **Set this whenever an auth proxy is in front.** Without it the app cannot tell a proxy from any other caller, so anything able to reach the pod can name itself an admin and pass every allow-list; startup logs a warning when an allow-list is configured and this is not. When set, `UI_ALLOWED_CIDRS` also resolves the real client from the rightmost untrusted hop instead of the spoofable first entry |
 | `MCP_ADMIN_TEAMS` / `MCP_ADMIN_EMAILS` | Who may add, edit, test or delete MCP connectors from the UI: comma-separated Slack user group IDs, and email addresses or domains matched like an agent's `allowed_emails`. Both empty = every UI user. Set from the chart's `mcp.adminTeams` / `mcp.adminEmails`; needs oauth2-proxy so the viewer's email is known. Everyone else sees connectors read-only and the API answers 403 to every verb but GET |
+| `MCP_ALLOWED_ENV` | Extra environment variables an MCP connector header may expand with `${NAME}`. The `MCP_*` namespace is always available and nothing else is, so a connector cannot be pointed at an attacker URL with `${SLACK_BOT_TOKEN}` in a header. Saving a connector that references a variable outside the allow-list is rejected |
+| `BACKEND_VIEW_TEAMS` / `BACKEND_VIEW_EMAILS` | Who may open the read-only backend state view at `/api/backend` — Slack user group IDs, and emails or domains matched like an agent's `allowed_emails`. **Both empty disables the view entirely**, so it fails closed if you never set them |
+| `AGENTS_DIR` | Directory holding the per-agent `config.yaml` / `prompts.yaml` (default `agents`) |
+| `AZURE_BILLING_ACCOUNT_ID` | Azure billing account scope for cost queries; falls back to the subscription scope when unset |
+| `WORKFLOW_RUN_HISTORY` | How many past runs each workflow keeps in its history |
 | `UI_HEADER` | Custom header text for the web UI (default `arbetern`) |
 | `HEADROOM_PROXY_URL` | Base URL of a [Headroom](docs/HEADROOM.md) compression sidecar (e.g. `http://localhost:8787`). When set, each conversation is compressed via its `/v1/compress` endpoint before every LLM call — cutting tokens across **all** backends (GitHub Models, Azure OpenAI, Azure Foundry/Claude, AWS Bedrock). Set automatically by Helm when `headroom.enabled: true` |
 | `HEADROOM_COMPRESS_TIMEOUT` | Go duration bounding a single `/v1/compress` round-trip before the app falls back to sending the conversation uncompressed (fail-open). Default `90s`; raise for very large contexts. Set via Helm `headroom.compressTimeout` |
@@ -264,6 +270,7 @@ cached the raw ID is shown. Chat turns are keyed by the proxy-verified email.
 - Set `UI_HEADER` env var to customize the top-bar title
 - Agents with `chat_enabled` expose a full-screen chat at `/ui/<agent>/chat` — a deep-linkable, reload-safe URL you can bookmark or share
 - Chat replies are produced in the background: sending returns at once, the thread shows elapsed time and tool activity while the agent works, and a reload or another replica picks the in-flight turn up from the stored transcript
+- **Conversations are private to the person who created them.** Each transcript records its owner (the proxy-verified email) and every list, open, rename and delete is scoped to that owner, so the Chats page shows only your own threads. A deployment with no auth proxy has no identity to scope by, and there every caller shares one ownerless set — which is also where conversations created before ownership existed live, so they stop appearing once you put a proxy in front
 - The side rail's collapsed state, the theme and the time window are remembered per browser
 
 ### Authentication (SSO)
@@ -285,6 +292,23 @@ When enabled, the chart automatically rewires the `ingress` backend to the proxy
 - With a single provider configured, the interstitial sign-in page is skipped and users go straight to the provider.
 - This is independent of `UI_ALLOWED_CIDRS`; you can use either or both.
 - The proxy passes the verified identity to the app as `X-Auth-Request-Email` (via `set_xauthrequest`). arbetern uses this to enforce per-agent chat access by email — see [Chat access by email](#chat-access-by-email-ui).
+- Narrow `email_domains` to your own domain. The chart ships `"yourcompany.com"` as a placeholder; `"*"` would let any account with the provider sign in.
+
+**Set `TRUSTED_PROXY_CIDRS` when you enable the proxy.** The identity header is
+just a header: on its own the app cannot tell the proxy from any other caller,
+so anything that can reach the pod — another workload in the cluster, an
+ingress path that skips the proxy — could send `X-Auth-Request-Email` and be
+treated as that person. Name the address range the proxy connects from and the
+app ignores the header from anywhere else:
+
+```yaml
+env:
+  TRUSTED_PROXY_CIDRS: "10.0.0.0/8"   # the pod network your proxy runs on
+```
+
+Leave it unset only where nothing but the proxy can reach the Service. Startup
+logs a warning if any allow-list is configured without it. Pair it with a
+NetworkPolicy that admits only the proxy pod for defence in depth.
 
 ## Adding a New Agent
 

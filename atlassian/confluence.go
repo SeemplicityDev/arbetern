@@ -11,9 +11,7 @@ import (
 	"strings"
 )
 
-// ---------------------------------------------------------------------------
 // Confluence REST API v2
-// ---------------------------------------------------------------------------
 // Confluence shares the same Atlassian OAuth token and cloud ID as Jira.
 // For Basic Auth the site URL is the same; for OAuth the base URL differs
 // (api.atlassian.com/ex/confluence/<cloudID>).
@@ -379,9 +377,7 @@ func (c *Client) resolveConfluenceSpaceID(spaceKey string) (string, error) {
 	return "", fmt.Errorf("confluence space with key %q not found", spaceKey)
 }
 
-// ---------------------------------------------------------------------------
 // Confluence URL / Tiny-Link Resolver
-// ---------------------------------------------------------------------------
 
 // ResolveConfluencePageID extracts a numeric Confluence page ID from various
 // input formats:

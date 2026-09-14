@@ -35,6 +35,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/justmike1/arbetern/internal/text"
 )
 
 const (
@@ -184,9 +186,7 @@ func (c *Client) scopePath() string {
 	return "/providers/Microsoft.Management/managementGroups/" + url.PathEscape(c.managementGroupID)
 }
 
-// --------------------------------------------------------------------------
 // Cost & usage
-// --------------------------------------------------------------------------
 
 // CostAndUsageOpts mirrors the AWS package shape so the tool surface stays
 // uniform across cloud providers.
@@ -286,9 +286,7 @@ func (c *Client) GetCostAndUsage(ctx context.Context, opts CostAndUsageOpts) (*C
 	return flattenQuery(&resp, gran, metric, groupBy, start, end)
 }
 
-// --------------------------------------------------------------------------
 // Cost forecast
-// --------------------------------------------------------------------------
 
 // ForecastOpts mirrors AWS ForecastOpts.
 type ForecastOpts struct {
@@ -384,9 +382,7 @@ func (c *Client) GetCostForecast(ctx context.Context, opts ForecastOpts) (*Forec
 	return out, nil
 }
 
-// --------------------------------------------------------------------------
 // Dimension values
-// --------------------------------------------------------------------------
 
 // DimensionValuesOpts configures GetDimensionValues. Search-time narrowing
 // is done server-side via the OData $filter on `properties/data`.
@@ -450,9 +446,7 @@ func (c *Client) GetDimensionValues(ctx context.Context, opts DimensionValuesOpt
 	return &DimensionValuesResult{Dimension: dim, Values: values}, nil
 }
 
-// --------------------------------------------------------------------------
 // HTTP plumbing
-// --------------------------------------------------------------------------
 
 type queryResponse struct {
 	Properties struct {
@@ -501,7 +495,7 @@ func (c *Client) token(ctx context.Context) (string, error) {
 	defer func() { _ = resp.Body.Close() }()
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode >= 300 {
-		return "", fmt.Errorf("token endpoint returned %s: %s", resp.Status, truncate(string(body), 300))
+		return "", fmt.Errorf("token endpoint returned %s: %s", resp.Status, text.Truncate(string(body), 300))
 	}
 	var tr struct {
 		AccessToken string `json:"access_token"`
@@ -674,7 +668,7 @@ func (c *Client) doJSONRaw(ctx context.Context, method, endpoint string, body an
 		if resp.StatusCode < 300 {
 			return respBody, nil
 		}
-		lastErr = fmt.Errorf("ARM returned %s: %s", resp.Status, truncate(string(respBody), 500))
+		lastErr = fmt.Errorf("ARM returned %s: %s", resp.Status, text.Truncate(string(respBody), 500))
 		if resp.StatusCode != http.StatusTooManyRequests && resp.StatusCode < 500 {
 			return nil, lastErr
 		}
@@ -746,9 +740,7 @@ func retryAfter(h http.Header, attempt int) time.Duration {
 	return best + jitter
 }
 
-// --------------------------------------------------------------------------
 // Helpers
-// --------------------------------------------------------------------------
 
 func resolveDateRange(start, end string, defaultDays int) (string, string, error) {
 	today := time.Now().UTC()
@@ -952,14 +944,4 @@ func formatDateCell(v any) string {
 		return s[:4] + "-" + s[4:6]
 	}
 	return s
-}
-
-func truncate(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	if n < 1 {
-		return ""
-	}
-	return s[:n-1] + "…"
 }

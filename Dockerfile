@@ -1,9 +1,18 @@
-FROM golang:1.26-bookworm AS builder
-RUN curl -fsSL https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -o /usr/local/bin/yq \
-    && chmod +x /usr/local/bin/yq
+FROM golang:1.27-trixie AS builder
+# Pinned so a rebuild of a given commit produces the same binary. Bump
+# deliberately; "latest" would silently change the build inputs.
+ARG YQ_VERSION=v4.53.6
+ARG LINGUIST_REF=v9.7.0
 
-# Fetch all known programming-language file extensions from GitHub Linguist.
-RUN curl -sf https://raw.githubusercontent.com/github-linguist/linguist/master/lib/linguist/languages.yml -o /tmp/languages.yml
+RUN set -eux; \
+    arch="$(dpkg --print-architecture)"; \
+    curl -fsSL "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_${arch}" -o /usr/local/bin/yq; \
+    chmod +x /usr/local/bin/yq; \
+    yq --version
+
+# Fetch all known programming-language file extensions from GitHub Linguist,
+# pinned to a release tag rather than a moving branch.
+RUN curl -fsSL "https://raw.githubusercontent.com/github-linguist/linguist/${LINGUIST_REF}/lib/linguist/languages.yml" -o /tmp/languages.yml
 
 WORKDIR /build
 

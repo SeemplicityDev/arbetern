@@ -7,9 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"net"
 	"net/http"
-	"net/url"
 	"reflect"
 	"regexp"
 	"sort"
@@ -18,6 +16,7 @@ import (
 	"time"
 
 	"github.com/justmike1/arbetern/github"
+	"github.com/justmike1/arbetern/internal/httpx"
 	"github.com/justmike1/arbetern/slack"
 )
 
@@ -549,47 +548,16 @@ func fetchWorkflowLogsBulk(ctx context.Context, ghClient *github.Client, text, u
 	return result
 }
 
-// httpGetClient is shared by http_get.
-var httpGetClient = &http.Client{
-	Timeout: 25 * time.Second,
-	// Re-validate on redirect to mitigate SSRF via 30x.
-	CheckRedirect: func(req *http.Request, via []*http.Request) error {
-		if len(via) >= 5 {
-			return fmt.Errorf("too many redirects")
-		}
-		return validatePublicURL(req.URL.String())
-	},
-}
+// httpGetClient is shared by http_get. Its transport resolves each hostname
+// and refuses any address that is not publicly routable, so a name that points
+// at a cluster service or the instance metadata endpoint fails at connect time
+// rather than passing a hostname-only check.
+var httpGetClient = httpx.SafeClient(25*time.Second, 5)
 
-// validatePublicURL rejects non-http(s) schemes and obvious internal
-// targets. No DNS resolution — hostname-level checks only.
-func validatePublicURL(raw string) error {
-	u, err := url.Parse(strings.TrimSpace(raw))
-	if err != nil {
-		return fmt.Errorf("invalid url: %w", err)
-	}
-	scheme := strings.ToLower(u.Scheme)
-	if scheme != "http" && scheme != "https" {
-		return fmt.Errorf("only http(s) URLs are allowed (got %q)", u.Scheme)
-	}
-	host := strings.ToLower(u.Hostname())
-	if host == "" {
-		return fmt.Errorf("url is missing a host")
-	}
-	switch host {
-	case "localhost", "ip6-localhost", "ip6-loopback":
-		return fmt.Errorf("refusing to fetch from %s", host)
-	}
-	if strings.HasSuffix(host, ".local") || strings.HasSuffix(host, ".internal") {
-		return fmt.Errorf("refusing to fetch from internal host %s", host)
-	}
-	if ip := net.ParseIP(host); ip != nil {
-		if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsUnspecified() {
-			return fmt.Errorf("refusing to fetch from non-public IP %s", host)
-		}
-	}
-	return nil
-}
+// validatePublicURL rejects non-http(s) schemes and obvious internal targets
+// before the request is built. The dialer guard is what actually enforces the
+// destination; this is the early, friendlier error.
+func validatePublicURL(raw string) error { return httpx.ValidateURL(raw) }
 
 // doHTTPGet implements the http_get tool. Errors are returned inline so
 // the LLM can react and retry.

@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/slack-go/slack"
 )
@@ -25,6 +26,11 @@ type Client struct {
 func NewClient(botToken string) *Client {
 	return &Client{api: slack.New(botToken), token: botToken}
 }
+
+// outboundClient carries the raw Slack calls that do not go through the
+// slack-go client (file uploads, response_url posts). The default client has
+// no timeout, so a stalled Slack edge would pin the goroutine indefinitely.
+var outboundClient = &http.Client{Timeout: 30 * time.Second}
 
 func (c *Client) FetchChannelHistory(channelID string, limit int) ([]slack.Message, error) {
 	params := &slack.GetConversationHistoryParameters{
@@ -407,7 +413,7 @@ func (c *Client) uploadContentToURL(ctx context.Context, uploadURL, filename, co
 	req.Header.Set("Content-Type", mw.FormDataContentType())
 	req.Header.Set("Authorization", "Bearer "+c.token)
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := outboundClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("failed to upload file content: %w", err)
 	}
@@ -439,7 +445,7 @@ func RespondToURL(responseURL, text string, ephemeral bool) error {
 		return fmt.Errorf("failed to marshal response payload: %w", err)
 	}
 
-	resp, err := http.Post(responseURL, "application/json", bytes.NewReader(payload))
+	resp, err := outboundClient.Post(responseURL, "application/json", bytes.NewReader(payload))
 	if err != nil {
 		return fmt.Errorf("failed to post to response_url: %w", err)
 	}

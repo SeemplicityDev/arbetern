@@ -1,6 +1,5 @@
 package llm
 
-// ---------------------------------------------------------------------------
 // Anthropic Messages API protocol adapter.
 //
 // Azure Foundry hosts Claude models behind the native Anthropic Messages API
@@ -22,7 +21,6 @@ package llm
 // The translators below convert between the internal ChatMessage / Tool /
 // ChatResponse types and this wire format so the rest of the codebase can
 // remain backend-agnostic.
-// ---------------------------------------------------------------------------
 
 import (
 	"bytes"
@@ -148,34 +146,52 @@ func markLastMessageCache(msgs []anthropicMessage) {
 // chatMessagesToAnthropic converts the unified ChatMessage list to the
 // Anthropic system-string + messages-array layout.
 //
+// It returns the stable system text, the per-turn system text (see
+// ChatMessage.Volatile) and the message array.
+//
 // Role mapping:
-//   - "system"       → appended to the top-level `system` string (joined by
-//     blank lines if multiple are present).
+//   - "system"       → one of the two system strings, joined by blank lines.
 //   - "user"/"assistant" → emitted verbatim with string content.
-//   - "tool"         → emitted as a user message carrying a single
-//     `tool_result` block keyed by ToolCallID.
+//   - "tool"         → a `tool_result` block keyed by ToolCallID, merged into
+//     the preceding user message when that message is already tool results.
 //
 // Assistant messages that include ToolCalls are emitted with a structured
 // content array containing an optional text block followed by one `tool_use`
 // block per call.
-func chatMessagesToAnthropic(messages []ChatMessage) (string, []anthropicMessage) {
-	var systemParts []string
+func chatMessagesToAnthropic(messages []ChatMessage) (string, string, []anthropicMessage) {
+	var systemParts, volatileParts []string
 	out := make([]anthropicMessage, 0, len(messages))
+
+	// appendToolResult puts consecutive tool results into one user message.
+	// The API requires every tool_use block in an assistant turn to be answered
+	// by tool_result blocks in the single user message that follows, and
+	// splitting them also teaches the model to stop calling tools in parallel.
+	appendToolResult := func(block map[string]interface{}) {
+		if n := len(out); n > 0 && out[n-1].Role == "user" {
+			if blocks, ok := out[n-1].Content.([]map[string]interface{}); ok &&
+				len(blocks) > 0 && blocks[0]["type"] == "tool_result" {
+				out[n-1].Content = append(blocks, block)
+				return
+			}
+		}
+		out = append(out, anthropicMessage{Role: "user", Content: []map[string]interface{}{block}})
+	}
 
 	for _, m := range messages {
 		switch m.Role {
 		case "system":
 			if s := strings.TrimSpace(m.Content); s != "" {
-				systemParts = append(systemParts, s)
+				if m.Volatile {
+					volatileParts = append(volatileParts, s)
+				} else {
+					systemParts = append(systemParts, s)
+				}
 			}
 		case "tool":
-			out = append(out, anthropicMessage{
-				Role: "user",
-				Content: []map[string]interface{}{{
-					"type":        "tool_result",
-					"tool_use_id": m.ToolCallID,
-					"content":     m.Content,
-				}},
+			appendToolResult(map[string]interface{}{
+				"type":        "tool_result",
+				"tool_use_id": m.ToolCallID,
+				"content":     m.Content,
 			})
 		case "assistant":
 			if len(m.ToolCalls) == 0 {
@@ -209,7 +225,7 @@ func chatMessagesToAnthropic(messages []ChatMessage) (string, []anthropicMessage
 		}
 	}
 
-	return strings.Join(systemParts, "\n\n"), out
+	return strings.Join(systemParts, "\n\n"), strings.Join(volatileParts, "\n\n"), out
 }
 
 // anthropicResponseToChat translates the Messages API reply into the shared
@@ -248,11 +264,12 @@ func anthropicResponseToChat(r *anthropicResponse) *ChatResponse {
 		FinishReason: r.StopReason,
 	})
 	if r.Usage != nil {
-		// PromptTokens are full-rate input (fresh input + cache writes); cache
-		// reads are tracked separately so they can be priced at the provider's
-		// steep cache-read discount. TotalTokens covers every category.
+		// The three input categories are priced differently — fresh input at
+		// the base rate, cache writes above it, cache reads far below — so each
+		// is reported on its own. TotalTokens covers every category.
 		resp.Usage = &Usage{
-			PromptTokens:       r.Usage.InputTokens + r.Usage.CacheCreationInputTokens,
+			PromptTokens:       r.Usage.InputTokens,
+			CacheWriteTokens:   r.Usage.CacheCreationInputTokens,
 			CachedPromptTokens: r.Usage.CacheReadInputTokens,
 			CompletionTokens:   r.Usage.OutputTokens,
 			TotalTokens:        r.Usage.InputTokens + r.Usage.CacheCreationInputTokens + r.Usage.CacheReadInputTokens + r.Usage.OutputTokens,
@@ -292,18 +309,34 @@ type messagesTransport interface {
 // quality-neutral — the model sees identical input; only billing and latency
 // improve. Disable with LLM_PROMPT_CACHE=false.
 func (c *Client) buildAnthropicRequest(messages []ChatMessage, tools []Tool) anthropicRequest {
-	system, anthMessages := chatMessagesToAnthropic(messages)
+	system, volatile, anthMessages := chatMessagesToAnthropic(messages)
 	anthTools := chatToolsToAnthropicTools(tools)
+	caching := promptCacheEnabled()
 
+	// The cache is a prefix match, so the breakpoint goes on the stable half of
+	// the system prompt and the per-turn half follows it unmarked. Appending
+	// volatile text into the marked block instead would rewrite the cached
+	// prefix every turn, turning every read into a full-price write.
 	var systemField interface{}
-	if s := strings.TrimSpace(system); s != "" {
-		if promptCacheEnabled() {
-			systemField = []map[string]interface{}{{"type": "text", "text": system, "cache_control": ephemeralCache}}
-		} else {
-			systemField = system
+	static := strings.TrimSpace(system)
+	vol := strings.TrimSpace(volatile)
+	switch {
+	case static == "" && vol == "":
+	case !caching:
+		systemField = strings.TrimSpace(static + "\n\n" + vol)
+	default:
+		blocks := make([]map[string]interface{}, 0, 2)
+		if static != "" {
+			blocks = append(blocks, map[string]interface{}{
+				"type": "text", "text": static, "cache_control": ephemeralCache,
+			})
 		}
+		if vol != "" {
+			blocks = append(blocks, map[string]interface{}{"type": "text", "text": vol})
+		}
+		systemField = blocks
 	}
-	if promptCacheEnabled() {
+	if caching {
 		if n := len(anthTools); n > 0 {
 			anthTools[n-1].CacheControl = ephemeralCache
 		}

@@ -201,6 +201,7 @@ func (e *Embedder) post(ctx context.Context, apiURL string, payload []byte, auth
 			return nil, fmt.Errorf("embeddings request failed: %w", err)
 		}
 		body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
+		retryAfter := resp.Header.Get("Retry-After")
 		_ = resp.Body.Close()
 		if err != nil {
 			return nil, fmt.Errorf("read embeddings response: %w", err)
@@ -212,7 +213,7 @@ func (e *Embedder) post(ctx context.Context, apiURL string, payload []byte, auth
 		if !isRetryable(resp.StatusCode) {
 			break
 		}
-		wait := retryDelay(resp, attempt)
+		wait := retryDelay(retryAfter, attempt)
 		log.Printf("[llm] embeddings retryable %d, backing off %s", resp.StatusCode, wait)
 		select {
 		case <-time.After(wait):

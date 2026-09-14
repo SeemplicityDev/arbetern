@@ -11,9 +11,7 @@ import (
 	"strings"
 )
 
-// ---------------------------------------------------------------------------
 // Jira REST API v3
-// ---------------------------------------------------------------------------
 
 // PermissionGrant describes whether a specific Jira permission is granted.
 type PermissionGrant struct {
@@ -1954,9 +1952,7 @@ func (c *Client) UpdateIssueFields(issueKey string, fields map[string]interface{
 	return nil
 }
 
-// ---------------------------------------------------------------------------
 // Dashboards & Filters
-// ---------------------------------------------------------------------------
 
 // Dashboard represents a Jira dashboard.
 type Dashboard struct {
@@ -2108,9 +2104,7 @@ func (c *Client) GetFilter(filterID string) (*FilterDetail, error) {
 	return &filter, nil
 }
 
-// ---------------------------------------------------------------------------
 // Comments, issue links, sprints
-// ---------------------------------------------------------------------------
 
 // marshalCreateIssueBody serializes the typed createIssuePayload while merging
 // arbitrary extra fields supplied via CreateIssueInput.Fields. Typed fields

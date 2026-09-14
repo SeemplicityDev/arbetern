@@ -14,8 +14,7 @@ import (
 	"sync"
 	"time"
 
-	gh "github.com/google/go-github/v85/github"
-	"golang.org/x/oauth2"
+	gh "github.com/google/go-github/v91/github"
 
 	"github.com/justmike1/arbetern/internal/safego"
 )
@@ -25,9 +24,14 @@ type Client struct {
 }
 
 func NewClient(token string) *Client {
-	ts := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: token})
-	httpClient := oauth2.NewClient(context.Background(), ts)
-	return &Client{api: gh.NewClient(httpClient)}
+	api, err := gh.NewClient(gh.WithAuthToken(token))
+	if err != nil {
+		// WithAuthToken only fails on an empty token, which is a
+		// configuration error the caller has already validated.
+		log.Printf("[github] client setup failed: %v", err)
+		api, _ = gh.NewClient()
+	}
+	return &Client{api: api}
 }
 
 func (c *Client) GetAuthenticatedUser(ctx context.Context) (string, error) {
@@ -173,10 +177,10 @@ func (c *Client) CreateBranch(ctx context.Context, owner, repo, baseBranch, newB
 
 func (c *Client) UpdateFile(ctx context.Context, owner, repo, path, branch, message string, content []byte, sha string) error {
 	opts := &gh.RepositoryContentFileOptions{
-		Message: gh.String(message),
+		Message: new(message),
 		Content: content,
-		Branch:  gh.String(branch),
-		SHA:     gh.String(sha),
+		Branch:  new(branch),
+		SHA:     new(sha),
 	}
 
 	_, _, err := c.api.Repositories.UpdateFile(ctx, owner, repo, path, opts)
@@ -190,9 +194,9 @@ func (c *Client) UpdateFile(ctx context.Context, owner, repo, path, branch, mess
 // SHA is required because the file does not exist yet.
 func (c *Client) CreateFile(ctx context.Context, owner, repo, path, branch, message string, content []byte) error {
 	opts := &gh.RepositoryContentFileOptions{
-		Message: gh.String(message),
+		Message: new(message),
 		Content: content,
-		Branch:  gh.String(branch),
+		Branch:  new(branch),
 	}
 
 	_, _, err := c.api.Repositories.CreateFile(ctx, owner, repo, path, opts)
@@ -203,11 +207,11 @@ func (c *Client) CreateFile(ctx context.Context, owner, repo, path, branch, mess
 }
 
 func (c *Client) CreatePullRequest(ctx context.Context, owner, repo, baseBranch, headBranch, title, body string) (string, error) {
-	pr := &gh.NewPullRequest{
-		Title: gh.String(title),
-		Body:  gh.String(body),
-		Head:  gh.String(headBranch),
-		Base:  gh.String(baseBranch),
+	pr := gh.CreatePullRequest{
+		Title: new(title),
+		Body:  new(body),
+		Head:  headBranch,
+		Base:  baseBranch,
 	}
 
 	created, _, err := c.api.PullRequests.Create(ctx, owner, repo, pr)
@@ -1482,13 +1486,22 @@ const (
 )
 
 // getJobLogs downloads the plain-text log for a specific job run.
+// logDownloadClient fetches the signed log URLs the Actions API redirects to.
+var logDownloadClient = &http.Client{Timeout: 60 * time.Second}
+
 func (c *Client) getJobLogs(ctx context.Context, owner, repo string, jobID int64) (string, error) {
 	logURL, _, err := c.api.Actions.GetWorkflowJobLogs(ctx, owner, repo, jobID, 2)
 	if err != nil {
 		return "", fmt.Errorf("failed to get log URL for job %d: %w", jobID, err)
 	}
 
-	resp, err := http.Get(logURL.String())
+	// The redirect target is a short-lived signed URL. Use the caller's context
+	// and a bounded client so a stalled download cannot outlive the request.
+	logReq, err := http.NewRequestWithContext(ctx, http.MethodGet, logURL.String(), nil)
+	if err != nil {
+		return "", fmt.Errorf("failed to build job log request: %w", err)
+	}
+	resp, err := logDownloadClient.Do(logReq)
 	if err != nil {
 		return "", fmt.Errorf("failed to download job logs: %w", err)
 	}

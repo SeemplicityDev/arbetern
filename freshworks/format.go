@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+
+	"github.com/justmike1/arbetern/internal/text"
 )
 
 const (
@@ -19,12 +21,10 @@ const (
 	maxItemBody = 350
 )
 
-func truncate(s string, max int) string {
-	s = strings.TrimSpace(s)
-	if len(s) <= max {
-		return s
-	}
-	return strings.TrimSpace(s[:max]) + "…"
+// truncateTrimmed trims surrounding whitespace before shortening, so a padded
+// Freshworks field does not spend its budget on blanks.
+func truncateTrimmed(s string, max int) string {
+	return text.Truncate(strings.TrimSpace(s), max)
 }
 
 // FormatTicketList renders a slice of tickets as a compact Slack list.
@@ -45,7 +45,7 @@ func FormatTicketList(tickets []Ticket, header string) string {
 	for i := 0; i < limit; i++ {
 		t := tickets[i]
 		fmt.Fprintf(&sb, "• *#%d* %s\n   _%s · %s · updated %s_\n",
-			t.ID, truncate(t.Subject, 120),
+			t.ID, truncateTrimmed(t.Subject, 120),
 			freshdeskStatus(t.Status), freshdeskPriority(t.Priority), t.UpdatedAt)
 	}
 	if len(tickets) > limit {
@@ -60,7 +60,7 @@ func FormatTicket(t *Ticket) string {
 		return "No ticket."
 	}
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "*Freshdesk ticket #%d — %s*\n", t.ID, truncate(t.Subject, 200))
+	fmt.Fprintf(&sb, "*Freshdesk ticket #%d — %s*\n", t.ID, truncateTrimmed(t.Subject, 200))
 	fmt.Fprintf(&sb, "Status: *%s* · Priority: *%s* · Source: %s\n",
 		freshdeskStatus(t.Status), freshdeskPriority(t.Priority), freshdeskSource(t.Source))
 	if t.Type != "" {
@@ -74,7 +74,7 @@ func FormatTicket(t *Ticket) string {
 	if len(t.Tags) > 0 {
 		fmt.Fprintf(&sb, "Tags: %s\n", strings.Join(t.Tags, ", "))
 	}
-	if body := truncate(t.DescriptionText, maxBodyChars); body != "" {
+	if body := truncateTrimmed(t.DescriptionText, maxBodyChars); body != "" {
 		fmt.Fprintf(&sb, "\n%s\n", body)
 	}
 	if len(t.Conversations) > 0 {
@@ -182,7 +182,7 @@ func formatConversations(convs []TicketConversation) string {
 		} else if c.Incoming {
 			direction = "Incoming"
 		}
-		fmt.Fprintf(&sb, "• _%s · %s_\n   %s\n", direction, c.CreatedAt, truncate(c.BodyText, maxItemBody))
+		fmt.Fprintf(&sb, "• _%s · %s_\n   %s\n", direction, c.CreatedAt, truncateTrimmed(c.BodyText, maxItemBody))
 	}
 	if len(convs) > limit {
 		fmt.Fprintf(&sb, "_…and %d more._\n", len(convs)-limit)
@@ -244,7 +244,7 @@ func formatChatMessages(msgs []ChatMessage) string {
 		if text == "" {
 			continue
 		}
-		fmt.Fprintf(&sb, "• _%s · %s_\n   %s\n", actor, m.CreatedTime, truncate(text, maxItemBody))
+		fmt.Fprintf(&sb, "• _%s · %s_\n   %s\n", actor, m.CreatedTime, truncateTrimmed(text, maxItemBody))
 	}
 	if len(msgs) > limit {
 		fmt.Fprintf(&sb, "_…and %d more._\n", len(msgs)-limit)

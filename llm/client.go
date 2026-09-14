@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math/rand/v2"
 	"net/http"
 	"strconv"
 	"strings"
@@ -90,22 +91,32 @@ func isRetryable(statusCode int) bool {
 	return statusCode == http.StatusTooManyRequests || statusCode >= 500
 }
 
-// retryDelay calculates how long to wait before the next retry, respecting
-// a Retry-After header (seconds) if present. Capped at maxRetryDelay.
-func retryDelay(resp *http.Response, attempt int) time.Duration {
+// retryDelay calculates how long to wait before the next retry, respecting a
+// Retry-After header (seconds, or an HTTP date) if present. Capped at
+// maxRetryDelay.
+//
+// The wait carries jitter because the failures that trigger it are usually
+// shared: a burst of workflow ticks hits the same rate limit at the same
+// moment, and a fixed backoff would send them all back together on every
+// round. Half the delay is fixed so a retry never comes back immediately.
+func retryDelay(retryAfter string, attempt int) time.Duration {
 	var d time.Duration
-	if ra := resp.Header.Get("Retry-After"); ra != "" {
+	if ra := strings.TrimSpace(retryAfter); ra != "" {
 		if secs, err := strconv.Atoi(ra); err == nil && secs > 0 {
 			d = time.Duration(secs) * time.Second
+		} else if t, err := http.ParseTime(ra); err == nil {
+			if until := time.Until(t); until > 0 {
+				d = until
+			}
 		}
 	}
 	if d == 0 {
-		d = baseRetryDelay * (1 << attempt)
+		d = baseRetryDelay << attempt
 	}
 	if d > maxRetryDelay {
 		d = maxRetryDelay
 	}
-	return d
+	return d/2 + time.Duration(rand.Int64N(int64(d/2)+1))
 }
 
 // Client provides LLM inference through GitHub Models, Azure OpenAI, or AWS
@@ -441,66 +452,77 @@ func (c *Client) doChat(ctx context.Context, messages []ChatMessage, tools []Too
 	return &chatResp, nil
 }
 
-// doPostWithRetry performs an HTTP POST with automatic retry on transient errors
-// (429, 5xx). It returns the response body, the final HTTP status code, and any
-// transport-level error. The label parameter is used in log messages.
+// doPostWithRetry performs an HTTP POST, retrying transient failures: 429, 5xx,
+// and transport errors. It returns the response body, the final HTTP status
+// code, and any transport-level error. The label parameter is used in log
+// messages.
 //
 // authorize decorates each freshly-built request with its headers and any
 // signing. It runs once per attempt — not once overall — so time-sensitive
 // signatures (SigV4) are regenerated before every retry rather than replayed
 // stale.
 func (c *Client) doPostWithRetry(ctx context.Context, url string, payload []byte, authorize func(*http.Request) error, label string) ([]byte, int, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
-	if err != nil {
-		return nil, 0, fmt.Errorf("failed to create %s request: %w", label, err)
-	}
-	if err := authorize(req); err != nil {
-		return nil, 0, fmt.Errorf("failed to authorize %s request: %w", label, err)
-	}
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, 0, fmt.Errorf("%s API request failed: %w", label, err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
-	if err != nil {
-		return nil, 0, fmt.Errorf("failed to read %s response body: %w", label, err)
-	}
-
-	if isRetryable(resp.StatusCode) {
-		for attempt := 0; attempt < maxRetries; attempt++ {
-			wait := retryDelay(resp, attempt)
-			log.Printf("[llm] %s retryable %d, backing off %s (attempt %d/%d)", label, resp.StatusCode, wait, attempt+1, maxRetries)
+	var (
+		lastErr        error
+		lastRetryAfter string
+		lastReason     string
+	)
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		if attempt > 0 {
+			wait := retryDelay(lastRetryAfter, attempt-1)
+			log.Printf("[llm] %s retrying after %s (attempt %d/%d): %s", label, wait, attempt, maxRetries, lastReason)
 			select {
 			case <-time.After(wait):
 			case <-ctx.Done():
 				return nil, 0, ctx.Err()
 			}
-			retryReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
-			if err != nil {
-				return nil, 0, fmt.Errorf("failed to create %s retry request: %w", label, err)
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
+		if err != nil {
+			return nil, 0, fmt.Errorf("failed to create %s request: %w", label, err)
+		}
+		if err := authorize(req); err != nil {
+			return nil, 0, fmt.Errorf("failed to authorize %s request: %w", label, err)
+		}
+
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			// A transport failure (connection reset, DNS blip, TLS timeout) is
+			// the most transient error there is, so it retries like a 503 —
+			// unless the caller gave up, which is not transient at all.
+			if ctx.Err() != nil {
+				return nil, 0, ctx.Err()
 			}
-			if err := authorize(retryReq); err != nil {
-				return nil, 0, fmt.Errorf("failed to authorize %s retry request: %w", label, err)
+			lastErr = fmt.Errorf("%s API request failed: %w", label, err)
+			lastRetryAfter, lastReason = "", err.Error()
+			continue
+		}
+		body, readErr := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
+		retryAfter := resp.Header.Get("Retry-After")
+		status := resp.StatusCode
+		_ = resp.Body.Close()
+		if readErr != nil {
+			if ctx.Err() != nil {
+				return nil, 0, ctx.Err()
 			}
-			resp, err = c.httpClient.Do(retryReq)
-			if err != nil {
-				return nil, 0, fmt.Errorf("%s API retry request failed: %w", label, err)
-			}
-			body, err = io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
-			_ = resp.Body.Close()
-			if err != nil {
-				return nil, 0, fmt.Errorf("failed to read %s retry response body: %w", label, err)
-			}
-			if !isRetryable(resp.StatusCode) {
-				break
-			}
+			lastErr = fmt.Errorf("failed to read %s response body: %w", label, readErr)
+			lastRetryAfter, lastReason = retryAfter, readErr.Error()
+			continue
+		}
+		if !isRetryable(status) {
+			return body, status, nil
+		}
+		lastErr = nil
+		lastRetryAfter = retryAfter
+		lastReason = fmt.Sprintf("HTTP %d", status)
+		if attempt == maxRetries {
+			return body, status, nil
 		}
 	}
-
-	return body, resp.StatusCode, nil
+	if lastErr != nil {
+		return nil, 0, lastErr
+	}
+	return nil, 0, fmt.Errorf("%s API gave up after %d attempts", label, maxRetries+1)
 }
 
 // ValidateModel verifies that the configured model/deployment is accessible

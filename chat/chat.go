@@ -5,13 +5,12 @@
 //
 // Like widely used assistant apps (ChatGPT, Claude), each agent can hold many
 // independent conversations: a left-bar history of titled threads plus a "New
-// chat" action. There is no per-user authentication in arbetern yet, so the
-// conversations are deliberately *centralized* — every viewer shares the same
-// list of threads, and they are stored in the state bucket so they survive
-// restarts. Each turn records a display name for context: when an upstream
-// OAuth proxy is in front, the proxy-verified email of the sender is recorded;
-// otherwise it is an optional free-text name. Either way it grants no access —
-// access is enforced separately by the authorizer.
+// chat" action. Conversations are stored in the state bucket so they survive
+// restarts, and each one records the identity that created it. Every read and
+// write is scoped to that owner, so one viewer never sees another viewer's
+// threads. The owner is the proxy-verified email when an upstream OAuth proxy
+// is in front; a deployment with no proxy has no identity to scope by, and
+// there every caller shares the one ownerless set.
 package chat
 
 import (
@@ -55,6 +54,11 @@ var ErrNotFound = errors.New("conversation not found")
 // ErrBusy is returned when a reply is already being produced for the conversation.
 var ErrBusy = errors.New("a reply is already in progress")
 
+// ErrForbidden is returned when a conversation exists but belongs to someone
+// else. Handlers translate it to 404 so the response does not confirm that the
+// conversation is real.
+var ErrForbidden = errors.New("conversation belongs to another user")
+
 var errNoChange = errors.New("no change")
 
 // Message is a single chat turn. Role is "user" or "assistant". Error marks an
@@ -77,8 +81,13 @@ type Responder func(ctx context.Context, agent, user string, history []Message, 
 // transcript is the stored shape of a single conversation, kept at
 // <Prefix><agent>/<id>.json.
 type transcript struct {
-	ID        string    `json:"id"`
-	Agent     string    `json:"agent"`
+	ID    string `json:"id"`
+	Agent string `json:"agent"`
+	// Owner is the normalized identity that created the conversation and the
+	// only one allowed to read or change it. Empty means the conversation was
+	// created without an identity source, and only an equally unidentified
+	// caller can reach it.
+	Owner     string    `json:"owner,omitempty"`
 	Title     string    `json:"title"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
@@ -190,6 +199,12 @@ func (r *Registry) userFor(req *http.Request) string {
 	return fn(req)
 }
 
+// OwnerKey normalizes a caller identity into the form stored on a transcript.
+func OwnerKey(user string) string { return strings.ToLower(strings.TrimSpace(user)) }
+
+// owns reports whether a caller identity may reach this conversation.
+func owns(t *transcript, owner string) bool { return t.Owner == owner }
+
 // splitKey returns the agent and conversation id encoded in a document key.
 func splitKey(key string) (agent, id string) {
 	agent, rest, _ := strings.Cut(key, "/")
@@ -198,7 +213,7 @@ func splitKey(key string) (agent, id string) {
 
 // ListConversations returns summaries of an agent's conversations, most
 // recently updated first. Returns an empty slice when the agent has none.
-func (r *Registry) ListConversations(agent string) ([]ConversationSummary, error) {
+func (r *Registry) ListConversations(agent, owner string) ([]ConversationSummary, error) {
 	if !store.AgentRe.MatchString(agent) {
 		return nil, fmt.Errorf("invalid agent %q", agent)
 	}
@@ -209,6 +224,9 @@ func (r *Registry) ListConversations(agent string) ([]ConversationSummary, error
 			return
 		}
 		normalize(t, a, id)
+		if !owns(t, owner) {
+			return
+		}
 		out = append(out, ConversationSummary{
 			ID:           t.ID,
 			Title:        t.Title,
@@ -223,13 +241,13 @@ func (r *Registry) ListConversations(agent string) ([]ConversationSummary, error
 
 // CreateConversation starts a new, empty conversation for an agent and stores
 // it so it appears in the history sidebar immediately.
-func (r *Registry) CreateConversation(ctx context.Context, agent string) (*transcript, error) {
+func (r *Registry) CreateConversation(ctx context.Context, agent, owner string) (*transcript, error) {
 	id, err := store.NewID()
 	if err != nil {
 		return nil, err
 	}
 	now := time.Now().UTC()
-	t := &transcript{ID: id, Agent: agent, Title: "New chat", CreatedAt: now, UpdatedAt: now, Messages: []Message{}}
+	t := &transcript{ID: id, Agent: agent, Owner: owner, Title: "New chat", CreatedAt: now, UpdatedAt: now, Messages: []Message{}}
 	if err := r.docs.Create(ctx, store.Key(agent, id), t); err != nil {
 		return nil, err
 	}
@@ -237,12 +255,15 @@ func (r *Registry) CreateConversation(ctx context.Context, agent string) (*trans
 }
 
 // Conversation returns a single conversation (nil when it does not exist).
-func (r *Registry) Conversation(agent, id string) (*transcript, error) {
+func (r *Registry) Conversation(agent, id, owner string) (*transcript, error) {
 	t, ok := r.docs.Get(store.Key(agent, id))
 	if !ok {
 		return nil, nil
 	}
 	normalize(t, agent, id)
+	if !owns(t, owner) {
+		return nil, ErrForbidden
+	}
 	if stalePending(t.Pending) {
 		t.Pending = nil
 	}
@@ -255,15 +276,25 @@ func stalePending(p *progress.Snapshot) bool {
 
 // DeleteConversation removes a conversation. Deleting a missing conversation is
 // a no-op.
-func (r *Registry) DeleteConversation(ctx context.Context, agent, id string) error {
-	return r.docs.Delete(ctx, store.Key(agent, id))
+func (r *Registry) DeleteConversation(ctx context.Context, agent, id, owner string) error {
+	key := store.Key(agent, id)
+	if t, ok := r.docs.Get(key); ok {
+		normalize(t, agent, id)
+		if !owns(t, owner) {
+			return ErrForbidden
+		}
+	}
+	return r.docs.Delete(ctx, key)
 }
 
 // RenameConversation sets a conversation's title. Returns nil when the
 // conversation does not exist.
-func (r *Registry) RenameConversation(ctx context.Context, agent, id, title string) (*transcript, error) {
+func (r *Registry) RenameConversation(ctx context.Context, agent, id, owner, title string) (*transcript, error) {
 	t, err := r.docs.Update(ctx, store.Key(agent, id), func(t *transcript) error {
 		normalize(t, agent, id)
+		if !owns(t, owner) {
+			return ErrForbidden
+		}
 		t.Title = title
 		t.UpdatedAt = time.Now().UTC()
 		return nil
@@ -372,7 +403,7 @@ func trimMessages(t *transcript) {
 // tool loop. The reply, or the failure, is appended when the turn ends. Returns
 // ErrBusy while an earlier turn is still in flight and ErrNotFound when the
 // conversation does not exist.
-func (r *Registry) Start(agent, id, user, message string) error {
+func (r *Registry) Start(agent, id, owner, user, message string) error {
 	if r.respond == nil {
 		return fmt.Errorf("chat responder not configured")
 	}
@@ -382,6 +413,9 @@ func (r *Registry) Start(agent, id, user, message string) error {
 	var contextMsgs []Message
 	_, err := r.docs.Update(ctx, key, func(t *transcript) error {
 		normalize(t, agent, id)
+		if !owns(t, owner) {
+			return ErrForbidden
+		}
 		if t.Pending != nil && !stalePending(t.Pending) {
 			return ErrBusy
 		}

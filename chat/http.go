@@ -4,9 +4,11 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 
+	"github.com/justmike1/arbetern/internal/httpx"
 	"github.com/justmike1/arbetern/internal/store"
 )
 
@@ -36,8 +38,8 @@ type renameRequest struct {
 //	DELETE /api/chat/<agent>/conversations/<id>   → delete the conversation
 //
 // Requests for unknown agents return 404; requests for agents that have not
-// enabled chat return 403. Access control is enforced upstream by the global
-// IP gate in main.
+// enabled chat return 403. Beyond the agent authorizer, every conversation is
+// scoped to the identity that created it, so a caller only ever sees its own.
 func (r *Registry) RegisterRoutes(apiMux *http.ServeMux, knownAgents map[string]bool) {
 	apiMux.HandleFunc("/api/chat/", func(w http.ResponseWriter, req *http.Request) {
 		rest := strings.Trim(strings.TrimPrefix(req.URL.Path, "/api/chat/"), "/")
@@ -55,13 +57,18 @@ func (r *Registry) RegisterRoutes(apiMux *http.ServeMux, knownAgents map[string]
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
+		if err := httpx.CheckSameOrigin(req); err != nil {
+			http.Error(w, err.Error(), http.StatusForbidden)
+			return
+		}
+		owner := OwnerKey(r.userFor(req))
 		// Expect /api/chat/<agent>/conversations[/<id>].
 		if len(parts) < 2 || parts[1] != "conversations" {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
 		if len(parts) == 2 {
-			r.handleCollection(w, req, agent)
+			r.handleCollection(w, req, agent, owner)
 			return
 		}
 		id := parts[2]
@@ -69,29 +76,29 @@ func (r *Registry) RegisterRoutes(apiMux *http.ServeMux, knownAgents map[string]
 			http.Error(w, "invalid conversation id", http.StatusNotFound)
 			return
 		}
-		r.handleConversation(w, req, agent, id)
+		r.handleConversation(w, req, agent, id, owner)
 	})
 }
 
 // handleCollection serves GET (list) and POST (create) on an agent's
 // conversation collection.
-func (r *Registry) handleCollection(w http.ResponseWriter, req *http.Request, agent string) {
+func (r *Registry) handleCollection(w http.ResponseWriter, req *http.Request, agent, owner string) {
 	switch req.Method {
 	case http.MethodGet:
-		list, err := r.ListConversations(agent)
+		list, err := r.ListConversations(agent, owner)
 		if err != nil {
 			http.Error(w, "failed to list conversations", http.StatusInternalServerError)
 			return
 		}
-		writeJSON(w, http.StatusOK, list)
+		httpx.WriteJSON(w, http.StatusOK, list)
 
 	case http.MethodPost:
-		conv, err := r.CreateConversation(req.Context(), agent)
+		conv, err := r.CreateConversation(req.Context(), agent, owner)
 		if err != nil {
 			http.Error(w, "failed to create conversation", http.StatusInternalServerError)
 			return
 		}
-		writeJSON(w, http.StatusCreated, conv)
+		httpx.WriteJSON(w, http.StatusCreated, conv)
 
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -99,10 +106,14 @@ func (r *Registry) handleCollection(w http.ResponseWriter, req *http.Request, ag
 }
 
 // handleConversation serves GET/POST/PATCH/DELETE on a single conversation.
-func (r *Registry) handleConversation(w http.ResponseWriter, req *http.Request, agent, id string) {
+func (r *Registry) handleConversation(w http.ResponseWriter, req *http.Request, agent, id, owner string) {
 	switch req.Method {
 	case http.MethodGet:
-		conv, err := r.Conversation(agent, id)
+		conv, err := r.Conversation(agent, id, owner)
+		if errors.Is(err, ErrForbidden) {
+			http.Error(w, "conversation not found", http.StatusNotFound)
+			return
+		}
 		if err != nil {
 			http.Error(w, "failed to load conversation", http.StatusInternalServerError)
 			return
@@ -111,7 +122,7 @@ func (r *Registry) handleConversation(w http.ResponseWriter, req *http.Request, 
 			http.Error(w, "conversation not found", http.StatusNotFound)
 			return
 		}
-		writeJSON(w, http.StatusOK, conv)
+		httpx.WriteJSON(w, http.StatusOK, conv)
 
 	case http.MethodPost:
 		var body postRequest
@@ -133,25 +144,26 @@ func (r *Registry) handleConversation(w http.ResponseWriter, req *http.Request, 
 		// their real identity instead of "Anonymous". Falls back to the free-text
 		// body name for local/unauthenticated use.
 		user := strings.TrimSpace(body.User)
-		if email := r.userFor(req); email != "" {
-			user = email
+		if owner != "" {
+			user = owner
 		}
 		if len(user) > 80 {
 			user = user[:80]
 		}
 
-		if err := r.Start(agent, id, user, msg); err != nil {
+		if err := r.Start(agent, id, owner, user, msg); err != nil {
 			switch {
-			case errors.Is(err, ErrNotFound):
+			case errors.Is(err, ErrNotFound), errors.Is(err, ErrForbidden):
 				http.Error(w, "conversation not found", http.StatusNotFound)
 			case errors.Is(err, ErrBusy):
 				http.Error(w, err.Error(), http.StatusConflict)
 			default:
-				http.Error(w, "failed to start reply: "+err.Error(), http.StatusBadGateway)
+				log.Printf("chat: start reply for %s/%s failed: %v", agent, id, err)
+				http.Error(w, "failed to start reply", http.StatusBadGateway)
 			}
 			return
 		}
-		writeJSON(w, http.StatusAccepted, map[string]string{"status": "pending"})
+		httpx.WriteJSON(w, http.StatusAccepted, map[string]string{"status": "pending"})
 
 	case http.MethodPatch:
 		var body renameRequest
@@ -168,7 +180,11 @@ func (r *Registry) handleConversation(w http.ResponseWriter, req *http.Request, 
 		if len(title) > 120 {
 			title = title[:120]
 		}
-		conv, err := r.RenameConversation(req.Context(), agent, id, title)
+		conv, err := r.RenameConversation(req.Context(), agent, id, owner, title)
+		if errors.Is(err, ErrForbidden) {
+			http.Error(w, "conversation not found", http.StatusNotFound)
+			return
+		}
 		if err != nil {
 			http.Error(w, "failed to rename conversation", http.StatusInternalServerError)
 			return
@@ -177,10 +193,15 @@ func (r *Registry) handleConversation(w http.ResponseWriter, req *http.Request, 
 			http.Error(w, "conversation not found", http.StatusNotFound)
 			return
 		}
-		writeJSON(w, http.StatusOK, conv)
+		httpx.WriteJSON(w, http.StatusOK, conv)
 
 	case http.MethodDelete:
-		if err := r.DeleteConversation(req.Context(), agent, id); err != nil {
+		err := r.DeleteConversation(req.Context(), agent, id, owner)
+		if errors.Is(err, ErrForbidden) {
+			http.Error(w, "conversation not found", http.StatusNotFound)
+			return
+		}
+		if err != nil {
 			http.Error(w, "failed to delete conversation", http.StatusInternalServerError)
 			return
 		}
@@ -189,11 +210,4 @@ func (r *Registry) handleConversation(w http.ResponseWriter, req *http.Request, 
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
-}
-
-func writeJSON(w http.ResponseWriter, status int, v any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Cache-Control", "no-store")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(v)
 }

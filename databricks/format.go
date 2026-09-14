@@ -3,6 +3,8 @@ package databricks
 import (
 	"fmt"
 	"strings"
+
+	"github.com/justmike1/arbetern/internal/text"
 )
 
 const (
@@ -50,11 +52,11 @@ func FormatQueryResult(r *QueryResult) string {
 	// Compute column widths from headers + displayed rows.
 	widths := make([]int, len(headers))
 	for i, h := range headers {
-		widths[i] = len(truncate(h, maxColWidth))
+		widths[i] = len(text.Truncate(h, maxColWidth))
 	}
 	for _, row := range display {
 		for i := 0; i < len(headers) && i < len(row); i++ {
-			if w := len(truncate(row[i], maxColWidth)); w > widths[i] {
+			if w := len(text.Truncate(row[i], maxColWidth)); w > widths[i] {
 				widths[i] = w
 			}
 		}
@@ -92,7 +94,7 @@ func writeRow(sb *strings.Builder, cells []string, widths []int) {
 	for i, w := range widths {
 		val := ""
 		if i < len(cells) {
-			val = truncate(cells[i], maxColWidth)
+			val = text.Truncate(cells[i], maxColWidth)
 		}
 		if i > 0 {
 			sb.WriteString("  ")
@@ -130,16 +132,4 @@ func csvLine(cells []string) string {
 		}
 	}
 	return strings.Join(out, ",") + "\n"
-}
-
-// truncate shortens s to at most max characters, appending an ellipsis when
-// it cuts. Shared by the formatter and the client's error rendering.
-func truncate(s string, max int) string {
-	if max <= 0 || len(s) <= max {
-		return s
-	}
-	if max <= 1 {
-		return s[:max]
-	}
-	return s[:max-1] + "…"
 }

@@ -47,9 +47,7 @@ func NewClient(apiKey, appKey, site string) *Client {
 	}
 }
 
-// --------------------------------------------------------------------------
 // Public methods
-// --------------------------------------------------------------------------
 
 // ListMonitors returns monitors matching an optional query string.
 // query can be empty to list all, or use Datadog monitor search syntax (e.g. "tag:env:prod").
@@ -173,9 +171,7 @@ func (c *Client) ListDashboards(ctx context.Context, query string, count int) ([
 	return filtered, nil
 }
 
-// --------------------------------------------------------------------------
 // Formatting helpers
-// --------------------------------------------------------------------------
 
 // FormatMonitors returns a Slack-friendly summary of monitors.
 func FormatMonitors(monitors []Monitor, site string) string {
@@ -443,9 +439,7 @@ func FormatDashboardList(dashboards []DashboardSummary, site string) string {
 	return sb.String()
 }
 
-// --------------------------------------------------------------------------
 // HTTP transport
-// --------------------------------------------------------------------------
 
 func (c *Client) baseURL() string {
 	return fmt.Sprintf("https://api.%s", c.site)
@@ -622,9 +616,7 @@ func (c *Client) SiteLabel() string {
 	return "US"
 }
 
-// --------------------------------------------------------------------------
 // MultiClient — wraps up to two site-specific clients (US + EU)
-// --------------------------------------------------------------------------
 
 // MultiClient holds Datadog clients for US and/or EU sites and routes
 // requests based on an inferred or explicit site parameter.
@@ -861,9 +853,7 @@ func (mc *MultiClient) ListDashboards(ctx context.Context, site, query string, c
 	return strings.Join(parts, "\n"), nil
 }
 
-// --------------------------------------------------------------------------
 // Metrics query (v1 /api/v1/query)
-// --------------------------------------------------------------------------
 
 // QueryMetrics runs a Datadog timeseries metrics query. `query` must be a full
 // Datadog metric query expression (e.g.

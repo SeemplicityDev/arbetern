@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	gh "github.com/google/go-github/v85/github"
+	gh "github.com/google/go-github/v91/github"
 )
 
 // prMarkerPrefix opens the HTML comment every arbetern-written PR body ends

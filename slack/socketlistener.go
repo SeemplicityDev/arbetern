@@ -11,6 +11,8 @@ import (
 	"github.com/slack-go/slack/socketmode"
 
 	"github.com/justmike1/arbetern/internal/safego"
+
+	"github.com/justmike1/arbetern/internal/text"
 )
 
 // ThreadReplyHandler is called when a user sends a message in a tracked thread.
@@ -159,7 +161,7 @@ func (sl *SocketListener) dispatchEvent(evt socketmode.Event) {
 		}
 
 		log.Printf("[socket-mode] slash command: command=%s channel=%s user=%s text=%q",
-			cmd.Command, cmd.ChannelID, cmd.UserID, truncate(cmd.Text, 80))
+			cmd.Command, cmd.ChannelID, cmd.UserID, truncateWithCount(cmd.Text, 80))
 
 		if sl.slashCommandHandler != nil {
 			safego.Go("slack: slash command "+cmd.Command, func() {
@@ -206,7 +208,7 @@ func (sl *SocketListener) handleEventsAPI(event slackevents.EventsAPIEvent) {
 func (sl *SocketListener) handleMessage(ev *slackevents.MessageEvent) {
 	// Log every message event for diagnostics.
 	log.Printf("[socket-mode] message: channel=%s user=%s thread_ts=%q sub_type=%q bot_id=%q text=%q",
-		ev.Channel, ev.User, ev.ThreadTimeStamp, ev.SubType, ev.BotID, truncate(ev.Text, 80))
+		ev.Channel, ev.User, ev.ThreadTimeStamp, ev.SubType, ev.BotID, truncateWithCount(ev.Text, 80))
 
 	// Only handle regular user messages (no subtypes like message_changed, bot_message, etc.).
 	if ev.SubType != "" {
@@ -234,9 +236,11 @@ func (sl *SocketListener) handleMessage(ev *slackevents.MessageEvent) {
 	})
 }
 
-func truncate(s string, max int) string {
+// truncateWithCount shortens s and says how much was dropped, which is what
+// makes an elided Slack payload readable in the logs.
+func truncateWithCount(s string, max int) string {
 	if len(s) <= max {
 		return s
 	}
-	return s[:max] + fmt.Sprintf("…(%d more)", len(s)-max)
+	return text.TruncatePlain(s, max) + fmt.Sprintf("…(%d more)", len(s)-max)
 }

@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"sync"
 
 	"github.com/justmike1/arbetern/internal/progress"
+	"github.com/justmike1/arbetern/internal/safego"
 	"github.com/justmike1/arbetern/llm"
 )
 
@@ -179,16 +181,21 @@ func (h *GeneralHandler) runToolLoop(ctx context.Context, lp toolLoop) (res loop
 		}
 
 		messages = append(messages, llm.ChatMessage{Role: "assistant", ToolCalls: choice.Message.ToolCalls})
+		res.ToolCalls += len(toolCalls)
 		for _, tc := range toolCalls {
+			lp.progress.ToolCalled(tc.Function.Name)
+		}
+		// The model may ask for several independent tools in one round. Running
+		// them together makes the round cost the slowest call rather than their
+		// sum. Results are collected by index so the order the model sees never
+		// depends on which call finished first.
+		results := h.executeToolsConcurrently(ctx, lp, toolCalls)
+		for i, tc := range toolCalls {
 			name := tc.Function.Name
-			log.Printf("%s tool: %s(%s)", lp.logPrefix, name, redactToolArgsForLog(name, tc.Function.Arguments))
-			res.ToolCalls++
-			lp.progress.ToolCalled(name)
-			result := h.executeTool(ctx, lp.channelID, lp.userID, lp.auditTS, name, tc.Function.Arguments)
 			if lp.afterTool != nil {
-				lp.afterTool(name, result)
+				lp.afterTool(name, results[i])
 			}
-			messages = append(messages, llm.NewToolResultMessage(tc.ID, stripPreconditionPrefix(result)))
+			messages = append(messages, llm.NewToolResultMessage(tc.ID, stripPreconditionPrefix(results[i])))
 			if codeModelTools[name] && lp.codeClient != nil && active != lp.codeClient {
 				active = lp.codeClient
 				log.Printf("%s switched to code model (%s) after %s call", lp.logPrefix, active.Model(), name)
@@ -201,6 +208,57 @@ func (h *GeneralHandler) runToolLoop(ctx context.Context, lp toolLoop) (res loop
 	log.Printf("%s exceeded max tool rounds (%d)", lp.logPrefix, rounds)
 	res.Outcome = loopMaxRounds
 	return res, nil
+}
+
+// maxConcurrentTools bounds how many tools from one round run at once, so a
+// round that asks for many calls cannot open an unbounded number of API
+// connections at the same time.
+const maxConcurrentTools = 4
+
+// executeToolsConcurrently runs a round's tool calls and returns their results
+// in call order. A single call runs inline so the common case adds no
+// scheduling overhead. Mutating tools run one at a time in their given order:
+// two writes to the same branch or ticket must not interleave.
+func (h *GeneralHandler) executeToolsConcurrently(ctx context.Context, lp toolLoop, calls []llm.ToolCall) []string {
+	results := make([]string, len(calls))
+	run := func(i int) {
+		tc := calls[i]
+		log.Printf("%s tool: %s(%s)", lp.logPrefix, tc.Function.Name, redactToolArgsForLog(tc.Function.Name, tc.Function.Arguments))
+		results[i] = h.executeTool(ctx, lp.channelID, lp.userID, lp.auditTS, tc.Function.Name, tc.Function.Arguments)
+	}
+	if len(calls) == 1 || anyMutating(calls) {
+		for i := range calls {
+			run(i)
+		}
+		return results
+	}
+	sem := make(chan struct{}, maxConcurrentTools)
+	var wg sync.WaitGroup
+	for i := range calls {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(i int) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			safego.Run("tool: "+calls[i].Function.Name, func() { run(i) })
+		}(i)
+	}
+	wg.Wait()
+	for i := range results {
+		if results[i] == "" {
+			results[i] = "Error: the tool did not return a result."
+		}
+	}
+	return results
+}
+
+func anyMutating(calls []llm.ToolCall) bool {
+	for _, tc := range calls {
+		if mutatingTools[tc.Function.Name] {
+			return true
+		}
+	}
+	return false
 }
 
 func previewText(s string, n int) string {

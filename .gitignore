@@ -12,6 +12,7 @@
 *.dylib
 *.tgz
 *_test
+*.log
 
 # ...
 .DS_Store

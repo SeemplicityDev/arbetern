@@ -34,6 +34,7 @@ import (
 	"github.com/justmike1/arbetern/freshworks"
 	"github.com/justmike1/arbetern/github"
 	"github.com/justmike1/arbetern/google"
+	"github.com/justmike1/arbetern/internal/httpx"
 	"github.com/justmike1/arbetern/internal/progress"
 	"github.com/justmike1/arbetern/internal/safego"
 	"github.com/justmike1/arbetern/internal/store"
@@ -305,7 +306,7 @@ func sharedGitOpsStatus(b *store.Backend, kind string, local func() any) func() 
 //
 // Both paths are exact matches and therefore take precedence over the
 // crud package's `/api/<kindPlural>/` prefix handler.
-func registerGitOpsRoutes(apiMux *http.ServeMux, kindPlural string, statusFn func() any, syncFn func(context.Context) error) {
+func registerGitOpsRoutes(apiMux *http.ServeMux, kindPlural string, authorize func(*http.Request) bool, statusFn func() any, syncFn func(context.Context) error) {
 	apiMux.HandleFunc("/api/"+kindPlural+"/_gitops", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -323,6 +324,14 @@ func registerGitOpsRoutes(apiMux *http.ServeMux, kindPlural string, statusFn fun
 	apiMux.HandleFunc("/api/"+kindPlural+"/_gitops/sync", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if err := httpx.CheckSameOrigin(r); err != nil {
+			http.Error(w, err.Error(), http.StatusForbidden)
+			return
+		}
+		if authorize != nil && !authorize(r) {
+			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
@@ -457,17 +466,32 @@ func checkAgentRBAC(cache *groupMemberCache, slackClient *slack.Client, agentID,
 const rbacDenyMessage = ":lock: Access denied — you are not a member of an authorized team for this agent. Contact your administrator if you need access."
 
 // clientEmail extracts the authenticated user's email from the headers an
-// upstream OAuth proxy (oauth2-proxy) injects after a successful login. The
-// proxy strips these headers from inbound client requests before setting its
-// own, so they cannot be spoofed by a browser going through the proxy. Returns
-// "" when no proxy is in front (e.g. local dev) or the user is unauthenticated.
+// upstream OAuth proxy (oauth2-proxy) injects after a successful login.
+//
+// The headers are only believed when TRUSTED_PROXY_CIDRS is configured and the
+// connection came from one of those peers. Without that, anything that can
+// reach the pod could name itself an admin, so an untrusted peer is treated as
+// unauthenticated. Returns "" for an unauthenticated or untrusted request.
 func clientEmail(r *http.Request) string {
+	if !identityHeadersTrusted(r) {
+		return ""
+	}
 	for _, h := range []string{"X-Auth-Request-Email", "X-Forwarded-Email"} {
 		if v := strings.TrimSpace(r.Header.Get(h)); v != "" {
 			return strings.ToLower(v)
 		}
 	}
 	return ""
+}
+
+// identityHeadersOpen mirrors the legacy behaviour of believing identity
+// headers from any peer. It is only enabled when no trusted-proxy list is
+// configured, and startup logs a warning whenever that combination is paired
+// with an allow-list that the headers can unlock.
+var identityHeadersOpen bool
+
+func identityHeadersTrusted(r *http.Request) bool {
+	return identityHeadersOpen || fromTrustedProxy(r)
 }
 
 // redactEmail masks the local part of an email address so RBAC logs keep the
@@ -2074,6 +2098,10 @@ func main() {
 	canManageMCP := func(r *http.Request) bool {
 		return uiRBACAllowed(r, cfg.MCPAdminEmails, cfg.MCPAdminTeams, slackClient, emailUserCache, rbacCache)
 	}
+	mcp.SetAllowedEnv(cfg.MCPAllowedEnv)
+	if len(cfg.MCPAllowedEnv) > 0 {
+		log.Printf("MCP connectors may expand MCP_* and %v", cfg.MCPAllowedEnv)
+	}
 	if len(cfg.MCPAdminTeams) > 0 || len(cfg.MCPAdminEmails) > 0 {
 		mcpRegistry.SetAuthorizer(func(r *http.Request) bool {
 			return checkChatRBAC(r, "mcp-connectors", cfg.MCPAdminEmails, cfg.MCPAdminTeams, slackClient, emailUserCache, rbacCache)
@@ -2223,6 +2251,27 @@ func main() {
 		return true
 	})
 
+	// Editing or running a workflow or dashboard drives the owning agent's
+	// tools, so it takes the same permission as using that agent.
+	canManageAgent := func(r *http.Request, agentID string) bool {
+		if canManageSkillsFor(r, agentID) {
+			return true
+		}
+		log.Printf("[rbac] DENIED email=%q scope=agent/%s (allowed_emails=%v allowed_teams=%v)",
+			redactEmail(clientEmail(r)), agentID, agentEmailRBAC[agentID], agentRBAC[agentID])
+		return false
+	}
+	// A GitOps reconcile touches every agent's descriptors, so it takes
+	// permission on all of them.
+	canManageAllAgents := func(r *http.Request) bool {
+		for _, id := range agentIDs {
+			if !canManageSkillsFor(r, id) {
+				return false
+			}
+		}
+		return true
+	}
+
 	// Attribute chat messages to the OAuth-proxy-verified sender. When a proxy is
 	// in front, clientEmail returns the authenticated email; with no proxy (local
 	// dev) it returns "" and the UI shows "Anonymous".
@@ -2333,6 +2382,16 @@ func main() {
 					return
 				}
 
+				// A thread reply drives the same tools as the command that
+				// opened the thread, so it takes the same team membership.
+				// Without this, any workspace member could steer a restricted
+				// agent by replying in someone else's thread.
+				if !checkAgentRBAC(rbacCache, slackClient, sess.AgentID, userID, agentRBAC[sess.AgentID]) {
+					log.Printf("[session] thread reply denied by RBAC: channel=%s thread=%s user=%s agent=%s",
+						channelID, threadTS, userID, sess.AgentID)
+					return
+				}
+
 				log.Printf("[session] thread reply channel=%s thread=%s user=%s text=%q",
 					channelID, threadTS, userID, text)
 				sess.Router.HandleThreadReply(channelID, threadTS, userID, text)
@@ -2374,6 +2433,24 @@ func main() {
 	})
 
 	// Agent management UI (embedded static files) — behind IP whitelist if configured.
+	trusted := parseCIDRs(cfg.TrustedProxyCIDRs)
+	setTrustedProxies(trusted)
+	identityHeadersOpen = len(trusted) == 0
+	if identityHeadersOpen {
+		guarded := len(cfg.MCPAdminTeams) > 0 || len(cfg.MCPAdminEmails) > 0 ||
+			len(cfg.BackendViewTeams) > 0 || len(cfg.BackendViewEmails) > 0
+		for _, a := range agents {
+			guarded = guarded || len(a.AllowedEmails) > 0 || len(a.AllowedTeams) > 0
+		}
+		if guarded {
+			log.Printf("WARNING: TRUSTED_PROXY_CIDRS is not set, so X-Auth-Request-Email is believed from any peer. " +
+				"Anything able to reach this pod can claim any identity and pass every allow-list. " +
+				"Set TRUSTED_PROXY_CIDRS to the address range your auth proxy connects from.")
+		}
+	} else {
+		log.Printf("Identity headers trusted only from %s", cfg.TrustedProxyCIDRs)
+	}
+
 	uiCIDRs := parseCIDRs(cfg.UIAllowedCIDRs)
 	if len(uiCIDRs) > 0 {
 		log.Printf("UI IP whitelist enabled: %s", cfg.UIAllowedCIDRs)
@@ -2574,8 +2651,8 @@ func main() {
 
 	// Per-agent data routes (/<agent>/<kind>/<id>/data.json, with the bare
 	// path redirecting into the console) and the /api/<kind>s API.
-	dashRegistry.RegisterRoutes(http.DefaultServeMux, apiMux, knownAgents)
-	wfRegistry.RegisterRoutes(http.DefaultServeMux, apiMux, knownAgents)
+	dashRegistry.RegisterRoutes(http.DefaultServeMux, apiMux, knownAgents, canManageAgent)
+	wfRegistry.RegisterRoutes(http.DefaultServeMux, apiMux, knownAgents, canManageAgent)
 	chatRegistry.RegisterRoutes(apiMux, knownAgents)
 	billingStore.RegisterRoutes(http.DefaultServeMux, apiMux)
 	skillRegistry.RegisterRoutes(apiMux, clientEmail)
@@ -2614,7 +2691,7 @@ func main() {
 			}
 		}
 	}
-	registerGitOpsRoutes(apiMux, "workflows", sharedGitOpsStatus(backend, "workflows", func() any {
+	registerGitOpsRoutes(apiMux, "workflows", canManageAllAgents, sharedGitOpsStatus(backend, "workflows", func() any {
 		if wfSyncer == nil {
 			return nil
 		}
@@ -2648,7 +2725,7 @@ func main() {
 			}
 		}
 	}
-	registerGitOpsRoutes(apiMux, "dashboards", sharedGitOpsStatus(backend, "dashboards", func() any {
+	registerGitOpsRoutes(apiMux, "dashboards", canManageAllAgents, sharedGitOpsStatus(backend, "dashboards", func() any {
 		if dashSyncer == nil {
 			return nil
 		}

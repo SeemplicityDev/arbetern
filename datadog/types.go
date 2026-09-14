@@ -1,8 +1,6 @@
 package datadog
 
-// --------------------------------------------------------------------------
 // Monitor types
-// --------------------------------------------------------------------------
 
 // Monitor represents a Datadog monitor.
 type Monitor struct {
@@ -26,9 +24,7 @@ type MonitorAuthor struct {
 	Email  string `json:"email"`
 }
 
-// --------------------------------------------------------------------------
 // Log search types
-// --------------------------------------------------------------------------
 
 // LogSearchResponse is the response from POST /api/v2/logs/events/search.
 type LogSearchResponse struct {
@@ -58,9 +54,7 @@ type LogAttributes struct {
 	Attributes map[string]interface{} `json:"attributes"`
 }
 
-// --------------------------------------------------------------------------
 // Infrastructure host types
-// --------------------------------------------------------------------------
 
 // HostListResponse is the response from GET /api/v1/hosts.
 type HostListResponse struct {
@@ -87,9 +81,7 @@ type HostMeta struct {
 	InstanceType string `json:"instance-type,omitempty"`
 }
 
-// --------------------------------------------------------------------------
 // Dashboard types
-// --------------------------------------------------------------------------
 
 // Dashboard represents a full Datadog dashboard.
 type Dashboard struct {
@@ -125,9 +117,7 @@ type DashboardSummary struct {
 	Modified     string `json:"modified_at"`
 }
 
-// --------------------------------------------------------------------------
 // Metrics query types (v1 /api/v1/query — timeseries)
-// --------------------------------------------------------------------------
 
 // MetricsQueryResponse is the response from GET /api/v1/query.
 type MetricsQueryResponse struct {

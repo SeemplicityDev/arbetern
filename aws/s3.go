@@ -36,9 +36,7 @@ const maxS3InlineBytes = 1 << 20
 // cheap and bounded.
 const maxS3ListKeys = 1000
 
-// --------------------------------------------------------------------------
 // Public result types
-// --------------------------------------------------------------------------
 
 // S3PutResult summarises a completed PutObject.
 type S3PutResult struct {
@@ -79,9 +77,7 @@ type S3ListResult struct {
 	Truncated bool       `json:"truncated"`
 }
 
-// --------------------------------------------------------------------------
 // Operations
-// --------------------------------------------------------------------------
 
 // S3PutObject writes body to s3://bucket/key. contentType is optional; when
 // empty it is inferred from the key's extension (.csv/.json/.txt) and
@@ -218,9 +214,7 @@ func (c *Client) S3ListObjects(ctx context.Context, bucket, prefix string, maxKe
 	return res, nil
 }
 
-// --------------------------------------------------------------------------
 // Region-aware client plumbing
-// --------------------------------------------------------------------------
 
 // s3ClientForBucket returns an S3 client signed for bucket's region (and the
 // region itself), detecting and caching the region on first use.
@@ -279,9 +273,7 @@ func (c *Client) s3ForRegionLocked(region string) *s3.Client {
 	return cl
 }
 
-// --------------------------------------------------------------------------
 // Helpers
-// --------------------------------------------------------------------------
 
 // normalizeS3Target accepts a bucket that may be a bare name, an
 // "s3://bucket/key" URI, or an "arn:aws:s3:::bucket/key" ARN, plus an
@@ -346,9 +338,7 @@ func humanSize(n int64) string {
 	return fmt.Sprintf("%.1f %cB", float64(n)/float64(div), "KMGTPE"[exp])
 }
 
-// --------------------------------------------------------------------------
 // Slack formatting
-// --------------------------------------------------------------------------
 
 // S3URI returns the canonical s3://bucket/key reference for an object.
 func S3URI(bucket, key string) string {

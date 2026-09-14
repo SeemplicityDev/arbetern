@@ -279,6 +279,7 @@ func (h *GeneralHandler) recordUsage(model, userID string, u llm.Usage, comp llm
 		Model:                  model,
 		PromptTokens:           u.PromptTokens,
 		CachedPromptTokens:     u.CachedPromptTokens,
+		CacheWriteTokens:       u.CacheWriteTokens,
 		CompletionTokens:       u.CompletionTokens,
 		TotalTokens:            u.TotalTokens,
 		CompressionInputTokens: comp.TokensBefore,
@@ -316,19 +317,23 @@ func (h *GeneralHandler) Execute(channelID, userID, text, responseURL, auditTS s
 	systemMsg = strings.Replace(systemMsg, "{{MODEL}}", activeClient.Model(), 1)
 	systemMsg = strings.Replace(systemMsg, "{{USER_ID}}", userID, 1)
 	systemMsg = strings.Replace(systemMsg, "{{USER_CONTEXT}}", h.userContext, 1)
-	systemMsg += userContextPrompt(h.readPersistentUserContext(ctx, userID, channelID, text))
-	if channelContext != "" && channelContext != "(no recent messages)" {
-		systemMsg += fmt.Sprintf("\n\nRecent channel messages for context:\n%s", channelContext)
-	}
 
+	// Everything below changes from one turn to the next, so it is kept out of
+	// the cached system block and sent after the prompt-cache breakpoint.
+	var turnCtx strings.Builder
+	turnCtx.WriteString(userContextPrompt(h.readPersistentUserContext(ctx, userID, channelID, text)))
+	if channelContext != "" && channelContext != "(no recent messages)" {
+		fmt.Fprintf(&turnCtx, "\n\nRecent channel messages for context:\n%s", channelContext)
+	}
 	// Proactively fetch workflow run logs from GitHub Actions URLs found in the user's message
 	// (not channel context — channel context may contain unrelated CI notifications).
 	if workflowLogs := h.fetchWorkflowLogs(ctx, text, userID, channelID); workflowLogs != "" {
-		systemMsg += fmt.Sprintf("\n\nGitHub Actions workflow run details and logs (auto-fetched from URLs found in your message):\n\n%s", workflowLogs)
+		fmt.Fprintf(&turnCtx, "\n\nGitHub Actions workflow run details and logs (auto-fetched from URLs found in your message):\n\n%s", workflowLogs)
 	}
 
 	messages := []llm.ChatMessage{
 		llm.NewChatMessage("system", systemMsg),
+		llm.NewVolatileSystemMessage(turnCtx.String()),
 		llm.NewChatMessage("user", text),
 	}
 
@@ -532,12 +537,16 @@ func (h *GeneralHandler) ExecuteChat(ctx context.Context, userID string, history
 	systemMsg = strings.Replace(systemMsg, "{{USER_ID}}", userID, 1)
 	systemMsg = strings.Replace(systemMsg, "{{USER_CONTEXT}}", h.userContext, 1)
 	memoryUser := h.requesterEmail
+	turnCtx := ""
 	if memoryUser != "" {
-		systemMsg += userContextPrompt(h.readPersistentUserContext(ctx, memoryUser, "", userMessage))
+		turnCtx = userContextPrompt(h.readPersistentUserContext(ctx, memoryUser, "", userMessage))
 	}
 
-	messages := make([]llm.ChatMessage, 0, len(history)+2)
+	messages := make([]llm.ChatMessage, 0, len(history)+3)
 	messages = append(messages, llm.NewChatMessage("system", systemMsg))
+	if turnCtx != "" {
+		messages = append(messages, llm.NewVolatileSystemMessage(turnCtx))
+	}
 	messages = append(messages, history...)
 	messages = append(messages, llm.NewChatMessage("user", userMessage))
 

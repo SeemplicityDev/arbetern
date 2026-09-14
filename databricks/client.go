@@ -23,6 +23,8 @@ import (
 	"time"
 
 	"github.com/justmike1/arbetern/internal/safego"
+
+	"github.com/justmike1/arbetern/internal/text"
 )
 
 const (
@@ -272,9 +274,7 @@ func (c *Client) allowHost(host string) error {
 	return validateWorkspaceHost(host)
 }
 
-// --------------------------------------------------------------------------
 // SQL statement execution
-// --------------------------------------------------------------------------
 
 // Query executes read-only SQL against a SQL warehouse and returns the rows.
 // sqlText may be a `;`-separated script (e.g. DECLARE/SET then SELECT); the
@@ -426,9 +426,7 @@ func isPending(state string) bool {
 	return state == "PENDING" || state == "RUNNING"
 }
 
-// --------------------------------------------------------------------------
 // HTTP + auth helpers
-// --------------------------------------------------------------------------
 
 // doJSON performs an authenticated JSON request against one workspace. A nil
 // body sends no payload; a nil out discards the response. host must already
@@ -470,7 +468,7 @@ func (c *Client) doJSON(ctx context.Context, host, method, path string, body any
 		return fmt.Errorf("read databricks response: %w", err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("databricks HTTP %d for %s %s: %s", resp.StatusCode, method, path, truncate(string(data), 500))
+		return fmt.Errorf("databricks HTTP %d for %s %s: %s", resp.StatusCode, method, path, text.Truncate(string(data), 500))
 	}
 	if out == nil || len(data) == 0 {
 		return nil
@@ -523,7 +521,7 @@ func (c *Client) token(ctx context.Context, host string) (string, error) {
 
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxAuthResponseBody))
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", fmt.Errorf("databricks token endpoint returned %s: %s", resp.Status, truncate(string(body), 300))
+		return "", fmt.Errorf("databricks token endpoint returned %s: %s", resp.Status, text.Truncate(string(body), 300))
 	}
 
 	var tr struct {

@@ -31,12 +31,26 @@ type Price struct {
 const defaultPriceSourceURL = "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
 
 var (
-	pricesMu    sync.RWMutex
-	prices      = mergePrices(nil)
+	pricesMu sync.RWMutex
+	prices   = mergePrices(nil)
+	// priceKeys holds the keys of prices ordered longest first, so the
+	// longest-substring lookup in PriceFor is a single scan. Rebuilt with the
+	// table rather than on every call: the feed carries thousands of models and
+	// PriceFor runs once per recorded turn.
+	priceKeys   = sortedKeys(prices)
 	priceSrcURL string
 	priceSrcAt  time.Time
 	priceSrcErr string
 )
+
+func sortedKeys(m map[string]Price) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool { return len(keys[i]) > len(keys[j]) })
+	return keys
+}
 
 // PriceSource is the live pricing-feed status surfaced in the billing UI.
 type PriceSource struct {
@@ -99,6 +113,7 @@ func StartPriceSync(stop <-chan struct{}) {
 			return
 		}
 		prices = mergePrices(f)
+		priceKeys = sortedKeys(prices)
 		priceSrcAt = time.Now().UTC()
 		priceSrcErr = ""
 		log.Printf("billing: synced %d model prices from %s", len(f), url)
@@ -169,13 +184,7 @@ func PriceFor(model string) (Price, bool) {
 	}
 	pricesMu.RLock()
 	defer pricesMu.RUnlock()
-
-	keys := make([]string, 0, len(prices))
-	for k := range prices {
-		keys = append(keys, k)
-	}
-	sort.Slice(keys, func(i, j int) bool { return len(keys[i]) > len(keys[j]) })
-	for _, k := range keys {
+	for _, k := range priceKeys {
 		if strings.Contains(m, k) {
 			return prices[k], true
 		}
@@ -184,19 +193,24 @@ func PriceFor(model string) (Price, bool) {
 }
 
 // cacheReadFactor is the fraction of the input rate charged for prompt tokens
-// served from the provider's cache. Anthropic bills cache reads at ~0.1x; this
-// conservative single factor is applied to any CachedPromptTokens we observe.
+// served from the provider's cache. Anthropic bills cache reads at ~0.1x.
 const cacheReadFactor = 0.1
 
+// cacheWriteFactor is the multiple of the input rate charged for writing the
+// cache. Anthropic bills 1.25x at the default 5-minute TTL (2x at one hour);
+// the shorter TTL is what this client asks for.
+const cacheWriteFactor = 1.25
+
 // Cost returns the dollar cost of a turn and whether the model was priced.
-// cachedTokens are prompt tokens served from cache and billed at the discounted
-// cacheReadFactor of the input rate.
-func Cost(model string, promptTokens, cachedTokens, completionTokens int) (float64, bool) {
+// The three input categories bill at different rates: promptTokens at the base
+// input rate, writeTokens above it, cachedTokens far below it.
+func Cost(model string, promptTokens, cachedTokens, writeTokens, completionTokens int) (float64, bool) {
 	p, ok := PriceFor(model)
 	if !ok {
 		return 0, false
 	}
 	c := p.In*float64(promptTokens)/1e6 +
+		p.In*cacheWriteFactor*float64(writeTokens)/1e6 +
 		p.In*cacheReadFactor*float64(cachedTokens)/1e6 +
 		p.Out*float64(completionTokens)/1e6
 	return c, true

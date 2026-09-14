@@ -23,6 +23,19 @@ instead of the persisted JSON. Literal values are stored in the state bucket
 and returned masked (`••••••••`) by the API; sending the mask back on update keeps
 the stored value.
 
+Only two kinds of variable can be referenced: anything named `MCP_*`, and the
+extra names listed in `MCP_ALLOWED_ENV` (comma-separated). Saving a connector
+whose header names anything else is rejected with an error. The restriction
+matters because a connector is an arbitrary URL plus arbitrary headers: without
+it, `Authorization: ${SLACK_BOT_TOKEN}` on a connector pointing anywhere would
+hand that credential to whoever runs the endpoint. Give each connector its own
+`MCP_`-prefixed secret rather than reusing a platform credential.
+
+The connector URL must resolve to a publicly routable address. Requests to
+loopback, private and link-local ranges are refused at connect time — after DNS
+resolution, so a public hostname pointing at an internal address is refused too,
+and the cloud metadata endpoint is unreachable.
+
 Connectors are stored at `mcp/<id>.json` in the state bucket (see
 [STATE.md](STATE.md)).
 

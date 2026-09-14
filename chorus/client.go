@@ -11,6 +11,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/justmike1/arbetern/internal/text"
 )
 
 const (
@@ -52,9 +54,7 @@ func NewClient(apiToken, baseURL string) *Client {
 // Ready returns true when an API token is configured.
 func (c *Client) Ready() bool { return c.apiToken != "" }
 
-// ---------------------------------------------------------------------------
 // HTTP helpers
-// ---------------------------------------------------------------------------
 
 func (c *Client) doGet(path, accept string) ([]byte, error) {
 	req, err := http.NewRequest("GET", c.baseURL+path, nil)
@@ -95,7 +95,7 @@ func (c *Client) execute(req *http.Request) ([]byte, error) {
 	log.Printf("[chorus] %s %s → %d (%s, %d bytes)", req.Method, req.URL.Path, resp.StatusCode, ct, len(data))
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("chorus HTTP %d: %s", resp.StatusCode, truncate(string(data), 500))
+		return nil, fmt.Errorf("chorus HTTP %d: %s", resp.StatusCode, text.Truncate(string(data), 500))
 	}
 
 	// Detect HTML responses (e.g. web app SPA served instead of API JSON).
@@ -106,9 +106,7 @@ func (c *Client) execute(req *http.Request) ([]byte, error) {
 	return data, nil
 }
 
-// ---------------------------------------------------------------------------
 // Engagements — GET /v3/engagements  (v3, token auth)
-// ---------------------------------------------------------------------------
 
 // Engagement represents a single engagement from the v3 API.
 type Engagement struct {
@@ -254,7 +252,7 @@ func (c *Client) ListEngagements(filter EngagementFilter) ([]Engagement, error) 
 
 		allEngagements = append(allEngagements, pg.Engagements...)
 		log.Printf("[chorus] engagements page %d: %d items (continuation_key=%q)",
-			page+1, len(pg.Engagements), truncate(pg.ContinuationKey, 40))
+			page+1, len(pg.Engagements), text.Truncate(pg.ContinuationKey, 40))
 
 		if pg.ContinuationKey == "" || len(pg.Engagements) == 0 {
 			break
@@ -296,10 +294,8 @@ func probeEngagements(data []byte) []Engagement {
 	return nil
 }
 
-// ---------------------------------------------------------------------------
 // Conversation detail — v1 JSON:API
 //   GET /api/v1/conversations/:id       (single)
-// ---------------------------------------------------------------------------
 
 // JSON:API response wrapper.
 type jsonAPISingle struct {
@@ -477,9 +473,7 @@ func (c *Client) GetConversation(id string) (*Conversation, error) {
 	}, nil
 }
 
-// ---------------------------------------------------------------------------
 // Formatting helpers
-// ---------------------------------------------------------------------------
 
 // FormatConversation renders a single conversation for Slack mrkdwn.
 func FormatConversation(conv *Conversation) string {
@@ -677,7 +671,7 @@ func FormatEngagements(engagements []Engagement) string {
 			summary := strings.ReplaceAll(*e.MeetingSummary, "<br>", "\n")
 			summary = strings.ReplaceAll(summary, "<br/>", "\n")
 			summary = stripHTMLTags(summary)
-			fmt.Fprintf(&sb, "   📝 %s\n", truncate(summary, 300))
+			fmt.Fprintf(&sb, "   📝 %s\n", text.Truncate(summary, 300))
 		}
 
 		// Action items (max 3)
@@ -689,7 +683,7 @@ func FormatEngagements(engagements []Engagement) string {
 			}
 			for _, item := range e.ActionItems[:limit] {
 				if item != "" {
-					fmt.Fprintf(&sb, "     • %s\n", truncate(item, 150))
+					fmt.Fprintf(&sb, "     • %s\n", text.Truncate(item, 150))
 				}
 			}
 			if len(e.ActionItems) > 3 {
@@ -731,12 +725,10 @@ func FormatEngagements(engagements []Engagement) string {
 	return sb.String()
 }
 
-// ---------------------------------------------------------------------------
 // Sales Qualifications — v1 JSON:API
 //   POST /api/v1/sales-qualifications           (create extraction)
 //   GET  /api/v1/sales-qualifications/:id       (get extraction)
 //   POST /api/v1/sales-qualifications/actions/writeback-crm
-// ---------------------------------------------------------------------------
 
 // SQFAnalysisField is a single field within a Sales Qualification Framework analysis.
 type SQFAnalysisField struct {
@@ -886,7 +878,7 @@ func FormatSalesQualification(sq *SalesQualification) string {
 				fmt.Fprintf(&sb, "    Previous: %s\n", f.PreviousValue)
 			}
 			if f.SupportingQuote != "" {
-				fmt.Fprintf(&sb, "    > _%s_\n", truncate(f.SupportingQuote, 200))
+				fmt.Fprintf(&sb, "    > _%s_\n", text.Truncate(f.SupportingQuote, 200))
 			}
 		}
 	}
@@ -921,13 +913,6 @@ func formatAmount(amount float64) string {
 		return fmt.Sprintf("$%.0fK", amount/1_000)
 	}
 	return fmt.Sprintf("$%.0f", amount)
-}
-
-func truncate(s string, max int) string {
-	if len(s) <= max {
-		return s
-	}
-	return s[:max] + "..."
 }
 
 // stripHTMLTags removes HTML tags from a string.

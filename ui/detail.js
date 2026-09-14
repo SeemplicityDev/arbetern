@@ -795,7 +795,7 @@ function ensureChartJs() {
         s.onerror = () => resolve(false);
         document.head.appendChild(s);
       };
-      load('https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js', () =>
+      load('https://cdn.jsdelivr.net/npm/chart.js@4.5.1/dist/chart.umd.min.js', () =>
         load('https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js', () => resolve(true)));
       setTimeout(() => resolve(typeof Chart !== 'undefined'), 8000);
     });

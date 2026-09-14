@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+
+	"github.com/justmike1/arbetern/internal/text"
 )
 
 const (
@@ -43,10 +45,10 @@ func FormatAppendResult(r *BatchAppendResult) string {
 			status = fmt.Sprintf("partial (%d of %d)", o.RowsAppended, o.RowsRequested)
 		}
 		rows = append(rows, []string{
-			truncate(o.SpreadsheetID, maxColWidth),
-			truncate(o.Tab, maxColWidth),
+			text.Truncate(o.SpreadsheetID, maxColWidth),
+			text.Truncate(o.Tab, maxColWidth),
 			fmt.Sprintf("%d", o.RowsRequested),
-			truncate(o.UpdatedRange, maxColWidth),
+			text.Truncate(o.UpdatedRange, maxColWidth),
 			status,
 		})
 	}
@@ -116,7 +118,7 @@ func FormatReadResult(r *ReadResult) string {
 		for _, row := range display {
 			out := make([]string, len(row))
 			for i, v := range row {
-				out[i] = truncate(v, maxColWidth)
+				out[i] = text.Truncate(v, maxColWidth)
 			}
 			cells = append(cells, out)
 		}
@@ -154,11 +156,11 @@ func FormatFindResult(r *FindFilesResult) string {
 	rows := make([][]string, 0, len(r.Files))
 	for _, f := range r.Files {
 		rows = append(rows, []string{
-			truncate(f.Name, maxColWidth),
+			text.Truncate(f.Name, maxColWidth),
 			f.ID,
 			fileKind(f),
 			fileSize(f),
-			truncate(f.ModifiedTime, 20),
+			text.Truncate(f.ModifiedTime, 20),
 		})
 	}
 	writeTable(&sb, headers, rows)
@@ -198,7 +200,7 @@ func FormatRoots(roots []Root, serviceAccount string, pinned bool) string {
 	headers := []string{"Name", "Folder ID", "Kind"}
 	rows := make([][]string, 0, len(roots))
 	for _, r := range roots {
-		rows = append(rows, []string{truncate(r.Name, maxColWidth), r.ID, r.Kind})
+		rows = append(rows, []string{text.Truncate(r.Name, maxColWidth), r.ID, r.Kind})
 	}
 	writeTable(&sb, headers, rows)
 	return sb.String()
@@ -222,7 +224,7 @@ func FormatCopyResult(r *CopyFileResult) string {
 	writeTable(&sb, nil, [][]string{
 		{"New file ID", r.File.ID},
 		{"Type", fileKind(r.File)},
-		{"Folder", truncate(folder, maxColWidth)},
+		{"Folder", text.Truncate(folder, maxColWidth)},
 		{"Copied from", r.Source.ID},
 	})
 	if r.File.WebViewLink != "" {
@@ -340,7 +342,7 @@ func FormatSpreadsheetInfo(i *SpreadsheetInfo) string {
 	rows := make([][]string, 0, len(i.Tabs))
 	for _, t := range i.Tabs {
 		rows = append(rows, []string{
-			truncate(t.Title, maxColWidth),
+			text.Truncate(t.Title, maxColWidth),
 			fmt.Sprintf("%d", t.RowCount),
 			fmt.Sprintf("%d", t.ColCount),
 		})
@@ -403,18 +405,6 @@ func writeRow(sb *strings.Builder, cells []string, widths []int) {
 		fmt.Fprintf(sb, "%-*s", w, val)
 	}
 	sb.WriteString("\n")
-}
-
-// truncate shortens s to at most max characters, appending an ellipsis when it
-// cuts.
-func truncate(s string, max int) string {
-	if max <= 0 || len(s) <= max {
-		return s
-	}
-	if max <= 1 {
-		return s[:max]
-	}
-	return s[:max-1] + "…"
 }
 
 // shortMime renders a MIME type as a short human word: a Google-native type by

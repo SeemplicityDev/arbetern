@@ -48,9 +48,16 @@ env:
   PORT: "8080"
   GENERAL_MODEL: "openai/gpt-4o" # options: openai/gpt-4o, meta/llama-3.1-405b-instruct, etc.
   # CODE_MODEL: "openai/gpt-4o"  # Separate model for code-generation tasks (PRs, file edits). Defaults to GENERAL_MODEL.
-  # BEDROCK_REGION: "us-east-1"  # Selects AWS Bedrock as the LLM backend (takes precedence over Azure/GitHub). Set GENERAL_MODEL to a Bedrock model/inference-profile ID, e.g. "us.anthropic.claude-opus-4-8". Credentials resolve via the standard AWS chain (IRSA / env / profile).
+  # BEDROCK_REGION: "us-east-1"  # Selects AWS Bedrock as the LLM backend (takes precedence over Azure/GitHub). Set GENERAL_MODEL to a Bedrock model/inference-profile ID, e.g. "us.anthropic.claude-opus-5". Credentials resolve via the standard AWS chain (IRSA / env / profile).
   APP_URL: ""  # Public base URL of this app (e.g. "https://ai.dev.example.io"). Used for UI link in Jira stamps.
   # UI_ALLOWED_CIDRS: "10.0.0.0/8,203.0.113.10/32"  # Comma-separated CIDRs; empty = no restriction.
+  # TRUSTED_PROXY_CIDRS: "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"  # Peers whose X-Auth-Request-Email and X-Forwarded-For headers are believed. REQUIRED when an auth proxy is in front: without it any caller that reaches the pod can claim any identity and pass every allow-list. Set it to the address range the proxy connects from (in-cluster proxies use the pod network).
+  # MCP_ALLOWED_ENV: "SOME_TOKEN,OTHER_TOKEN"  # Extra env vars an MCP connector header may expand via ${NAME}. MCP_* is always allowed; nothing else is, so a connector cannot exfiltrate platform credentials.
+  # MCP_ADMIN_TEAMS / MCP_ADMIN_EMAILS: who may add, change, test or delete MCP connectors. Both empty = any console user.
+  # BACKEND_VIEW_TEAMS / BACKEND_VIEW_EMAILS: who may open the read-only backend state view (/api/backend). Both empty disables the view entirely.
+  # AGENTS_DIR: "agents"  # Directory holding the per-agent config.yaml / prompts.yaml. Defaults to ./agents.
+  # AZURE_BILLING_ACCOUNT_ID: ""  # Azure billing account scope for cost queries; falls back to the subscription scope when unset.
+  # WORKFLOW_RUN_HISTORY: "20"  # How many past runs each workflow keeps in its history.
   # THREAD_SESSION_TTL: "7m"  # How long a thread session stays active (Go duration: 7m, 5m30s, etc.). Default 7m.
   # CHAT_RETENTION: "168h"  # How long an idle UI chat conversation is kept before auto-deletion (Go duration). Default 168h (1 week).
   # MAX_TOOL_ROUNDS: "200"  # Max LLM tool-call rounds per request. Default 200; raise for very long multi-step workflows.
@@ -350,7 +357,10 @@ oauth2-proxy:
     # `upstreams` host = arbetern Service name = Helm release name
     # (e.g. release "foo" -> http://foo-arbetern:80); adjust if yours differs.
     configFile: |-
-      email_domains = ["*"]
+      # Restrict sign-in to your own domain. "*" accepts any Google account,
+      # which combined with arbetern's per-agent allow-lists still means every
+      # stranger reaches the console shell.
+      email_domains = ["yourcompany.com"]
       upstreams = ["http://arbetern:80"]
       # Must exceed a UI chat turn (chat.chatRequestTimeout, 5m); the 30s default
       # aborts long turns with a 502.
@@ -367,6 +377,8 @@ oauth2-proxy:
       # allowed_teams; see customConfigs below). The proxy strips any
       # client-supplied copies, so they can't be spoofed.
       set_xauthrequest = true
+      # Reject cross-site form posts that ride the session cookie.
+      cookie_samesite = "lax"
       # Paths that bypass auth (RE2 regex). Add entries to expose more.
       skip_auth_routes = [
         "^/healthz",

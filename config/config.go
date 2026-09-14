@@ -150,6 +150,10 @@ type Config struct {
 	CodeModelExplicit bool
 	Port              string
 	UIAllowedCIDRs    string
+	// TrustedProxyCIDRs lists the peers whose X-Forwarded-For and
+	// X-Auth-Request-Email headers are believed. Leave empty only where
+	// nothing but a trusted proxy can reach the pod.
+	TrustedProxyCIDRs string
 	AppURL            string
 	ThreadSessionTTL  time.Duration
 	MaxToolRounds     int
@@ -205,6 +209,9 @@ type Config struct {
 	// every UI user may.
 	MCPAdminTeams  []string
 	MCPAdminEmails []string
+	// MCPAllowedEnv names the environment variables an MCP connector header
+	// may expand, on top of the always-available MCP_* namespace.
+	MCPAllowedEnv []string
 
 	// BackendViewTeams and BackendViewEmails admit users to the console's
 	// read-only view of the state bucket and vector index. Set from
@@ -460,6 +467,7 @@ func Load() (*Config, error) {
 		CodeModel:           os.Getenv("CODE_MODEL"),
 		Port:                os.Getenv("PORT"),
 		UIAllowedCIDRs:      os.Getenv("UI_ALLOWED_CIDRS"),
+		TrustedProxyCIDRs:   os.Getenv("TRUSTED_PROXY_CIDRS"),
 		AppURL:              os.Getenv("APP_URL"),
 		HeadroomURL:         strings.TrimRight(strings.TrimSpace(os.Getenv("HEADROOM_PROXY_URL")), "/"),
 		AWSRegion:           os.Getenv("AWS_REGION"),
@@ -471,6 +479,7 @@ func Load() (*Config, error) {
 		EmbeddingModel:      strings.TrimSpace(os.Getenv("EMBEDDING_MODEL")),
 		MCPAdminTeams:       splitList(os.Getenv("MCP_ADMIN_TEAMS")),
 		MCPAdminEmails:      splitList(os.Getenv("MCP_ADMIN_EMAILS")),
+		MCPAllowedEnv:       splitList(os.Getenv("MCP_ALLOWED_ENV")),
 		BackendViewTeams:    splitList(os.Getenv("BACKEND_VIEW_TEAMS")),
 		BackendViewEmails:   splitList(os.Getenv("BACKEND_VIEW_EMAILS")),
 

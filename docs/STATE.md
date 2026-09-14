@@ -21,7 +21,7 @@ IAM policy.
 |---|---|
 | `workflows/<agent>/<id>.json` | Workflow descriptors including run history |
 | `dashboards/<agent>/<id>.json` | Dashboard descriptors including the latest data / markdown |
-| `chat/<agent>/<id>.json` | UI chat transcripts |
+| `chat/<agent>/<id>.json` | UI chat transcripts. Each carries an `owner` field — the signed-in email that created it — and every read and write is scoped to it, so one viewer never sees another's threads. An empty `owner` means the conversation was created with no identity source (no auth proxy) and is reachable only by an equally unidentified caller |
 | `skills/<id>.json` | Custom skills |
 | `mcp/<id>.json` | MCP connectors |
 | `billing/usage-YYYY-MM.json`, `billing/recent.json` | Usage & billing ledger |
@@ -30,6 +30,18 @@ IAM policy.
 | `gitops/<kind>.json` | Status of the last GitOps reconcile, shared with every replica |
 | `catalog/manifest.json` | What the catalog search index currently holds |
 | `locks/scheduler`, `locks/workflows/…`, `locks/dashboards/…`, `locks/sessions/…` | Leases (see below) |
+
+## Browsing the state
+
+The console's **Backend** page (`/ui/backend`, API `/api/backend`) is a
+read-only browser over these prefixes: the objects laid out as folders, an
+object viewer that masks secret-looking values, and a sample of the vector
+index. Access is limited to the Slack user groups in `BACKEND_VIEW_TEAMS` and
+the emails or domains in `BACKEND_VIEW_EMAILS`.
+
+It fails closed: with both unset the page and every `/api/backend` route answer
+403, so the view stays off until you deliberately name who may open it. Reads
+are capped at 1 MiB per object and served with `Cache-Control: no-store`.
 
 ## How the cache works
 

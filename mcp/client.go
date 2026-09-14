@@ -13,8 +13,11 @@ import (
 	"os"
 	"regexp"
 	"strings"
+
 	"sync/atomic"
 	"time"
+
+	"github.com/justmike1/arbetern/internal/httpx"
 )
 
 // protocolVersion is the MCP revision this client speaks (Streamable HTTP).
@@ -28,11 +31,54 @@ const (
 
 var envRefRe = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
 
+// envPrefix is the namespace a connector may always read from. Anything else
+// must be named explicitly in MCP_ALLOWED_ENV.
+const envPrefix = "MCP_"
+
+// allowedEnv holds the extra variable names connectors may reference, beyond
+// the envPrefix namespace. Set once at startup.
+var allowedEnv = map[string]bool{}
+
+// SetAllowedEnv names the environment variables a connector header may expand
+// in addition to the MCP_ namespace. Without this, a connector could name any
+// variable in the process — including every platform credential — and have its
+// value sent to whatever URL the connector points at.
+func SetAllowedEnv(names []string) {
+	m := make(map[string]bool, len(names))
+	for _, n := range names {
+		if n = strings.TrimSpace(n); n != "" {
+			m[n] = true
+		}
+	}
+	allowedEnv = m
+}
+
+// EnvAllowed reports whether a connector may read the named variable.
+func EnvAllowed(name string) bool {
+	return strings.HasPrefix(name, envPrefix) || allowedEnv[name]
+}
+
+// EnvRefs returns the ${NAME} references in v.
+func EnvRefs(v string) []string {
+	matches := envRefRe.FindAllStringSubmatch(v, -1)
+	out := make([]string, 0, len(matches))
+	for _, m := range matches {
+		out = append(out, m[1])
+	}
+	return out
+}
+
 // expandEnv resolves ${NAME} references so header values can point at
-// environment variables instead of storing secrets on disk.
+// environment variables instead of storing secrets on disk. References to
+// variables outside the allow-list expand to nothing rather than leaking a
+// credential to the connector's endpoint.
 func expandEnv(v string) string {
 	return envRefRe.ReplaceAllStringFunc(v, func(m string) string {
-		return os.Getenv(m[2 : len(m)-1])
+		name := m[2 : len(m)-1]
+		if !EnvAllowed(name) {
+			return ""
+		}
+		return os.Getenv(name)
 	})
 }
 
@@ -75,7 +121,7 @@ type rpcResponse struct {
 }
 
 func newClient(url string, headers map[string]string, timeout time.Duration) *Client {
-	return &Client{url: url, headers: headers, http: &http.Client{Timeout: timeout}}
+	return &Client{url: url, headers: headers, http: httpx.SafeClient(timeout, 3)}
 }
 
 // Initialize performs the MCP handshake and records the session ID.

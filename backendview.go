@@ -12,6 +12,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/justmike1/arbetern/internal/httpx"
 	"github.com/justmike1/arbetern/internal/store"
 	"github.com/justmike1/arbetern/internal/vectors"
 )
@@ -79,8 +80,7 @@ func (v *backendView) guard(next http.HandlerFunc) http.HandlerFunc {
 }
 
 func (v *backendView) writeJSON(w http.ResponseWriter, payload any) {
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(payload)
+	httpx.WriteJSON(w, http.StatusOK, payload)
 }
 
 func (v *backendView) objects(ctx context.Context) ([]store.Object, bool, error) {

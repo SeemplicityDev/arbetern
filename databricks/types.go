@@ -4,9 +4,7 @@ package databricks
 // Statement Execution API (POST/GET /api/2.0/sql/statements) plus the
 // flattened public types arbetern hands back to the tool layer.
 
-// --------------------------------------------------------------------------
 // Public types (returned to callers)
-// --------------------------------------------------------------------------
 
 // Column describes one column of a query result set.
 type Column struct {
@@ -44,9 +42,7 @@ type QueryResult struct {
 	StatementID string     `json:"statement_id"`
 }
 
-// --------------------------------------------------------------------------
 // Wire types (Statement Execution API)
-// --------------------------------------------------------------------------
 
 // statementResponse is returned by POST /api/2.0/sql/statements and
 // GET /api/2.0/sql/statements/{id}. Fields beyond statement_id + status may

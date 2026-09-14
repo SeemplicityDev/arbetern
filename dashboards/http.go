@@ -21,8 +21,9 @@ import (
 //	DELETE /api/dashboards/<agent>/<id>         → delete
 //	POST   /api/dashboards/<agent>/<id>/render  → render a prompt instance
 //
-// Access control is enforced upstream by the global IP gate in main.
-func (r *Registry) RegisterRoutes(mux *http.ServeMux, apiMux *http.ServeMux, knownAgents map[string]bool) {
+// State-changing verbs additionally require the caller to pass the owning
+// agent's allow-lists, via the authorize callback supplied by main.
+func (r *Registry) RegisterRoutes(mux *http.ServeMux, apiMux *http.ServeMux, knownAgents map[string]bool, authorize func(*http.Request, string) bool) {
 	crud.Mount(mux, apiMux, knownAgents, crud.Spec{
 		Kind:       "dashboard",
 		KindPlural: "dashboards",
@@ -39,7 +40,8 @@ func (r *Registry) RegisterRoutes(mux *http.ServeMux, apiMux *http.ServeMux, kno
 		Delete: func(agent, id string) error {
 			return r.Delete(agent, id)
 		},
-		Custom: r.handleCustom,
+		Custom:    r.handleCustom,
+		Authorize: authorize,
 	})
 }
 
@@ -59,6 +61,10 @@ func (r *Registry) handleCustom(w http.ResponseWriter, req *http.Request, agent,
 	return false
 }
 
+// maxRenderBytes bounds a dashboard render payload, which is a small map of
+// template inputs.
+const maxRenderBytes = 64 << 10
+
 type renderRequest struct {
 	Inputs   map[string]string `json:"inputs"`
 	Interval string            `json:"interval"`
@@ -72,6 +78,7 @@ type renderRequest struct {
 func (r *Registry) handleRender(w http.ResponseWriter, req *http.Request, agent, id string) {
 	var body renderRequest
 	if req.Body != nil {
+		req.Body = http.MaxBytesReader(w, req.Body, maxRenderBytes)
 		dec := json.NewDecoder(req.Body)
 		dec.DisallowUnknownFields()
 		if err := dec.Decode(&body); err != nil && err.Error() != "EOF" {

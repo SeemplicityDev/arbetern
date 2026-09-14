@@ -93,9 +93,7 @@ func NewClient(ctx context.Context, region string) (*Client, error) {
 // Region returns the region used for signing Cost Explorer calls.
 func (c *Client) Region() string { return c.region }
 
-// --------------------------------------------------------------------------
 // Cost & usage
-// --------------------------------------------------------------------------
 
 // CostAndUsageOpts are the arguments for GetCostAndUsage. All fields are
 // optional; see defaults in GetCostAndUsage.
@@ -247,9 +245,7 @@ func (c *Client) GetCostAndUsage(ctx context.Context, opts CostAndUsageOpts) (*C
 	return result, nil
 }
 
-// --------------------------------------------------------------------------
 // Cost forecast
-// --------------------------------------------------------------------------
 
 // ForecastOpts configures GetCostForecast.
 type ForecastOpts struct {
@@ -371,9 +367,7 @@ func (c *Client) GetCostForecast(ctx context.Context, opts ForecastOpts) (*Forec
 	return result, nil
 }
 
-// --------------------------------------------------------------------------
 // Dimension values (enumerate services, accounts, regions, ...)
-// --------------------------------------------------------------------------
 
 // DimensionValuesOpts configures GetDimensionValues.
 type DimensionValuesOpts struct {
@@ -433,9 +427,7 @@ func (c *Client) GetDimensionValues(ctx context.Context, opts DimensionValuesOpt
 	}, nil
 }
 
-// --------------------------------------------------------------------------
 // Helpers
-// --------------------------------------------------------------------------
 
 // resolveDateRange fills missing start/end with sensible defaults (last
 // `defaultDays` days ending today, exclusive-end). Validates format and the

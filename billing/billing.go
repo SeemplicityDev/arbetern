@@ -62,6 +62,7 @@ type Event struct {
 	Model              string    `json:"model"`
 	PromptTokens       int       `json:"prompt_tokens"`
 	CachedPromptTokens int       `json:"cached_prompt_tokens,omitempty"`
+	CacheWriteTokens   int       `json:"cache_write_tokens,omitempty"`
 	CompletionTokens   int       `json:"completion_tokens"`
 	TotalTokens        int       `json:"total_tokens"`
 	// Compression{Input,Saved}Tokens track Headroom savings for this turn; the
@@ -77,6 +78,7 @@ type Counts struct {
 	Requests           int   `json:"requests"`
 	PromptTokens       int64 `json:"prompt_tokens"`
 	CachedPromptTokens int64 `json:"cached_prompt_tokens"`
+	CacheWriteTokens   int64 `json:"cache_write_tokens"`
 	CompletionTokens   int64 `json:"completion_tokens"`
 	TotalTokens        int64 `json:"total_tokens"`
 	// Headroom compression rollup; saved-% = CompressionSavedTokens / CompressionInputTokens.
@@ -90,6 +92,7 @@ func (c *Counts) add(e Event) {
 	c.Requests++
 	c.PromptTokens += int64(e.PromptTokens)
 	c.CachedPromptTokens += int64(e.CachedPromptTokens)
+	c.CacheWriteTokens += int64(e.CacheWriteTokens)
 	c.CompletionTokens += int64(e.CompletionTokens)
 	c.TotalTokens += int64(e.TotalTokens)
 	c.CompressionInputTokens += int64(e.CompressionInputTokens)
@@ -254,7 +257,7 @@ func (s *Store) Record(e Event) {
 		e.Source = SourceSlack
 	}
 	if e.CostUSD == 0 {
-		cost, ok := Cost(e.Model, e.PromptTokens, e.CachedPromptTokens, e.CompletionTokens)
+		cost, ok := Cost(e.Model, e.PromptTokens, e.CachedPromptTokens, e.CacheWriteTokens, e.CompletionTokens)
 		e.CostUSD = cost
 		e.Unpriced = !ok
 	}
@@ -528,6 +531,7 @@ func (c *Counts) addCounts(o *Counts) {
 	c.Requests += o.Requests
 	c.PromptTokens += o.PromptTokens
 	c.CachedPromptTokens += o.CachedPromptTokens
+	c.CacheWriteTokens += o.CacheWriteTokens
 	c.CompletionTokens += o.CompletionTokens
 	c.TotalTokens += o.TotalTokens
 	c.CompressionInputTokens += o.CompressionInputTokens

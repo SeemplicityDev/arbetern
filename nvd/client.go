@@ -9,6 +9,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/justmike1/arbetern/internal/text"
 )
 
 const (
@@ -35,9 +37,7 @@ func NewClient(apiKey string) *Client {
 	}
 }
 
-// --------------------------------------------------------------------------
 // Public methods
-// --------------------------------------------------------------------------
 
 // LookupCVE fetches a single CVE by its ID (e.g. "CVE-2025-13836").
 func (c *Client) LookupCVE(ctx context.Context, cveID string) (*CVEItem, error) {
@@ -73,9 +73,7 @@ func (c *Client) SearchCVE(ctx context.Context, keyword string, resultsPerPage i
 	return items, resp.TotalResults, nil
 }
 
-// --------------------------------------------------------------------------
 // Formatting helpers
-// --------------------------------------------------------------------------
 
 // FormatCVE returns a concise Slack-friendly summary of a CVE.
 func FormatCVE(cve *CVEItem) string {
@@ -192,9 +190,7 @@ func nvdOr(val, fallback string) string {
 	return val
 }
 
-// --------------------------------------------------------------------------
 // HTTP transport
-// --------------------------------------------------------------------------
 
 func (c *Client) get(ctx context.Context, params url.Values, target interface{}) error {
 	u, _ := url.Parse(baseURL)
@@ -220,7 +216,7 @@ func (c *Client) get(ctx context.Context, params url.Values, target interface{})
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("NVD API returned %d: %s", resp.StatusCode, truncate(string(body), 300))
+		return fmt.Errorf("NVD API returned %d: %s", resp.StatusCode, text.Truncate(string(body), 300))
 	}
 
 	if err := json.Unmarshal(body, target); err != nil {
@@ -229,16 +225,7 @@ func (c *Client) get(ctx context.Context, params url.Values, target interface{})
 	return nil
 }
 
-func truncate(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n] + "…"
-}
-
-// --------------------------------------------------------------------------
 // NVD CVE API v2.0 response types
-// --------------------------------------------------------------------------
 
 type cveResponse struct {
 	ResultsPerPage  int             `json:"resultsPerPage"`
