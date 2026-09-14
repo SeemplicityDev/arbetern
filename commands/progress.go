@@ -1,13 +1,11 @@
 package commands
 
 import (
-	"fmt"
 	"log"
-	"strings"
 	"sync"
 	"time"
 
-	"github.com/justmike1/arbetern/internal/safego"
+	"github.com/justmike1/arbetern/internal/progress"
 )
 
 const (
@@ -15,90 +13,44 @@ const (
 	progressEvery      = time.Minute
 )
 
-// progressReporter keeps a single "still working" reply in the thread while a
-// long turn runs, edits it in place, and removes it once the answer lands.
-type progressReporter struct {
+// slackProgress mirrors a turn's progress into one thread reply that is edited
+// in place and removed when the answer lands.
+type slackProgress struct {
+	*progress.Tracker
 	slack     SlackClient
 	channelID string
 	threadTS  string
-	started   time.Time
 	stop      chan struct{}
 	once      sync.Once
 
 	postMu   sync.Mutex
 	ts       string
 	finished bool
-
-	mu        sync.Mutex
-	toolCalls int
-	lastTool  string
 }
 
-func startProgressReporter(slack SlackClient, channelID, threadTS string) *progressReporter {
+func startSlackProgress(slack SlackClient, channelID, threadTS string) *slackProgress {
 	if slack == nil || channelID == "" || threadTS == "" {
 		return nil
 	}
-	p := &progressReporter{slack: slack, channelID: channelID, threadTS: threadTS, started: time.Now(), stop: make(chan struct{})}
-	safego.Go("slack: progress reporter", p.run)
+	p := &slackProgress{Tracker: progress.NewTracker(), slack: slack, channelID: channelID, threadTS: threadTS, stop: make(chan struct{})}
+	p.Watch(p.stop, progressFirstAfter, progressEvery, p.publish)
 	return p
 }
 
-func (p *progressReporter) run() {
-	first := time.NewTimer(progressFirstAfter)
-	defer first.Stop()
-	select {
-	case <-p.stop:
-		return
-	case <-first.C:
-	}
-	p.publish()
-	t := time.NewTicker(progressEvery)
-	defer t.Stop()
-	for {
-		select {
-		case <-p.stop:
-			return
-		case <-t.C:
-			p.publish()
-		}
-	}
-}
-
-func (p *progressReporter) toolCalled(name string) {
+func (p *slackProgress) tracker() *progress.Tracker {
 	if p == nil {
-		return
+		return nil
 	}
-	p.mu.Lock()
-	p.toolCalls++
-	p.lastTool = strings.ReplaceAll(name, "_", " ")
-	p.mu.Unlock()
+	return p.Tracker
 }
 
-func (p *progressReporter) text() string {
-	p.mu.Lock()
-	calls, last := p.toolCalls, p.lastTool
-	p.mu.Unlock()
-	elapsed := time.Since(p.started)
-	var age string
-	if elapsed < time.Minute {
-		age = fmt.Sprintf("%ds", int(elapsed.Seconds()))
-	} else {
-		age = fmt.Sprintf("%dm", int(elapsed.Minutes()))
-	}
-	msg := ":hourglass_flowing_sand: Still working — " + age + " elapsed"
-	if calls > 0 {
-		msg += fmt.Sprintf(", %d tool calls (last: %s)", calls, last)
-	}
-	return "_" + msg + "_"
-}
-
-func (p *progressReporter) publish() {
+func (p *slackProgress) publish(s progress.Snapshot) {
 	p.postMu.Lock()
 	defer p.postMu.Unlock()
 	if p.finished {
 		return
 	}
-	text := p.text()
+	text := "_:hourglass_flowing_sand: " + s.Line(time.Now()) + "_"
 	if p.ts == "" {
 		ts, err := p.slack.PostMessageInThread(p.channelID, p.threadTS, text)
 		if err != nil {
@@ -113,8 +65,7 @@ func (p *progressReporter) publish() {
 	}
 }
 
-// done stops the updates and deletes the progress message, if one was posted.
-func (p *progressReporter) done() {
+func (p *slackProgress) done() {
 	if p == nil {
 		return
 	}

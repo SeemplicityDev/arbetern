@@ -25,6 +25,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/justmike1/arbetern/internal/progress"
 	"github.com/justmike1/arbetern/internal/safego"
 	"github.com/justmike1/arbetern/internal/store"
 )
@@ -40,15 +41,30 @@ const maxMessages = 500
 // as conversation context on each turn.
 const historyContextLimit = 30
 
+// turnTimeout bounds one background reply, tool loop included.
+const turnTimeout = 30 * time.Minute
+
+// pendingFlushEvery is how often in-flight progress is written to the transcript.
+const pendingFlushEvery = 5 * time.Second
+
+const finishTimeout = 30 * time.Second
+
 // ErrNotFound is returned when a conversation does not exist.
 var ErrNotFound = errors.New("conversation not found")
 
-// Message is a single chat turn. Role is "user" or "assistant".
+// ErrBusy is returned when a reply is already being produced for the conversation.
+var ErrBusy = errors.New("a reply is already in progress")
+
+var errNoChange = errors.New("no change")
+
+// Message is a single chat turn. Role is "user" or "assistant". Error marks an
+// assistant turn that reports a failure instead of an answer.
 type Message struct {
 	Role    string    `json:"role"`
 	User    string    `json:"user,omitempty"`
 	Content string    `json:"content"`
 	Time    time.Time `json:"time"`
+	Error   bool      `json:"error,omitempty"`
 }
 
 // Responder produces an assistant reply for an agent given the prior
@@ -56,7 +72,7 @@ type Message struct {
 // resolved sender identity (the OAuth-proxy-verified email when a proxy is in
 // front, else any client-supplied name), or "" when unknown. It is implemented
 // in main using the shared LLM client and the agent's system prompt.
-type Responder func(ctx context.Context, agent, user string, history []Message, userMessage string) (string, error)
+type Responder func(ctx context.Context, agent, user string, history []Message, userMessage string, tracker *progress.Tracker) (string, error)
 
 // transcript is the stored shape of a single conversation, kept at
 // <Prefix><agent>/<id>.json.
@@ -67,6 +83,8 @@ type transcript struct {
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 	Messages  []Message `json:"messages"`
+	// Pending is set while a reply is being produced.
+	Pending *progress.Snapshot `json:"pending,omitempty"`
 }
 
 // ConversationSummary is the lightweight shape returned when listing an
@@ -225,7 +243,14 @@ func (r *Registry) Conversation(agent, id string) (*transcript, error) {
 		return nil, nil
 	}
 	normalize(t, agent, id)
+	if stalePending(t.Pending) {
+		t.Pending = nil
+	}
 	return t, nil
+}
+
+func stalePending(p *progress.Snapshot) bool {
+	return p != nil && time.Since(p.StartedAt) > turnTimeout+time.Minute
 }
 
 // DeleteConversation removes a conversation. Deleting a missing conversation is
@@ -342,19 +367,24 @@ func trimMessages(t *transcript) {
 	}
 }
 
-// Post appends the user's message to the given conversation, asks the responder
-// for a reply, appends the reply, and returns the assistant message. The
-// user's turn is stored before the (slow) LLM call so it is never lost, and
-// each write re-reads the latest transcript so a concurrent Post's turns are
-// not clobbered. Returns ErrNotFound when the conversation does not exist.
-func (r *Registry) Post(ctx context.Context, agent, id, user, message string) (Message, error) {
+// Start appends the user's message, marks the conversation as answering, and
+// produces the reply in the background so the HTTP request never waits on the
+// tool loop. The reply, or the failure, is appended when the turn ends. Returns
+// ErrBusy while an earlier turn is still in flight and ErrNotFound when the
+// conversation does not exist.
+func (r *Registry) Start(agent, id, user, message string) error {
 	if r.respond == nil {
-		return Message{}, fmt.Errorf("chat responder not configured")
+		return fmt.Errorf("chat responder not configured")
 	}
 	key := store.Key(agent, id)
+	tracker := progress.NewTracker()
+	ctx, cancel := context.WithTimeout(context.Background(), turnTimeout)
 	var contextMsgs []Message
 	_, err := r.docs.Update(ctx, key, func(t *transcript) error {
 		normalize(t, agent, id)
+		if t.Pending != nil && !stalePending(t.Pending) {
+			return ErrBusy
+		}
 		contextMsgs = trimContext(t.Messages)
 		now := time.Now().UTC()
 		t.Messages = append(t.Messages, Message{Role: "user", User: user, Content: message, Time: now})
@@ -362,46 +392,70 @@ func (r *Registry) Post(ctx context.Context, agent, id, user, message string) (M
 			t.Title = deriveTitle(message)
 		}
 		t.UpdatedAt = now
+		snap := tracker.Snapshot()
+		t.Pending = &snap
 		trimMessages(t)
 		return nil
 	})
-	if errors.Is(err, store.ErrNotFound) {
-		return Message{}, ErrNotFound
-	}
 	if err != nil {
-		return Message{}, err
+		cancel()
+		if errors.Is(err, store.ErrNotFound) {
+			return ErrNotFound
+		}
+		return err
 	}
-
-	reply, err := r.respond(ctx, agent, user, contextMsgs, message)
-	if err != nil {
-		return Message{}, err
-	}
-	assistantMsg := Message{Role: "assistant", Content: reply, Time: time.Now().UTC()}
-
-	_, err = r.docs.Update(ctx, key, func(t *transcript) error {
-		normalize(t, agent, id)
-		t.Messages = append(t.Messages, assistantMsg)
-		t.UpdatedAt = assistantMsg.Time
-		trimMessages(t)
-		return nil
+	safego.Go("chat: turn "+key, func() {
+		defer cancel()
+		stop := make(chan struct{})
+		tracker.Watch(stop, pendingFlushEvery, pendingFlushEvery, func(s progress.Snapshot) { r.flushPending(ctx, key, s) })
+		reply, err := r.respond(ctx, agent, user, contextMsgs, message, tracker)
+		close(stop)
+		msg := Message{Role: "assistant", Content: reply, Time: time.Now().UTC()}
+		if err != nil {
+			msg.Content, msg.Error = "Error: "+err.Error(), true
+		}
+		fctx, fcancel := context.WithTimeout(context.Background(), finishTimeout)
+		defer fcancel()
+		_, err = r.docs.Update(fctx, key, func(t *transcript) error {
+			normalize(t, agent, id)
+			t.Pending = nil
+			t.Messages = append(t.Messages, msg)
+			t.UpdatedAt = msg.Time
+			trimMessages(t)
+			return nil
+		})
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			log.Printf("chat: failed to store reply for %s: %v", key, err)
+		}
 	})
-	if errors.Is(err, store.ErrNotFound) {
-		return Message{}, ErrNotFound
-	}
-	if err != nil {
-		return Message{}, err
-	}
-	return assistantMsg, nil
+	return nil
 }
 
-// trimContext returns the most recent historyContextLimit messages, copied
-// into a fresh slice so callers cannot mutate the registry's data.
-func trimContext(msgs []Message) []Message {
-	if len(msgs) > historyContextLimit {
-		msgs = msgs[len(msgs)-historyContextLimit:]
+func (r *Registry) flushPending(ctx context.Context, key string, s progress.Snapshot) {
+	_, err := r.docs.Update(ctx, key, func(t *transcript) error {
+		if t.Pending == nil || (t.Pending.ToolCalls == s.ToolCalls && t.Pending.LastTool == s.LastTool) {
+			return errNoChange
+		}
+		t.Pending = &s
+		return nil
+	})
+	if err != nil && !errors.Is(err, errNoChange) && !errors.Is(err, store.ErrNotFound) {
+		log.Printf("chat: failed to store progress for %s: %v", key, err)
 	}
-	out := make([]Message, len(msgs))
-	copy(out, msgs)
+}
+
+// trimContext returns the most recent historyContextLimit messages that were
+// real turns, leaving out stored failure notices.
+func trimContext(msgs []Message) []Message {
+	out := make([]Message, 0, len(msgs))
+	for _, m := range msgs {
+		if !m.Error {
+			out = append(out, m)
+		}
+	}
+	if len(out) > historyContextLimit {
+		out = out[len(out)-historyContextLimit:]
+	}
 	return out
 }
 

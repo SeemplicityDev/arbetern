@@ -26,6 +26,7 @@ import (
 	"github.com/justmike1/arbetern/freshworks"
 	"github.com/justmike1/arbetern/github"
 	"github.com/justmike1/arbetern/google"
+	"github.com/justmike1/arbetern/internal/progress"
 	"github.com/justmike1/arbetern/llm"
 	"github.com/justmike1/arbetern/mcp"
 	"github.com/justmike1/arbetern/nvd"
@@ -288,8 +289,8 @@ func (h *GeneralHandler) recordUsage(model, userID string, u llm.Usage, comp llm
 func (h *GeneralHandler) Execute(channelID, userID, text, responseURL, auditTS string) {
 	ctx := context.Background()
 	started := time.Now()
-	progress := startProgressReporter(h.slackClient, channelID, auditTS)
-	defer progress.done()
+	reporter := startSlackProgress(h.slackClient, channelID, auditTS)
+	defer reporter.done()
 	h.currentChannelID = channelID
 	h.currentAuditTS = auditTS
 	h.aggregateCache = nil
@@ -332,197 +333,57 @@ func (h *GeneralHandler) Execute(channelID, userID, text, responseURL, auditTS s
 	}
 
 	repliedInThread := false
-	toolCallsMade := false
-	blockedPreActionAcks := 0
-	emptyResponseRetries := 0
-	truncatedToolRounds := 0
-	narrationRetries := 0
-
-	// Track cumulative token usage and compression savings across all LLM rounds.
-	var totalUsage llm.Usage
-	var totalCompression llm.CompressionStats
-	defer func() { h.recordUsage(activeClient.Model(), userID, totalUsage, totalCompression) }()
-
-	rounds := h.maxToolRounds
-	if rounds <= 0 {
-		rounds = 50
-	}
-
-	for i := 0; i < rounds; i++ {
-		resp, err := activeClient.CompleteWithTools(ctx, messages, tools)
-		if err != nil {
-			log.Printf("[user=%s channel=%s] LLM completion failed for general query: %v", userID, channelID, err)
-			h.replyDefault(channelID, responseURL, auditTS, fmt.Sprintf("Failed to process request: %v", err))
-			return
-		}
-
-		if resp.Usage != nil {
-			totalUsage.PromptTokens += resp.Usage.PromptTokens
-			totalUsage.CachedPromptTokens += resp.Usage.CachedPromptTokens
-			totalUsage.CompletionTokens += resp.Usage.CompletionTokens
-			totalUsage.TotalTokens += resp.Usage.TotalTokens
-		}
-		if resp.Compression != nil {
-			totalCompression.TokensBefore += resp.Compression.TokensBefore
-			totalCompression.TokensAfter += resp.Compression.TokensAfter
-			totalCompression.TokensSaved += resp.Compression.TokensSaved
-		}
-
-		if len(resp.Choices) == 0 {
-			log.Printf("[user=%s channel=%s] LLM returned no choices", userID, channelID)
-			h.replyDefault(channelID, responseURL, auditTS, "No response from the model.")
-			return
-		}
-
-		choice := resp.Choices[0]
-
-		// A turn cut off at the output ceiling can still carry a half-written
-		// tool call whose trailing arguments are silently empty. Never execute
-		// that one — a write tool would commit a real diff behind a titleless,
-		// bodyless PR.
-		toolCalls, truncatedCall := splitTruncatedToolCalls(choice.FinishReason, choice.Message.ToolCalls)
-		if truncatedCall != nil {
-			truncatedToolRounds++
-			log.Printf("[user=%s channel=%s] discarded truncated %s call (finish=%q, round %d/%d); kept %d complete call(s)",
-				userID, channelID, truncatedCall.Function.Name, choice.FinishReason, truncatedToolRounds, maxTruncatedToolRounds, len(toolCalls))
-			if truncatedToolRounds > maxTruncatedToolRounds {
-				fallback := "I stopped here: my tool calls kept getting cut off at the output limit, and I won't run a half-written change (that is how a PR ends up with no title or description). Try narrowing the request — one file or one change at a time."
-				stamp := llm.FormatUsageStamp(&totalUsage, activeClient.Model(), time.Since(started))
-				if repliedInThread {
-					if stamp != "" {
-						_ = h.slackClient.PostThreadReply(channelID, auditTS, stamp)
-					}
-					return
-				}
-				h.replyDefault(channelID, responseURL, auditTS, fallback+stamp)
-				return
-			}
-		}
-
-		if len(toolCalls) == 0 && truncatedCall == nil {
-			// Guardrail: prevent placeholder acknowledgements like "I'm checking..."
-			// from being posted for code/repo actions before any tool execution.
-			if !toolCallsMade && isCodeIntent(strings.ToLower(text)) && isPreActionAck(choice.Message.Content) {
-				blockedPreActionAcks++
-				log.Printf("[user=%s channel=%s] blocked pre-action ack reply (%d); forcing tool execution retry", userID, channelID, blockedPreActionAcks)
-				if blockedPreActionAcks >= 3 {
-					h.replyDefault(channelID, responseURL, auditTS, "I couldn't complete this yet because tool execution did not start. Please retry the same request; I'll return only completed results from tool outputs.")
-					return
-				}
-				messages = append(messages,
-					llm.NewChatMessage("assistant", choice.Message.Content),
-					llm.NewChatMessage("user", "Do not send pre-action acknowledgements. Start tool execution now. Return only completed results from tool outputs (or a concrete tool error after attempted execution)."),
-				)
-				continue
-			}
-
-			// An empty final message (no text, no tool call) has two causes,
-			// told apart by finish reason: a truncated turn (hit the output
-			// ceiling) needs a "smaller step" nudge; a spurious empty reply just
-			// needs a retry. The assistant placeholder below preserves
-			// user/assistant alternation; it carries emptyTurnPlaceholder rather
-			// than "" because the Anthropic Messages API rejects a non-final
-			// message with empty content, which would turn a recoverable empty
-			// turn into a hard 400.
-			if strings.TrimSpace(choice.Message.Content) == "" && emptyResponseRetries < 2 {
-				emptyResponseRetries++
-				var nudge string
-				if isTruncatedFinish(choice.FinishReason) {
-					log.Printf("[user=%s channel=%s] response truncated at output limit (finish=%q, retry %d); asking for a smaller step", userID, channelID, choice.FinishReason, emptyResponseRetries)
-					nudge = "Your previous response hit the output-length limit before it produced anything. Take ONE smaller step now: make a single tool call (e.g. modify one file), or give a brief answer. Keep the response concise so it fits within the limit."
-				} else {
-					log.Printf("[user=%s channel=%s] model returned empty content (retry %d); nudging for a real response", userID, channelID, emptyResponseRetries)
-					nudge = "Your previous response was empty. Please provide a complete answer to my original request. Use the available tools if needed."
-				}
-				messages = append(messages,
-					llm.NewChatMessage("assistant", emptyTurnPlaceholder),
-					llm.NewChatMessage("user", nudge),
-				)
-				continue
-			}
-
-			// Retries exhausted and still empty. Never post an empty reply (that
-			// previously shipped just the usage stamp); surface a fallback.
-			if strings.TrimSpace(choice.Message.Content) == "" {
-				log.Printf("[user=%s channel=%s] general query ended with empty content after %d retries (finish=%q); replying with fallback", userID, channelID, emptyResponseRetries, choice.FinishReason)
-				fallback := "I couldn't complete this request — it looks like it was too large to finish in one pass (my response kept hitting the output limit). Try breaking it into smaller steps and I'll pick it up from there."
-				stamp := llm.FormatUsageStamp(&totalUsage, activeClient.Model(), time.Since(started))
-				if repliedInThread {
-					if stamp != "" {
-						_ = h.slackClient.PostThreadReply(channelID, auditTS, stamp)
-					}
-					return
-				}
-				h.replyDefault(channelID, responseURL, auditTS, fallback+stamp)
-				return
-			}
-
-			if name := narratedToolCall(choice.Message.Content, tools); name != "" && narrationRetries < 2 {
-				narrationRetries++
-				log.Printf("[user=%s channel=%s] model described a %s call instead of making it (retry %d)", userID, channelID, name, narrationRetries)
-				messages = append(messages,
-					llm.NewChatMessage("assistant", choice.Message.Content),
-					llm.NewChatMessage("user", narrationNudge(name)),
-				)
-				continue
-			}
-
-			log.Printf("[user=%s channel=%s] general query completed successfully", userID, channelID)
-			h.persistUserContext(ctx, userID, channelID, text, choice.Message.Content)
-			stamp := llm.FormatUsageStamp(&totalUsage, activeClient.Model(), time.Since(started))
-			// If we already replied in a specific thread, don't send a redundant follow-up.
-			if repliedInThread {
-				log.Printf("[user=%s channel=%s] skipping reply (already replied in thread)", userID, channelID)
-				if stamp != "" {
-					_ = h.slackClient.PostThreadReply(channelID, auditTS, stamp)
-				}
-				return
-			}
-			h.replyDefault(channelID, responseURL, auditTS, choice.Message.Content+stamp)
-			return
-		}
-
-		// The assistant message keeps every requested call — including the
-		// discarded one — so each tool_use still has a matching tool_result.
-		messages = append(messages, llm.ChatMessage{
-			Role:      "assistant",
-			ToolCalls: choice.Message.ToolCalls,
-		})
-
-		for _, tc := range toolCalls {
-			log.Printf("[user=%s channel=%s] LLM called tool: %s(%s)", userID, channelID, tc.Function.Name, redactToolArgsForLog(tc.Function.Name, tc.Function.Arguments))
-			toolCallsMade = true
-			progress.toolCalled(tc.Function.Name)
-			result := h.executeTool(ctx, channelID, userID, auditTS, tc.Function.Name, tc.Function.Arguments)
-			result = stripPreconditionPrefix(result)
-			messages = append(messages, llm.NewToolResultMessage(tc.ID, result))
-			if tc.Function.Name == "reply_in_thread" && !strings.HasPrefix(result, "Error") {
+	res, err := h.runToolLoop(ctx, toolLoop{
+		logPrefix:         fmt.Sprintf("[user=%s channel=%s]", userID, channelID),
+		client:            activeClient,
+		codeClient:        h.codeModelsClient,
+		tools:             tools,
+		messages:          messages,
+		rounds:            h.maxToolRounds,
+		emptyRetries:      2,
+		guardPreActionAck: isCodeIntent(strings.ToLower(text)),
+		channelID:         channelID,
+		userID:            userID,
+		auditTS:           auditTS,
+		progress:          reporter.tracker(),
+		afterTool: func(name, result string) {
+			if name == "reply_in_thread" && !strings.HasPrefix(result, "Error") {
 				repliedInThread = true
 			}
-			// Dynamically switch to the code model once code-related
-			// tools are invoked (covers cases where initial intent detection
-			// didn't trigger the code model).
-			codeTools := map[string]bool{
-				"modify_file": true, "create_file": true, "regex_replace_file": true,
-				"get_file_content": true,
-				"search_code":      true, "search_code_org": true, "search_files": true,
-				"list_directory": true, "get_pull_request": true,
-				// Dashboard / workflow composition benefits from the stronger model.
-				"create_dashboard": true, "create_workflow": true, "update_workflow": true, "call_workflow": true,
-			}
-			if codeTools[tc.Function.Name] && h.codeModelsClient != nil && activeClient != h.codeModelsClient {
-				activeClient = h.codeModelsClient
-				log.Printf("[user=%s channel=%s] switched to code model (%s) after %s call",
-					userID, channelID, h.codeModelsClient.Model(), tc.Function.Name)
-			}
-		}
-		if truncatedCall != nil {
-			messages = append(messages, llm.NewToolResultMessage(truncatedCall.ID, truncatedToolCallResult))
-		}
+		},
+	})
+	if err != nil {
+		log.Printf("[user=%s channel=%s] LLM completion failed for general query: %v", userID, channelID, err)
+		h.replyDefault(channelID, responseURL, auditTS, fmt.Sprintf("Failed to process request: %v", err))
+		return
 	}
-
-	log.Printf("[user=%s channel=%s] exceeded max tool rounds", userID, channelID)
-	h.replyDefault(channelID, responseURL, auditTS, "The request required too many steps. Please try a simpler query.")
+	stamp := llm.FormatUsageStamp(&res.Usage, res.Model, time.Since(started))
+	reply := func(text string) {
+		if repliedInThread {
+			log.Printf("[user=%s channel=%s] skipping reply (already replied in thread)", userID, channelID)
+			if stamp != "" {
+				_ = h.slackClient.PostThreadReply(channelID, auditTS, stamp)
+			}
+			return
+		}
+		h.replyDefault(channelID, responseURL, auditTS, text+stamp)
+	}
+	switch res.Outcome {
+	case loopCompleted:
+		log.Printf("[user=%s channel=%s] general query completed successfully", userID, channelID)
+		h.persistUserContext(ctx, userID, channelID, text, res.Final)
+		reply(res.Final)
+	case loopNoChoices:
+		reply("No response from the model.")
+	case loopPreActionAck:
+		reply("I couldn't complete this yet because tool execution did not start. Please retry the same request; I'll return only completed results from tool outputs.")
+	case loopTruncatedCalls:
+		reply(truncatedCallsFallback)
+	case loopEmpty:
+		reply(emptyTurnFallback)
+	case loopMaxRounds:
+		reply("The request required too many steps. Please try a simpler query.")
+	}
 }
 
 // ExecuteHeadless runs the agent's LLM tool-loop against a single prompt,
@@ -590,169 +451,53 @@ func (h *GeneralHandler) ExecuteHeadless(ctx context.Context, userID, prompt str
 		llm.NewChatMessage("user", prompt),
 	}
 
-	rounds := h.maxToolRounds
-	if rounds <= 0 {
-		rounds = 50
-	}
-	toolCallsMade := 0
-	// mutatingTools are the side-effect-producing tools whose failure means
-	// this tick did not achieve what the workflow was supposed to do. A
-	// failed modify_file (e.g. 404 because the model passed a non-existent
-	// branch, or old_content didn't match) means no PR was opened; a failed
-	// post_slack_message means no notification went out. We count those
-	// specifically so the workflow layer can treat the tick as failed —
-	// even when the LLM's final assistant message is a nicely-worded
-	// "I tried but…" string — and eventually auto-disable the workflow.
-	mutatingTools := map[string]bool{
-		"modify_file":        true,
-		"create_file":        true,
-		"regex_replace_file": true,
-		"post_slack_message": true,
-		"create_dashboard":   true,
-		"create_workflow":    true,
-		"update_workflow":    true,
-		"delete_workflow":    true,
-		"call_workflow":      true,
-	}
+	logPrefix := fmt.Sprintf("[workflow user=%s agent=%s]", userID, h.agentID)
 	var mutatingFailures []string
-	truncatedToolRounds := 0
-	narrationRetries := 0
-	var totalUsage llm.Usage
-	var totalCompression llm.CompressionStats
-	defer func() { h.recordUsage(activeClient.Model(), userID, totalUsage, totalCompression) }()
-	for i := 0; i < rounds; i++ {
-		resp, err := activeClient.CompleteWithTools(ctx, messages, tools)
-		if err != nil {
-			log.Printf("[workflow user=%s agent=%s] LLM completion failed after %d rounds / %d tool calls: %v",
-				userID, h.agentID, i, toolCallsMade, err)
-			return "", fmt.Errorf("LLM completion failed: %w", err)
-		}
-		if resp.Usage != nil {
-			totalUsage.PromptTokens += resp.Usage.PromptTokens
-			totalUsage.CachedPromptTokens += resp.Usage.CachedPromptTokens
-			totalUsage.CompletionTokens += resp.Usage.CompletionTokens
-			totalUsage.TotalTokens += resp.Usage.TotalTokens
-		}
-		if resp.Compression != nil {
-			totalCompression.TokensBefore += resp.Compression.TokensBefore
-			totalCompression.TokensAfter += resp.Compression.TokensAfter
-			totalCompression.TokensSaved += resp.Compression.TokensSaved
-		}
-		if len(resp.Choices) == 0 {
-			return "", fmt.Errorf("LLM returned no choices")
-		}
-		choice := resp.Choices[0]
-		// Never execute a tool call the model was still writing when it hit the
-		// output ceiling: its trailing arguments are empty, which for a write
-		// tool means a committed diff behind a contentless PR.
-		toolCalls, truncatedCall := splitTruncatedToolCalls(choice.FinishReason, choice.Message.ToolCalls)
-		if truncatedCall != nil {
-			truncatedToolRounds++
-			log.Printf("[workflow user=%s agent=%s] discarded truncated %s call (finish=%q, round %d/%d); kept %d complete call(s)",
-				userID, h.agentID, truncatedCall.Function.Name, choice.FinishReason, truncatedToolRounds, maxTruncatedToolRounds, len(toolCalls))
-			if truncatedToolRounds > maxTruncatedToolRounds {
-				return "", fmt.Errorf("workflow tick abandoned: %d tool calls were truncated at the model's output limit and discarded unexecuted (last: %s)",
-					truncatedToolRounds, truncatedCall.Function.Name)
+	res, err := h.runToolLoop(ctx, toolLoop{
+		logPrefix: logPrefix,
+		client:    activeClient,
+		tools:     tools,
+		messages:  messages,
+		rounds:    h.maxToolRounds,
+		userID:    userID,
+		afterTool: func(name, result string) {
+			if !strings.HasPrefix(result, "Error") {
+				return
 			}
-		}
-		if len(toolCalls) == 0 && truncatedCall == nil {
-			final := strings.TrimSpace(choice.Message.Content)
-			// Make headless completion visible in the operator log. Without
-			// this, a tick that silently ends with "I was unable to…" (or
-			// an empty message) is indistinguishable from a tick that
-			// actually shipped a PR or Slack message.
-			preview := final
-			if len(preview) > 200 {
-				preview = preview[:200] + "…"
+			preview := previewText(result, 300)
+			if isPreconditionErr(result) {
+				log.Printf("%s tool %s precondition rejected (no side effect attempted): %s", logPrefix, name, preview)
+				return
 			}
-			preview = strings.ReplaceAll(preview, "\n", " ")
-			log.Printf("[workflow user=%s agent=%s] completed after %d rounds / %d tool calls; final (%d chars): %q",
-				userID, h.agentID, i+1, toolCallsMade, len(final), preview)
-			// A tick left empty by a truncated turn didn't finish its work —
-			// return an error so the registry counts it as failed, not an empty
-			// "success".
-			if final == "" && isTruncatedFinish(choice.FinishReason) {
-				log.Printf("[workflow user=%s agent=%s] tick ended with truncated, empty output (finish=%q) — output limit hit before a result", userID, h.agentID, choice.FinishReason)
-				return "", fmt.Errorf("workflow tick output was truncated at the model's output limit before producing a result")
+			log.Printf("%s tool %s returned: %s", logPrefix, name, preview)
+			if mutatingTools[name] {
+				mutatingFailures = append(mutatingFailures, fmt.Sprintf("%s: %s", name, preview))
 			}
-			if name := narratedToolCall(final, tools); name != "" && narrationRetries < 2 {
-				narrationRetries++
-				log.Printf("[workflow user=%s agent=%s] model described a %s call instead of making it (retry %d)", userID, h.agentID, name, narrationRetries)
-				messages = append(messages,
-					llm.NewChatMessage("assistant", final),
-					llm.NewChatMessage("user", narrationNudge(name)),
-				)
-				continue
-			}
-			if len(mutatingFailures) > 0 {
-				// At least one side-effect tool failed. The tick technically
-				// reached a final assistant message, but the intent of the
-				// workflow (open a PR, post a Slack message, …) wasn't
-				// actually achieved. Surface this as an error so the
-				// workflow registry counts the tick as failed and can
-				// auto-disable after repeated failures.
-				last := mutatingFailures[len(mutatingFailures)-1]
-				return final, fmt.Errorf("workflow tick had %d failed mutating tool call(s); last: %s", len(mutatingFailures), last)
-			}
-			return final, nil
-		}
-		// Every requested call stays on the assistant message — including the
-		// discarded one — so each tool_use keeps a matching tool_result.
-		messages = append(messages, llm.ChatMessage{
-			Role:      "assistant",
-			ToolCalls: choice.Message.ToolCalls,
-		})
-		for _, tc := range toolCalls {
-			toolCallsMade++
-			log.Printf("[workflow user=%s agent=%s] tool: %s(%s)", userID, h.agentID, tc.Function.Name, redactToolArgsForLog(tc.Function.Name, tc.Function.Arguments))
-			result := h.executeTool(ctx, "", userID, "", tc.Function.Name, tc.Function.Arguments)
-			// Precondition errors mean the tool rejected the call BEFORE any
-			// side effect was attempted (missing args, content guards, etc.).
-			// They are recoverable by the LLM's own retry loop and must not
-			// be counted as mutating failures — nothing externally observable
-			// happened. We still log them for operator visibility, then strip
-			// the sentinel before handing the message back to the LLM.
-			precondition := isPreconditionErr(result)
-			if precondition {
-				result = stripPreconditionPrefix(result)
-			}
-			// Surface tool-level errors in the operator log. Without this, a
-			// silent "Error: old_content not found" (or similar) from a
-			// modify_file call is only visible to the LLM and can cause it
-			// to ship a weaker fallback (or no-op) PR on its next attempt.
-			if strings.HasPrefix(result, "Error") {
-				preview := strings.ReplaceAll(result, "\n", " ")
-				if len(preview) > 300 {
-					preview = preview[:300] + "…"
-				}
-				if precondition {
-					log.Printf("[workflow user=%s agent=%s] tool %s precondition rejected (no side effect attempted): %s", userID, h.agentID, tc.Function.Name, preview)
-				} else {
-					log.Printf("[workflow user=%s agent=%s] tool %s returned: %s", userID, h.agentID, tc.Function.Name, preview)
-					if mutatingTools[tc.Function.Name] {
-						mutatingFailures = append(mutatingFailures, fmt.Sprintf("%s: %s", tc.Function.Name, preview))
-					}
-				}
-			}
-			messages = append(messages, llm.NewToolResultMessage(tc.ID, result))
-			codeTools := map[string]bool{
-				"modify_file": true, "create_file": true, "regex_replace_file": true,
-				"get_file_content": true,
-				"search_code":      true, "search_code_org": true, "search_files": true,
-				"list_directory": true, "get_pull_request": true,
-				"create_dashboard": true, "create_workflow": true, "update_workflow": true, "call_workflow": true,
-			}
-			if codeTools[tc.Function.Name] && activeClient != codeClient {
-				activeClient = codeClient
-			}
-		}
-		if truncatedCall != nil {
-			messages = append(messages, llm.NewToolResultMessage(truncatedCall.ID, truncatedToolCallResult))
-		}
+		},
+	})
+	if err != nil {
+		log.Printf("%s LLM completion failed after %d rounds / %d tool calls: %v", logPrefix, res.Rounds, res.ToolCalls, err)
+		return "", fmt.Errorf("LLM completion failed: %w", err)
 	}
-	log.Printf("[workflow user=%s agent=%s] exceeded max tool rounds (%d); %d tool calls made",
-		userID, h.agentID, rounds, toolCallsMade)
-	return "", fmt.Errorf("workflow tick exceeded max tool rounds (%d)", rounds)
+	switch res.Outcome {
+	case loopNoChoices:
+		return "", fmt.Errorf("LLM returned no choices")
+	case loopTruncatedCalls:
+		return "", fmt.Errorf("workflow tick abandoned: %d tool calls were truncated at the model's output limit and discarded unexecuted (last: %s)",
+			maxTruncatedToolRounds+1, res.LastTruncated)
+	case loopMaxRounds:
+		return "", fmt.Errorf("workflow tick exceeded max tool rounds (%d)", res.Rounds)
+	}
+	log.Printf("%s completed after %d rounds / %d tool calls; final (%d chars): %q",
+		logPrefix, res.Rounds, res.ToolCalls, len(res.Final), previewText(res.Final, 200))
+	if res.Outcome == loopEmpty && isTruncatedFinish(res.FinishReason) {
+		return "", fmt.Errorf("workflow tick output was truncated at the model's output limit before producing a result")
+	}
+	if len(mutatingFailures) > 0 {
+		last := mutatingFailures[len(mutatingFailures)-1]
+		return res.Final, fmt.Errorf("workflow tick had %d failed mutating tool call(s); last: %s", len(mutatingFailures), last)
+	}
+	return res.Final, nil
 }
 
 // ExecuteChat runs the agent's LLM tool-loop for an interactive UI chat turn
@@ -768,7 +513,7 @@ func (h *GeneralHandler) ExecuteHeadless(ctx context.Context, userID, prompt str
 // It uses the general (conversational) model, upgrading to the code model only
 // after a code-related tool is invoked — mirroring the interactive Execute
 // path. Returns the reply text or the first tool-loop error.
-func (h *GeneralHandler) ExecuteChat(ctx context.Context, userID string, history []llm.ChatMessage, userMessage string) (string, error) {
+func (h *GeneralHandler) ExecuteChat(ctx context.Context, userID string, history []llm.ChatMessage, userMessage string, tracker *progress.Tracker) (string, error) {
 	h.currentChannelID = ""
 	h.currentAuditTS = ""
 	h.aggregateCache = nil
@@ -796,124 +541,37 @@ func (h *GeneralHandler) ExecuteChat(ctx context.Context, userID string, history
 	messages = append(messages, history...)
 	messages = append(messages, llm.NewChatMessage("user", userMessage))
 
-	rounds := h.maxToolRounds
-	if rounds <= 0 {
-		rounds = 50
+	logPrefix := fmt.Sprintf("[chat user=%s agent=%s]", userID, h.agentID)
+	res, err := h.runToolLoop(ctx, toolLoop{
+		logPrefix:    logPrefix,
+		client:       activeClient,
+		codeClient:   h.codeModelsClient,
+		tools:        tools,
+		messages:     messages,
+		rounds:       h.maxToolRounds,
+		emptyRetries: 2,
+		userID:       userID,
+		progress:     tracker,
+	})
+	if err != nil {
+		log.Printf("%s LLM completion failed after %d rounds: %v", logPrefix, res.Rounds, err)
+		return "", fmt.Errorf("LLM completion failed: %w", err)
 	}
-	emptyResponseRetries := 0
-	truncatedToolRounds := 0
-	narrationRetries := 0
-	var totalUsage llm.Usage
-	var totalCompression llm.CompressionStats
-	defer func() { h.recordUsage(activeClient.Model(), userID, totalUsage, totalCompression) }()
-	for i := 0; i < rounds; i++ {
-		resp, err := activeClient.CompleteWithTools(ctx, messages, tools)
-		if err != nil {
-			log.Printf("[chat user=%s agent=%s] LLM completion failed after %d rounds: %v", userID, h.agentID, i, err)
-			return "", fmt.Errorf("LLM completion failed: %w", err)
-		}
-		if resp.Usage != nil {
-			totalUsage.PromptTokens += resp.Usage.PromptTokens
-			totalUsage.CachedPromptTokens += resp.Usage.CachedPromptTokens
-			totalUsage.CompletionTokens += resp.Usage.CompletionTokens
-			totalUsage.TotalTokens += resp.Usage.TotalTokens
-		}
-		if resp.Compression != nil {
-			totalCompression.TokensBefore += resp.Compression.TokensBefore
-			totalCompression.TokensAfter += resp.Compression.TokensAfter
-			totalCompression.TokensSaved += resp.Compression.TokensSaved
-		}
-		if resp.Error != nil {
-			return "", fmt.Errorf("%s", resp.Error.Message)
-		}
-		if len(resp.Choices) == 0 {
-			return "", fmt.Errorf("LLM returned no choices")
-		}
-		choice := resp.Choices[0]
-
-		// A tool call the model was still writing when it hit the output ceiling
-		// arrives with its trailing arguments empty — dropped, never executed.
-		toolCalls, truncatedCall := splitTruncatedToolCalls(choice.FinishReason, choice.Message.ToolCalls)
-		if truncatedCall != nil {
-			truncatedToolRounds++
-			log.Printf("[chat user=%s agent=%s] discarded truncated %s call (finish=%q, round %d/%d); kept %d complete call(s)",
-				userID, h.agentID, truncatedCall.Function.Name, choice.FinishReason, truncatedToolRounds, maxTruncatedToolRounds, len(toolCalls))
-			if truncatedToolRounds > maxTruncatedToolRounds {
-				return "I stopped here: my tool calls kept getting cut off at the output limit, and I won't run a half-written change. Try narrowing the request — one file or one change at a time.", nil
-			}
-		}
-
-		if len(toolCalls) == 0 && truncatedCall == nil {
-			final := strings.TrimSpace(choice.Message.Content)
-			// Retry on an empty final turn. Truncated turns (output ceiling) get
-			// a "smaller step" nudge; a spurious empty reply just retries.
-			if final == "" && emptyResponseRetries < 2 {
-				emptyResponseRetries++
-				var nudge string
-				if isTruncatedFinish(choice.FinishReason) {
-					log.Printf("[chat user=%s agent=%s] response truncated at output limit (finish=%q, retry %d); asking for a smaller step", userID, h.agentID, choice.FinishReason, emptyResponseRetries)
-					nudge = "Your previous response hit the output-length limit before it produced anything. Take one smaller step, or give a brief, concise answer that fits within the limit."
-				} else {
-					log.Printf("[chat user=%s agent=%s] empty response (retry %d); nudging for content", userID, h.agentID, emptyResponseRetries)
-					nudge = "Your previous response was empty. Please provide a complete answer to my request, using the available tools if needed."
-				}
-				messages = append(messages,
-					llm.NewChatMessage("assistant", emptyTurnPlaceholder),
-					llm.NewChatMessage("user", nudge),
-				)
-				continue
-			}
-			// Never hand an empty string back to the UI — return a fallback.
-			if final == "" {
-				log.Printf("[chat user=%s agent=%s] ended with empty content after %d retries (finish=%q); returning fallback", userID, h.agentID, emptyResponseRetries, choice.FinishReason)
-				return "I couldn't complete this request — it may have been too large to finish in one pass (my response kept hitting the output limit). Try narrowing it and I'll pick it up from there.", nil
-			}
-			if name := narratedToolCall(final, tools); name != "" && narrationRetries < 2 {
-				narrationRetries++
-				log.Printf("[chat user=%s agent=%s] model described a %s call instead of making it (retry %d)", userID, h.agentID, name, narrationRetries)
-				messages = append(messages,
-					llm.NewChatMessage("assistant", final),
-					llm.NewChatMessage("user", narrationNudge(name)),
-				)
-				continue
-			}
-			log.Printf("[chat user=%s agent=%s] completed after %d rounds", userID, h.agentID, i+1)
-			if memoryUser != "" {
-				h.persistUserContext(ctx, memoryUser, "", userMessage, final)
-			}
-			return final, nil
-		}
-
-		// Every requested call stays on the assistant message — including the
-		// discarded one — so each tool_use keeps a matching tool_result.
-		messages = append(messages, llm.ChatMessage{
-			Role:      "assistant",
-			ToolCalls: choice.Message.ToolCalls,
-		})
-		for _, tc := range toolCalls {
-			log.Printf("[chat user=%s agent=%s] tool: %s(%s)", userID, h.agentID, tc.Function.Name, redactToolArgsForLog(tc.Function.Name, tc.Function.Arguments))
-			result := h.executeTool(ctx, "", userID, "", tc.Function.Name, tc.Function.Arguments)
-			result = stripPreconditionPrefix(result)
-			messages = append(messages, llm.NewToolResultMessage(tc.ID, result))
-			codeTools := map[string]bool{
-				"modify_file": true, "create_file": true, "regex_replace_file": true,
-				"get_file_content": true,
-				"search_code":      true, "search_code_org": true, "search_files": true,
-				"list_directory": true, "get_pull_request": true,
-				"create_dashboard": true, "create_workflow": true, "update_workflow": true, "call_workflow": true,
-			}
-			if codeTools[tc.Function.Name] && h.codeModelsClient != nil && activeClient != h.codeModelsClient {
-				activeClient = h.codeModelsClient
-				log.Printf("[chat user=%s agent=%s] switched to code model (%s) after %s call",
-					userID, h.agentID, h.codeModelsClient.Model(), tc.Function.Name)
-			}
-		}
-		if truncatedCall != nil {
-			messages = append(messages, llm.NewToolResultMessage(truncatedCall.ID, truncatedToolCallResult))
-		}
+	switch res.Outcome {
+	case loopNoChoices:
+		return "", fmt.Errorf("LLM returned no choices")
+	case loopTruncatedCalls:
+		return truncatedCallsFallback, nil
+	case loopEmpty:
+		return emptyTurnFallback, nil
+	case loopMaxRounds:
+		return "", fmt.Errorf("chat exceeded max tool rounds (%d)", res.Rounds)
 	}
-	log.Printf("[chat user=%s agent=%s] exceeded max tool rounds (%d)", userID, h.agentID, rounds)
-	return "", fmt.Errorf("chat exceeded max tool rounds (%d)", rounds)
+	log.Printf("%s completed after %d rounds", logPrefix, res.Rounds)
+	if memoryUser != "" {
+		h.persistUserContext(ctx, memoryUser, "", userMessage, res.Final)
+	}
+	return res.Final, nil
 }
 
 func (h *GeneralHandler) systemPrompt() string {

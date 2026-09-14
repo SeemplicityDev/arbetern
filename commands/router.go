@@ -21,6 +21,7 @@ import (
 	"github.com/justmike1/arbetern/freshworks"
 	"github.com/justmike1/arbetern/github"
 	"github.com/justmike1/arbetern/google"
+	"github.com/justmike1/arbetern/internal/progress"
 	"github.com/justmike1/arbetern/llm"
 	"github.com/justmike1/arbetern/mcp"
 	"github.com/justmike1/arbetern/nvd"
@@ -148,23 +149,13 @@ func (r *Router) Handle(channelID, userID, text, responseURL string) {
 
 	userContext := r.resolveUserContext(userID)
 
-	lower := strings.ToLower(text)
-
-	switch {
-	case isIntroIntent(lower):
+	if isIntroIntent(strings.ToLower(text)) {
 		log.Printf("[user=%s channel=%s] routed to: intro", userID, channelID)
 		// Intro replies go to the channel (not a thread) so the whole team can see them.
 		_, _ = r.slackClient.PostMessage(channelID, r.prompts.MustGet("intro"))
 		return
-
-	case isDebugIntent(lower):
-		log.Printf("[user=%s channel=%s] routed to: debug", userID, channelID)
-		r.newDebugHandler(userContext).Execute(channelID, userID, text, responseURL, auditTS)
-
-	default:
-		log.Printf("[user=%s channel=%s] routed to: general handler", userID, channelID)
-		r.newGeneralHandler(userContext, sess).Execute(channelID, userID, text, responseURL, auditTS)
 	}
+	r.dispatch(channelID, userID, text, responseURL, auditTS, userContext, sess)
 
 	// Post a session footer so the user knows they can reply in the thread.
 	if auditTS != "" && r.sessions != nil {
@@ -353,17 +344,18 @@ func (r *Router) HandleThreadReply(channelID, threadTS, userID, text string) {
 		sess = r.sessions.Lookup(channelID, threadTS)
 	}
 
-	lower := strings.ToLower(text)
+	r.dispatch(channelID, userID, text, "", threadTS, userContext, sess)
+}
 
-	switch {
-	case isDebugIntent(lower):
-		log.Printf("[user=%s channel=%s thread=%s] thread routed to: debug", userID, channelID, threadTS)
-		r.newDebugHandler(userContext).Execute(channelID, userID, text, "", threadTS)
-
-	default:
-		log.Printf("[user=%s channel=%s thread=%s] thread routed to: general handler", userID, channelID, threadTS)
-		r.newGeneralHandler(userContext, sess).Execute(channelID, userID, text, "", threadTS)
+// dispatch runs the request through the debug or general handler.
+func (r *Router) dispatch(channelID, userID, text, responseURL, threadTS, userContext string, sess *ThreadSession) {
+	if isDebugIntent(strings.ToLower(text)) {
+		log.Printf("[user=%s channel=%s thread=%s] routed to: debug", userID, channelID, threadTS)
+		r.newDebugHandler(userContext).Execute(channelID, userID, text, responseURL, threadTS)
+		return
 	}
+	log.Printf("[user=%s channel=%s thread=%s] routed to: general handler", userID, channelID, threadTS)
+	r.newGeneralHandler(userContext, sess).Execute(channelID, userID, text, responseURL, threadTS)
 }
 
 // RunWorkflow runs a workflow's prompt through this agent's headless LLM
@@ -433,7 +425,7 @@ func (r *Router) RunDashboardPrompt(ctx context.Context, userID, dashboardID, da
 // returned to the caller (the chat registry) to persist and display.
 //
 // Returns the reply text or the first tool-loop error.
-func (r *Router) RunChat(ctx context.Context, userEmail string, history []llm.ChatMessage, userMessage string) (string, error) {
+func (r *Router) RunChat(ctx context.Context, userEmail string, history []llm.ChatMessage, userMessage string, tracker *progress.Tracker) (string, error) {
 	if strings.TrimSpace(userMessage) == "" {
 		return "", fmt.Errorf("chat message is empty")
 	}
@@ -442,5 +434,5 @@ func (r *Router) RunChat(ctx context.Context, userEmail string, history []llm.Ch
 	h.headless = true
 	h.requesterEmail = userEmail
 	h.billingSource = billing.SourceChat
-	return h.ExecuteChat(ctx, "ui-chat", history, userMessage)
+	return h.ExecuteChat(ctx, "ui-chat", history, userMessage, tracker)
 }

@@ -1,13 +1,11 @@
 package chat
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
 	"strings"
-	"time"
 
 	"github.com/justmike1/arbetern/internal/store"
 )
@@ -15,13 +13,6 @@ import (
 // maxMessageBytes bounds an inbound chat message to keep the LLM prompt and
 // on-disk transcript a sane size.
 const maxMessageBytes = 8 << 10 // 8 KiB
-
-// chatRequestTimeout bounds a single chat turn end to end. A turn now runs the
-// agent's full multi-round tool loop (the same one a Slack command uses), so it
-// must allow for several LLM rounds plus tool calls — including a long-running
-// Databricks AI_FORECAST query, which alone can poll for up to a few minutes —
-// before a slow upstream is allowed to pin a request handler.
-const chatRequestTimeout = 5 * time.Minute
 
 // postRequest is the JSON body accepted when sending a message.
 type postRequest struct {
@@ -40,7 +31,7 @@ type renameRequest struct {
 //	GET    /api/chat/<agent>/conversations        → list conversation summaries
 //	POST   /api/chat/<agent>/conversations        → create a new conversation
 //	GET    /api/chat/<agent>/conversations/<id>   → full conversation (messages)
-//	POST   /api/chat/<agent>/conversations/<id>   → send a message; returns reply
+//	POST   /api/chat/<agent>/conversations/<id>   → send a message; the reply is produced in the background and GET reports `pending` until it lands
 //	PATCH  /api/chat/<agent>/conversations/<id>   → rename the conversation
 //	DELETE /api/chat/<agent>/conversations/<id>   → delete the conversation
 //
@@ -149,18 +140,18 @@ func (r *Registry) handleConversation(w http.ResponseWriter, req *http.Request, 
 			user = user[:80]
 		}
 
-		ctx, cancel := context.WithTimeout(req.Context(), chatRequestTimeout)
-		defer cancel()
-		reply, err := r.Post(ctx, agent, id, user, msg)
-		if err != nil {
-			if errors.Is(err, ErrNotFound) {
+		if err := r.Start(agent, id, user, msg); err != nil {
+			switch {
+			case errors.Is(err, ErrNotFound):
 				http.Error(w, "conversation not found", http.StatusNotFound)
-				return
+			case errors.Is(err, ErrBusy):
+				http.Error(w, err.Error(), http.StatusConflict)
+			default:
+				http.Error(w, "failed to start reply: "+err.Error(), http.StatusBadGateway)
 			}
-			http.Error(w, "failed to generate reply: "+err.Error(), http.StatusBadGateway)
 			return
 		}
-		writeJSON(w, http.StatusOK, reply)
+		writeJSON(w, http.StatusAccepted, map[string]string{"status": "pending"})
 
 	case http.MethodPatch:
 		var body renameRequest

@@ -34,6 +34,7 @@ import (
 	"github.com/justmike1/arbetern/freshworks"
 	"github.com/justmike1/arbetern/github"
 	"github.com/justmike1/arbetern/google"
+	"github.com/justmike1/arbetern/internal/progress"
 	"github.com/justmike1/arbetern/internal/safego"
 	"github.com/justmike1/arbetern/internal/store"
 	"github.com/justmike1/arbetern/internal/vectors"
@@ -2195,7 +2196,7 @@ func main() {
 	// command.
 	sessions.SetRouterResolver(func(agentID string) *commands.Router { return routers[agentID] })
 
-	chatRegistry := chat.New(backend, func(ctx context.Context, agentID, user string, history []chat.Message, userMessage string) (string, error) {
+	chatRegistry := chat.New(backend, func(ctx context.Context, agentID, user string, history []chat.Message, userMessage string, tracker *progress.Tracker) (string, error) {
 		router := routers[agentID]
 		if router == nil {
 			return "", fmt.Errorf("no router configured for agent %q", agentID)
@@ -2214,7 +2215,7 @@ func main() {
 		// could only role-play "running the query" without executing anything.
 		// user is the OAuth-proxy-verified email (when present) used to
 		// attribute a created Jira ticket's reporter to the requester.
-		return router.RunChat(ctx, user, msgs, userMessage)
+		return router.RunChat(ctx, user, msgs, userMessage, tracker)
 	})
 	if err := chatRegistry.Load(bootCtx); err != nil {
 		log.Fatalf("failed to load chat transcripts: %v", err)
@@ -2742,10 +2743,8 @@ func main() {
 	}
 
 	srv := &http.Server{
-		Addr:    ":" + cfg.Port,
-		Handler: gatedHandler,
-		// WriteTimeout must exceed the longest handler: a UI chat turn is bounded
-		// by chat.chatRequestTimeout (5m); a lower cap would sever it mid-turn.
+		Addr:              ":" + cfg.Port,
+		Handler:           gatedHandler,
 		ReadTimeout:       30 * time.Second,
 		ReadHeaderTimeout: 30 * time.Second,
 		WriteTimeout:      6 * time.Minute,

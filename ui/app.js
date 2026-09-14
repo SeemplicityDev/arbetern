@@ -1434,6 +1434,7 @@ let chatAgentId = null;
 let chatConvId = null;
 let chatCurrentEmpty = true;
 let chatBusy = false;
+let chatPollToken = 0;
 let chatFull = false;
 
 function chatEls() {
@@ -1633,7 +1634,7 @@ async function selectConversation(agent, convId) {
   try {
     const conv = await apiGetConversation(agent, convId);
     if (chatAgentId !== agent || chatConvId !== convId) return;
-    renderChatMessages(conv.messages || []);
+    renderConversation(conv);
     if (chatFull) document.querySelectorAll('#fs-conv-list .fs-conv').forEach(el => el.classList.remove('active'));
     await refreshConvList(agent);
   } catch (err) {
@@ -1654,6 +1655,8 @@ async function newChat(agent) {
     chatAgentId = agent;
     chatConvId = conv.id;
     chatCurrentEmpty = true;
+    chatPollToken++;
+    setChatBusy(false);
     renderChatMessages([]);
     await refreshConvList(agent);
     const { input } = chatEls();
@@ -1720,6 +1723,54 @@ function appendChatBubble(m) {
   if (empty) box.innerHTML = '';
   box.insertAdjacentHTML('beforeend', chatBubbleHtml(m));
   box.scrollTop = box.scrollHeight;
+  return box.lastElementChild.querySelector('.chat-bubble');
+}
+
+function setChatBusy(busy) {
+  chatBusy = busy;
+  const { input, send } = chatEls();
+  if (send) send.disabled = busy;
+  if (input) {
+    input.disabled = busy;
+    if (!busy) input.focus();
+  }
+}
+
+function progressLine(p) {
+  const elapsed = Math.max(0, (Date.now() - new Date(p.started_at).getTime()) / 1000);
+  if (elapsed < 45) return 'Thinking…';
+  const age = elapsed < 60 ? `${Math.floor(elapsed)}s` : `${Math.floor(elapsed / 60)}m`;
+  let line = `Still working — ${age} elapsed`;
+  if (p.tool_calls > 0) line += `, ${p.tool_calls} tool calls (last: ${p.last_tool})`;
+  return line;
+}
+
+function renderConversation(conv) {
+  chatPollToken++;
+  setChatBusy(false);
+  renderChatMessages(conv.messages || []);
+  if (conv.pending) watchPendingReply(conv.agent, conv.id, conv.pending);
+}
+
+async function watchPendingReply(agent, convId, pending) {
+  const token = ++chatPollToken;
+  const bubble = appendChatBubble({ role: 'assistant', content: progressLine(pending), pending: true });
+  setChatBusy(true);
+  const current = () => chatAgentId === agent && chatConvId === convId && token === chatPollToken;
+  try {
+    while (current()) {
+      await new Promise(resolve => setTimeout(resolve, 2500));
+      let conv;
+      try { conv = await apiGetConversation(agent, convId); } catch (_) { continue; }
+      if (!current()) return;
+      if (conv.pending) { bubble.textContent = progressLine(conv.pending); continue; }
+      renderChatMessages(conv.messages || []);
+      await refreshConvList(agent);
+      return;
+    }
+  } finally {
+    if (token === chatPollToken) setChatBusy(false);
+  }
 }
 
 async function sendChat() {
@@ -1736,15 +1787,12 @@ async function sendChat() {
     }
   }
   const convId = chatConvId;
-  const { input, send: sendBtn } = chatEls();
+  const { input } = chatEls();
   const text = input.value.trim();
   if (!text) return;
 
-  chatBusy = true;
-  sendBtn.disabled = true;
-  input.disabled = true;
+  setChatBusy(true);
   appendChatBubble({ role: 'user', content: text });
-  appendChatBubble({ role: 'assistant', content: 'Thinking…', pending: true });
   input.value = '';
   chatCurrentEmpty = false;
 
@@ -1756,23 +1804,13 @@ async function sendChat() {
     });
     if (!r.ok) throw new Error((await r.text()) || ('HTTP ' + r.status));
     if (chatAgentId === agent && chatConvId === convId) {
-      const conv = await apiGetConversation(agent, convId);
-      renderChatMessages(conv.messages || []);
-      await refreshConvList(agent);
+      await watchPendingReply(agent, convId, { started_at: new Date().toISOString(), tool_calls: 0 });
     }
   } catch (err) {
     if (chatAgentId === agent && chatConvId === convId) {
-      try {
-        const conv = await apiGetConversation(agent, convId);
-        renderChatMessages(conv.messages || []);
-      } catch (_) {}
       appendChatBubble({ role: 'assistant', content: 'Error: ' + String(err).slice(0, 300), error: true });
+      setChatBusy(false);
     }
-  } finally {
-    chatBusy = false;
-    sendBtn.disabled = false;
-    input.disabled = false;
-    input.focus();
   }
 }
 

@@ -57,12 +57,27 @@ type Usage struct {
 	CachedPromptTokens int `json:"cached_prompt_tokens,omitempty"`
 }
 
+// Add accumulates another round's usage.
+func (u *Usage) Add(o Usage) {
+	u.PromptTokens += o.PromptTokens
+	u.CachedPromptTokens += o.CachedPromptTokens
+	u.CompletionTokens += o.CompletionTokens
+	u.TotalTokens += o.TotalTokens
+}
+
 // CompressionStats reports the tokens Headroom removed from an LLM request's
 // messages before the provider call. Zero-valued when compression made no change.
 type CompressionStats struct {
 	TokensBefore int `json:"tokens_before"`
 	TokensAfter  int `json:"tokens_after"`
 	TokensSaved  int `json:"tokens_saved"`
+}
+
+// Add accumulates another round's savings.
+func (c *CompressionStats) Add(o CompressionStats) {
+	c.TokensBefore += o.TokensBefore
+	c.TokensAfter += o.TokensAfter
+	c.TokensSaved += o.TokensSaved
 }
 
 // ChatResponse wraps the LLM's reply, normalised from either the Chat

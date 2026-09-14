@@ -261,6 +261,7 @@ cached the raw ID is shown. Chat turns are keyed by the proxy-verified email.
 - Drop a `logo.png` into `ui/` to replace the default icon
 - Set `UI_HEADER` env var to customize the top-bar title
 - Agents with `chat_enabled` expose a full-screen chat at `/ui/<agent>/chat` — a deep-linkable, reload-safe URL you can bookmark or share
+- Chat replies are produced in the background: sending returns at once, the thread shows elapsed time and tool activity while the agent works, and a reload or another replica picks the in-flight turn up from the stored transcript
 - The side rail's collapsed state, the theme and the time window are remembered per browser
 
 ### Authentication (SSO)
