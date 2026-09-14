@@ -1,3 +1,6 @@
+# I don't believe in merged unit tests in AI era
+*_test.go
+
 # If you prefer the allow list template instead of the deny list, see community template:
 # https://github.com/github/gitignore/blob/main/community/Golang/Go.AllowList.gitignore
 #
@@ -43,3 +46,6 @@ config/extensions.json
 # Editor/IDE
 # .idea/
 # .vscode/
+
+# Local Claude Code settings (may contain internal hostnames)
+.claude/settings.local.json
