@@ -364,6 +364,10 @@ func FirstLine(text string, max int) string {
 // userFor resolves the requesting user for created_by; may be nil.
 func (r *Registry) RegisterRoutes(apiMux *http.ServeMux, userFor func(*http.Request) string) {
 	apiMux.HandleFunc("/api/skills", func(w http.ResponseWriter, req *http.Request) {
+		if err := httpx.CheckSameOrigin(req); err != nil {
+			http.Error(w, err.Error(), http.StatusForbidden)
+			return
+		}
 		switch req.Method {
 		case http.MethodGet:
 			httpx.WriteJSON(w, http.StatusOK, r.List())
@@ -391,6 +395,10 @@ func (r *Registry) RegisterRoutes(apiMux *http.ServeMux, userFor func(*http.Requ
 		}
 	})
 	apiMux.HandleFunc("/api/skills/{id}", func(w http.ResponseWriter, req *http.Request) {
+		if err := httpx.CheckSameOrigin(req); err != nil {
+			http.Error(w, err.Error(), http.StatusForbidden)
+			return
+		}
 		id := req.PathValue("id")
 		switch req.Method {
 		case http.MethodGet:

@@ -516,6 +516,10 @@ func llmToolName(prefix, tool string, taken map[string]bool) string {
 // SetAuthorizer. userFor resolves the requesting user for created_by; may be nil.
 func (r *Registry) RegisterRoutes(apiMux *http.ServeMux, userFor func(*http.Request) string) {
 	apiMux.HandleFunc("/api/mcp", func(w http.ResponseWriter, req *http.Request) {
+		if err := httpx.CheckSameOrigin(req); err != nil {
+			http.Error(w, err.Error(), http.StatusForbidden)
+			return
+		}
 		switch req.Method {
 		case http.MethodGet:
 			httpx.WriteJSON(w, http.StatusOK, r.List())
@@ -543,6 +547,10 @@ func (r *Registry) RegisterRoutes(apiMux *http.ServeMux, userFor func(*http.Requ
 		}
 	})
 	apiMux.HandleFunc("/api/mcp/{id}", func(w http.ResponseWriter, req *http.Request) {
+		if err := httpx.CheckSameOrigin(req); err != nil {
+			http.Error(w, err.Error(), http.StatusForbidden)
+			return
+		}
 		id := req.PathValue("id")
 		if req.Method != http.MethodGet && !r.authorized(req) {
 			http.Error(w, ErrForbidden.Error(), http.StatusForbidden)
@@ -579,6 +587,10 @@ func (r *Registry) RegisterRoutes(apiMux *http.ServeMux, userFor func(*http.Requ
 		}
 	})
 	apiMux.HandleFunc("/api/mcp/{id}/test", func(w http.ResponseWriter, req *http.Request) {
+		if err := httpx.CheckSameOrigin(req); err != nil {
+			http.Error(w, err.Error(), http.StatusForbidden)
+			return
+		}
 		if req.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
