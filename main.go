@@ -63,6 +63,8 @@ var uiPages = map[string]bool{
 	"workflows":    true,
 	"dashboards":   true,
 	"pulls":        true,
+	"tickets":      true,
+	"backend":      true,
 	"changelog":    true,
 	"billing":      true,
 }
@@ -214,77 +216,12 @@ func (c *agentsCache) seed(agents []prompts.AgentConfig) {
 // served from memory.
 const changelogCacheTTL = 5 * time.Minute
 
-// changelogCache is a process-wide TTL cache for the /api/changes payload.
-// Without it every console load spends a GitHub API call on a list that changes
-// a few times a day. Concurrent misses are single-flighted by the mutex, and a
-// failed refresh falls back to the last good snapshot.
-type changelogCache struct {
-	gh *github.Client
-
-	mu        sync.Mutex
-	data      []github.CommitSummary
-	expiresAt time.Time
-}
-
-func (c *changelogCache) get(ctx context.Context) ([]github.CommitSummary, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.data != nil && time.Now().Before(c.expiresAt) {
-		return c.data, nil
-	}
-	commits, err := c.gh.ListCommits(ctx, changelogOwner, changelogRepo, "", "", "", time.Time{}, time.Time{}, 20)
-	if err != nil {
-		if c.data != nil {
-			return c.data, nil
-		}
-		return nil, err
-	}
-	// Shorten SHAs to 7 chars for the UI's changelog view.
-	for i := range commits {
-		if len(commits[i].SHA) > 7 {
-			commits[i].SHA = commits[i].SHA[:7]
-		}
-	}
-	c.data = commits
-	c.expiresAt = time.Now().Add(changelogCacheTTL)
-	return commits, nil
-}
-
 const pullsCacheTTL = time.Minute
 
-type pullsCache struct {
-	gh          *github.Client
-	knownAgents map[string]bool
+const ticketsCacheTTL = time.Minute
 
-	mu        sync.Mutex
-	data      []github.AutomatedPR
-	expiresAt time.Time
-}
-
-func (c *pullsCache) get(ctx context.Context) ([]github.AutomatedPR, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.data != nil && time.Now().Before(c.expiresAt) {
-		return c.data, nil
-	}
-	prs, err := c.gh.ListOpenAutomatedPullRequests(ctx)
-	if err != nil {
-		if c.data != nil {
-			return c.data, nil
-		}
-		return nil, err
-	}
-	for i := range prs {
-		if prs[i].Agent == "" {
-			prs[i].Agent = c.agentFromTitle(prs[i].Title)
-		}
-	}
-	c.data = prs
-	c.expiresAt = time.Now().Add(pullsCacheTTL)
-	return prs, nil
-}
-
-func (c *pullsCache) agentFromTitle(title string) string {
+// agentFromTitle recovers the agent from a conventional "<agent>: subject" PR title.
+func agentFromTitle(title string, knownAgents map[string]bool) string {
 	prefix, _, ok := strings.Cut(title, ":")
 	if !ok {
 		return ""
@@ -293,7 +230,7 @@ func (c *pullsCache) agentFromTitle(title string) string {
 	if i := strings.LastIndex(prefix, "/"); i >= 0 {
 		prefix = prefix[i+1:]
 	}
-	if c.knownAgents[prefix] {
+	if knownAgents[prefix] {
 		return prefix
 	}
 	return ""
@@ -2081,6 +2018,16 @@ func main() {
 
 	// Catalog: workflows and dashboards searchable by meaning through the
 	// same vector index as the user context.
+	// The state bucket holds transcripts, sessions and connector settings, so
+	// its view is closed unless an allow-list admits the user.
+	canViewBackend := func(r *http.Request) bool {
+		if len(cfg.BackendViewTeams) == 0 && len(cfg.BackendViewEmails) == 0 {
+			return false
+		}
+		return uiRBACAllowed(r, cfg.BackendViewEmails, cfg.BackendViewTeams, slackClient, emailUserCache, rbacCache)
+	}
+	backendUI := newBackendView(backend, canViewBackend)
+	backendUI.setIndex(vectorIndex)
 	catalogIndex := catalog.New(backend, wfRegistry, dashRegistry)
 	catalogIndex.SetIndex(vectorIndex)
 	if vectorErr != nil {
@@ -2088,6 +2035,7 @@ func main() {
 		retryVectorIndex(cfg, func(index *vectors.Index) {
 			userContextStore.SetIndex(index)
 			catalogIndex.SetIndex(index)
+			backendUI.setIndex(index)
 		})
 	}
 
@@ -2475,9 +2423,10 @@ func main() {
 		w.Header().Set("Cache-Control", "no-store")
 		_ = json.NewEncoder(w).Encode(struct {
 			identity
-			MCPAdmin    bool     `json:"mcp_admin"`
-			SkillAgents []string `json:"skill_agents"`
-		}{identities.lookup(clientEmail(r), slackClient, jiraClient, cfg.AtlassianURL), canManageMCP(r), skillAgentsFor(r)})
+			MCPAdmin     bool     `json:"mcp_admin"`
+			BackendAdmin bool     `json:"backend_admin"`
+			SkillAgents  []string `json:"skill_agents"`
+		}{identities.lookup(clientEmail(r), slackClient, jiraClient, cfg.AtlassianURL), canManageMCP(r), canViewBackend(r), skillAgentsFor(r)})
 	})
 
 	// API: UI settings.
@@ -2513,7 +2462,18 @@ func main() {
 	})
 
 	// API: latest changes (commits from the arbetern repo).
-	changelog := &changelogCache{gh: ghClient}
+	changelog := newTTLCache(changelogCacheTTL, func(ctx context.Context) ([]github.CommitSummary, error) {
+		commits, err := ghClient.ListCommits(ctx, changelogOwner, changelogRepo, "", "", "", time.Time{}, time.Time{}, 20)
+		if err != nil {
+			return nil, err
+		}
+		for i := range commits {
+			if len(commits[i].SHA) > 7 {
+				commits[i].SHA = commits[i].SHA[:7]
+			}
+		}
+		return commits, nil
+	})
 	apiMux.HandleFunc("/api/changes", func(w http.ResponseWriter, r *http.Request) {
 		if ghClient == nil {
 			http.Error(w, "GitHub integration not configured", http.StatusServiceUnavailable)
@@ -2529,7 +2489,18 @@ func main() {
 	})
 
 	// API: open pull requests the agents authored, found by the body marker.
-	pulls := &pullsCache{gh: ghClient, knownAgents: knownAgents}
+	pulls := newTTLCache(pullsCacheTTL, func(ctx context.Context) ([]github.AutomatedPR, error) {
+		prs, err := ghClient.ListOpenAutomatedPullRequests(ctx)
+		if err != nil {
+			return nil, err
+		}
+		for i := range prs {
+			if prs[i].Agent == "" {
+				prs[i].Agent = agentFromTitle(prs[i].Title, knownAgents)
+			}
+		}
+		return prs, nil
+	})
 	apiMux.HandleFunc("/api/pulls", func(w http.ResponseWriter, r *http.Request) {
 		if ghClient == nil {
 			http.Error(w, "GitHub integration not configured", http.StatusServiceUnavailable)
@@ -2543,6 +2514,39 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(prs)
 	})
+
+	// API: unresolved Jira issues assigned to the integration's own account.
+	tickets := newTTLCache(ticketsCacheTTL, func(context.Context) ([]atlassian.IssueSummary, error) {
+		return jiraClient.AssignedIssues(200)
+	})
+	jiraReady := func() bool { return jiraClient != nil && jiraClient.Ready() }
+	apiMux.HandleFunc("/api/tickets", func(w http.ResponseWriter, r *http.Request) {
+		if !jiraReady() {
+			http.Error(w, "Jira integration not configured", http.StatusServiceUnavailable)
+			return
+		}
+		issues, err := tickets.get(r.Context())
+		if err != nil {
+			http.Error(w, "failed to fetch tickets", http.StatusInternalServerError)
+			return
+		}
+		if issues == nil {
+			issues = []atlassian.IssueSummary{}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(issues)
+	})
+	if jiraReady() {
+		safego.Go("warm: tickets", func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			if _, err := tickets.get(ctx); err != nil {
+				log.Printf("warn: tickets warm-up failed: %v", err)
+			}
+		})
+	}
+
+	backendUI.mount(apiMux)
 
 	// Fill the caches the console reads on load that are not already warm:
 	// the commit list and open pull requests (GitHub calls) and the usage

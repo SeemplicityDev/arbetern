@@ -119,6 +119,12 @@ func (b *Backend) String() string { return "s3://" + b.bucket + "/" + b.prefix }
 // Region is the region the bucket lives in.
 func (b *Backend) Region() string { return b.region }
 
+// Bucket is the S3 bucket name.
+func (b *Backend) Bucket() string { return b.bucket }
+
+// Prefix is the key prefix every object lives under.
+func (b *Backend) Prefix() string { return b.prefix }
+
 func (b *Backend) fullKey(key string) *string { return awsv2.String(b.prefix + key) }
 
 func withTimeout(ctx context.Context, d time.Duration) (context.Context, context.CancelFunc) {

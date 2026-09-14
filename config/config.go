@@ -206,6 +206,12 @@ type Config struct {
 	MCPAdminTeams  []string
 	MCPAdminEmails []string
 
+	// BackendViewTeams and BackendViewEmails admit users to the console's
+	// read-only view of the state bucket and vector index. Set from
+	// BACKEND_VIEW_TEAMS / BACKEND_VIEW_EMAILS; both empty disables the view.
+	BackendViewTeams  []string
+	BackendViewEmails []string
+
 	// ChatRetention is how long a UI chat conversation is kept after its last
 	// activity before it is deleted by the background sweeper. Applies to all
 	// agents. Defaults to one week; override with CHAT_RETENTION.
@@ -465,6 +471,8 @@ func Load() (*Config, error) {
 		EmbeddingModel:      strings.TrimSpace(os.Getenv("EMBEDDING_MODEL")),
 		MCPAdminTeams:       splitList(os.Getenv("MCP_ADMIN_TEAMS")),
 		MCPAdminEmails:      splitList(os.Getenv("MCP_ADMIN_EMAILS")),
+		BackendViewTeams:    splitList(os.Getenv("BACKEND_VIEW_TEAMS")),
+		BackendViewEmails:   splitList(os.Getenv("BACKEND_VIEW_EMAILS")),
 
 		WorkflowsGitOpsOwner:    os.Getenv("WORKFLOWS_GITOPS_OWNER"),
 		WorkflowsGitOpsRepo:     os.Getenv("WORKFLOWS_GITOPS_REPO"),

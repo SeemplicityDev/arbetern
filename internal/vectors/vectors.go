@@ -84,6 +84,48 @@ func RegionOf(arn string) (string, error) {
 // ARN is the index ARN.
 func (ix *Index) ARN() string { return ix.arn }
 
+// Info identifies an index for display.
+type Info struct {
+	ARN    string `json:"arn"`
+	Region string `json:"region"`
+	Bucket string `json:"bucket"`
+	Name   string `json:"name"`
+	Metric string `json:"metric"`
+}
+
+// Describe parses the index ARN into its parts.
+func (ix *Index) Describe() Info {
+	info := Info{ARN: ix.arn, Metric: string(ix.metric)}
+	info.Region, _ = RegionOf(ix.arn)
+	if parts := strings.SplitN(ix.arn, ":", 6); len(parts) == 6 {
+		if seg := strings.Split(parts[5], "/"); len(seg) == 4 && seg[0] == "bucket" && seg[2] == "index" {
+			info.Bucket, info.Name = seg[1], seg[3]
+		}
+	}
+	return info
+}
+
+// Vector is one stored key with its metadata.
+type Vector struct {
+	Key      string         `json:"key"`
+	Metadata map[string]any `json:"metadata,omitempty"`
+}
+
+// Sample returns up to limit vectors and whether more exist.
+func (ix *Index) Sample(ctx context.Context, limit int) ([]Vector, bool, error) {
+	out := make([]Vector, 0, limit)
+	truncated := false
+	err := ix.Each(ctx, func(key string, meta map[string]any) bool {
+		if len(out) >= limit {
+			truncated = true
+			return false
+		}
+		out = append(out, Vector{Key: key, Metadata: meta})
+		return true
+	})
+	return out, truncated, err
+}
+
 // Metric is the index's distance metric.
 func (ix *Index) Metric() string { return string(ix.metric) }
 

@@ -81,6 +81,10 @@
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="5" r="2.2"/><circle cx="6" cy="19" r="2.2"/><circle cx="18" cy="19" r="2.2"/><path d="M6 7.2v9.6M18 16.8V10a3 3 0 0 0-3-3h-4"/><path d="M13.5 4.5 11 7l2.5 2.5"/></svg>
           <span>Pull requests</span>
         </a>
+        <a class="nav-item" href="/ui/tickets" data-page="tickets" title="Tickets">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v2a2 2 0 0 0 0 4v2a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-2a2 2 0 0 0 0-4V8z"/><path d="M14 6v12"/></svg>
+          <span>Tickets</span>
+        </a>
         <div class="nav-sep"></div>
         <a class="nav-item" href="/ui/changelog" data-page="changelog" title="Changelog">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3.5"/><path d="M2.5 12h6M15.5 12h6"/></svg>
@@ -89,6 +93,10 @@
         <a class="nav-item" href="/ui/billing" data-page="billing" title="Usage &amp; Billing">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5.5 3h13v18l-2.6-1.8L13.3 21 12 19.6 10.7 21l-2.6-1.8L5.5 21V3z"/><path d="M9 8.5h6M9 12.5h6"/></svg>
           <span>Usage &amp; Billing</span>
+        </a>
+        <a class="nav-item" href="/ui/backend" data-page="backend" title="Backend" id="nav-backend" hidden>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5.5" rx="8" ry="2.5"/><path d="M4 5.5v13c0 1.4 3.6 2.5 8 2.5s8-1.1 8-2.5v-13"/><path d="M4 12c0 1.4 3.6 2.5 8 2.5s8-1.1 8-2.5"/></svg>
+          <span>Backend</span>
         </a>
       </nav>
       <button class="sidebar-collapse" id="sidebar-collapse" type="button" aria-label="Collapse navigation" title="Collapse">
@@ -235,6 +243,36 @@
         </div>
         <p class="search-note" id="pr-note" hidden></p>
         <div class="list-panel list-scroll" id="pr-list"><div class="empty tall">Loading pull requests…</div></div>
+      </section>
+
+      <section class="page" data-page="tickets" hidden>
+        <div class="page-head">
+          <div>
+            <h1 class="page-title">Tickets</h1>
+            <p class="page-desc">Unresolved Jira issues assigned to the agents' own account, most recently updated first.</p>
+          </div>
+          <div class="page-actions">
+            <div class="pills" id="ticket-filter"></div>
+            <input class="search-input" id="ticket-search" type="search" placeholder="Filter tickets…" autocomplete="off" aria-label="Filter tickets">
+          </div>
+        </div>
+        <p class="search-note" id="ticket-note" hidden></p>
+        <div class="list-panel list-scroll" id="ticket-list"><div class="empty tall">Loading tickets…</div></div>
+      </section>
+
+      <section class="page" data-page="backend" hidden>
+        <div class="page-head">
+          <div>
+            <h1 class="page-title">Backend</h1>
+            <p class="page-desc">Read-only view of the state bucket, laid out as folders, and of the vector index.</p>
+          </div>
+          <div class="page-actions">
+            <div class="pills" id="backend-tabs"></div>
+            <input class="search-input" id="backend-search" type="search" placeholder="Filter by key…" autocomplete="off" aria-label="Filter objects">
+          </div>
+        </div>
+        <div class="backend-summary" id="backend-summary"></div>
+        <div id="backend-body"><div class="empty tall">Loading…</div></div>
       </section>
 
       <section class="page" data-page="workflow" hidden><div id="wf-detail"></div></section>

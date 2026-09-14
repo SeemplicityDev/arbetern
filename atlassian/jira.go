@@ -1470,7 +1470,7 @@ func (c *Client) SearchIssuesJQL(jql string, maxResults int) ([]IssueSummary, er
 	if maxResults <= 0 {
 		maxResults = 20
 	}
-	fields := "summary,status,assignee,priority,issuetype,updated,description"
+	fields := "summary,status,assignee,reporter,priority,issuetype,project,labels,created,updated,description"
 	for _, id := range c.extraFieldIDs() {
 		fields += "," + id
 	}
@@ -1527,16 +1527,23 @@ func (c *Client) SearchIssuesJQL(jql string, maxResults int) ([]IssueSummary, er
 				Summary     string                        `json:"summary"`
 				Status      struct{ Name string }         `json:"status"`
 				Assignee    *struct{ DisplayName string } `json:"assignee"`
+				Reporter    *struct{ DisplayName string } `json:"reporter"`
 				Priority    *struct{ Name string }        `json:"priority"`
 				IssueType   struct{ Name string }         `json:"issuetype"`
+				Project     struct{ Key string }          `json:"project"`
+				Labels      []string                      `json:"labels"`
+				Created     string                        `json:"created"`
 				Updated     string                        `json:"updated"`
 				Description json.RawMessage               `json:"description"`
 			}
 			_ = json.Unmarshal(i.Fields, &fields)
 
-			assignee := ""
+			assignee, reporter := "", ""
 			if fields.Assignee != nil {
 				assignee = fields.Assignee.DisplayName
+			}
+			if fields.Reporter != nil {
+				reporter = fields.Reporter.DisplayName
 			}
 			priority := ""
 			if fields.Priority != nil {
@@ -1551,8 +1558,12 @@ func (c *Client) SearchIssuesJQL(jql string, maxResults int) ([]IssueSummary, er
 				Summary:     fields.Summary,
 				Status:      fields.Status.Name,
 				Assignee:    assignee,
+				Reporter:    reporter,
 				Priority:    priority,
 				IssueType:   fields.IssueType.Name,
+				Project:     fields.Project.Key,
+				Labels:      fields.Labels,
+				Created:     fields.Created,
 				Updated:     fields.Updated,
 				Description: desc,
 				Browse:      fmt.Sprintf("%s/browse/%s", c.siteURL, i.Key),
@@ -1579,6 +1590,12 @@ func (c *Client) SearchIssuesJQL(jql string, maxResults int) ([]IssueSummary, er
 	}
 
 	return allIssues, nil
+}
+
+// AssignedIssues returns the unresolved issues assigned to the account behind
+// the client's credentials, most recently updated first.
+func (c *Client) AssignedIssues(maxResults int) ([]IssueSummary, error) {
+	return c.SearchIssuesJQL("assignee = currentUser() AND statusCategory != Done ORDER BY updated DESC", maxResults)
 }
 
 // GetIssue fetches a single Jira issue by key with full details.
@@ -1847,6 +1864,8 @@ type IssueSummary struct {
 	Reporter    string   `json:"reporter,omitempty"`
 	Priority    string   `json:"priority,omitempty"`
 	IssueType   string   `json:"issue_type"`
+	Project     string   `json:"project,omitempty"`
+	Created     string   `json:"created,omitempty"`
 	Updated     string   `json:"updated"`
 	Labels      []string `json:"labels,omitempty"`
 	Description string   `json:"description,omitempty"`

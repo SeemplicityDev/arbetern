@@ -72,10 +72,11 @@ const INTEGRATION_LOGOS = {
 
 const SOURCE_LABELS = { slack: 'Slack commands', chat: 'Web chat', workflow: 'Scheduled workflows', dashboard: 'Dashboard renders' };
 const SLACK_ID_RE = /^[UW][A-Z0-9]{6,}$/;
-const PAGES = ['overview', 'integrations', 'mcp', 'agents', 'chats', 'skills', 'workflows', 'dashboards', 'pulls', 'changelog', 'billing'];
+const PAGES = ['overview', 'integrations', 'mcp', 'agents', 'chats', 'skills', 'workflows', 'dashboards', 'pulls', 'tickets', 'changelog', 'billing', 'backend'];
 const PAGE_TITLES = {
   overview: 'Overview', integrations: 'Integrations', mcp: 'MCP & Connectors', agents: 'Agents', chats: 'Chats',
-  skills: 'Skills', workflows: 'Workflows', dashboards: 'Dashboards', pulls: 'Pull requests', changelog: 'Changelog', billing: 'Usage & Billing',
+  skills: 'Skills', workflows: 'Workflows', dashboards: 'Dashboards', pulls: 'Pull requests', tickets: 'Tickets',
+  changelog: 'Changelog', billing: 'Usage & Billing', backend: 'Backend',
 };
 const WINDOWS = [7, 30, 90, 0];
 const EXTRAS_CACHE_TTL_MS = 5 * 60 * 1000;
@@ -113,6 +114,10 @@ let mcpData = null;
 let pullsState = { list: null, error: null };
 let prFilter = 'all';
 let prQuery = '';
+let ticketsState = { list: null, error: null };
+let ticketFilter = 'all';
+let ticketQuery = '';
+let backendState = { summary: null, objects: null, truncated: false, error: null, tab: 'state', path: '', query: '', file: null, vectors: null };
 
 function escapeHtml(str) {
   return String(str == null ? '' : str)
@@ -382,6 +387,12 @@ function loadPage(page) {
     case 'pulls':
       renderPullsPage();
       return loadPulls();
+    case 'tickets':
+      renderTicketsPage();
+      return loadTickets();
+    case 'backend':
+      renderBackendPage();
+      return loadBackend();
     case 'changelog':
       renderChanges();
       return loadChanges();
@@ -829,6 +840,14 @@ function renderFleet() {
   } else if (!pullsState.error) {
     rows.push(fleetRow('/ui/pulls', 'pulls', 'Pull requests', 'loading', '—', 'off'));
   }
+  if (ticketsState.list) {
+    const issues = ticketsState.list;
+    const urgent = issues.filter(i => /^(highest|high|critical|blocker)$/i.test(i.priority || '')).length;
+    const sub = issues.length ? (urgent ? `${urgent} high priority` : 'assigned to the agents') : 'none open';
+    rows.push(fleetRow('/ui/tickets', 'tickets', 'Tickets', sub, fmtInt(issues.length), urgent ? 'warn' : issues.length ? '' : 'off'));
+  } else if (!ticketsState.error) {
+    rows.push(fleetRow('/ui/tickets', 'tickets', 'Tickets', 'loading', '—', 'off'));
+  }
   if (mcpData && mcpData.list) {
     const list = mcpData.list;
     const enabled = list.filter(c => c.enabled).length;
@@ -1226,6 +1245,293 @@ function renderPullsPage() {
       </tr>`;
     }).join('')}</tbody></table>`;
 }
+
+
+/* Tickets */
+async function loadTickets() {
+  if (recentlyFetched('tickets')) return;
+  try {
+    ticketsState = { list: await fetchJSON('/api/tickets'), error: null };
+  } catch (err) {
+    console.warn('Failed to load tickets:', err);
+    ticketsState = { list: null, error: err };
+  }
+  renderTicketsPage();
+  renderFleet();
+}
+
+function valuePills(el, values, current, attr, allLabel) {
+  const vals = [...new Set(values.filter(Boolean))].sort((a, b) => a.localeCompare(b));
+  if (vals.length < 2) { el.innerHTML = ''; return; }
+  el.innerHTML = `<button class="pill${current === 'all' ? ' active' : ''}" ${attr}="all">${allLabel}</button>` +
+    vals.map(v => `<button class="pill${current === v ? ' active' : ''}" ${attr}="${escapeHtml(v)}">${escapeHtml(v)}</button>`).join('');
+}
+
+function ticketStatusClass(status) {
+  const s = (status || '').toLowerCase();
+  if (/progress|review|doing|active/.test(s)) return 'running';
+  if (/block|wait|hold/.test(s)) return 'auto';
+  return 'paused';
+}
+
+document.getElementById('ticket-filter').addEventListener('click', e => {
+  const b = e.target.closest('.pill');
+  if (!b) return;
+  ticketFilter = b.dataset.project;
+  renderTicketsPage();
+});
+(() => {
+  const input = document.getElementById('ticket-search');
+  input.addEventListener('input', () => { ticketQuery = input.value.trim().toLowerCase(); renderTicketsPage(); });
+  input.addEventListener('keydown', e => {
+    if (e.key === 'Escape') { input.value = ''; ticketQuery = ''; renderTicketsPage(); }
+  });
+})();
+
+function renderTicketsPage() {
+  const el = document.getElementById('ticket-list');
+  const note = document.getElementById('ticket-note');
+  if (ticketsState.error) {
+    note.hidden = true;
+    el.innerHTML = emptyHtml(ticketsState.error.status === 503 ? 'Jira is not configured, so tickets are unavailable.' : 'Tickets are unavailable right now.', true);
+    return;
+  }
+  const list = ticketsState.list;
+  if (!list) return;
+  valuePills(document.getElementById('ticket-filter'), list.map(t => t.project), ticketFilter, 'data-project', 'All projects');
+  if (ticketFilter !== 'all' && !list.some(t => t.project === ticketFilter)) ticketFilter = 'all';
+  const words = ticketQuery.split(/\s+/).filter(Boolean);
+  const rows = list.filter(t => ticketFilter === 'all' || t.project === ticketFilter).filter(t => {
+    if (!words.length) return true;
+    const hay = [t.key, t.summary, t.status, t.priority, t.issue_type, t.reporter, t.project, ...(t.labels || [])].join('\n').toLowerCase();
+    return words.every(w => hay.includes(w));
+  });
+  note.hidden = !words.length;
+  if (words.length) note.textContent = `${plural(rows.length, 'match')} for “${ticketQuery}”`;
+  if (!rows.length) {
+    el.innerHTML = emptyHtml(words.length ? 'No ticket matches this filter.' : list.length ? 'No open tickets in this project.' : 'No open tickets are assigned to the agents right now.', true);
+    return;
+  }
+  el.innerHTML = `<table class="data-table"><thead><tr>
+      <th>Ticket</th><th>Type</th><th>Status</th><th>Priority</th><th>Reporter</th><th>Updated</th><th>Created</th><th></th>
+    </tr></thead><tbody>${rows.map(t => {
+      const url = escapeHtml(safeExternalUrl(t.browse) || '#');
+      const labels = (t.labels || []).length ? ' · ' + t.labels.map(escapeHtml).join(', ') : '';
+      return `<tr>
+        <td><a href="${url}" target="_blank" rel="noopener">${escapeHtml(t.summary)}</a>
+          <span class="sub">${escapeHtml(t.key)}${t.team ? ' · ' + escapeHtml(t.team) : ''}${t.sprint ? ' · ' + escapeHtml(t.sprint) : ''}${labels}</span></td>
+        <td>${escapeHtml(t.issue_type || '—')}</td>
+        <td><span class="status-pill ${ticketStatusClass(t.status)}">${escapeHtml(t.status || 'unknown')}</span></td>
+        <td>${t.priority ? escapeHtml(t.priority) : '<span class="muted">—</span>'}</td>
+        <td>${t.reporter ? escapeHtml(t.reporter) : '<span class="muted">—</span>'}</td>
+        <td class="muted" title="${escapeHtml(new Date(t.updated).toLocaleString())}">${timeAgo(t.updated)}</td>
+        <td class="muted" title="${t.created ? escapeHtml(new Date(t.created).toLocaleString()) : ''}">${t.created ? timeAgo(t.created) : '—'}</td>
+        <td><div class="actions"><a class="btn-mini" href="${url}" target="_blank" rel="noopener">Open</a></div></td>
+      </tr>`;
+    }).join('')}</tbody></table>`;
+}
+
+/* Backend */
+const FOLDER_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z"/></svg>';
+const FILE_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M7 3h7l5 5v13a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1z"/><path d="M14 3v5h5"/></svg>';
+
+function fmtBytes(n) {
+  if (!n) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB'];
+  let i = 0;
+  while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+  return `${i ? n.toFixed(1) : n} ${units[i]}`;
+}
+
+function canViewBackend() { return !!(identityData && identityData.backend_admin); }
+
+function renderBackendNav() { document.getElementById('nav-backend').hidden = !canViewBackend(); }
+
+async function loadBackend() {
+  if (!canViewBackend() || recentlyFetched('backend')) return;
+  try {
+    const [summary, listing] = await Promise.all([fetchJSON('/api/backend'), fetchJSON('/api/backend/objects')]);
+    backendState.summary = summary;
+    backendState.objects = listing.objects || [];
+    backendState.truncated = !!listing.truncated;
+    backendState.error = null;
+  } catch (err) {
+    console.warn('Failed to load backend state:', err);
+    backendState.error = err;
+  }
+  renderBackendPage();
+}
+
+async function loadBackendVectors() {
+  try {
+    backendState.vectors = await fetchJSON('/api/backend/vectors');
+  } catch (err) {
+    backendState.vectors = { error: err };
+  }
+  renderBackendPage();
+}
+
+async function openBackendFile(key) {
+  backendState.file = { key, loading: true };
+  renderBackendPage();
+  try {
+    backendState.file = await fetchJSON('/api/backend/object?key=' + encodeURIComponent(key));
+  } catch (err) {
+    backendState.file = { key, error: err };
+  }
+  renderBackendPage();
+}
+
+function backendChildren(objects, path) {
+  const dirs = new Map();
+  const files = [];
+  for (const o of objects) {
+    if (!o.key.startsWith(path)) continue;
+    const rest = o.key.slice(path.length);
+    const i = rest.indexOf('/');
+    if (i < 0) { if (rest) files.push({ ...o, name: rest }); continue; }
+    const name = rest.slice(0, i);
+    const d = dirs.get(name) || { name, count: 0, size: 0, modified: '' };
+    d.count++;
+    d.size += o.size;
+    if (o.last_modified > d.modified) d.modified = o.last_modified;
+    dirs.set(name, d);
+  }
+  const byName = (a, b) => a.name.localeCompare(b.name);
+  return { dirs: [...dirs.values()].sort(byName), files: files.sort(byName) };
+}
+
+function backendCrumbs(path) {
+  const parts = path.split('/').filter(Boolean);
+  let acc = '';
+  const items = [`<button type="button" data-crumb="">root</button>`];
+  parts.forEach((p, i) => {
+    acc += p + '/';
+    items.push('›');
+    items.push(i === parts.length - 1 ? `<span class="current">${escapeHtml(p)}</span>` : `<button type="button" data-crumb="${escapeHtml(acc)}">${escapeHtml(p)}</button>`);
+  });
+  return `<div class="crumbs">${items.join(' ')}</div>`;
+}
+
+function backendFileRow(o, label) {
+  return `<tr>
+      <td><button type="button" class="tree-name" data-file="${escapeHtml(o.key)}">${FILE_ICON}<span>${escapeHtml(label)}</span></button></td>
+      <td class="muted">object</td>
+      <td class="n">${fmtBytes(o.size)}</td>
+      <td class="muted" title="${escapeHtml(new Date(o.last_modified).toLocaleString())}">${timeAgo(o.last_modified)}</td>
+    </tr>`;
+}
+
+function listPanel(strip, body) {
+  return `<div class="list-panel">${strip ? `<div class="panel-strip">${strip}</div>` : ''}<div class="list-scroll">${body}</div></div>`;
+}
+
+function renderBackendListing() {
+  const { objects, path, query } = backendState;
+  const head = '<table class="data-table"><thead><tr><th>Name</th><th>Kind</th><th class="n">Size</th><th>Modified</th></tr></thead><tbody>';
+  if (query) {
+    const hits = objects.filter(o => o.key.toLowerCase().includes(query)).slice(0, 500);
+    const strip = `${plural(hits.length, 'match')}${hits.length === 500 ? ' (first 500)' : ''} for “${escapeHtml(query)}”`;
+    if (!hits.length) return listPanel(strip, emptyHtml('No object key matches this filter.', true));
+    return listPanel(strip, head + hits.map(o => backendFileRow(o, o.key)).join('') + '</tbody></table>');
+  }
+  const { dirs, files } = backendChildren(objects, path);
+  if (!dirs.length && !files.length) return listPanel(backendCrumbs(path), emptyHtml('This folder is empty.', true));
+  const dirRows = dirs.map(d => `<tr>
+      <td><button type="button" class="tree-name" data-dir="${escapeHtml(path + d.name + '/')}">${FOLDER_ICON}<span>${escapeHtml(d.name)}/</span></button></td>
+      <td class="muted">${plural(d.count, 'object')}</td>
+      <td class="n">${fmtBytes(d.size)}</td>
+      <td class="muted" title="${escapeHtml(new Date(d.modified).toLocaleString())}">${timeAgo(d.modified)}</td>
+    </tr>`).join('');
+  return listPanel(backendCrumbs(path), head + dirRows + files.map(o => backendFileRow(o, o.name)).join('') + '</tbody></table>');
+}
+
+function renderBackendFile() {
+  const f = backendState.file;
+  if (!f) return '';
+  let body;
+  if (f.loading) body = '<div class="empty tall">Loading…</div>';
+  else if (f.error) body = emptyHtml(f.error.status === 404 ? 'This object no longer exists.' : 'Failed to read this object.', true);
+  else if (f.kind === 'large') body = emptyHtml(`Too large to display here (${fmtBytes(f.size)}).`, true);
+  else if (f.kind === 'binary') body = emptyHtml('Binary content.', true);
+  else body = `<pre class="code-view">${escapeHtml(f.content || '')}</pre>`;
+  const meta = f.size != null ? `<span>${fmtBytes(f.size)}</span><span>${escapeHtml(new Date(f.last_modified).toLocaleString())}</span><span>${escapeHtml(f.kind || '')}</span>` : '';
+  return `<div class="list-panel"><div class="file-head"><b>${escapeHtml(f.key)}</b>${meta}<button type="button" class="btn-mini" data-close-file>Close</button></div>${body}</div>`;
+}
+
+function renderBackendVectors() {
+  const v = backendState.vectors;
+  if (!v) { loadBackendVectors(); return listPanel('', '<div class="empty tall">Loading vectors…</div>'); }
+  if (v.error) return listPanel('', emptyHtml(v.error.status === 503 ? 'No vector index is configured.' : 'Vectors are unavailable right now.', true));
+  const query = backendState.query;
+  const all = v.vectors || [];
+  const rows = all.filter(x => !query || x.key.toLowerCase().includes(query) || JSON.stringify(x.metadata || {}).toLowerCase().includes(query));
+  const strip = query ? `${plural(rows.length, 'match')} for “${escapeHtml(query)}”` : v.truncated ? `Showing the first ${all.length} vectors.` : plural(all.length, 'vector');
+  if (!rows.length) return listPanel(strip, emptyHtml(query ? 'No vector matches this filter.' : 'The index is empty.', true));
+  return listPanel(strip, `<table class="data-table"><thead><tr><th>Key</th><th>Metadata</th></tr></thead><tbody>` +
+    rows.map(x => {
+      const meta = JSON.stringify(x.metadata || {});
+      return `<tr><td class="meta-cell" title="${escapeHtml(x.key)}">${escapeHtml(x.key)}</td><td class="meta-cell" title="${escapeHtml(meta)}">${escapeHtml(meta)}</td></tr>`;
+    }).join('') + '</tbody></table>');
+}
+
+function renderBackendPage() {
+  const summaryEl = document.getElementById('backend-summary');
+  const body = document.getElementById('backend-body');
+  const tabs = document.getElementById('backend-tabs');
+  if (!canViewBackend()) {
+    tabs.innerHTML = '';
+    summaryEl.innerHTML = '';
+    body.innerHTML = emptyHtml(identityData ? 'This view is limited to the platform team.' : 'Checking access…', true);
+    return;
+  }
+  if (backendState.error) {
+    summaryEl.innerHTML = '';
+    body.innerHTML = emptyHtml(backendState.error.status === 403 ? 'This view is limited to the platform team.' : 'The state store is unavailable right now.', true);
+    return;
+  }
+  const s = backendState.summary;
+  if (!s || !backendState.objects) return;
+  tabs.innerHTML = [['state', 'State'], ['vectors', 'Vectors']].map(([id, label]) =>
+    `<button class="pill${backendState.tab === id ? ' active' : ''}" data-tab="${id}">${label}</button>`).join('');
+  const chips = [
+    `<span class="chip">bucket <b>${escapeHtml(s.state.bucket)}</b></span>`,
+    s.state.prefix ? `<span class="chip">prefix <b>${escapeHtml(s.state.prefix)}</b></span>` : '',
+    `<span class="chip">region <b>${escapeHtml(s.state.region)}</b></span>`,
+    `<span class="chip">${plural(s.state.objects, 'object')}${s.state.truncated ? '+' : ''} · ${fmtBytes(s.state.bytes)}</span>`,
+    s.vectors ? `<span class="chip">vectors <b>${escapeHtml(s.vectors.bucket || s.vectors.arn)}</b> / <b>${escapeHtml(s.vectors.name || '')}</b> · ${escapeHtml(s.vectors.metric || '')}</span>` : '<span class="chip">vectors <b>not configured</b></span>',
+  ].filter(Boolean).join('');
+  summaryEl.innerHTML = chips;
+  if (backendState.tab === 'vectors') {
+    body.innerHTML = renderBackendVectors();
+    return;
+  }
+  const file = renderBackendFile();
+  body.innerHTML = `<div class="backend-grid${file ? ' with-file' : ''}">${renderBackendListing()}${file}</div>`;
+}
+
+document.getElementById('backend-tabs').addEventListener('click', e => {
+  const b = e.target.closest('.pill');
+  if (!b) return;
+  backendState.tab = b.dataset.tab;
+  renderBackendPage();
+});
+document.getElementById('backend-body').addEventListener('click', e => {
+  const dir = e.target.closest('[data-dir]');
+  if (dir) { backendState.path = dir.dataset.dir; backendState.file = null; renderBackendPage(); return; }
+  const crumb = e.target.closest('[data-crumb]');
+  if (crumb) { backendState.path = crumb.dataset.crumb; backendState.file = null; renderBackendPage(); return; }
+  const file = e.target.closest('[data-file]');
+  if (file) { openBackendFile(file.dataset.file); return; }
+  if (e.target.closest('[data-close-file]')) { backendState.file = null; renderBackendPage(); }
+});
+(() => {
+  const input = document.getElementById('backend-search');
+  input.addEventListener('input', () => { backendState.query = input.value.trim().toLowerCase(); renderBackendPage(); });
+  input.addEventListener('keydown', e => {
+    if (e.key === 'Escape') { input.value = ''; backendState.query = ''; renderBackendPage(); }
+  });
+})();
 
 /* Usage & Billing */
 function billingRows(el, data, nameOf) {
@@ -2594,6 +2900,8 @@ async function loadIdentity() {
   renderIdentity();
   renderMCPPage();
   renderSkillsPage();
+  renderBackendNav();
+  if (currentPage === 'backend') { renderBackendPage(); loadBackend(); }
 }
 
 /* Branding */
@@ -2623,7 +2931,7 @@ async function loadIdentity() {
    so each page and widget draws from memory instead of its own round trip. */
 function prefetchAll() {
   return Promise.allSettled([
-    loadIntegrations(), loadWorkflows(), loadDashboards(), loadPulls(), loadChanges(), loadSessions(),
+    loadIntegrations(), loadWorkflows(), loadDashboards(), loadPulls(), loadTickets(), loadChanges(), loadSessions(),
     loadBilling(), loadSkills(), loadMCP(), loadGitops('workflows'), loadGitops('dashboards'),
   ]);
 }
@@ -2632,7 +2940,7 @@ applyRoute();
 loadIdentity();
 loadAgents().then(loadChats);
 prefetchAll();
-const LIVE_PAGES = new Set(['overview', 'billing', 'workflows', 'dashboards', 'pulls']);
+const LIVE_PAGES = new Set(['overview', 'billing', 'workflows', 'dashboards', 'pulls', 'tickets']);
 setInterval(() => {
   if (document.visibilityState !== 'visible' || chatFull) return;
   if (LIVE_PAGES.has(currentPage)) loadPage(currentPage);

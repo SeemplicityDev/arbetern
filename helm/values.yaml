@@ -203,6 +203,13 @@ mcp:
   adminTeams: []
   adminEmails: []
 
+# Backend view: the console page that browses the state bucket and the vector
+# index read-only. Closed to everyone until at least one Slack user group or
+# email / domain is listed here; resolved the same way as mcp above.
+backendView:
+  teams: []
+  emails: []
+
 secretName: arbetern-secrets
 
 # Set to true to have the chart create the Secret resource.

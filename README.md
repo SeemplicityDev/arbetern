@@ -248,6 +248,8 @@ URL:
 | Workflows | `/ui/workflows` | Every workflow across agents with schedule, status, last run, run / delete actions and GitOps sync state; each opens at `/ui/<agent>/workflow/<id>` with its flow diagram, prompt or tasks, run history and editor |
 | Dashboards | `/ui/dashboards` | Every dashboard across agents (source dashboards, prompt templates, rendered reports) with sync state; each opens at `/ui/<agent>/dashboard/<id>` |
 | Pull requests | `/ui/pulls` | Open pull requests the agents authored, found by the marker every arbetern-written PR body carries: agent, requester, entry source (Slack / chat / workflow) and age, filterable by agent; ready-for-review PRs are listed first, drafts last with a draft label |
+| Tickets | `/ui/tickets` | Unresolved Jira issues assigned to the account behind the Atlassian integration: type, status, priority, reporter, labels and age, filterable by project |
+| Backend | `/ui/backend` | Read-only browser of the state bucket laid out as folders, with an object viewer that masks secret-looking values, plus a sample of the vector index; visible only to the Slack user groups or emails in `backendView` (closed when none are set) |
 | Changelog | `/ui/changelog` | Latest commits to the arbetern repository |
 | Usage & Billing | `/ui/billing` | Estimated LLM spend by agent, model, source, user and workflow (`/billing` redirects here) |
 

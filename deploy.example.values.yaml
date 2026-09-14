@@ -29,6 +29,12 @@ env:
 #   #   requests: { cpu: 250m, memory: 1Gi }
 #   #   limits:   { cpu: "2",  memory: 4Gi }
 
+# Console "Backend" page (state bucket and vector index, read-only). Closed
+# until a Slack user group or an email / domain is listed.
+backendView:
+  teams: []              # e.g. ["S0123456789"]
+  emails: []             # e.g. ["ops@example.com", "example.com"]
+
 secretValues:
   github-token: "ghp_your_github_token"
   slack-bot-token: "xoxb-your-slack-bot-token"

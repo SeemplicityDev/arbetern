@@ -394,6 +394,14 @@ spec:
             - name: MCP_ADMIN_EMAILS
               value: {{ join "," .Values.mcp.adminEmails | quote }}
             {{- end }}
+            {{- if and .Values.backendView .Values.backendView.teams }}
+            - name: BACKEND_VIEW_TEAMS
+              value: {{ join "," .Values.backendView.teams | quote }}
+            {{- end }}
+            {{- if and .Values.backendView .Values.backendView.emails }}
+            - name: BACKEND_VIEW_EMAILS
+              value: {{ join "," .Values.backendView.emails | quote }}
+            {{- end }}
             {{- if .Values.customConfigs }}
             - name: CUSTOM_CONFIG_DIR
               value: /etc/arbetern/custom-config
