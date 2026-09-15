@@ -766,7 +766,9 @@ type profileEnricher struct {
 	models   *llm.Client
 	billing  *billing.Store
 	people   *lookupCache[slackPerson]
-	channels *lookupCache[string]
+	channels *lookupCache[channelLabel]
+	// scopeWarned keeps the missing-scope notice to one line per process.
+	scopeWarned atomic.Bool
 }
 
 func newProfileEnricher(slackClient *slack.Client, models *llm.Client, bill *billing.Store) *profileEnricher {
@@ -775,7 +777,7 @@ func newProfileEnricher(slackClient *slack.Client, models *llm.Client, bill *bil
 		models:   models,
 		billing:  bill,
 		people:   newLookupCache[slackPerson](24 * time.Hour),
-		channels: newLookupCache[string](24 * time.Hour),
+		channels: newLookupCache[channelLabel](24 * time.Hour),
 	}
 }
 
@@ -817,18 +819,54 @@ func (p *profileEnricher) Person(_ context.Context, ids []string) commands.Perso
 	return commands.PersonFacts{}
 }
 
-func (p *profileEnricher) ChannelName(_ context.Context, id string) string {
+// channelLabel is one conversations.info answer: the label to show, or the
+// reason there is none, phrased for whoever has to fix it.
+type channelLabel struct {
+	label  string
+	reason string
+}
+
+func (p *profileEnricher) ChannelName(_ context.Context, id string) (string, string) {
 	if p.slack == nil || id == "" {
-		return ""
+		return "", ""
 	}
-	return p.channels.get(id, func() string {
+	// A DM has no name, and conversations.info answers channel_not_found for
+	// one unless the app holds im:read — so it is labelled without asking.
+	if strings.HasPrefix(id, "D") {
+		return "Direct message", ""
+	}
+	out := p.channels.get(id, func() channelLabel {
 		name, err := p.slack.GetChannelName(id)
 		if err != nil {
-			log.Printf("[user-context] slack conversations.info %s failed: %v", id, err)
-			return ""
+			return channelLabel{reason: p.channelNameReason(id, err)}
 		}
-		return name
+		if name == "" {
+			return channelLabel{reason: "Slack returned no name for this channel."}
+		}
+		return channelLabel{label: "#" + name}
 	})
+	return out.label, out.reason
+}
+
+// channelNameReason turns a conversations.info failure into the sentence that
+// tells someone what to do about it.
+func (p *profileEnricher) channelNameReason(id string, err error) string {
+	switch msg := err.Error(); {
+	case strings.Contains(msg, "missing_scope"):
+		// One setup fact, not one per channel: log it once, with the fix.
+		if p.scopeWarned.CompareAndSwap(false, true) {
+			log.Printf("[user-context] channel names unavailable: conversations.info needs the channels:read scope " +
+				"(groups:read for private channels). Profiles show channel IDs until it is added and the app reinstalled.")
+		}
+		return "The Slack app is missing the channels:read scope (groups:read for private channels)."
+	case strings.Contains(msg, "channel_not_found"), strings.Contains(msg, "not_in_channel"):
+		return "The bot cannot see this channel — it is probably private and the bot is not a member."
+	case strings.Contains(msg, "is_archived"):
+		return "This channel is archived."
+	default:
+		log.Printf("[user-context] slack conversations.info %s failed: %v", id, err)
+		return "Slack would not answer for this channel."
+	}
 }
 
 func (p *profileEnricher) Summarize(ctx context.Context, system, user string) (string, error) {
@@ -1279,6 +1317,8 @@ func refreshIntegrations(
 		{Scope: "groups:history", Description: "Read message history in private channels", Required: true},
 		{Scope: "im:history", Description: "Read message history in DMs", Required: true},
 		{Scope: "mpim:history", Description: "Read message history in group DMs", Required: true},
+		{Scope: "channels:read", Description: "Read public channel metadata — names the channels in a person's context profile", Required: false},
+		{Scope: "groups:read", Description: "Read private channel metadata — same, for private channels the bot is in", Required: false},
 		{Scope: "users:read", Description: "Read user profile information (name, email)", Required: true},
 		{Scope: "users:read.email", Description: "Resolve a user's email to their Slack ID for chat-UI team RBAC", Required: true},
 		{Scope: "usergroups:read", Description: "Read user group membership for RBAC enforcement", Required: true},

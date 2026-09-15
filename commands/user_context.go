@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -51,8 +52,11 @@ type ProfileEnricher interface {
 	Link(ctx context.Context, id string) []string
 	// Person describes who the identities belong to, outside their turns.
 	Person(ctx context.Context, ids []string) PersonFacts
-	// ChannelName turns a channel ID into its name, without the leading #.
-	ChannelName(ctx context.Context, id string) string
+	// ChannelName returns a label to show for a channel ID, such as "#alerts".
+	// When the workspace will not name it the label is empty and reason says
+	// what to do about it, in a sentence fit to show the person. Nothing waits
+	// on the answer.
+	ChannelName(ctx context.Context, id string) (label, reason string)
 	// Summarize writes the profile's prose from the prompt it is given.
 	Summarize(ctx context.Context, system, user string) (string, error)
 }
@@ -560,6 +564,8 @@ type UserContextCount struct {
 	Name  string `json:"name"`
 	Label string `json:"label,omitempty"`
 	Count int    `json:"count"`
+	// Note says why Label is missing, when something could have supplied one.
+	Note string `json:"note,omitempty"`
 }
 
 // UserContextMetrics is what the turns say about a person by counting rather
@@ -573,6 +579,8 @@ type UserContextMetrics struct {
 	ActiveDays  int                `json:"active_days"`
 	PerWeek     float64            `json:"per_week"`
 	BusiestHour int                `json:"busiest_hour"`
+	// UnnamedChannels is how many of Channels the workspace would not name.
+	UnnamedChannels int `json:"unnamed_channels,omitempty"`
 }
 
 // UserContextProfile is one person's whole stored context — every agent that
@@ -705,6 +713,10 @@ func (p *UserContextProfile) insert(turn UserContextTurn, ids []string) bool {
 		p.Identities = ids
 	}
 	p.trim()
+	// Recount rather than adjust: the counts have to describe the turns the
+	// profile now holds, and trim may have dropped some. Channel names already
+	// resolved are reused, so this asks nothing of Slack.
+	p.Metrics = countMetrics(p.Turns, knownLabels(p.Metrics))
 	p.stamp()
 	return true
 }
@@ -833,9 +845,55 @@ func countTop(tally map[string]int, labels map[string]string, n int) []UserConte
 	return out
 }
 
-// measure counts what the turns touch. Channel names are resolved through the
-// enricher when it can, and fall back to the raw ID when it cannot.
-func (s *UserContextStore) measure(ctx context.Context, turns []UserContextTurn) UserContextMetrics {
+// measure counts what the turns touch, then puts names to the channels that
+// made the list. Naming is the only part that leaves the process, so it comes
+// last and changes nothing but labels: a channel the workspace will not name —
+// a missing scope, a channel the bot was never in, a DM — is counted like any
+// other and carried with its ID, and the profile is written and summarised
+// around it. The count of the ones left unnamed travels with the metrics so
+// the console can say so.
+func (s *UserContextStore) measure(ctx context.Context, turns []UserContextTurn, prev UserContextMetrics) UserContextMetrics {
+	names := knownLabels(prev)
+	m := countMetrics(turns, names)
+	if e := s.enricher(); e != nil {
+		for i := range m.Channels {
+			if m.Channels[i].Label != "" {
+				continue
+			}
+			m.Channels[i].Label, m.Channels[i].Note = e.ChannelName(ctx, m.Channels[i].Name)
+		}
+	}
+	m.countUnnamed()
+	return m
+}
+
+// countUnnamed records how many of the channels on the list have no name, so
+// the console can surface a naming problem without inferring it.
+func (m *UserContextMetrics) countUnnamed() {
+	m.UnnamedChannels = 0
+	for _, c := range m.Channels {
+		if c.Label == "" {
+			m.UnnamedChannels++
+		}
+	}
+}
+
+// knownLabels is the channel names a previous count already resolved, so a
+// recount does not have to ask for them again.
+func knownLabels(m UserContextMetrics) map[string]string {
+	out := make(map[string]string, len(m.Channels))
+	for _, c := range m.Channels {
+		if c.Label != "" {
+			out[c.Name] = c.Label
+		}
+	}
+	return out
+}
+
+// countMetrics counts what the turns touch. It takes the channel names it is
+// given rather than resolving any, so it can run anywhere — including inside
+// the conditional write that folds in a single new turn.
+func countMetrics(turns []UserContextTurn, names map[string]string) UserContextMetrics {
 	m := UserContextMetrics{Turns: len(turns)}
 	if len(turns) == 0 {
 		return m
@@ -864,14 +922,6 @@ func (s *UserContextStore) measure(ctx context.Context, turns []UserContextTurn)
 			m.LastSeen = t.At
 		}
 	}
-	names := map[string]string{}
-	if e := s.enricher(); e != nil {
-		for id := range channels {
-			if name := e.ChannelName(ctx, id); name != "" {
-				names[id] = "#" + name
-			}
-		}
-	}
 	m.Channels = countTop(channels, names, userProfileTopCounts)
 	m.Repos = countTop(repos, nil, userProfileTopCounts)
 	m.ActiveDays = len(days)
@@ -885,6 +935,7 @@ func (s *UserContextStore) measure(ctx context.Context, turns []UserContextTurn)
 		weeks = 1
 	}
 	m.PerWeek = float64(len(turns)) / weeks
+	m.countUnnamed()
 	return m
 }
 
@@ -934,7 +985,7 @@ func (s *UserContextStore) aggregate(ctx context.Context, ids []string, objs []s
 	sort.Slice(out.Agents, func(i, j int) bool { return out.Agents[i].Agent < out.Agents[j].Agent })
 	sort.Slice(out.Turns, func(i, j int) bool { return out.Turns[i].At.After(out.Turns[j].At) })
 	out.trim()
-	out.Metrics = s.measure(ctx, out.Turns)
+	out.Metrics = s.measure(ctx, out.Turns, out.Metrics)
 	if e := s.enricher(); e != nil {
 		out.Person = e.Person(ctx, ids)
 	}
@@ -942,11 +993,37 @@ func (s *UserContextStore) aggregate(ctx context.Context, ids []string, objs []s
 	return out, nil
 }
 
+// sameContent reports whether two profiles would store the same document. It
+// compares everything that is written, ignoring only when it was built, so a
+// field added to the profile is covered without anyone remembering to add it
+// here. Comparing the turn fingerprint instead would be cheaper and wrong: the
+// turns can be identical while the metrics, the person or the written summary
+// are not, and a profile whose turns never change would then never gain any of
+// them.
+func sameContent(a, b *UserContextProfile) bool {
+	x, y := *a, *b
+	x.Updated, y.Updated = time.Time{}, time.Time{}
+	xb, err := json.Marshal(x)
+	if err != nil {
+		return false
+	}
+	yb, err := json.Marshal(y)
+	if err != nil {
+		return false
+	}
+	return bytes.Equal(xb, yb)
+}
+
 // writeProfile stores prof under every identity of the person and reports how
 // many copies it had to write. A copy already holding the same content is left
 // alone; one that is missing or behind is written, so the decision is made per
 // copy rather than from whichever copy happened to be read first.
 func (s *UserContextStore) writeProfile(ctx context.Context, prof UserContextProfile) (int, error) {
+	// The three fields describing the store's current configuration are
+	// recomputed on every read, so they are never stored: a document that
+	// carried them would differ between the writer that filled them in and the
+	// one that did not, and the two would overwrite each other forever.
+	prof.Semantic, prof.RetentionDays, prof.MaxTurns = false, 0, 0
 	var firstErr error
 	written := 0
 	for _, id := range prof.Identities {
@@ -955,7 +1032,7 @@ func (s *UserContextStore) writeProfile(ctx context.Context, prof UserContextPro
 		}
 		changed := false
 		err := updateDoc(ctx, s.b, profileKey(id), func(d *UserContextProfile) bool {
-			if d.Fingerprint != "" && d.Fingerprint == prof.Fingerprint {
+			if sameContent(d, &prof) {
 				return false
 			}
 			*d = prof
@@ -1068,7 +1145,9 @@ func summaryPrompt(p *UserContextProfile) string {
 	for _, c := range p.Metrics.Channels {
 		name := c.Label
 		if name == "" {
-			name = "an unnamed channel"
+			// Keep the channel in the record even when it has no name: how
+			// concentrated someone's work is says something on its own.
+			name = "an unnamed channel (" + c.Name + ")"
 		}
 		fmt.Fprintf(&sb, "- Channel %s: %d turns\n", name, c.Count)
 	}
@@ -1193,7 +1272,8 @@ func (s *UserContextStore) rebuildProfiles(ctx context.Context) {
 		sources = append(sources, userID)
 	}
 	expected := map[string]bool{}
-	people, written, summarised := 0, 0, 0
+	people, written, summarised, failed, deferred := 0, 0, 0, 0, 0
+	unnamed := map[string]string{}
 	budget := userProfileSummaryBudget
 	for _, ids := range s.groupIdentities(ctx, sources) {
 		prof, err := s.aggregate(ctx, ids, objs)
@@ -1211,12 +1291,23 @@ func (s *UserContextStore) rebuildProfiles(ctx context.Context) {
 		if cached, ok := s.cachedProfile(ctx, prof.Identities); ok {
 			prof.Summary, prof.SummaryAt, prof.SummaryFor = cached.Summary, cached.SummaryAt, cached.SummaryFor
 		}
-		if budget > 0 && staleSummary(&prof) {
-			budget--
-			if err := s.summarize(ctx, &prof); err != nil {
-				log.Printf("[user-context] profile summary failed: %v", err)
-			} else {
-				summarised++
+		if staleSummary(&prof) {
+			switch {
+			case budget <= 0:
+				deferred++
+			default:
+				budget--
+				if err := s.summarize(ctx, &prof); err != nil {
+					failed++
+					log.Printf("[user-context] profile summary failed: %v", err)
+				} else {
+					summarised++
+				}
+			}
+		}
+		for _, c := range prof.Metrics.Channels {
+			if c.Label == "" {
+				unnamed[c.Name] = c.Note
 			}
 		}
 		n, err := s.writeProfile(ctx, prof)
@@ -1224,6 +1315,17 @@ func (s *UserContextStore) rebuildProfiles(ctx context.Context) {
 			log.Printf("[user-context] profile write failed: %v", err)
 		}
 		written += n
+	}
+	if len(unnamed) > 0 {
+		ids := make([]string, 0, len(unnamed))
+		for id := range unnamed {
+			ids = append(ids, id)
+		}
+		sort.Strings(ids)
+		// Name them: a count alone cannot be acted on, and these are the
+		// channels to check the bot is a member of.
+		log.Printf("[user-context] %d channel(s) could not be named: %s (%s)",
+			len(ids), strings.Join(ids, " "), unnamed[ids[0]])
 	}
 	stale, err := s.b.List(ctx, userProfilePrefix)
 	if err != nil {
@@ -1241,10 +1343,11 @@ func (s *UserContextStore) rebuildProfiles(ctx context.Context) {
 		}
 		removed++
 	}
-	if written > 0 || removed > 0 {
-		log.Printf("[user-context] profiles: %d person(s), %d copy(ies) written, %d summarised, %d stale removed",
-			people, written, summarised, removed)
-	}
+	// Always log the pass: "0 summarised" means nothing was due, and that is
+	// only distinguishable from a pass that failed or ran out of budget if
+	// those are counted separately.
+	log.Printf("[user-context] profiles: %d person(s), %d copy(ies) written, %d summarised (%d failed, %d over budget), %d stale removed",
+		people, written, summarised, failed, deferred, removed)
 }
 
 // QueueTopic is the deferred-work topic a completed turn's memory is written

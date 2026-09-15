@@ -97,6 +97,14 @@ on every aggregation, free. And the *written profile*: a markdown description
 of what this person works on, where, and how they use each agent, produced by
 a model call over their own turns and the metrics above.
 
+**Naming is best-effort.** Channel IDs are resolved to names last, after the
+counting, and only for the channels that made the list. A channel the workspace
+will not name — the app missing `channels:read` / `groups:read`, a channel the
+bot was never in, a DM — is counted like any other and carried with its ID; the
+metrics, the profile and the written summary are produced around it, and the
+number left unnamed travels with the metrics so the console can say so rather
+than leaving a silent gap. Nothing about a profile waits on Slack answering.
+
 **Cost of the written profile.** It is the only part of the aggregation that
 calls a model, so it is confined to the hourly pass and rationed there: at most
 25 summaries per pass, and a profile is only rewritten when its turns have

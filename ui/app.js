@@ -3135,38 +3135,67 @@ function contextTurnHtml(t) {
   </details>`;
 }
 
-function contextCountsHtml(items, prefix) {
-  return items.map(c => `<span class="chip">${escapeHtml(c.label || (prefix || '') + c.name)} <b>${fmtInt(c.count)}</b></span>`).join('');
+function contextCountsHtml(items) {
+  return items.map(c => `<span class="chip">${escapeHtml(c.label || c.name)} <b>${fmtInt(c.count)}</b></span>`).join('');
+}
+
+// An unnamed channel is shown by ID, linked into Slack and carrying the reason
+// it has no name — the ID alone cannot be acted on, and opening it is how you
+// check whether the bot is a member.
+function contextChannelsHtml(items) {
+  return items.map(c => {
+    if (c.label) return `<span class="chip">${escapeHtml(c.label)} <b>${fmtInt(c.count)}</b></span>`;
+    const href = 'https://slack.com/app_redirect?channel=' + encodeURIComponent(c.name);
+    const why = c.note || 'This channel has no name yet.';
+    return `<span class="chip unnamed" title="${escapeHtml(why + ' Open it in Slack to check whether the bot is a member.')}">`
+      + `<a href="${escapeHtml(href)}" target="_blank" rel="noopener">${escapeHtml(c.name)}</a> <b>${fmtInt(c.count)}</b></span>`;
+  }).join('');
+}
+
+// A zero time marshals as year 1, so a date is only a date once it parses to a
+// real instant — otherwise the tile says so rather than showing 1/1/1.
+function fmtDay(iso) {
+  const t = new Date(iso).getTime();
+  return !t || t < 0 ? '—' : new Date(t).toLocaleDateString();
 }
 
 function contextSummaryHtml(p) {
   const m = p.metrics || {};
+  const counted = !!m.turns;
   const hour = String(m.busiest_hour || 0).padStart(2, '0');
   const tiles = [
     ['Turns remembered', fmtInt(p.turns.length)],
     ['Agents', fmtInt(p.agents.length)],
-    ['Active days', fmtInt(m.active_days || 0)],
-    ['Turns a week', (m.per_week || 0).toFixed(1)],
-    ['First remembered', m.first_seen ? new Date(m.first_seen).toLocaleDateString() : '—'],
-    ['Busiest hour', `${hour}:00 <small>UTC</small>`],
+    ['Active days', counted ? fmtInt(m.active_days) : '—'],
+    ['Turns a week', counted ? (m.per_week || 0).toFixed(1) : '—'],
+    ['First remembered', fmtDay(m.first_seen)],
+    ['Busiest hour', counted ? `${hour}:00 <small>UTC</small>` : '—'],
   ].map(([k, v]) => `<div class="stat"><div class="k">${escapeHtml(k)}</div><div class="v">${v}</div></div>`).join('');
 
   const summary = p.summary
     ? `<div class="report">${renderMarkdownDoc(p.summary)}</div>`
-    : emptyHtml('No written profile yet. The background pass writes one from your turns on its next run.', true);
+    : emptyHtml(counted
+      ? 'No written profile yet. The background pass writes one from your turns on its next run.'
+      : 'This profile has not been counted or written yet. The background pass does both on its next run.', true);
   const behind = p.summary && p.summary_for && p.fingerprint && p.summary_for !== p.fingerprint
-    ? `<div class="page-note">Written ${escapeHtml(timeAgo(p.summary_at))} from the turns as they stood then; you have had new turns since, and the next run will rewrite it.</div>`
-    : (p.summary ? `<div class="page-note">Written ${escapeHtml(timeAgo(p.summary_at))} by the background pass, from the turns below.</div>` : '');
+    ? `<div class="page-note after-block">Written ${escapeHtml(timeAgo(p.summary_at))} from the turns as they stood then; you have had new turns since, and the next run will rewrite it.</div>`
+    : (p.summary ? `<div class="page-note after-block">Written ${escapeHtml(timeAgo(p.summary_at))} by the background pass, from the turns below.</div>` : '');
 
+  // A channel the workspace would not name is still counted; say why the name
+  // is missing so it can be fixed, without implying the profile is incomplete.
+  const reasons = [...new Set((m.channels || []).filter(c => !c.label && c.note).map(c => c.note))];
+  const unnamed = m.unnamed_channels
+    ? `<div class="page-note after-block">${escapeHtml(plural(m.unnamed_channels, 'channel'))} could not be named, so ${m.unnamed_channels === 1 ? 'it is' : 'they are'} listed by ID above — open one in Slack to check whether the bot is a member. ${reasons.map(escapeHtml).join(' ')} Everything else on this page is unaffected.</div>`
+    : '';
   const groups = [
-    ['Agents', p.agents.map(a => `<span class="chip">${escapeHtml(agentLabel(a.agent))} <b>${fmtInt(a.turns)}</b></span>`).join('')],
-    ['Channels', contextCountsHtml(m.channels || [], '')],
-    ['Repositories', contextCountsHtml(m.repos || [], '')],
+    ['Agents', p.agents.map(a => `<span class="chip">${escapeHtml(agentLabel(a.agent))} <b>${fmtInt(a.turns)}</b></span>`).join(''), ''],
+    ['Channels', contextChannelsHtml(m.channels || []), unnamed],
+    ['Repositories', contextCountsHtml(m.repos || []), ''],
   ].filter(([, html]) => html)
-    .map(([title, html]) => `<div class="group-title">${escapeHtml(title)}</div><div class="chip-row">${html}</div>`).join('');
+    .map(([title, html, note]) => `<div class="group-title">${escapeHtml(title)}</div><div class="chip-row">${html}</div>${note}`).join('');
 
   return `<div class="stats">${tiles}</div>${summary}${behind}${groups}
-    <div class="page-note"><a href="/ui/context" onclick="event.preventDefault();setContextTab('history')">Read the ${escapeHtml(plural(p.turns.length, 'turn'))} this is written from →</a></div>`;
+    <div class="page-note after-block"><a href="/ui/context" onclick="event.preventDefault();setContextTab('history')">Read the ${escapeHtml(plural(p.turns.length, 'turn'))} this is written from →</a></div>`;
 }
 
 function setContextTab(tab) {

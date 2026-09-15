@@ -28,6 +28,8 @@
 | `users:read` | Resolve Slack user IDs to real names (used by agents like Seihin to look up the user's identity for Jira queries) |
 | `users:read.email` | Resolve a user's email to their Slack ID — required for the chat-UI `allowed_teams` fallback (maps the OAuth-proxy email to a Slack user) and for the signed-in user button in the web UI |
 | `usergroups:read` | Read Slack user group (subteam) membership for per-agent RBAC (`allowed_teams`) |
+| `channels:read` | *Optional.* Read public channel metadata (`conversations.info`). Only used to name the channels on the **Your context** profile page; without it those show as raw channel IDs and a single `missing_scope` line is logged at startup |
+| `groups:read` | *Optional.* The same for private channels the bot is in |
 
 > **RBAC scopes:** `usergroups:read` is required whenever any agent sets `allowed_teams`. `users:read.email` is additionally required if you rely on `allowed_teams` as the chat-UI access fallback — without it the email→Slack-user lookup fails with `missing_scope` and access is denied (fail-closed). After adding scopes, **reinstall the app** (Slack requires a reinstall when scopes change) and update `SLACK_BOT_TOKEN`.
 

@@ -30,7 +30,7 @@ output_slack: |
   - Line breaks: use a blank line — Slack ignores trailing spaces
   - NO MARKDOWN TABLES. Slack renders `| a | b |` as literal pipes, so a table
     arrives as unreadable rubble. Present tabular data one of two ways:
-    • a short list, one line per row: `• Jan — new 306, closed 274`
+    • a short list, one line per row: `• Jan — new 12, closed 9`
     • a fixed-width ```code block``` when the columns must line up
     If the data is too wide for either, give the few rows that answer the
     question and offer the rest rather than pasting a grid.
@@ -54,7 +54,7 @@ output_chat: |
 
     | Month | New | Closed |
     |---|---|---|
-    | Jan | 306 | 274 |
+    | Jan | 12 | 9 |
 
   - Structured data a tool or MCP connector returned (JSON, HTML, a CSV) is
     INPUT, not output. Turn it into the tables, lists and prose above rather
