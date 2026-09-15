@@ -16,7 +16,6 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"path"
 	"regexp"
 	"sort"
 	"strings"
@@ -281,23 +280,7 @@ func (s *Store) Record(e Event) {
 // StartFlusher merges buffered events into the bucket on a timer until stop is
 // closed, then once more. The returned channel closes after that final flush.
 func (s *Store) StartFlusher(stop <-chan struct{}) <-chan struct{} {
-	done := make(chan struct{})
-	flush := func() { safego.Run("billing: flush", func() { s.flush(context.Background()) }) }
-	safego.Go("billing: flush loop", func() {
-		defer close(done)
-		t := time.NewTicker(flushInterval)
-		defer t.Stop()
-		for {
-			select {
-			case <-stop:
-				flush()
-				return
-			case <-t.C:
-				flush()
-			}
-		}
-	})
-	return done
+	return safego.Every("billing: flush", flushInterval, stop, func() { s.flush(context.Background()) })
 }
 
 func (s *Store) flush(ctx context.Context) {
@@ -326,74 +309,45 @@ func (s *Store) flush(ctx context.Context) {
 	}
 }
 
-// mergeMonth folds evs into the stored month with a conditional write and
-// adopts the merged result as the local view, so turns recorded by other
-// replicas show up here too.
+// mergeMonth folds evs into the stored month and adopts the merged result as
+// the local view, so turns recorded by other replicas show up here too.
 func (s *Store) mergeMonth(ctx context.Context, mk string, evs []Event) error {
-	key := monthObjectKey(mk)
-	for attempt := 0; attempt < maxMergeAttempts; attempt++ {
-		remote, tag, err := store.GetJSON[monthData](ctx, s.b, key)
-		cond := store.Condition{IfMatch: tag}
-		switch {
-		case errors.Is(err, store.ErrNotFound):
-			remote = newMonth(mk)
-			cond = store.Condition{IfNoneMatch: true}
-		case err != nil:
-			return err
-		default:
-			remote.ensureMaps()
-		}
+	merged, err := store.Merge(ctx, s.b, monthObjectKey(mk), maxMergeAttempts, func(m *monthData) {
+		m.Month = mk
+		m.ensureMaps()
 		for _, e := range evs {
-			remote.add(e)
+			m.add(e)
 		}
-		if _, err := store.PutJSON(ctx, s.b, key, remote, cond); err != nil {
-			if errors.Is(err, store.ErrConflict) {
-				continue
-			}
-			return err
-		}
-		s.mu.Lock()
-		for _, e := range s.pending[mk] {
-			remote.add(e)
-		}
-		s.months[mk] = remote
-		s.mu.Unlock()
-		return nil
+	})
+	if err != nil {
+		return err
 	}
-	return store.ErrConflict
+	s.mu.Lock()
+	for _, e := range s.pending[mk] {
+		merged.add(e)
+	}
+	s.months[mk] = merged
+	s.mu.Unlock()
+	return nil
 }
 
-// mergeRecent appends added to the stored activity feed with a conditional
-// write and adopts the merged feed locally.
+// mergeRecent appends added to the stored activity feed and adopts the merged
+// feed locally.
 func (s *Store) mergeRecent(ctx context.Context, added []Event) error {
-	for attempt := 0; attempt < maxMergeAttempts; attempt++ {
-		remote, tag, err := store.GetJSON[[]Event](ctx, s.b, recentKey)
-		cond := store.Condition{IfMatch: tag}
-		var list []Event
-		switch {
-		case errors.Is(err, store.ErrNotFound):
-			cond = store.Condition{IfNoneMatch: true}
-		case err != nil:
-			return err
-		default:
-			list = *remote
-		}
-		list = capRecent(append(list, added...))
-		if _, err := store.PutJSON(ctx, s.b, recentKey, list, cond); err != nil {
-			if errors.Is(err, store.ErrConflict) {
-				continue
-			}
-			return err
-		}
-		s.mu.Lock()
-		for _, evs := range s.pending {
-			list = append(list, evs...)
-		}
-		s.recent = capRecent(list)
-		s.mu.Unlock()
-		return nil
+	merged, err := store.Merge(ctx, s.b, recentKey, maxMergeAttempts, func(list *[]Event) {
+		*list = capRecent(append(*list, added...))
+	})
+	if err != nil {
+		return err
 	}
-	return store.ErrConflict
+	list := *merged
+	s.mu.Lock()
+	for _, evs := range s.pending {
+		list = append(list, evs...)
+	}
+	s.recent = capRecent(list)
+	s.mu.Unlock()
+	return nil
 }
 
 func capRecent(list []Event) []Event {
@@ -405,28 +359,16 @@ func capRecent(list []Event) []Event {
 }
 
 func (s *Store) load(ctx context.Context) error {
-	objs, err := s.b.List(ctx, Prefix)
-	if err != nil {
-		return err
-	}
-	for _, o := range objs {
-		name := path.Base(o.Key)
-		if !strings.HasPrefix(name, "usage-") || !strings.HasSuffix(name, ".json") {
-			continue
-		}
-		m, _, err := store.GetJSON[monthData](ctx, s.b, o.Key)
-		if err != nil {
-			if errors.Is(err, store.ErrNotFound) {
-				continue
-			}
-			return err
-		}
+	err := store.LoadMatching(ctx, s.b, Prefix, "usage-", func(key string, m *monthData) {
 		if !monthRe.MatchString(m.Month) {
-			log.Printf("[billing] skipping %s: invalid month %q", o.Key, m.Month)
-			continue
+			log.Printf("[billing] skipping %s: invalid month %q", key, m.Month)
+			return
 		}
 		m.ensureMaps()
 		s.months[m.Month] = m
+	})
+	if err != nil {
+		return err
 	}
 	rec, _, err := store.GetJSON[[]Event](ctx, s.b, recentKey)
 	switch {

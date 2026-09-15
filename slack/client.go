@@ -24,12 +24,14 @@ type Client struct {
 }
 
 func NewClient(botToken string) *Client {
-	return &Client{api: slack.New(botToken), token: botToken}
+	return &Client{api: slack.New(botToken, slack.OptionHTTPClient(outboundClient)), token: botToken}
 }
 
-// outboundClient carries the raw Slack calls that do not go through the
-// slack-go client (file uploads, response_url posts). The default client has
-// no timeout, so a stalled Slack edge would pin the goroutine indefinitely.
+// outboundClient carries every Slack call, both the ones slack-go makes and the
+// raw ones (file uploads, response_url posts). Neither slack-go's default nor
+// http.DefaultClient sets a timeout, and a channel-history fetch runs inline
+// before a turn's first model call, so a stalled Slack edge would pin the
+// goroutine — and the answer — indefinitely.
 var outboundClient = &http.Client{Timeout: 30 * time.Second}
 
 func (c *Client) FetchChannelHistory(channelID string, limit int) ([]slack.Message, error) {

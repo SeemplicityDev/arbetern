@@ -25,6 +25,8 @@ IAM policy.
 | `skills/<id>.json` | Custom skills |
 | `mcp/<id>.json` | MCP connectors |
 | `billing/usage-YYYY-MM.json`, `billing/recent.json` | Usage & billing ledger |
+| `metrics/perf-YYYY-MM.json`, `metrics/recent.json` | Performance series: turn, model-call and tool latency histograms and outcome counts. Carries no identity — keyed by agent, entry path, model, backend and tool only |
+| `queue/<topic>/<task>.json` | Deferred work waiting to run (see below). A `user-context` task carries the turn it is about to write, so until it is processed the same conversation text lives here as well as under `user-context/` |
 | `user-context/<agent>/<user>.json` | Per-user rolling context (`{"entries":[{id,at,c,q,a}]}`, `c` = channel) |
 | `sessions/<channel>/<thread>.json`, `sessions/_stats.json` | Slack thread sessions and their counters |
 | `gitops/<kind>.json` | Status of the last GitOps reconcile, shared with every replica |
@@ -65,11 +67,14 @@ and immutability plus ETags replace explicit invalidation.
   the descriptor shape (`<agent>/<id>.json` or `<id>.json`) are ignored, and
   an object that fails to decode is logged once and left alone until its
   ETag changes.
-- **Billing merges.** Usage events are buffered in memory and merged into the
-  stored month aggregate with a conditional write every 15 seconds. Several
-  replicas recording at once fold their events into the same object without
-  losing each other's turns; the merged result becomes the local view, so the
-  Usage tab on any replica converges to the global numbers.
+- **Billing and metrics merges.** Usage events and performance samples are
+  buffered in memory and merged into their stored month aggregate with a
+  conditional write — every 15 seconds for usage, every 20 for performance.
+  Several replicas recording at once fold their samples into the same object
+  without losing each other's turns; the merged result becomes the local view,
+  so the Usage and Performance tabs on any replica converge to the global
+  numbers. Latency is kept as a histogram precisely because it merges by
+  addition, so percentiles survive both the merge and the month rollup.
 
 ## Replicas and leases
 
@@ -108,6 +113,46 @@ The GitOps reconcile runs only on the leader; it writes its status to
 replica serves that object, so the Workflows and Dashboards pages show the
 same sync state everywhere. A `running` flag older than ten minutes is
 treated as stale.
+
+## Deferred work
+
+Anything a requester should not wait for is handed to a queue kept in the same
+bucket under `queue/<topic>/`. One task is one object; the key starts with the
+enqueue timestamp, so a plain list is oldest-first.
+
+A worker runs on **every** replica, not only the leader. Claiming a task is a
+conditional write on the task object itself: the worker reads it, stamps its
+own instance and a lease expiry, and writes it back with `If-Match`. Exactly
+one replica's write can succeed, so the claim *is* the lock — no leader, no
+broker, and the backlog spreads across the fleet instead of piling onto one pod.
+A task whose lease expires (the replica died mid-handler) becomes claimable
+again. Enqueuing also nudges the local worker, so a task usually starts within
+milliseconds rather than at the next poll.
+
+One listing covers the whole `queue/` prefix, so adding a topic costs no extra
+requests, and an idle queue backs its polling off from 5 to 30 seconds — the
+common state of this queue is empty, and a fixed fast poll across a fleet costs
+far more in requests than it saves in latency. A task enqueued on another
+replica therefore waits at most one poll.
+
+Each topic chooses its delivery mode:
+
+| Topic | Mode | What it defers |
+|---|---|---|
+| `user-context` | at-least-once, 4 attempts | Writing a finished turn into the user's rolling context and indexing its vector. Retries are safe: the entry ID travels with the task, so a redelivered task recognises the write it already made instead of appending the turn twice |
+| `workflow-run` | at-most-once | Manual "Run now" and event-triggered (`on_success` / `on_failure`) runs. The task is dropped the moment it is claimed: a tick opens pull requests and posts to Slack, so a run lost to a crash is far cheaper than one replayed after it. The per-workflow lease still prevents two replicas running the same workflow at once |
+
+A failed at-least-once task is rescheduled with exponential backoff (30s
+doubling to 15 minutes) and dropped once its attempt budget is spent. A task
+that cannot be decoded at all is dropped on sight rather than re-read on every
+poll, and a task for a topic this binary does not know is left alone, so a
+rolling deploy hands it to the replica that does. The
+Performance page shows the pending depth and the age of the oldest task per
+topic; a backlog that keeps growing means the fleet is behind.
+
+Moving the user-context write off the reply path is what it is for: the turn's
+memory is not read again until the *next* turn, so the requester's answer no
+longer waits on a conditional read-modify-write plus an embedding call.
 
 ## Lists and detail pages
 

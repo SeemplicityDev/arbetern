@@ -41,6 +41,20 @@ Compression is wired once in `llm.Client.CompleteWithTools`
 unreachable or returns an error, the original (uncompressed) messages are sent,
 so a compression outage never breaks an LLM call.
 
+It also **fails fast**. Compression runs before every round of a tool loop, so a
+sidecar that accepts connections but never answers would otherwise cost its full
+timeout per round — a 20-round tick can spend half an hour waiting on a step
+whose result is optional. A breaker
+([llm/breaker.go](../llm/breaker.go)) takes a failing sidecar out of the path:
+one timeout opens it on its own (the timeout has already been paid), a couple of
+cheap failures such as a refused connection or an error status are tolerated
+first. While open it is skipped entirely and probed once per cooldown, starting
+at 30s and doubling to 10 minutes for as long as the probe keeps failing. A
+successful probe closes it and resets the cooldown. The state is shared
+process-wide — clients are cloned per agent and per model override, but they all
+point at one sidecar — and it is logged once per transition and shown on the
+console's **Performance** page under *Optional services*.
+
 ## Configuration
 
 ### App side
@@ -48,7 +62,7 @@ so a compression outage never breaks an LLM call.
 | Environment Variable | Required | Description |
 |---|---|---|
 | `HEADROOM_PROXY_URL` | no | Base URL of a Headroom compression sidecar (e.g. `http://localhost:8787`). When set, each conversation is compressed via `<HEADROOM_PROXY_URL>/v1/compress` before every LLM call. Empty disables compression. Applies to **all** backends. |
-| `HEADROOM_COMPRESS_TIMEOUT` | no | Go duration bounding a single `/v1/compress` round-trip before the app gives up and sends the conversation **uncompressed** (fail-open). Default `90s`. Raise it for very large contexts that the sidecar can't compress in time (log symptom: `headroom compress unavailable, sending uncompressed: ... context deadline exceeded`). |
+| `HEADROOM_COMPRESS_TIMEOUT` | no | Go duration bounding a single `/v1/compress` round-trip before the app gives up and sends the conversation **uncompressed** (fail-open). Default `90s`. Raise it for very large contexts that the sidecar can't compress in time. A round-trip that hits this deadline opens the breaker, so the symptom is one `headroom compression … unhealthy, skipping it for 30s` line rather than a stalled round every time. |
 
 When deployed via Helm with `headroom.enabled: true`, `HEADROOM_PROXY_URL` is
 injected automatically (pointing at the loopback sidecar); you do **not** set it
@@ -117,9 +131,10 @@ If you enable a liveness probe anyway, do **not** size its budget against
 ([`compressMessages`](../llm/client.go)); Headroom keeps compressing, and keeps
 ignoring `/health`, after the app has walked away. Nothing on the arbetern side
 bounds how long the sidecar stays busy, so `periodSeconds × failureThreshold`
-must exceed the worst-case *compression*, not the client's patience. There is no
-backoff either: the app re-POSTs on the next round with a larger conversation,
-so a sidecar that just restarted is immediately re-blocked.
+must exceed the worst-case *compression*, not the client's patience. The app's
+breaker does back off — after a timeout it stops POSTing for at least 30s — but
+that only protects arbetern's own latency; it does not stop the sidecar from
+finishing the compression it is already wedged on.
 
 Two failure signatures, both distinguishable from memory pressure by the absence
 of `OOMKilled`:
@@ -164,9 +179,10 @@ every backend benefits:
   truncated tool output. For arbetern's tool-heavy workloads (Datadog, Databricks,
   search) the SmartCrusher savings are the main win, so this is usually an
   acceptable trade.
-- **One extra loopback round-trip per LLM call** (~tens of ms, bounded to 30s).
-  Negligible against the token savings on each provider call, and skipped
-  entirely when the sidecar is unreachable (fail-open).
+- **One extra loopback round-trip per LLM call** (~tens of ms, bounded by
+  `HEADROOM_COMPRESS_TIMEOUT`). Negligible against the token savings on each
+  provider call, and skipped entirely while the sidecar is unhealthy — at most
+  one timeout per cooldown, not one per round.
 - **Short prompts barely compress.** Headroom passes content under ~200 tokens
   through unchanged, so simple completions see little or no change.
 

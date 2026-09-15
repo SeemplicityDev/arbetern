@@ -52,6 +52,7 @@ import (
 	"github.com/robfig/cron/v3"
 
 	"github.com/justmike1/arbetern/internal/crud"
+	"github.com/justmike1/arbetern/internal/queue"
 	"github.com/justmike1/arbetern/internal/safego"
 )
 
@@ -278,6 +279,70 @@ type Registry struct {
 	// active is true between StartAllEnabled and StopAll, i.e. while this
 	// replica holds the scheduling lease. Runners are only started while active.
 	active bool
+	// tasks, when set, carries out-of-schedule runs so they survive the
+	// replica that accepted them. See UseQueue.
+	tasks *queue.Queue
+}
+
+// QueueTopic is the deferred-work topic out-of-schedule runs travel through.
+const QueueTopic = "workflow-run"
+
+// queueRunTimeout bounds one queued run, matching the manual-run budget.
+const queueRunTimeout = 30 * time.Minute
+
+type runTask struct {
+	Agent   string `json:"agent"`
+	ID      string `json:"id"`
+	Trigger string `json:"trigger"`
+}
+
+// UseQueue routes manual and event-triggered runs through the durable queue, so
+// a run outlives the replica that accepted it and lands on whichever replica
+// has capacity rather than always the one that took the request. The topic is
+// at-most-once on purpose: a tick opens pull requests and posts to Slack, so a
+// run lost to a crash is far cheaper than one replayed after it.
+func (r *Registry) UseQueue(q *queue.Queue) {
+	if r == nil || q == nil {
+		return
+	}
+	r.mu.Lock()
+	r.tasks = q
+	r.mu.Unlock()
+	q.Register(QueueTopic, queue.Options{Timeout: queueRunTimeout, MaxAttempts: 1}, r.runQueued)
+}
+
+func (r *Registry) runQueued(ctx context.Context, payload []byte) error {
+	var t runTask
+	if err := json.Unmarshal(payload, &t); err != nil {
+		return err
+	}
+	_, err := r.runOnce(ctx, t.Agent, t.ID, t.Trigger)
+	return err
+}
+
+// Trigger schedules a run outside the workflow's cron and returns as soon as it
+// is durably recorded. With no queue attached it falls back to running on this
+// replica in the background.
+func (r *Registry) Trigger(ctx context.Context, agent, id, trigger string) error {
+	if _, ok := r.docs.Get(store.Key(agent, id)); !ok {
+		return fmt.Errorf("workflow %s/%s not found", agent, id)
+	}
+	r.mu.RLock()
+	q := r.tasks
+	r.mu.RUnlock()
+	if q != nil {
+		err := q.Enqueue(ctx, QueueTopic, runTask{Agent: agent, ID: id, Trigger: trigger})
+		if err == nil {
+			return nil
+		}
+		log.Printf("[workflows] queueing %s/%s failed, running locally: %v", agent, id, err)
+	}
+	safego.Go("workflows: run "+agent+"/"+id, func() {
+		rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), queueRunTimeout)
+		defer cancel()
+		_, _ = r.runOnce(rctx, agent, id, trigger)
+	})
+	return nil
 }
 
 // New creates a Registry over b. Call LoadAll before serving.
@@ -1162,17 +1227,14 @@ func (r *Registry) fireListeners(parent context.Context, srcAgent, srcID string,
 			listeners = append(listeners, struct{ agent, id string }{w.Agent, w.ID})
 		}
 	})
+	// Hand each listener to the queue rather than running it here: the source
+	// tick's context is already winding down, and a chain of listeners would
+	// otherwise all execute on whichever replica happened to run the source.
 	for _, l := range listeners {
-		agent, id := l.agent, l.id
-		safego.Go("workflows: listener "+agent+"/"+id, func() {
-			// Decouple from the parent tick context so listener cancellation
-			// does not cascade; use a fresh timeout-bounded context.
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-			defer cancel()
-			_, _ = r.runOnce(ctx, agent, id, wantType+":"+ref)
-		})
+		if err := r.Trigger(context.WithoutCancel(parent), l.agent, l.id, wantType+":"+ref); err != nil {
+			log.Printf("[workflows] listener %s/%s not started: %v", l.agent, l.id, err)
+		}
 	}
-	_ = parent
 }
 
 func composeTaskPrompt(task Task, prior []string) string {

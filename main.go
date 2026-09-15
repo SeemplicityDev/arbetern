@@ -14,6 +14,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -36,11 +37,13 @@ import (
 	"github.com/justmike1/arbetern/google"
 	"github.com/justmike1/arbetern/internal/httpx"
 	"github.com/justmike1/arbetern/internal/progress"
+	"github.com/justmike1/arbetern/internal/queue"
 	"github.com/justmike1/arbetern/internal/safego"
 	"github.com/justmike1/arbetern/internal/store"
 	"github.com/justmike1/arbetern/internal/vectors"
 	"github.com/justmike1/arbetern/llm"
 	"github.com/justmike1/arbetern/mcp"
+	"github.com/justmike1/arbetern/metrics"
 	"github.com/justmike1/arbetern/nvd"
 	"github.com/justmike1/arbetern/prompts"
 	"github.com/justmike1/arbetern/salesforce"
@@ -68,6 +71,7 @@ var uiPages = map[string]bool{
 	"backend":      true,
 	"changelog":    true,
 	"billing":      true,
+	"performance":  true,
 }
 
 // ── Integration permission types & cache ────────────────────────────────────
@@ -256,6 +260,8 @@ const (
 	// gitOpsStatusStale is how long a stored "running" GitOps status is
 	// believed before it is assumed to come from a crashed reconcile.
 	gitOpsStatusStale = 10 * time.Minute
+	// gitOpsSyncTimeout bounds one out-of-band reconcile started from the UI.
+	gitOpsSyncTimeout = 5 * time.Minute
 )
 
 type storedGitOpsStatus struct {
@@ -302,11 +308,14 @@ func sharedGitOpsStatus(b *store.Backend, kind string, local func() any) func() 
 // apiMux:
 //
 //	GET  /api/<kindPlural>/_gitops        → status JSON ({enabled:false} if syncer is nil)
-//	POST /api/<kindPlural>/_gitops/sync   → trigger an out-of-band reconcile
+//	POST /api/<kindPlural>/_gitops/sync   → trigger an out-of-band reconcile (202)
 //
 // Both paths are exact matches and therefore take precedence over the
 // crud package's `/api/<kindPlural>/` prefix handler.
 func registerGitOpsRoutes(apiMux *http.ServeMux, kindPlural string, authorize func(*http.Request) bool, statusFn func() any, syncFn func(context.Context) error) {
+	// One reconcile at a time per kind, so a double-click cannot stack
+	// goroutines waiting on the syncer's own lock.
+	var syncing atomic.Bool
 	apiMux.HandleFunc("/api/"+kindPlural+"/_gitops", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -334,24 +343,28 @@ func registerGitOpsRoutes(apiMux *http.ServeMux, kindPlural string, authorize fu
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
-		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
-		defer cancel()
-		if err := syncFn(ctx); err != nil {
-			if errors.Is(err, errGitOpsDisabled) {
-				http.Error(w, err.Error(), http.StatusServiceUnavailable)
-				return
-			}
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
 		st := statusFn()
 		if st == nil {
-			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+			http.Error(w, errGitOpsDisabled.Error(), http.StatusServiceUnavailable)
 			return
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "status": st})
+		// A reconcile clones a repo and rewrites descriptors; it routinely runs
+		// for minutes, which is far longer than a proxy will hold a browser
+		// request open. Start it and answer at once — the syncer records
+		// `running` and the outcome in the shared status the page already
+		// polls, so the result survives the request, the tab and this replica.
+		started := syncing.CompareAndSwap(false, true)
+		if started {
+			safego.Go("gitops: sync "+kindPlural, func() {
+				defer syncing.Store(false)
+				ctx, cancel := context.WithTimeout(context.Background(), gitOpsSyncTimeout)
+				defer cancel()
+				if err := syncFn(ctx); err != nil {
+					log.Printf("[gitops] %s manual sync failed: %v", kindPlural, err)
+				}
+			})
+		}
+		httpx.WriteJSON(w, http.StatusAccepted, map[string]any{"ok": true, "started": started, "status": st})
 	})
 }
 
@@ -395,7 +408,16 @@ func containsNonBotMentions(text, botUserID string) bool {
 type groupCacheEntry struct {
 	members map[string]bool
 	fetched time.Time
+	// failedAt marks the last refresh that errored. The check runs on every
+	// slash command and every gated UI request, so without it a Slack outage
+	// means one timed-out lookup per request rather than one per cooldown.
+	failedAt time.Time
 }
+
+// rbacFailCooldown is how long a failed membership refresh is remembered. It
+// only shortens the wait: the answer while it holds is the same denial the
+// failed lookup would have produced.
+const rbacFailCooldown = 15 * time.Second
 
 type groupMemberCache struct {
 	mu      sync.RWMutex
@@ -428,12 +450,23 @@ func (c *groupMemberCache) checkGroup(slackClient *slack.Client, userID, groupID
 		c.mu.RUnlock()
 		return entry.members[userID]
 	}
+	recentlyFailed := ok && time.Since(entry.failedAt) < rbacFailCooldown
 	c.mu.RUnlock()
+	if recentlyFailed {
+		return false // fail closed, without waiting on Slack again
+	}
 
 	// Fetch fresh membership from Slack API.
 	members, err := slackClient.GetUserGroupMembers(groupID)
 	if err != nil {
 		log.Printf("[rbac] failed to fetch members for group %s: %v", groupID, err)
+		c.mu.Lock()
+		if cur := c.entries[groupID]; cur != nil {
+			cur.failedAt = time.Now()
+		} else {
+			c.entries[groupID] = &groupCacheEntry{failedAt: time.Now()}
+		}
+		c.mu.Unlock()
 		return false // fail closed — deny on error
 	}
 
@@ -1972,6 +2005,12 @@ func main() {
 	}
 	log.Printf("State backend: %s (region %s, instance %s)", backend, backend.Region(), store.InstanceID())
 
+	// Deferred work: anything a requester should not wait for is handed to the
+	// queue, which keeps its tasks in the same bucket and claims them with
+	// conditional writes. Every replica runs a worker — the claim is the lock,
+	// so no leader is involved and the backlog spreads across the fleet.
+	tasks := queue.New(backend)
+
 	// Thread sessions live in the bucket so a reply in a thread may be
 	// answered by any replica.
 	sessions := commands.NewSessionStore(backend, cfg.ThreadSessionTTL)
@@ -1997,6 +2036,7 @@ func main() {
 		}
 	}
 	userContextStore.SetSharedAgents(sharedAgents)
+	userContextStore.UseQueue(tasks)
 	log.Printf("User-context store: %suser-context/ (TTL=%s, semantic=%t, shared agents=%d)", backend, commands.UserContextTTL, userContextStore.Semantic(), len(sharedAgents))
 
 	// RBAC: build agentID → allowedTeams map and group membership cache.
@@ -2035,6 +2075,7 @@ func main() {
 	// Workflows registry: scheduled LLM tool-loop runs. The executor is wired
 	// below once the routers map is populated.
 	wfRegistry := workflows.New(backend, nil)
+	wfRegistry.UseQueue(tasks)
 	if err := wfRegistry.LoadAll(bootCtx); err != nil {
 		log.Fatalf("failed to load workflows: %v", err)
 	}
@@ -2075,6 +2116,30 @@ func main() {
 	userNames := newUserNameCache(24 * time.Hour)
 	billingStore.SetUserNameResolver(func(id string) string { return userNames.resolve(slackClient, id) })
 	billing.StartPriceSync(billingStop)
+
+	// Performance series: how long turns, model calls and tool calls take, and
+	// how often they fail. Kept apart from the usage ledger on purpose — it
+	// records no requester, channel or workflow owner, only the agent, entry
+	// path, model and tool.
+	perfStore, err := metrics.New(bootCtx, backend)
+	if err != nil {
+		log.Fatalf("failed to init metrics store: %v", err)
+	}
+	log.Printf("Performance store: %smetrics/ (%d month(s))", backend, perfStore.Months())
+	perfStop := make(chan struct{})
+	perfDone := perfStore.StartFlusher(perfStop)
+	perfStore.SetQueueStats(func() any { return tasks.Stats() })
+	perfStore.SetDependencies(func() any { return llm.Dependencies() })
+	llm.SetObserver(llm.ObserverFunc(func(c llm.CallStats) {
+		perfStore.RecordCall(metrics.Call{
+			Model:       c.Model,
+			Backend:     c.Backend,
+			LatencyMS:   c.Latency.Milliseconds(),
+			Attempts:    c.Attempts,
+			RateLimited: c.RateLimited,
+			Failed:      c.Failed,
+		})
+	}))
 
 	agentIDs := make([]string, 0, len(agents))
 	for _, a := range agents {
@@ -2141,6 +2206,7 @@ func main() {
 		router := commands.NewRouter(slackClient, ghClient, modelsClient, codeModelsClient, agentClients.jira, agentClients.nvd, agentClients.sf, agentClients.chorus, agentClients.datadog, agentClients.aws, agentClients.azure, agentClients.databricks, agentClients.clickhouse, agentClients.freshworks, agentClients.google, dashRegistry, wfRegistry, ap, agent.ID, cfg.AppURL, sessions, cfg.MaxToolRounds, userContextStore, billingStore)
 		router.SetMCP(mcpRegistry)
 		router.SetCatalog(catalogIndex)
+		router.SetPerf(perfStore)
 		routers[agent.ID] = router
 
 		// Sweeps the per-router channel-history cache so inactive channels
@@ -2651,6 +2717,7 @@ func main() {
 		})
 	}
 	safego.Go("warm: usage summary", func() { _ = billingStore.Summarize(30) })
+	safego.Go("warm: performance summary", func() { _ = perfStore.Summarize(30) })
 
 	http.Handle("/api/", apiMux)
 
@@ -2660,6 +2727,7 @@ func main() {
 	wfRegistry.RegisterRoutes(http.DefaultServeMux, apiMux, knownAgents, canManageAgent)
 	chatRegistry.RegisterRoutes(apiMux, knownAgents)
 	billingStore.RegisterRoutes(http.DefaultServeMux, apiMux)
+	perfStore.RegisterRoutes(apiMux)
 	skillRegistry.RegisterRoutes(apiMux, clientEmail)
 	mcpRegistry.RegisterRoutes(apiMux, clientEmail)
 
@@ -2768,6 +2836,14 @@ func main() {
 		})
 	}
 
+	// Deferred work runs on every replica, not only the scheduling leader: a
+	// task is claimed with a conditional write, so the backlog is shared out
+	// rather than piled onto one pod.
+	queueCtx, cancelQueue := context.WithCancel(context.Background())
+	defer cancelQueue()
+	tasks.Start(queueCtx)
+	log.Printf("Deferred work: %squeue/ (topics %v)", backend, tasks.Topics())
+
 	// Every replica keeps its caches in step with the bucket so UI reads and
 	// tool calls see what other replicas wrote.
 	for _, start := range []func(context.Context, time.Duration){
@@ -2858,14 +2934,21 @@ func main() {
 	// Hand the scheduling lease over right away rather than letting it expire,
 	// then merge the last buffered usage into the bucket.
 	cancelLeader()
+	cancelQueue()
 	select {
 	case <-leaderDone:
 	case <-time.After(10 * time.Second):
 	}
+	// Both final flushes start as soon as their stop channel closes, so they
+	// share one deadline rather than queueing two.
 	close(billingStop)
-	select {
-	case <-billingDone:
-	case <-time.After(30 * time.Second):
+	close(perfStop)
+	flushed := time.After(30 * time.Second)
+	for _, done := range []<-chan struct{}{billingDone, perfDone} {
+		select {
+		case <-done:
+		case <-flushed:
+		}
 	}
 	log.Println("server stopped")
 }

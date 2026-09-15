@@ -83,6 +83,10 @@ func (e *Embedder) Model() string { return e.model }
 func (e *Embedder) Dimensions() int { return e.dims }
 
 // Embed returns one vector per text, in order.
+// Embed vectorises texts. Like compression it is guarded by a breaker: the
+// semantic parts of a prompt are optional (retrieval falls back to recency) and
+// indexing is retried from the queue, so a backend that has started failing is
+// better skipped than waited on at the front of every turn.
 func (e *Embedder) Embed(ctx context.Context, texts []string) ([][]float32, error) {
 	if len(texts) == 0 {
 		return nil, nil
@@ -94,10 +98,29 @@ func (e *Embedder) Embed(ctx context.Context, texts []string) ([][]float32, erro
 		}
 		clipped[i] = t
 	}
-	if e.bedrock != nil {
-		return e.embedTitan(ctx, clipped)
+	br := breakerFor("embeddings:"+e.model, "Embeddings ("+e.model+")")
+	if !br.allow() {
+		return nil, fmt.Errorf("%w: embeddings model %s", ErrDependencyDown, e.model)
 	}
-	return e.embedOpenAI(ctx, clipped)
+	var (
+		out [][]float32
+		err error
+	)
+	if e.bedrock != nil {
+		out, err = e.embedTitan(ctx, clipped)
+	} else {
+		out, err = e.embedOpenAI(ctx, clipped)
+	}
+	// A caller that gave up says nothing about the backend.
+	if err != nil && ctx.Err() == nil {
+		br.fail(err)
+		return nil, err
+	}
+	if err != nil {
+		return nil, err
+	}
+	br.ok()
+	return out, nil
 }
 
 func (e *Embedder) embedTitan(ctx context.Context, texts []string) ([][]float32, error) {

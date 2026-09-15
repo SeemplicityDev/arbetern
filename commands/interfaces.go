@@ -2,6 +2,7 @@ package commands
 
 import (
 	"github.com/justmike1/arbetern/billing"
+	"github.com/justmike1/arbetern/metrics"
 	slacklib "github.com/slack-go/slack"
 )
 
@@ -9,6 +10,13 @@ import (
 // can be aggregated for the Usage & Billing tab. Implemented by *billing.Store.
 type UsageRecorder interface {
 	Record(billing.Event)
+}
+
+// PerfRecorder receives the timing of a finished turn and of each tool call it
+// made, for the Performance tab. Implemented by *metrics.Store.
+type PerfRecorder interface {
+	RecordTurn(metrics.Turn)
+	RecordTool(metrics.ToolRun)
 }
 
 type SlackClient interface {

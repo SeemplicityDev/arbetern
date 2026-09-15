@@ -97,6 +97,9 @@ type GeneralHandler struct {
 	billingSource       string
 	billingWorkflowID   string
 	billingWorkflowName string
+	// perf records how long the turn and its tool calls took. Optional — nil
+	// disables tracking.
+	perf PerfRecorder
 	// modelOverride, when set, replaces the default CODE_MODEL for a headless
 	// workflow tick with a specific backend deployment (workflow.Model).
 	modelOverride string
@@ -352,7 +355,7 @@ func (h *GeneralHandler) Execute(channelID, userID, text, responseURL, auditTS s
 		auditTS:           auditTS,
 		progress:          reporter.tracker(),
 		afterTool: func(name, result string) {
-			if name == "reply_in_thread" && !strings.HasPrefix(result, "Error") {
+			if name == "reply_in_thread" && !toolFailed(result) {
 				repliedInThread = true
 			}
 		},
@@ -466,7 +469,7 @@ func (h *GeneralHandler) ExecuteHeadless(ctx context.Context, userID, prompt str
 		rounds:    h.maxToolRounds,
 		userID:    userID,
 		afterTool: func(name, result string) {
-			if !strings.HasPrefix(result, "Error") {
+			if !toolFailed(result) {
 				return
 			}
 			preview := previewText(result, 300)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -13,6 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/justmike1/arbetern/internal/queue"
 	"github.com/justmike1/arbetern/internal/safego"
 	"github.com/justmike1/arbetern/internal/store"
 	"github.com/justmike1/arbetern/internal/vectors"
@@ -33,6 +35,7 @@ type UserContextStore struct {
 	b      *store.Backend
 	index  atomic.Pointer[vectors.Index]
 	shared atomic.Pointer[map[string]bool]
+	tasks  atomic.Pointer[queue.Queue]
 }
 
 const (
@@ -57,6 +60,11 @@ const (
 	userContextRecentAnchors    = 2
 	userContextEntrySep         = "\n---\n"
 	userContextIndexTimeout     = 30 * time.Second
+	// userContextReadTimeout bounds the retrieval a turn does before its first
+	// model call. Everything it fetches is optional — the prompt falls back to
+	// recency — so a degraded embeddings or vector backend must cost this much
+	// and no more, rather than stalling the answer behind its own retries.
+	userContextReadTimeout = 20 * time.Second
 	// Working memory: turns in the same channel within this window.
 	userContextRecentWindow = 10 * time.Minute
 	userContextRecentTurns  = 10
@@ -187,6 +195,8 @@ func (s *UserContextStore) Context(ctx context.Context, agentID, userID, channel
 	if s == nil {
 		return view
 	}
+	ctx, cancel := context.WithTimeout(ctx, userContextReadTimeout)
+	defer cancel()
 	userID = UserContextID(userID)
 	doc := s.load(ctx, agentID, userID)
 	index := s.index.Load()
@@ -383,16 +393,61 @@ func joinWithin(parts []string, maxBytes int) string {
 	return out
 }
 
-// Append records a completed (question, answer) turn, trims the document to
-// its caps, and indexes the new entry when a vector index is attached.
-// Errors are logged, never returned: context persistence is best-effort.
+// QueueTopic is the deferred-work topic a completed turn's memory is written
+// through.
+const QueueTopic = "user-context"
+
+// queueAppendTimeout bounds one deferred write, document and vector together.
+const queueAppendTimeout = 2 * time.Minute
+
+// appendTask is the queued form of one completed turn. The entry ID travels
+// with it so a redelivered task recognises the write it already made instead
+// of appending the turn twice.
+type appendTask struct {
+	Agent   string    `json:"agent"`
+	User    string    `json:"user"`
+	Entry   string    `json:"entry"`
+	At      time.Time `json:"at"`
+	Channel string    `json:"channel,omitempty"`
+	Q       string    `json:"q,omitempty"`
+	A       string    `json:"a,omitempty"`
+}
+
+// UseQueue defers the write of a completed turn to the durable queue, so the
+// reply a requester is waiting for is not held behind a conditional write and
+// an embedding call. Nothing reads this document again until the next turn, so
+// the delay costs nothing; what it buys is that the write survives the replica
+// that produced it.
+func (s *UserContextStore) UseQueue(q *queue.Queue) {
+	if s == nil || q == nil {
+		return
+	}
+	s.tasks.Store(q)
+	q.Register(QueueTopic, queue.Options{Timeout: queueAppendTimeout, MaxAttempts: 4}, s.runAppendTask)
+}
+
+func (s *UserContextStore) runAppendTask(ctx context.Context, payload []byte) error {
+	var t appendTask
+	if err := json.Unmarshal(payload, &t); err != nil {
+		return err
+	}
+	entry := userContextEntry{ID: t.Entry, At: t.At, Channel: t.Channel, Question: t.Q, Answer: t.A}
+	dropped, err := s.appendEntry(ctx, t.Agent, t.User, entry)
+	if err != nil {
+		return err
+	}
+	return s.indexEntry(ctx, t.Agent, t.User, entry, dropped)
+}
+
+// Append records a completed (question, answer) turn. With a queue attached the
+// write is handed off and this returns immediately; without one it falls back
+// to writing the document inline and indexing in the background.
 func (s *UserContextStore) Append(ctx context.Context, agentID, userID, channelID, question, answer string) {
 	if s == nil {
 		return
 	}
 	userID = UserContextID(userID)
-	key := s.key(agentID, userID)
-	if key == "" {
+	if s.key(agentID, userID) == "" {
 		return
 	}
 	question = text.Truncate(strings.TrimSpace(question), userContextMaxQuestionLen)
@@ -406,14 +461,50 @@ func (s *UserContextStore) Append(ctx context.Context, agentID, userID, channelI
 		return
 	}
 	entry := userContextEntry{ID: id, At: time.Now().UTC(), Channel: channelID, Question: question, Answer: answer}
-	index := s.index.Load()
+
+	if q := s.tasks.Load(); q != nil {
+		task := appendTask{Agent: agentID, User: userID, Entry: entry.ID, At: entry.At, Channel: channelID, Q: question, A: answer}
+		err := q.Enqueue(ctx, QueueTopic, task)
+		if err == nil {
+			return
+		}
+		log.Printf("[user-context] enqueue failed, writing inline: %v", err)
+	}
+
+	dropped, err := s.appendEntry(ctx, agentID, userID, entry)
+	if err != nil {
+		log.Printf("[user-context] write failed agent=%s user=%s: %v", agentID, userID, err)
+		return
+	}
+	safego.Go("user context: index", func() {
+		ictx, cancel := context.WithTimeout(context.Background(), userContextIndexTimeout)
+		defer cancel()
+		if err := s.indexEntry(ictx, agentID, userID, entry, dropped); err != nil {
+			log.Printf("[user-context] index failed agent=%s user=%s: %v", agentID, userID, err)
+		}
+	})
+}
+
+// appendEntry adds the entry to the user's document and trims the oldest ones
+// back under the caps, returning the IDs it dropped. An entry already present
+// is left alone, so a redelivered task is a no-op rather than a duplicate.
+func (s *UserContextStore) appendEntry(ctx context.Context, agentID, userID string, entry userContextEntry) ([]string, error) {
+	key := s.key(agentID, userID)
+	if key == "" {
+		return nil, fmt.Errorf("invalid agent %q or user %q", agentID, userID)
+	}
 	maxEntries, maxBytes := userContextMaxEntries, userContextMaxDocBytes
-	if index != nil {
+	if s.index.Load() != nil {
 		maxEntries, maxBytes = userContextMaxEntriesIndexed, userContextMaxDocBytesIndexed
 	}
 	var dropped []string
-	err = s.update(ctx, key, func(d *userContextDoc) {
+	err := s.update(ctx, key, func(d *userContextDoc) {
 		dropped = dropped[:0]
+		for _, e := range d.Entries {
+			if e.ID == entry.ID {
+				return
+			}
+		}
 		d.Entries = append(d.Entries, entry)
 		for len(d.Entries) > 1 && (len(d.Entries) > maxEntries || d.size() > maxBytes) {
 			dropped = append(dropped, d.Entries[0].ID)
@@ -421,29 +512,29 @@ func (s *UserContextStore) Append(ctx context.Context, agentID, userID, channelI
 		}
 	})
 	if err != nil {
-		log.Printf("[user-context] write failed agent=%s user=%s: %v", agentID, userID, err)
-		return
+		return nil, err
 	}
+	return dropped, nil
+}
+
+// indexEntry upserts the entry's vector and removes the vectors of the entries
+// the document dropped. A no-op when no vector index is attached.
+func (s *UserContextStore) indexEntry(ctx context.Context, agentID, userID string, entry userContextEntry, dropped []string) error {
+	index := s.index.Load()
 	if index == nil {
-		return
+		return nil
 	}
-	safego.Go("user context: index", func() {
-		ictx, cancel := context.WithTimeout(context.Background(), userContextIndexTimeout)
-		defer cancel()
-		if err := index.Upsert(ictx, []vectors.Item{vectorItem(agentID, userID, entry)}); err != nil {
-			log.Printf("[user-context] index failed agent=%s user=%s: %v", agentID, userID, err)
-		}
-		if len(dropped) == 0 {
-			return
-		}
-		keys := make([]string, 0, len(dropped))
-		for _, id := range dropped {
-			keys = append(keys, vectorKeyPrefix(agentID, userID)+id)
-		}
-		if err := index.Delete(ictx, keys); err != nil {
-			log.Printf("[user-context] unindex failed agent=%s user=%s: %v", agentID, userID, err)
-		}
-	})
+	if err := index.Upsert(ctx, []vectors.Item{vectorItem(agentID, userID, entry)}); err != nil {
+		return err
+	}
+	if len(dropped) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(dropped))
+	for _, id := range dropped {
+		keys = append(keys, vectorKeyPrefix(agentID, userID)+id)
+	}
+	return index.Delete(ctx, keys)
 }
 
 func vectorItem(agentID, userID string, e userContextEntry) vectors.Item {

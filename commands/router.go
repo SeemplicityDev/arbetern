@@ -58,6 +58,7 @@ type Router struct {
 	maxToolRounds    int
 	userContextStore *UserContextStore
 	billing          UsageRecorder
+	perf             PerfRecorder
 }
 
 func NewRouter(slackClient SlackClient, ghClient *github.Client, modelsClient *llm.Client, codeModelsClient *llm.Client, jiraClient *atlassian.Client, nvdClient *nvd.Client, sfClient *salesforce.Client, chorusClient *chorus.Client, datadogClients *datadog.MultiClient, awsClient *aws.Client, azureClient *azure.Client, databricksClient *databricks.Client, clickhouseClient *clickhouse.Client, freshworksClient *freshworks.Client, googleClient *google.Client, dashboardRegistry *dashboards.Registry, workflowRegistry *workflows.Registry, pp PromptProvider, agentID, appURL string, sessions *SessionStore, maxToolRounds int, userContextStore *UserContextStore, usage UsageRecorder) *Router {
@@ -102,6 +103,9 @@ func NewRouter(slackClient SlackClient, ghClient *github.Client, modelsClient *l
 // SetMCP makes the tools of registered MCP connectors available to this
 // agent's tool loops.
 func (r *Router) SetMCP(reg *mcp.Registry) { r.mcp = reg }
+
+// SetPerf records the timing of this agent's turns and tool calls.
+func (r *Router) SetPerf(p PerfRecorder) { r.perf = p }
 
 // SetCatalog gives the tool loops semantic search over workflows and
 // dashboards.
@@ -278,6 +282,7 @@ func (r *Router) newGeneralHandler(userContext string, session *ThreadSession) *
 		userContextStore: r.userContextStore,
 		billing:          r.billing,
 		billingSource:    billing.SourceSlack,
+		perf:             r.perf,
 	}
 }
 

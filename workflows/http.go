@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/justmike1/arbetern/internal/crud"
-	"github.com/justmike1/arbetern/internal/safego"
 )
 
 // RegisterRoutes wires the per-agent data route and workflow CRUD API onto
@@ -59,19 +58,17 @@ func (r *Registry) handleCustom(w http.ResponseWriter, req *http.Request, agent,
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return true
 		}
-		// Run in its own goroutine and return 202 immediately. Workflow
-		// ticks routinely run for several minutes (LLM tool loops, GitHub
-		// API, rate-limit back-offs); blocking the HTTP response that long
-		// ties up the "Run now" UI button and is usually killed by
-		// intermediate proxies before the tick completes. The caller polls
-		// /data.json to see results in run history. The per-workflow busy
-		// try-lock inside runOnce still prevents concurrent runs of the
-		// same workflow.
-		safego.Go("workflows: manual run "+agent+"/"+id, func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
-			defer cancel()
-			_, _ = r.RunOnce(ctx, agent, id, "manual:api")
-		})
+		// Queue the run and return 202 immediately. Workflow ticks routinely
+		// run for several minutes (LLM tool loops, GitHub API, rate-limit
+		// back-offs); blocking the HTTP response that long ties up the "Run
+		// now" UI button and is usually killed by intermediate proxies before
+		// the tick completes. The caller polls /data.json to see results in
+		// run history. The per-workflow busy try-lock inside runOnce still
+		// prevents concurrent runs of the same workflow.
+		if err := r.Trigger(req.Context(), agent, id, "manual:api"); err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return true
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusAccepted)
 		_ = json.NewEncoder(w).Encode(map[string]any{

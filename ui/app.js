@@ -72,11 +72,16 @@ const INTEGRATION_LOGOS = {
 
 const SOURCE_LABELS = { slack: 'Slack commands', chat: 'Web chat', workflow: 'Scheduled workflows', dashboard: 'Dashboard renders' };
 const SLACK_ID_RE = /^[UW][A-Z0-9]{6,}$/;
-const PAGES = ['overview', 'integrations', 'mcp', 'agents', 'chats', 'skills', 'workflows', 'dashboards', 'pulls', 'tickets', 'changelog', 'billing', 'backend'];
+const PAGES = ['overview', 'integrations', 'mcp', 'agents', 'chats', 'skills', 'workflows', 'dashboards', 'pulls', 'tickets', 'changelog', 'performance', 'billing', 'backend'];
 const PAGE_TITLES = {
   overview: 'Overview', integrations: 'Integrations', mcp: 'MCP & Connectors', agents: 'Agents', chats: 'Chats',
   skills: 'Skills', workflows: 'Workflows', dashboards: 'Dashboards', pulls: 'Pull requests', tickets: 'Tickets',
-  changelog: 'Changelog', billing: 'Usage & Billing', backend: 'Backend',
+  changelog: 'Changelog', performance: 'Performance', billing: 'Usage & Billing', backend: 'Backend',
+};
+const OUTCOME_LABELS = {
+  completed: 'Answered', empty: 'Ran out of content', max_rounds: 'Hit the round limit',
+  truncated: 'Truncated tool calls', no_choices: 'Model returned nothing', blocked_ack: 'Blocked acknowledgement',
+  error: 'Failed outright',
 };
 const WINDOWS = [7, 30, 90, 0];
 const EXTRAS_CACHE_TTL_MS = 5 * 60 * 1000;
@@ -97,6 +102,9 @@ let sessionsData = null;
 let sessionsFetched = false;
 let billingSummary = null;
 let billingSummaryDays = null;
+let metricsSummary = null;
+let metricsSummaryDays = null;
+let metricsFetched = false;
 const gitops = { workflows: null, dashboards: null };
 const lastFetched = {};
 const inflight = new Set();
@@ -362,6 +370,7 @@ function renderViews() {
     () => { if (integrationsData) renderIntegrations(integrationsData); },
     renderWorkflowsPage, renderDashboardsPage, renderPullsPage, renderSkillsPage, renderMCPPage, renderChatsPage, renderChanges,
     () => { if (billingSummary) renderBilling(billingSummary); },
+    renderPerformance,
   ];
   for (const paint of painters) {
     try { paint(); } catch (err) { console.error('render failed:', err); }
@@ -372,7 +381,7 @@ function loadPage(page) {
   switch (page) {
     case 'overview':
       renderOverview();
-      return Promise.all([loadBilling(), loadSessions(), loadIntegrations(), loadWorkflows(), loadDashboards(), loadPulls(), loadChanges(), loadMCP()]);
+      return Promise.all([loadBilling(), loadMetrics(), loadSessions(), loadIntegrations(), loadWorkflows(), loadDashboards(), loadPulls(), loadChanges(), loadMCP()]);
     case 'integrations':
       if (integrationsData) renderIntegrations(integrationsData);
       return loadIntegrations();
@@ -399,6 +408,9 @@ function loadPage(page) {
     case 'billing':
       if (billingSummary) renderBilling(billingSummary);
       return loadBilling();
+    case 'performance':
+      renderPerformance();
+      return loadMetrics();
     case 'mcp':
       renderMCPPage();
       return loadMCP();
@@ -425,6 +437,7 @@ document.querySelectorAll('[data-pills="window"]').forEach(group => {
     try { localStorage.setItem('arbetern-window', String(days)); } catch (_) {}
     syncPills();
     delete lastFetched['billing:' + days];
+    delete lastFetched['metrics:' + days];
     loadPage(currentPage);
   });
 });
@@ -541,6 +554,26 @@ async function loadBilling() {
   }
 }
 
+async function loadMetrics() {
+  const windowDays = days;
+  const key = 'metrics:' + windowDays;
+  if (inflight.has(key)) return;
+  if (recentlyFetched(key) && metricsSummaryDays === windowDays) return;
+  inflight.add(key);
+  try {
+    const sum = await fetchJSON('/api/metrics/summary?days=' + windowDays);
+    if (windowDays !== days) return;
+    metricsSummary = sum;
+    metricsSummaryDays = windowDays;
+    renderViews();
+  } catch (err) {
+    console.warn('Failed to load performance summary:', err);
+  } finally {
+    metricsFetched = true;
+    inflight.delete(key);
+  }
+}
+
 async function loadGitops(kind, force) {
   if (!force && recentlyFetched('gitops:' + kind)) return;
   try {
@@ -603,6 +636,7 @@ function renderOverview() {
     renderSources(billingSummary);
     renderRecent(billingSummary);
   }
+  renderPerfGlance();
   renderSessions();
   renderFleet();
   renderLatestChange();
@@ -679,19 +713,25 @@ function userCellHtml(u) {
   return `<td class="mx-user${raw ? ' raw' : ''}" title="${escapeHtml(u.key)}">${escapeHtml(u.key)}</td>`;
 }
 
-function fillDaily(daily, windowDays) {
+// Pads a daily series out to the whole window so a quiet day reads as a gap
+// rather than shifting the chart. blank() supplies the shape of a missing day.
+function fillDays(daily, windowDays, blank) {
   const byKey = new Map((daily || []).map(d => [d.key, d]));
   if (!windowDays) return [...byKey.values()].sort((a, b) => (a.key < b.key ? -1 : 1));
   const out = [];
   const end = new Date();
   end.setUTCHours(0, 0, 0, 0);
   for (let i = windowDays - 1; i >= 0; i--) {
-    const d = new Date(end.getTime() - i * 86400000);
-    const key = d.toISOString().slice(0, 10);
-    out.push(byKey.get(key) || { key, counts: { requests: 0, cost_usd: 0, total_tokens: 0 } });
+    const key = new Date(end.getTime() - i * 86400000).toISOString().slice(0, 10);
+    out.push(byKey.get(key) || blank(key));
   }
   return out;
 }
+
+const fillDaily = (daily, windowDays) =>
+  fillDays(daily, windowDays, key => ({ key, counts: { requests: 0, cost_usd: 0, total_tokens: 0 } }));
+const fillDailyLatency = (daily, windowDays) =>
+  fillDays(daily, windowDays, key => ({ key, latency: { count: 0, p95_ms: 0 } }));
 
 function renderBars(el, rows, valueOf, labelOf, fromEl, toEl) {
   if (!rows || !rows.length) {
@@ -935,17 +975,36 @@ function gitopsHtml(kind) {
     <button class="btn-mini" type="button" onclick="syncGitops('${kind}', this)"${s.running ? ' disabled' : ''}>Sync now</button>`;
 }
 
+// The server starts the reconcile and answers at once, because it routinely
+// runs for minutes. Follow it through the shared status instead of holding the
+// request open: the outcome is recorded there, so it survives this tab.
+const GITOPS_POLL_MS = 3000;
+const GITOPS_POLL_LIMIT = 100;
+
 async function syncGitops(kind, btn) {
   btn.disabled = true;
   btn.textContent = 'Syncing…';
+  const before = ((gitops[kind] || {}).status || {}).last_sync || '';
   try {
     const r = await fetch(`/api/${kind}/_gitops/sync`, { method: 'POST' });
     if (!r.ok) throw new Error((await r.text()) || ('HTTP ' + r.status));
   } catch (err) {
     alert('Sync failed: ' + err);
+    await loadGitops(kind, true);
+    return;
+  }
+  // Wait for a *new* result, not merely for `running` to be false: the status
+  // is written by the reconcile itself and does not flip to running the instant
+  // the request returns.
+  for (let i = 0; i < GITOPS_POLL_LIMIT; i++) {
+    await new Promise(done => setTimeout(done, GITOPS_POLL_MS));
+    await loadGitops(kind, true);
+    const s = (gitops[kind] || {}).status;
+    if (!s) break;
+    if (!s.running && (s.last_sync || '') !== before) break;
   }
   delete lastFetched[kind];
-  await Promise.all([loadGitops(kind, true), kind === 'workflows' ? loadWorkflows() : loadDashboards()]);
+  await (kind === 'workflows' ? loadWorkflows() : loadDashboards());
   refreshDetailIf(kind.slice(0, -1));
 }
 
@@ -1534,27 +1593,41 @@ document.getElementById('backend-body').addEventListener('click', e => {
 })();
 
 /* Usage & Billing */
+// Renders a data table, or the empty note when there is nothing to show. Every
+// caller had its own copy of this scaffolding; only the columns differ.
+function dataTable(el, emptyText, headers, rows, cellsOf) {
+  if (!rows || !rows.length) { el.innerHTML = emptyHtml(emptyText); return; }
+  const head = headers.map(h => `<th${h.n ? ' class="n"' : ''}>${escapeHtml(h.label)}</th>`).join('');
+  const body = rows.map(r => `<tr>${cellsOf(r).map(c =>
+    typeof c === 'string' ? `<td>${c}</td>` : `<td class="n${c.cls ? ' ' + c.cls : ''}">${c.v}</td>`).join('')}</tr>`).join('');
+  el.innerHTML = `<table class="data-table"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
+}
+
+// num marks a right-aligned numeric cell; cls flags one worth worrying about.
+const num = (v, cls) => ({ v, cls: cls || '' });
+
 function billingRows(el, data, nameOf) {
-  if (!data || !data.length) { el.innerHTML = emptyHtml('No usage in this window'); return; }
-  let h = '<table class="data-table"><thead><tr><th>Name</th><th class="n">Req</th><th class="n">Tokens</th><th class="n">Cost</th></tr></thead><tbody>';
-  data.slice(0, 12).forEach(r => {
-    h += `<tr><td>${nameOf(r)}</td><td class="n">${fmtInt(r.counts.requests)}</td><td class="n">${tok(r.counts.total_tokens)}</td><td class="n cost">${money4(r.counts.cost_usd)}</td></tr>`;
-  });
-  el.innerHTML = h + '</tbody></table>';
+  dataTable(el, 'No usage in this window',
+    [{ label: 'Name' }, { label: 'Req', n: true }, { label: 'Tokens', n: true }, { label: 'Cost', n: true }],
+    (data || []).slice(0, 12),
+    r => [nameOf(r), num(fmtInt(r.counts.requests)), num(tok(r.counts.total_tokens)), num(money4(r.counts.cost_usd), 'cost')]);
 }
 
 function billingRecent(el, evs, names) {
-  if (!evs || !evs.length) { el.innerHTML = emptyHtml('No turns recorded yet'); return; }
-  let h = '<table class="data-table"><thead><tr><th>Time</th><th>Agent</th><th>Source</th><th>Model</th><th class="n">Tokens</th><th class="n">Saved</th><th class="n">Cost</th></tr></thead><tbody>';
-  evs.slice(0, 30).forEach(e => {
-    const t = new Date(e.at);
-    const who = e.workflow_name ? ` · ${escapeHtml(e.workflow_name)}` : (e.user_id ? ` · ${escapeHtml(names.get(e.user_id) || e.user_id)}` : '');
-    const cs = e.compression_saved_tokens || 0, ci = e.compression_input_tokens || 0, cp = ci ? Math.round(cs / ci * 100) : 0;
-    const saved = cs ? `${tok(cs)} <small class="muted">${cp}%</small>` : '—';
-    h += `<tr><td>${t.toLocaleString()}</td><td>${agentChip(e.agent)}</td><td><span class="tag ${escapeHtml(e.source)}">${escapeHtml(e.source)}</span>${who}</td><td>${escapeHtml(e.model)}</td><td class="n">${tok(e.total_tokens)}</td><td class="n">${saved}</td><td class="n cost">${money4(e.cost_usd)}</td></tr>`;
-  });
-  el.innerHTML = h + '</tbody></table>';
+  dataTable(el, 'No turns recorded yet',
+    [{ label: 'Time' }, { label: 'Agent' }, { label: 'Source' }, { label: 'Model' },
+      { label: 'Tokens', n: true }, { label: 'Saved', n: true }, { label: 'Cost', n: true }],
+    (evs || []).slice(0, 30),
+    e => {
+      const who = e.workflow_name ? ` · ${escapeHtml(e.workflow_name)}` : (e.user_id ? ` · ${escapeHtml(names.get(e.user_id) || e.user_id)}` : '');
+      const cs = e.compression_saved_tokens || 0, ci = e.compression_input_tokens || 0;
+      const saved = cs ? `${tok(cs)} <small class="muted">${ci ? Math.round(cs / ci * 100) : 0}%</small>` : '—';
+      return [new Date(e.at).toLocaleString(), agentChip(e.agent),
+        `<span class="tag ${escapeHtml(e.source)}">${escapeHtml(e.source)}</span>${who}`, escapeHtml(e.model),
+        num(tok(e.total_tokens)), num(saved), num(money4(e.cost_usd), 'cost')];
+    });
 }
+
 
 function priceSrc(p) {
   if (!p || (!p.url && !p.last_sync && !p.error)) return 'Pricing: configured overrides only, no live price feed';
@@ -1588,6 +1661,207 @@ function renderBilling(d) {
   billingRecent($('#t-recent'), d.recent, names);
   $('#recent-meta').textContent = d.recent && d.recent.length ? `${d.recent.length} shown` : '';
   $('#price-src').innerHTML = priceSrc(d.pricing);
+}
+
+/* Performance */
+function ms(v) {
+  v = Math.round(v || 0);
+  if (v < 1000) return v + 'ms';
+  if (v < 60000) return (v / 1000).toFixed(v < 10000 ? 1 : 0) + 's';
+  const m = v / 60000;
+  return (m < 10 ? m.toFixed(1) : Math.round(m)) + 'm';
+}
+const pct = v => (v || 0).toFixed(v && v < 10 ? 1 : 0) + '%';
+// Averages arrive as JSON numbers; formatting them keeps every cell in these
+// tables on the same path as the rest, rather than interpolating a raw value.
+const dec = v => (Number(v) || 0).toFixed(2).replace(/\.?0+$/, '');
+const outcomeLabel = k => OUTCOME_LABELS[k] || k;
+
+function perfBucketLabel(bounds, i) {
+  if (i >= bounds.length) return '>' + ms(bounds[bounds.length - 1]);
+  return ms(bounds[i]);
+}
+
+function renderPerfGlance() {
+  const el = document.getElementById('ov-perf');
+  const meta = document.getElementById('ov-perf-meta');
+  if (!el) return;
+  const sum = metricsSummary;
+  if (!sum) {
+    el.innerHTML = emptyHtml(metricsFetched ? 'Performance stats unavailable.' : 'Loading…');
+    meta.textContent = '';
+    return;
+  }
+  const t = sum.turns || {};
+  const l = t.latency || {};
+  meta.textContent = windowLabel();
+  if (!l.count) {
+    el.innerHTML = emptyHtml('No turns recorded in this window yet.');
+    return;
+  }
+  const answered = 100 - (l.fail_pct || 0);
+  const daily = fillDailyLatency(sum.daily, days).slice(-30);
+  const max = Math.max(...daily.map(d => d.latency.p95_ms || 0), 1);
+  const spark = daily.map(d => {
+    const v = d.latency.p95_ms || 0;
+    return `<div class="bar${v ? '' : ' empty-day'}" style="height:${Math.max(2, v / max * 100)}%"><span>${escapeHtml(d.key)}: ${ms(v)} p95</span></div>`;
+  }).join('');
+  el.innerHTML = `<div class="perf-glance">
+      <div class="kpi-big">${ms(l.p50_ms)}<small>median response</small></div>
+      <div class="perf-kpis">
+        <div class="kpi">${ms(l.p95_ms)}<small>p95</small></div>
+        <div class="kpi">${ms((t.first_response || {}).p50_ms)}<small>first round</small></div>
+        <div class="kpi${answered < 90 ? ' warn' : ''}">${pct(answered)}<small>answered</small></div>
+        <div class="kpi">${t.avg_tool_calls || 0}<small>tool calls / turn</small></div>
+        <div class="kpi">${pct(t.tool_pct)}<small>time in tools</small></div>
+      </div>
+      <div class="perf-spark">${daily.length ? `<div class="bars mini">${spark}</div>
+        <div class="axis"><span>${escapeHtml(daily[0].key)}</span><span>${escapeHtml(daily[daily.length - 1].key)}</span></div>` : emptyHtml('No daily data')}</div>
+    </div>
+    <div class="kpi-note">${plural(l.count, 'turn')} · ${pct(t.model_pct)} of that time waiting on the model${queueNote(sum)}</div>`;
+}
+
+function queueNote(sum) {
+  const pending = (sum.queue || []).reduce((n, q) => n + (q.pending || 0), 0);
+  const down = (sum.deps || []).filter(d => !d.healthy).length;
+  let out = pending ? ` · ${plural(pending, 'task')} queued` : '';
+  if (down) out += ` · ${plural(down, 'service')} skipped`;
+  return out;
+}
+
+function renderPerformance() {
+  renderPerfGlance();
+  const sum = metricsSummary;
+  const $ = id => document.getElementById(id);
+  if (!sum) return;
+  const t = sum.turns || {};
+  const l = t.latency || {};
+  $('perf-p50').textContent = l.count ? ms(l.p50_ms) : '—';
+  $('perf-sub').textContent = l.count
+    ? `${plural(l.count, 'turn')} · p95 ${ms(l.p95_ms)} · slowest ${ms(l.max_ms)} · ${windowLabel()}`
+    : `No turns recorded · ${windowLabel()}`;
+  const rt = sum.runtime || {};
+  $('perf-runtime').textContent = `this replica up ${rt.uptime || '—'} · ${fmtInt(rt.goroutines)} goroutines · ${fmtInt(rt.heap_mb)} MB heap`;
+
+  $('p-turns').textContent = fmtInt(l.count);
+  $('p-p95').textContent = l.count ? ms(l.p95_ms) : '—';
+  $('p-first').textContent = ms((t.first_response || {}).p50_ms);
+  $('p-ok').textContent = l.count ? pct(100 - (l.fail_pct || 0)) : '—';
+  $('p-tools').textContent = pct(t.tool_pct);
+  $('p-tps').textContent = t.tokens_per_sec ? t.tokens_per_sec.toFixed(1) + ' tok/s' : '—';
+
+  const daily = fillDailyLatency(sum.daily, days);
+  renderBars($('perf-bars'), daily, d => d.latency.p95_ms || 0, v => ms(v), $('perf-axis-from'), $('perf-axis-to'));
+
+  renderHistogram($('p-hist'), l);
+  $('p-hist-meta').textContent = l.count ? `${plural(l.count, 'turn')} · ${windowLabel()}` : '';
+
+  perfTurnTable($('p-agent'), sum.by_agent, r => agentChip(r.key));
+  perfTurnTable($('p-source'), sum.by_source, r => `<span class="tag ${escapeHtml(r.key)}">${escapeHtml(r.key)}</span>`);
+  perfOutcomes($('p-outcome'), sum.by_outcome);
+  perfQueue($('p-queue'), sum.queue);
+  perfDeps($('p-deps'), sum.deps);
+  perfCallTable($('p-model'), sum.by_call);
+  perfToolTable($('p-tool'), sum.by_tool);
+  $('p-tool-meta').textContent = (sum.by_tool || []).length ? plural(sum.by_tool.length, 'tool') : '';
+  perfSlowest($('p-slow'), sum.slowest);
+  $('p-slow-meta').textContent = (sum.slowest || []).length ? `${sum.slowest.length} shown` : '';
+}
+
+function renderHistogram(el, v) {
+  const buckets = v.buckets || [];
+  const bounds = v.bounds || [];
+  if (!v.count || !buckets.length) { el.innerHTML = emptyHtml('No turns in this window'); return; }
+  const max = Math.max(...buckets, 1);
+  el.innerHTML = `<div class="hist">${buckets.map((n, i) => {
+    const label = perfBucketLabel(bounds, i);
+    const share = n / v.count * 100;
+    return `<div class="hist-col"><div class="hist-track"><div class="hist-bar${n ? '' : ' empty-bucket'}" style="height:${Math.max(2, n / max * 100)}%"><span>${escapeHtml(label)}: ${plural(n, 'turn')} (${pct(share)})</span></div></div><i>${escapeHtml(label)}</i></div>`;
+  }).join('')}</div>`;
+}
+
+// A share above these reads as a problem rather than noise, and is coloured.
+const PERF_ALERT = { unanswered: 10, retries: 10, callFail: 5, toolFail: 20 };
+const alertIf = (v, limit) => ((v || 0) > limit ? 'bad' : '');
+
+function perfTurnTable(el, rows, nameOf) {
+  dataTable(el, 'No turns in this window',
+    [{ label: 'Name' }, { label: 'Turns', n: true }, { label: 'p50', n: true }, { label: 'p95', n: true },
+      { label: 'Rounds', n: true }, { label: 'Tools', n: true }, { label: 'Unanswered', n: true }],
+    (rows || []).slice(0, 12),
+    r => [nameOf(r), num(fmtInt(r.latency.count)), num(ms(r.latency.p50_ms)), num(ms(r.latency.p95_ms)),
+      num(dec(r.avg_rounds)), num(dec(r.avg_tool_calls)),
+      num(pct(r.latency.fail_pct), alertIf(r.latency.fail_pct, PERF_ALERT.unanswered))]);
+}
+
+function perfCallTable(el, rows) {
+  dataTable(el, 'No model calls in this window',
+    [{ label: 'Model' }, { label: 'Calls', n: true }, { label: 'p50', n: true }, { label: 'p95', n: true },
+      { label: 'Retried', n: true }, { label: 'Rate-limited', n: true }, { label: 'Failed', n: true }],
+    (rows || []).slice(0, 12),
+    r => [escapeHtml(r.key), num(fmtInt(r.latency.count)), num(ms(r.latency.p50_ms)), num(ms(r.latency.p95_ms)),
+      num(pct(r.retry_pct), alertIf(r.retry_pct, PERF_ALERT.retries)), num(fmtInt(r.rate_limited)),
+      num(pct(r.latency.fail_pct), alertIf(r.latency.fail_pct, PERF_ALERT.callFail))]);
+}
+
+function perfToolTable(el, rows) {
+  dataTable(el, 'No tool calls in this window',
+    [{ label: 'Tool' }, { label: 'Calls', n: true }, { label: 'p50', n: true }, { label: 'p95', n: true },
+      { label: 'Slowest', n: true }, { label: 'Errors', n: true }],
+    (rows || []).slice(0, 40),
+    r => [`<code>${escapeHtml(r.key)}</code>`, num(fmtInt(r.latency.count)), num(ms(r.latency.p50_ms)),
+      num(ms(r.latency.p95_ms)), num(ms(r.latency.max_ms)),
+      num(pct(r.latency.fail_pct), alertIf(r.latency.fail_pct, PERF_ALERT.toolFail))]);
+}
+
+function perfOutcomes(el, rows) {
+  if (!rows || !rows.length) { el.innerHTML = emptyHtml('No turns in this window'); return; }
+  const max = Math.max(...rows.map(r => r.count), 1);
+  el.innerHTML = rows.map(r => {
+    const ok = r.key === 'completed';
+    return `<div class="lb-row${ok ? '' : ' idle'}">
+        <span class="oc-dot${ok ? '' : ' bad'}"></span>
+        <div><div class="lb-name">${escapeHtml(outcomeLabel(r.key))}</div><div class="lb-sub">${pct(r.pct)} of turns</div></div>
+        <div class="lb-bar"><i style="--w:${(r.count / max * 100).toFixed(1)}%;--fill:${ok ? 'var(--green)' : 'var(--amber)'}"></i></div>
+        <div class="lb-num">${fmtInt(r.count)}</div>
+      </div>`;
+  }).join('');
+}
+
+function perfQueue(el, rows) {
+  dataTable(el, 'No deferred work registered.',
+    [{ label: 'Topic' }, { label: 'Pending', n: true }, { label: 'Oldest', n: true }],
+    rows,
+    r => [`<code>${escapeHtml(r.topic)}</code>`, num(fmtInt(r.pending)), num(escapeHtml(r.oldest_age || '—'))]);
+  if (rows && rows.length) {
+    el.insertAdjacentHTML('beforeend',
+      '<p class="kpi-note">Work handed off so a requester never waits on it. A backlog that keeps growing means the fleet is behind.</p>');
+  }
+}
+
+function perfDeps(el, deps) {
+  if (!deps || !deps.length) {
+    el.innerHTML = emptyHtml('No optional services configured.');
+    return;
+  }
+  el.innerHTML = deps.map(d => `<div class="lb-row${d.healthy ? '' : ' idle'}">
+      <span class="oc-dot${d.healthy ? '' : ' bad'}"></span>
+      <div><div class="lb-name">${escapeHtml(d.service)}</div>
+        <div class="lb-sub">${d.healthy ? 'healthy' : `${plural(d.failures || 0, 'failure')} — retrying in ${escapeHtml(d.retry_in || 'a moment')}`}</div></div>
+      <div></div>
+      <div class="lb-num">${d.healthy ? 'ok' : 'skipped'}</div>
+    </div>`).join('')
+    + '<p class="kpi-note">These run alongside a turn and their result is optional. One that starts failing is taken out of the path rather than charged to every request, and probed again on the interval shown.</p>';
+}
+
+function perfSlowest(el, turns) {
+  dataTable(el, 'No turns recorded yet',
+    [{ label: 'Time' }, { label: 'Agent' }, { label: 'Source' }, { label: 'Outcome' },
+      { label: 'Total', n: true }, { label: 'Model', n: true }, { label: 'Tools', n: true }, { label: 'Rounds', n: true }],
+    turns,
+    e => [new Date(e.at).toLocaleString(), agentChip(e.agent),
+      `<span class="tag ${escapeHtml(e.source)}">${escapeHtml(e.source)}</span>`, escapeHtml(outcomeLabel(e.outcome)),
+      num(ms(e.duration_ms)), num(ms(e.model_ms)), num(ms(e.tool_ms)), num(fmtInt(e.rounds))]);
 }
 
 /* Agents */
@@ -2934,7 +3208,7 @@ async function loadIdentity() {
 function prefetchAll() {
   return Promise.allSettled([
     loadIntegrations(), loadWorkflows(), loadDashboards(), loadPulls(), loadTickets(), loadChanges(), loadSessions(),
-    loadBilling(), loadSkills(), loadMCP(), loadGitops('workflows'), loadGitops('dashboards'),
+    loadBilling(), loadMetrics(), loadSkills(), loadMCP(), loadGitops('workflows'), loadGitops('dashboards'),
   ]);
 }
 
@@ -2942,7 +3216,7 @@ applyRoute();
 loadIdentity();
 loadAgents().then(loadChats);
 prefetchAll();
-const LIVE_PAGES = new Set(['overview', 'billing', 'workflows', 'dashboards', 'pulls', 'tickets']);
+const LIVE_PAGES = new Set(['overview', 'billing', 'performance', 'workflows', 'dashboards', 'pulls', 'tickets']);
 setInterval(() => {
   if (document.visibilityState !== 'visible' || chatFull) return;
   if (LIVE_PAGES.has(currentPage)) loadPage(currentPage);

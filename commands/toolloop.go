@@ -6,10 +6,13 @@ import (
 	"log"
 	"strings"
 	"sync"
+	"time"
 
+	"github.com/justmike1/arbetern/billing"
 	"github.com/justmike1/arbetern/internal/progress"
 	"github.com/justmike1/arbetern/internal/safego"
 	"github.com/justmike1/arbetern/llm"
+	"github.com/justmike1/arbetern/metrics"
 )
 
 type loopOutcome int
@@ -76,7 +79,8 @@ type toolLoop struct {
 	afterTool         func(name, result string)
 }
 
-// loopResult is how the loop ended, with the turn's cumulative usage.
+// loopResult is how the loop ended, with the turn's cumulative usage and the
+// timing split between the model and the tools it called.
 type loopResult struct {
 	Outcome       loopOutcome
 	Final         string
@@ -87,7 +91,70 @@ type loopResult struct {
 	ToolCalls     int
 	Usage         llm.Usage
 	Compression   llm.CompressionStats
+	FirstResponse time.Duration
+	ModelTime     time.Duration
+	ToolTime      time.Duration
 }
+
+// outcomeNames map how the loop ended onto the stable labels the performance
+// series is aggregated by.
+var outcomeNames = map[loopOutcome]string{
+	loopCompleted:      metrics.OutcomeCompleted,
+	loopNoChoices:      metrics.OutcomeNoChoices,
+	loopTruncatedCalls: metrics.OutcomeTruncated,
+	loopPreActionAck:   metrics.OutcomeBlocked,
+	loopEmpty:          metrics.OutcomeEmpty,
+	loopMaxRounds:      metrics.OutcomeMaxRounds,
+}
+
+// recordTurn hands the finished turn's timing to the performance series. The
+// sample carries the agent, entry path, model and outcome — never the
+// requester, the channel or the prompt.
+func (h *GeneralHandler) recordTurn(res loopResult, started time.Time, err error) {
+	if h.perf == nil {
+		return
+	}
+	outcome := metrics.OutcomeError
+	if err == nil {
+		if name, ok := outcomeNames[res.Outcome]; ok {
+			outcome = name
+		}
+	}
+	src := h.billingSource
+	if src == "" {
+		src = billing.SourceSlack
+	}
+	h.perf.RecordTurn(metrics.Turn{
+		Agent:           h.agentID,
+		Source:          src,
+		Model:           res.Model,
+		Outcome:         outcome,
+		DurationMS:      time.Since(started).Milliseconds(),
+		FirstResponseMS: res.FirstResponse.Milliseconds(),
+		ModelMS:         res.ModelTime.Milliseconds(),
+		ToolMS:          res.ToolTime.Milliseconds(),
+		Rounds:          res.Rounds,
+		ToolCalls:       res.ToolCalls,
+		OutputTokens:    res.Usage.CompletionTokens,
+		Failed:          outcome != metrics.OutcomeCompleted,
+	})
+}
+
+func (h *GeneralHandler) recordTool(name string, took time.Duration, result string) {
+	if h.perf == nil {
+		return
+	}
+	h.perf.RecordTool(metrics.ToolRun{
+		Agent:     h.agentID,
+		Name:      name,
+		LatencyMS: took.Milliseconds(),
+		Failed:    toolFailed(result),
+	})
+}
+
+// toolFailed reports whether a tool result is the error convention every tool
+// in this package follows: a plain string starting with "Error".
+func toolFailed(result string) bool { return strings.HasPrefix(result, "Error") }
 
 // runToolLoop drives the model until it answers, gives up, or runs out of
 // rounds, and records the turn's usage on the way out.
@@ -98,15 +165,23 @@ func (h *GeneralHandler) runToolLoop(ctx context.Context, lp toolLoop) (res loop
 	if rounds <= 0 {
 		rounds = defaultToolRounds
 	}
+	started := time.Now()
 	defer func() {
 		res.Model = active.Model()
 		h.recordUsage(res.Model, lp.userID, res.Usage, res.Compression)
+		h.recordTurn(res, started, err)
 	}()
 
 	var blockedAcks, emptyRetries, truncatedRounds, narrationRetries int
 	for i := 0; i < rounds; i++ {
 		res.Rounds = i + 1
+		roundStart := time.Now()
 		resp, err := active.CompleteWithTools(ctx, messages, lp.tools)
+		took := time.Since(roundStart)
+		res.ModelTime += took
+		if res.FirstResponse == 0 {
+			res.FirstResponse = took
+		}
 		if err != nil {
 			return res, err
 		}
@@ -193,7 +268,9 @@ func (h *GeneralHandler) runToolLoop(ctx context.Context, lp toolLoop) (res loop
 		// them together makes the round cost the slowest call rather than their
 		// sum. Results are collected by index so the order the model sees never
 		// depends on which call finished first.
+		toolStart := time.Now()
 		results := h.executeToolsConcurrently(ctx, lp, toolCalls)
+		res.ToolTime += time.Since(toolStart)
 		for i, tc := range toolCalls {
 			name := tc.Function.Name
 			if lp.afterTool != nil {
@@ -228,7 +305,9 @@ func (h *GeneralHandler) executeToolsConcurrently(ctx context.Context, lp toolLo
 	run := func(i int) {
 		tc := calls[i]
 		log.Printf("%s tool: %s(%s)", lp.logPrefix, tc.Function.Name, redactToolArgsForLog(tc.Function.Name, tc.Function.Arguments))
+		toolStart := time.Now()
 		results[i] = h.executeTool(ctx, lp.channelID, lp.userID, lp.auditTS, tc.Function.Name, tc.Function.Arguments)
+		h.recordTool(tc.Function.Name, time.Since(toolStart), results[i])
 	}
 	if len(calls) == 1 || anyMutating(calls) {
 		for i := range calls {

@@ -23,13 +23,19 @@ type Client struct {
 	api *gh.Client
 }
 
+// apiTimeout bounds every GitHub call. go-github defaults to a client with no
+// timeout, and most calls here run under a turn context that has no deadline
+// either, so a connection that stalls mid-response would hold a tool call — and
+// the person waiting on it — open indefinitely.
+const apiTimeout = 60 * time.Second
+
 func NewClient(token string) *Client {
-	api, err := gh.NewClient(gh.WithAuthToken(token))
+	api, err := gh.NewClient(gh.WithAuthToken(token), gh.WithTimeout(apiTimeout))
 	if err != nil {
 		// WithAuthToken only fails on an empty token, which is a
 		// configuration error the caller has already validated.
 		log.Printf("[github] client setup failed: %v", err)
-		api, _ = gh.NewClient()
+		api, _ = gh.NewClient(gh.WithTimeout(apiTimeout))
 	}
 	return &Client{api: api}
 }

@@ -251,19 +251,41 @@ URL:
 | Agents | `/ui/agents` | The roster — open a card for its prompts (read-only), or chat where `chat_enabled` |
 | Chats | `/ui/chats` | Conversations of every chat-enabled agent: open, start, rename or delete them (same access rules as the chat itself) |
 | Skills | `/ui/skills` | Instruction blocks the agents follow: the built-in ones from the prompt files (read-only) plus custom skills written here and appended to the system prompts of the agents they target |
-| Workflows | `/ui/workflows` | Every workflow across agents with schedule, status, last run, run / delete actions and GitOps sync state; each opens at `/ui/<agent>/workflow/<id>` with its flow diagram, prompt or tasks, run history and editor |
+| Workflows | `/ui/workflows` | Every workflow across agents with schedule, status, last run, run / delete actions and GitOps sync state; each opens at `/ui/<agent>/workflow/<id>` with its flow diagram, prompt or tasks, run history and editor. "Run now" and "Sync now" both return immediately and report through the shared state the page polls, so neither holds a browser request open for the minutes they take |
 | Dashboards | `/ui/dashboards` | Every dashboard across agents (source dashboards, prompt templates, rendered reports) with sync state; each opens at `/ui/<agent>/dashboard/<id>` |
 | Pull requests | `/ui/pulls` | Open pull requests the agents authored, found by the marker every arbetern-written PR body carries: agent, requester, entry source (Slack / chat / workflow) and age, filterable by agent; ready-for-review PRs are listed first, drafts last with a draft label |
 | Tickets | `/ui/tickets` | Unresolved Jira issues assigned to the account behind the Atlassian integration: type, status, priority, reporter, labels and age, filterable by project |
 | Backend | `/ui/backend` | Read-only browser of the state bucket laid out as folders, with an object viewer that masks secret-looking values, plus a sample of the vector index; visible only to the Slack user groups or emails in `backendView` (closed when none are set) |
 | Changelog | `/ui/changelog` | Latest commits to the arbetern repository |
+| Performance | `/ui/performance` | Recorded statistics: response-time percentiles and their distribution, time to the model's first round, the split between model and tool time, rounds and tool calls per turn, how turns end, provider round-trip latency with retries and rate limits, per-tool latency, the slowest recent turns, the deferred-work backlog, and which optional services are currently being skipped |
 | Usage & Billing | `/ui/billing` | Estimated LLM spend by agent, model, source, user and workflow (`/billing` redirects here) |
 
-Overview and Usage & Billing share one time window (7 / 30 / 90 days / all) and
-read from the usage ledger (`/api/billing/summary`), which also aggregates per
-user × agent (`by_user_agent`). Slack user IDs are resolved to display names in
-the background via `users.info` (needs the `users:read` scope); until a name is
+Overview, Performance and Usage & Billing share one time window (7 / 30 / 90
+days / all). Overview and billing read the usage ledger
+(`/api/billing/summary`), which also aggregates per user × agent
+(`by_user_agent`). Slack user IDs are resolved to display names in the
+background via `users.info` (needs the `users:read` scope); until a name is
 cached the raw ID is shown. Chat turns are keyed by the proxy-verified email.
+
+Optional services that sit alongside a turn — the Headroom compression sidecar,
+the embeddings backend — are guarded by a breaker: each runs before the model on
+every round, so one that accepts connections but never answers would otherwise
+cost its full timeout per round and spend a whole turn's budget on a step whose
+result is optional. One timeout takes it out of the path (the timeout has
+already been paid); a couple of cheap failures are tolerated first. It is probed
+once per cooldown, starting at 30s and doubling to 10 minutes, and the current
+state is on the Performance page under *Optional services*. See
+[docs/HEADROOM.md](docs/HEADROOM.md).
+
+The Performance page reads a separate series (`/api/metrics/summary`) that
+records **no identity at all** — a sample is keyed by agent, entry path, model,
+backend and tool name, never by the person, channel or prompt behind the turn.
+That keeps it safe to retain and to point a monitor at. Overview carries a
+**Response time** strip with the same numbers at a glance: median and p95, time
+to the first model round, the share of turns that produced an answer, tool calls
+per turn, and a 30-day p95 trend. Latency is stored as a histogram rather than
+raw samples, so percentiles survive both the merge across replicas and the
+month rollup.
 
 - The top-right user button shows who is signed in (`/api/me`): the email verified by the SSO proxy, resolved to the Slack profile (name, handle, title, time zone) via `users.lookupByEmail`, and to the Atlassian account (name, account ID) when that integration is connected. Without a proxy it reads "Not signed in".
 - Drop a `logo.png` into `ui/` to replace the default icon
@@ -898,11 +920,21 @@ Every workflow has a manual-run endpoint behind the UI IP whitelist:
 
 ```bash
 curl -X POST https://<host>/api/workflows/<agent>/<id>/run
-# → { "result": "<final output>" } or { "error": "...", "result": "..." }
+# → 202 { "accepted": true, "agent": "...", "id": "...", "message": "workflow run queued; …" }
 ```
 
 This is also how event-triggered and `trigger: manual` workflows are kicked
 off the first time.
+
+The run is not executed by the replica that took the request. It is written to
+the durable queue in the state bucket and claimed by whichever replica has
+capacity, so it survives a pod restart between the request and the run and
+spreads the load instead of pinning it to one pod. Event-triggered
+(`on_success` / `on_failure`) listeners go through the same queue. Poll
+`GET /api/workflows/<agent>/<id>` — the run appears in its history when it
+finishes. Delivery is deliberately at-most-once: a tick opens pull requests and
+posts to Slack, so a run lost to a crash is cheaper than one replayed after it.
+See [docs/STATE.md](docs/STATE.md#deferred-work).
 
 ### Configuration
 
@@ -966,6 +998,7 @@ agents/              # agent definitions (one directory per agent)
 commands/            # intent routing, debug/general handlers, per-user context store
 config/              # env var loading
 internal/store/      # S3 state backend: cached documents, conditional writes, leases
+internal/queue/      # durable work queue in the same bucket (claims by conditional write)
 internal/vectors/    # S3 Vectors index client (semantic user context)
 github/              # GitHub REST API client (repos, PRs, files, workflows)
 llm/                 # LLM inference client + tool types (GitHub Models, Azure OpenAI, AWS Bedrock)
@@ -979,6 +1012,7 @@ prompts/             # YAML prompt loader + agent discovery
 dashboards/          # dashboard registry, sync runner, executor + CRUD API
 workflows/           # workflow engine (monoflow / subflows / event-triggered) + CRUD API
 billing/             # usage & billing ledger (per agent / model / source / user / workflow) + summary API
+metrics/             # performance series (turn / model-call / tool latency, outcomes) + summary API
 skills/              # custom skill registry (instruction blocks appended to agent prompts) + API
 mcp/                 # MCP connector registry, Streamable HTTP JSON-RPC client, tool exposure + API
 ui/                  # embedded management console (index.html shell, app.css, app.js)

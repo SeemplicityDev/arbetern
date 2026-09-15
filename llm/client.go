@@ -289,6 +289,12 @@ func (c *Client) CompleteWithTools(ctx context.Context, messages []ChatMessage, 
 		resp *ChatResponse
 		err  error
 	)
+	obs := currentObserver()
+	var tries *attempts
+	if obs != nil {
+		ctx, tries = withAttempts(ctx)
+	}
+	started := time.Now()
 	switch {
 	case c.useBedrock():
 		resp, err = c.doBedrock(ctx, messages, tools)
@@ -298,6 +304,17 @@ func (c *Client) CompleteWithTools(ctx context.Context, messages []ChatMessage, 
 		resp, err = c.doAnthropic(ctx, messages, tools)
 	default:
 		resp, err = c.doChat(ctx, messages, tools)
+	}
+	if obs != nil {
+		n, limited := tries.read()
+		obs.ObserveCall(CallStats{
+			Model:       c.model,
+			Backend:     c.backendName(),
+			Latency:     time.Since(started),
+			Attempts:    n,
+			RateLimited: limited,
+			Failed:      err != nil || (resp != nil && resp.Error != nil),
+		})
 	}
 	if err != nil {
 		return nil, err
@@ -346,17 +363,36 @@ func (c *Client) compressModel() string {
 // or on any error (fail-open: compression never breaks an LLM call). The
 // returned CompressionStats reports the token savings (zero when compression
 // was disabled, skipped, or made no change).
+//
+// A proxy that keeps failing is taken out of the path by a breaker. Compression
+// runs before every round of a tool loop, so without one a sidecar that accepts
+// connections but never answers costs its full timeout per round and can spend
+// a whole turn's budget on an optional step.
 func (c *Client) compressMessages(ctx context.Context, messages []ChatMessage) ([]ChatMessage, CompressionStats) {
 	if c.compressURL == "" || len(messages) == 0 {
 		return messages, CompressionStats{}
 	}
-
-	payload, err := json.Marshal(compressRequest{Model: c.compressModel(), Messages: messages})
-	if err != nil {
+	br := breakerFor("headroom:"+c.compressURL, "Headroom compression")
+	if !br.allow() {
 		return messages, CompressionStats{}
 	}
+	out, stats, err := c.compress(ctx, messages)
+	if err != nil {
+		br.fail(err)
+		return messages, CompressionStats{}
+	}
+	br.ok()
+	return out, stats
+}
 
-	// Bound the compression round-trip independently of the 120s LLM timeout.
+func (c *Client) compress(ctx context.Context, messages []ChatMessage) ([]ChatMessage, CompressionStats, error) {
+	payload, err := json.Marshal(compressRequest{Model: c.compressModel(), Messages: messages})
+	if err != nil {
+		// Our own request is malformed; that says nothing about the proxy.
+		return messages, CompressionStats{}, nil
+	}
+
+	// Bound the compression round-trip independently of the LLM timeout.
 	timeout := c.compressTimeout
 	if timeout <= 0 {
 		timeout = defaultCompressTimeout
@@ -366,29 +402,38 @@ func (c *Client) compressMessages(ctx context.Context, messages []ChatMessage) (
 
 	req, err := http.NewRequestWithContext(cctx, http.MethodPost, c.compressURL+"/v1/compress", bytes.NewReader(payload))
 	if err != nil {
-		return messages, CompressionStats{}
+		return messages, CompressionStats{}, nil
 	}
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		log.Printf("[llm] headroom compress unavailable, sending uncompressed: %v", err)
-		return messages, CompressionStats{}
+		// A caller that gave up is not the proxy failing.
+		if ctx.Err() != nil {
+			return messages, CompressionStats{}, nil
+		}
+		if cctx.Err() != nil {
+			err = fmt.Errorf("no response within %s: %w", timeout, context.DeadlineExceeded)
+		}
+		return messages, CompressionStats{}, err
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxCompressResponseBody))
 	if err != nil {
-		return messages, CompressionStats{}
+		return messages, CompressionStats{}, err
 	}
 	if resp.StatusCode != http.StatusOK {
-		log.Printf("[llm] headroom compress returned %d, sending uncompressed", resp.StatusCode)
-		return messages, CompressionStats{}
+		return messages, CompressionStats{}, fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
 
 	var cr compressResponse
-	if err := json.Unmarshal(body, &cr); err != nil || len(cr.Messages) == 0 {
-		return messages, CompressionStats{}
+	if err := json.Unmarshal(body, &cr); err != nil {
+		return messages, CompressionStats{}, fmt.Errorf("undecodable response: %w", err)
+	}
+	// The proxy answered and chose to change nothing; that is a healthy call.
+	if len(cr.Messages) == 0 {
+		return messages, CompressionStats{}, nil
 	}
 	if cr.TokensSaved > 0 {
 		pct := float64(cr.TokensSaved) / float64(cr.TokensBefore) * 100
@@ -398,7 +443,7 @@ func (c *Client) compressMessages(ctx context.Context, messages []ChatMessage) (
 		TokensBefore: cr.TokensBefore,
 		TokensAfter:  cr.TokensAfter,
 		TokensSaved:  cr.TokensSaved,
-	}
+	}, nil
 }
 
 func (c *Client) doChat(ctx context.Context, messages []ChatMessage, tools []Tool) (*ChatResponse, error) {
@@ -493,6 +538,7 @@ func (c *Client) doPostWithRetry(ctx context.Context, url string, payload []byte
 			if ctx.Err() != nil {
 				return nil, 0, ctx.Err()
 			}
+			noteAttempt(ctx, 0)
 			lastErr = fmt.Errorf("%s API request failed: %w", label, err)
 			lastRetryAfter, lastReason = "", err.Error()
 			continue
@@ -501,6 +547,7 @@ func (c *Client) doPostWithRetry(ctx context.Context, url string, payload []byte
 		retryAfter := resp.Header.Get("Retry-After")
 		status := resp.StatusCode
 		_ = resp.Body.Close()
+		noteAttempt(ctx, status)
 		if readErr != nil {
 			if ctx.Err() != nil {
 				return nil, 0, ctx.Err()
