@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/justmike1/arbetern/billing"
 	"github.com/justmike1/arbetern/github"
 	"github.com/justmike1/arbetern/llm"
 	"github.com/justmike1/arbetern/slack"
@@ -41,7 +42,7 @@ func (h *DebugHandler) Execute(channelID, userID, text, responseURL, auditTS str
 
 	workflowLogs := fetchWorkflowLogsBulk(ctx, h.ghClient, channelContext+"\n"+text, userID, channelID)
 
-	systemPrompt := h.prompts.SystemPrompt("debug")
+	systemPrompt := withOutputRules(h.prompts, "debug", billing.SourceSlack)
 	systemPrompt = strings.Replace(systemPrompt, "{{USER_CONTEXT}}", h.userContext, 1)
 	systemPrompt += userContextPrompt(h.readPersistentUserContext(ctx, userID, channelID, text))
 

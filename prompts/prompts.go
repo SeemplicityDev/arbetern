@@ -191,13 +191,33 @@ func (ap *AgentPrompts) GetAll() map[string]string {
 	return cp
 }
 
+// outputKeyPrefix marks the global keys that belong to one destination rather
+// than to every prompt: agents/prompts.yaml holds one per source, and only the
+// one matching the turn's destination is injected, by OutputPrompt.
+const outputKeyPrefix = "output_"
+
+// OutputPrompt returns the formatting rules for where this turn's answer is
+// going — "slack", "chat", "workflow", "dashboard" — or "" when the source is
+// unknown or has no block. The same answer is read by very different renderers,
+// so the destination decides the syntax.
+func (ap *AgentPrompts) OutputPrompt(source string) string {
+	if ap == nil || source == "" {
+		return ""
+	}
+	return ap.Get(outputKeyPrefix + source)
+}
+
 // SystemPrompt builds a system prompt by joining all global keys (in their
 // original YAML order) followed by the handler-specific key, separated by
 // double newlines. Adding a new key to agents/prompts.yaml automatically
-// includes it — no code changes required.
+// includes it — no code changes required. Keys prefixed output_ are the
+// exception: they are per-destination and injected by OutputPrompt instead.
 func (ap *AgentPrompts) SystemPrompt(specificKey string) string {
 	parts := make([]string, 0, len(ap.globalKeys)+1)
 	for _, k := range ap.globalKeys {
+		if strings.HasPrefix(k, outputKeyPrefix) {
+			continue
+		}
 		if v := ap.Get(k); v != "" {
 			parts = append(parts, v)
 		}

@@ -256,7 +256,7 @@ URL:
 | Pull requests | `/ui/pulls` | Open pull requests the agents authored, found by the marker every arbetern-written PR body carries: agent, requester, entry source (Slack / chat / workflow) and age, filterable by agent; ready-for-review PRs are listed first, drafts last with a draft label |
 | Tickets | `/ui/tickets` | Unresolved Jira issues assigned to the account behind the Atlassian integration: type, status, priority, reporter, labels and age, filterable by project |
 | Backend | `/ui/backend` | Read-only browser of the state bucket laid out as folders, with an object viewer that masks secret-looking values, plus a sample of the vector index; visible only to the Slack user groups or emails in `backendView` (closed when none are set) |
-| Your context | `/ui/context` | Everything the agents remember of the signed-in person, aggregated across every agent and every identity they are recorded under (Slack ID, email), newest first, filterable by agent and text. Served from the cached aggregate the background pass maintains, so the page is one object read. Reached from the user button, not the rail, and open to anyone signed in: it reads only what is keyed to the identities the request authenticated as, so it needs no allow-list |
+| Your context | `/ui/context` | A profile of the signed-in person written from their own turns: what they work on, the channels and repositories they keep touching, how they use each agent, and counted metrics — with the turns it was written from behind a History tab. Aggregated across every agent and every identity they are recorded under (Slack ID, email) by the background pass, prose and all, so the page is one object read. Reached from the user button, not the rail, and open to anyone signed in: it reads only what is keyed to the identities the request authenticated as, so it needs no allow-list. See [docs/STATE.md](docs/STATE.md#aggregated-per-person-context) |
 | Changelog | `/ui/changelog` | Latest commits to the arbetern repository |
 | Performance | `/ui/performance` | Recorded statistics: response-time percentiles and their distribution, time to the model's first round, the split between model and tool time, rounds and tool calls per turn, how turns end, provider round-trip latency with retries and rate limits, per-tool latency, the slowest recent turns, the deferred-work backlog, and which optional services are currently being skipped |
 | Usage & Billing | `/ui/billing` | Estimated LLM spend by agent, model, source, user and workflow (`/billing` redirects here) |
@@ -289,7 +289,7 @@ raw samples, so percentiles survive both the merge across replicas and the
 month rollup.
 
 - The top-right user button shows who is signed in (`/api/me`): the email verified by the SSO proxy, resolved to the Slack profile (name, handle, title, time zone) via `users.lookupByEmail`, and to the Atlassian account (name, account ID) when that integration is connected. Without a proxy it reads "Not signed in".
-- The same menu opens **Your context** (`/api/me/context`): how many turns the agents currently remember of you, and a page listing them.
+- The same menu opens **Your context** (`/api/me/context`): how many turns the agents currently remember of you, and the written profile built from them.
 - Drop a `logo.png` into `ui/` to replace the default icon
 - Set `UI_HEADER` env var to customize the top-bar title
 - Agents with `chat_enabled` expose a full-screen chat at `/ui/<agent>/chat` — a deep-linkable, reload-safe URL you can bookmark or share
@@ -1030,17 +1030,25 @@ Edit any `agents/<name>/prompts.yaml` to change LLM behavior without recompiling
 
 Global prompts are defined in `agents/prompts.yaml` and inherited by every agent. Each key there is joined into every system prompt the agent builds, so a rule added to that file applies to all agents from every entry point — Slack commands, thread replies, the chat UI, scheduled workflow ticks and dashboard renders. Agent-specific prompts override globals by key.
 
+Keys prefixed `output_` are the exception: they are per-destination, and only the one matching where the turn's answer is going is injected. The same answer is read by Slack, which renders no Markdown, by the console's chat view, which renders GitHub-flavoured Markdown including tables, and by a stored dashboard report — so the destination, not the agent, decides the syntax.
+
 | Global key | What it governs |
 |---|---|
 | `security` | Scope policy, prompt-injection and secret-handling rules |
 | `user_identity` | How the pre-resolved requester is referenced across integrations |
-| `slack_formatting` | Slack mrkdwn output rules, brevity, bias toward action |
+| `confluence_tools` | The Confluence tools and the format their bodies take |
+| `output_slack` | Slack mrkdwn rules: `*bold*`, `<url\|text>`, no headings and no Markdown tables — tabular data goes out as a list or a fixed-width code block |
+| `output_chat` | GitHub-flavoured Markdown for the console's chat view: headings, `[text](url)`, fenced code, and Markdown tables for anything tabular |
+| `output_workflow` | A scheduled tick's result, read in Slack and stored in run history: Slack mrkdwn, lead with what changed |
+| `output_dashboard` | The answer *is* the page: Markdown with tables, figures first, no greeting or sign-off |
 | `action_first_response` | No pre-action acknowledgements; report completed results |
 | `code_comments` | Comment policy for every code change the agent authors |
 | `repo_agent_instructions` | Reading a repository's own CLAUDE.md / AGENTS.md before changing it |
 | `pull_request_updates` | Committing follow-up work onto the existing PR instead of opening another |
 | `plan_then_batch` | Plan the whole change set first, ask only where the plan forks, execute in batches, verify before handing off |
 | `clarify_before_expedition` | When an open-ended ask must pause for one round of questions |
+
+Every `output_` block also says the same thing about tool output: structured data a tool or MCP connector returns — JSON, a Markdown table, HTML, a CSV — is input, not an answer, and must be re-rendered for the destination rather than pasted through. MCP payloads additionally carry that reminder inline, prefixed to the tool result itself, because that is the last thing the model reads before it writes.
 
 The `plan_then_batch` block exists because an unplanned agent run spreads one
 logical change across dozens of single-file commits, sometimes undoing its own

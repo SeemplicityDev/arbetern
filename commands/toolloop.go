@@ -8,7 +8,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/justmike1/arbetern/billing"
 	"github.com/justmike1/arbetern/internal/progress"
 	"github.com/justmike1/arbetern/internal/safego"
 	"github.com/justmike1/arbetern/llm"
@@ -126,10 +125,7 @@ func (h *GeneralHandler) recordTurn(res loopResult, started time.Time, err error
 			outcome = name
 		}
 	}
-	src := h.billingSource
-	if src == "" {
-		src = billing.SourceSlack
-	}
+	src := h.source()
 	h.perf.RecordTurn(metrics.Turn{
 		Agent:           h.agentID,
 		Source:          src,

@@ -45,6 +45,8 @@ type PromptProvider interface {
 	// SystemPrompt builds the full system prompt by joining all global keys
 	// (in YAML order) with the handler-specific key.
 	SystemPrompt(specificKey string) string
+	// OutputPrompt returns the formatting rules for where the answer is going.
+	OutputPrompt(source string) string
 }
 
 // OAuthClient is implemented by any integration client that uses OAuth and

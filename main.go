@@ -709,53 +709,148 @@ type identity struct {
 	ResolvedAt         time.Time          `json:"resolved_at"`
 }
 
-// identityLinks resolves one stored user-context identity to the others the
-// same person is recorded under. Only the Slack direction can be resolved —
-// a member ID gives the email, and the email gives the key the console records
-// that person under — because the stored email key is a one-way hash.
-// Lookups are cached, negatives included, so the background aggregation does
-// not call Slack once per person per pass.
-type identityLinks struct {
+// lookupCache memoises a slow lookup for a while, negatives included, so the
+// hourly profile pass does not re-ask Slack about what it already knows.
+type lookupCache[T any] struct {
 	mu      sync.Mutex
-	entries map[string]identityLinkEntry
+	entries map[string]lookupEntry[T]
 	ttl     time.Duration
-	slack   *slack.Client
 }
 
-type identityLinkEntry struct {
-	ids     []string
-	fetched time.Time
+type lookupEntry[T any] struct {
+	value  T
+	cached time.Time
 }
 
-func newIdentityLinks(slackClient *slack.Client, ttl time.Duration) *identityLinks {
-	return &identityLinks{entries: make(map[string]identityLinkEntry), ttl: ttl, slack: slackClient}
+func newLookupCache[T any](ttl time.Duration) *lookupCache[T] {
+	return &lookupCache[T]{entries: make(map[string]lookupEntry[T]), ttl: ttl}
 }
 
-func (c *identityLinks) resolve(_ context.Context, id string) []string {
-	if c == nil || c.slack == nil || !slackUserIDRe.MatchString(id) {
-		return nil
-	}
+func (c *lookupCache[T]) get(key string, fetch func() T) T {
 	c.mu.Lock()
-	if e, ok := c.entries[id]; ok && time.Since(e.fetched) < c.ttl {
+	if e, ok := c.entries[key]; ok && time.Since(e.cached) < c.ttl {
 		c.mu.Unlock()
-		return e.ids
+		return e.value
 	}
 	c.mu.Unlock()
 
-	var ids []string
-	user, err := c.slack.GetUserInfo(id)
-	switch {
-	case err != nil:
-		log.Printf("[user-context] slack users.info %s failed: %v", id, err)
-	case user != nil:
+	value := fetch()
+	c.mu.Lock()
+	c.entries[key] = lookupEntry[T]{value: value, cached: time.Now()}
+	c.mu.Unlock()
+	return value
+}
+
+// slackPerson is one users.info answer, kept whole because the profile pass
+// wants both halves of it: who the person is and which other key they are
+// recorded under.
+type slackPerson struct {
+	facts   commands.PersonFacts
+	aliases []string
+}
+
+// billingAgentPlatform attributes spend that belongs to the platform itself
+// rather than to any agent's work — currently only the written profiles.
+const billingAgentPlatform = "platform"
+
+// profileEnricher gives the user-context store what it cannot derive from the
+// turns it holds: the link between a person's Slack ID and the email key the
+// console records them under, who that person is, what the channel IDs are
+// called, and the model call that writes their profile.
+//
+// Only the Slack direction of the identity link resolves — a member ID gives
+// the email, and the email gives the console's key — because the stored email
+// key is a one-way hash.
+type profileEnricher struct {
+	slack    *slack.Client
+	models   *llm.Client
+	billing  *billing.Store
+	people   *lookupCache[slackPerson]
+	channels *lookupCache[string]
+}
+
+func newProfileEnricher(slackClient *slack.Client, models *llm.Client, bill *billing.Store) *profileEnricher {
+	return &profileEnricher{
+		slack:    slackClient,
+		models:   models,
+		billing:  bill,
+		people:   newLookupCache[slackPerson](24 * time.Hour),
+		channels: newLookupCache[string](24 * time.Hour),
+	}
+}
+
+func (p *profileEnricher) lookup(id string) slackPerson {
+	if p.slack == nil || !slackUserIDRe.MatchString(id) {
+		return slackPerson{}
+	}
+	return p.people.get(id, func() slackPerson {
+		user, err := p.slack.GetUserInfo(id)
+		if err != nil {
+			log.Printf("[user-context] slack users.info %s failed: %v", id, err)
+			return slackPerson{}
+		}
+		if user == nil {
+			return slackPerson{}
+		}
+		out := slackPerson{facts: commands.PersonFacts{
+			Name:     firstNonBlank(user.RealName, user.Profile.RealName, user.Profile.DisplayName),
+			Title:    user.Profile.Title,
+			Timezone: firstNonBlank(user.TZLabel, user.TZ),
+		}}
 		if email := strings.TrimSpace(user.Profile.Email); email != "" {
-			ids = []string{commands.UserContextID(email)}
+			out.aliases = []string{commands.UserContextID(email)}
+		}
+		return out
+	})
+}
+
+func (p *profileEnricher) Link(_ context.Context, id string) []string {
+	return p.lookup(id).aliases
+}
+
+func (p *profileEnricher) Person(_ context.Context, ids []string) commands.PersonFacts {
+	for _, id := range ids {
+		if facts := p.lookup(id).facts; facts.Name != "" || facts.Title != "" {
+			return facts
 		}
 	}
-	c.mu.Lock()
-	c.entries[id] = identityLinkEntry{ids: ids, fetched: time.Now()}
-	c.mu.Unlock()
-	return ids
+	return commands.PersonFacts{}
+}
+
+func (p *profileEnricher) ChannelName(_ context.Context, id string) string {
+	if p.slack == nil || id == "" {
+		return ""
+	}
+	return p.channels.get(id, func() string {
+		name, err := p.slack.GetChannelName(id)
+		if err != nil {
+			log.Printf("[user-context] slack conversations.info %s failed: %v", id, err)
+			return ""
+		}
+		return name
+	})
+}
+
+func (p *profileEnricher) Summarize(ctx context.Context, system, user string) (string, error) {
+	if p.models == nil {
+		return "", nil
+	}
+	out, usage, err := p.models.Complete(ctx, system, user)
+	if err != nil {
+		return "", err
+	}
+	if p.billing != nil && usage != nil {
+		p.billing.Record(billing.Event{
+			Agent:              billingAgentPlatform,
+			Source:             billing.SourceProfile,
+			Model:              p.models.Model(),
+			PromptTokens:       usage.PromptTokens,
+			CachedPromptTokens: usage.CachedPromptTokens,
+			CompletionTokens:   usage.CompletionTokens,
+			TotalTokens:        usage.TotalTokens,
+		})
+	}
+	return out, nil
 }
 
 type identityCache struct {
@@ -2086,7 +2181,6 @@ func main() {
 		}
 	}
 	userContextStore.SetSharedAgents(sharedAgents)
-	userContextStore.SetIdentityLinker(newIdentityLinks(slackClient, 24*time.Hour).resolve)
 	userContextStore.UseQueue(tasks)
 	log.Printf("User-context store: %suser-context/ (TTL=%s, semantic=%t, shared agents=%d)", backend, commands.UserContextTTL, userContextStore.Semantic(), len(sharedAgents))
 
@@ -2164,6 +2258,9 @@ func main() {
 	log.Printf("Usage & billing store: %sbilling/ (%d month(s))", backend, billingStore.Months())
 	billingStop := make(chan struct{})
 	billingDone := billingStore.StartFlusher(billingStop)
+	// Profiles are aggregated in the background and described by the model, so
+	// the store needs Slack, an LLM client and the ledger that prices the call.
+	userContextStore.SetEnricher(newProfileEnricher(slackClient, modelsClient, billingStore))
 	userNames := newUserNameCache(24 * time.Hour)
 	billingStore.SetUserNameResolver(func(id string) string { return userNames.resolve(slackClient, id) })
 	billing.StartPriceSync(billingStop)

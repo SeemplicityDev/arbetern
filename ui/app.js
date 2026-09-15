@@ -70,7 +70,7 @@ const INTEGRATION_LOGOS = {
   aws: `<svg viewBox="0 0 128 128"><path style="fill:var(--text-bright)" d="M36.4 54.4c0 1.6.2 2.9.5 3.8.4.9.9 1.9 1.6 3 .2.4.3.8.3 1.1 0 .5-.3 1-.9 1.4l-3 2c-.4.3-.9.4-1.3.4-.5 0-1-.2-1.5-.7-.7-.7-1.3-1.5-1.8-2.4-.5-.9-1-1.9-1.5-3.1-3.7 4.4-8.4 6.5-14 6.5-4 0-7.2-1.2-9.5-3.5C2.8 60.7 1.7 57.7 1.7 54c0-4 1.4-7.2 4.2-9.6 2.9-2.4 6.7-3.6 11.5-3.6 1.6 0 3.3.1 5 .4 1.7.2 3.5.6 5.4 1v-3.4c0-3.6-.8-6.1-2.2-7.6-1.5-1.5-4.1-2.2-7.7-2.2-1.7 0-3.4.2-5.1.6-1.7.4-3.4.9-5 1.6-.7.3-1.2.5-1.6.6-.3.1-.6.1-.8.1-.7 0-1-.5-1-1.5v-2.4c0-.8.1-1.4.3-1.7.2-.3.6-.6 1.2-.9 1.7-.9 3.7-1.6 6-2.2 2.4-.6 4.9-.9 7.5-.9 5.8 0 10 1.3 12.7 3.9 2.7 2.6 4 6.6 4 11.9zM20.1 60.5c1.6 0 3.2-.3 5-.9 1.7-.6 3.3-1.6 4.5-3.1.8-.9 1.3-1.9 1.6-3 .3-1.1.4-2.5.4-4.1v-2c-1.3-.3-2.8-.6-4.3-.8-1.5-.2-3-.3-4.5-.3-3.2 0-5.5.6-7.1 1.9-1.6 1.3-2.4 3.1-2.4 5.5 0 2.3.6 4 1.8 5.1 1.2 1.2 2.9 1.7 5 1.7zm32.2 4.3c-.8 0-1.3-.1-1.7-.4-.4-.3-.7-.9-1-1.6L40.1 30c-.3-.9-.5-1.5-.5-1.9 0-.8.4-1.2 1.2-1.2h4.6c.9 0 1.5.1 1.8.4.4.3.7.9.9 1.6l6.8 26.8 6.3-26.8c.2-.9.5-1.4.9-1.6.4-.2 1-.4 1.9-.4h3.7c.9 0 1.5.1 1.9.4.4.3.7.9.9 1.6l6.4 27.2 7-27.2c.2-.9.5-1.4.9-1.6.4-.2 1-.4 1.8-.4h4.3c.8 0 1.2.4 1.2 1.2 0 .2 0 .5-.1.8-.1.3-.2.7-.4 1.2L83.6 62.9c-.3.9-.6 1.4-1 1.6-.4.2-.9.4-1.7.4h-4c-.9 0-1.5-.1-1.9-.4-.4-.3-.7-.9-.9-1.6l-6.3-26.1-6.2 26c-.2.9-.5 1.4-.9 1.6-.4.3-1 .4-1.9.4zm51.5 1.3c-2.5 0-5-.3-7.4-.9-2.4-.6-4.3-1.2-5.5-1.9-.8-.4-1.3-.9-1.5-1.3-.2-.4-.3-.9-.3-1.3v-2.5c0-1 .4-1.5 1.1-1.5.3 0 .6.1.9.2.3.1.8.3 1.3.5 1.7.7 3.5 1.3 5.5 1.7 2 .4 3.9.6 5.8.6 3.1 0 5.5-.5 7.1-1.6 1.7-1.1 2.5-2.7 2.5-4.7 0-1.4-.4-2.5-1.3-3.4-.9-.9-2.5-1.8-4.9-2.6l-7-2.2c-3.5-1.1-6.1-2.7-7.7-4.9-1.6-2.1-2.4-4.4-2.4-6.9 0-2 .4-3.8 1.3-5.3.9-1.5 2.1-2.9 3.6-3.9 1.5-1.1 3.2-1.9 5.2-2.5 2-.6 4.1-.8 6.2-.8 1.1 0 2.2.1 3.3.2 1.1.1 2.1.3 3.1.5 1 .2 1.9.5 2.8.7.9.3 1.6.5 2.1.8.7.4 1.2.8 1.5 1.2.3.4.4.9.4 1.5v2.3c0 1-.4 1.5-1.1 1.5-.4 0-1-.2-1.8-.5-2.7-1.2-5.7-1.8-9.1-1.8-2.8 0-5 .5-6.5 1.4-1.5.9-2.3 2.4-2.3 4.4 0 1.4.5 2.6 1.5 3.5 1 .9 2.8 1.8 5.4 2.7l6.9 2.2c3.5 1.1 6 2.6 7.5 4.6 1.5 2 2.3 4.2 2.3 6.7 0 2.1-.4 4-1.3 5.7-.9 1.7-2.1 3.2-3.6 4.4-1.5 1.2-3.3 2-5.4 2.7-2.2.7-4.4 1.1-6.8 1.1z"/><path fill="#F90" d="M115.9 97c-14 10.3-34.3 15.8-51.8 15.8-24.5 0-46.6-9.1-63.3-24.2-1.3-1.2-.1-2.8 1.5-1.9 18 10.5 40.3 16.8 63.3 16.8 15.5 0 32.6-3.2 48.3-9.9 2.3-1 4.3 1.5 2 3.4z"/><path fill="#F90" d="M121.8 90.3c-1.8-2.3-11.8-1.1-16.3-.5-1.4.2-1.6-1-.3-1.9 8-5.6 21.1-4 22.6-2.1 1.5 1.9-.4 15-7.9 21.3-1.2.9-2.3.5-1.8-.8 1.6-4.3 5.5-14 3.7-16z"/></svg>`,
 };
 
-const SOURCE_LABELS = { slack: 'Slack commands', chat: 'Web chat', workflow: 'Scheduled workflows', dashboard: 'Dashboard renders' };
+const SOURCE_LABELS = { slack: 'Slack commands', chat: 'Web chat', workflow: 'Scheduled workflows', dashboard: 'Dashboard renders', profile: 'Profile summaries' };
 const SLACK_ID_RE = /^[UW][A-Z0-9]{6,}$/;
 const PAGES = ['overview', 'integrations', 'mcp', 'agents', 'chats', 'skills', 'workflows', 'dashboards', 'pulls', 'tickets', 'changelog', 'performance', 'billing', 'backend', 'context'];
 const PAGE_TITLES = {
@@ -127,7 +127,7 @@ let ticketsState = { list: null, error: null };
 let ticketFilter = 'all';
 let ticketQuery = '';
 let backendState = { summary: null, objects: null, truncated: false, error: null, tab: 'state', path: '', query: '', file: null, vectors: null };
-let contextState = { profile: null, error: null, agent: 'all', query: '', open: new Set() };
+let contextState = { profile: null, error: null, agent: 'all', query: '', open: new Set(), tab: 'summary' };
 
 function escapeHtml(str) {
   return String(str == null ? '' : str)
@@ -2296,8 +2296,11 @@ function chatBubbleHtml(m) {
   const name = m.role === 'assistant' ? '' : (m.user ? escapeHtml(m.user) : 'Anonymous');
   const meta = name ? `<div class="chat-meta">${name}</div>` : '';
   const cls = m.pending ? ' pending' : (m.error ? ' chat-error' : '');
-  const body = (who === 'assistant' && !m.pending && !m.error) ? renderSlackMarkdown(m.content) : escapeHtml(m.content);
-  return `<div class="chat-msg ${who}">${meta}<div class="chat-bubble${cls}">${body}</div></div>`;
+  // Answers written for this view are Markdown — the agent is told so — and a
+  // table here should arrive as a table, not as rows of pipes.
+  const rich = who === 'assistant' && !m.pending && !m.error;
+  const body = rich ? renderMarkdownDoc(m.content) : escapeHtml(m.content);
+  return `<div class="chat-msg ${who}">${meta}<div class="chat-bubble${cls}${rich ? ' rich' : ''}">${body}</div></div>`;
 }
 
 function renderChatMessages(msgs) {
@@ -3127,16 +3130,57 @@ function contextTurnHtml(t) {
       <div class="turn-label">You asked</div>
       <div class="rich">${escapeHtml(question)}</div>
       <div class="turn-label">The agent answered</div>
-      <div class="rich">${renderSlackMarkdown(t.answer)}</div>
+      <div class="rich">${t.channel ? renderSlackMarkdown(t.answer) : renderMarkdownDoc(t.answer)}</div>
     </div>
   </details>`;
 }
 
+function contextCountsHtml(items, prefix) {
+  return items.map(c => `<span class="chip">${escapeHtml(c.label || (prefix || '') + c.name)} <b>${fmtInt(c.count)}</b></span>`).join('');
+}
+
+function contextSummaryHtml(p) {
+  const m = p.metrics || {};
+  const hour = String(m.busiest_hour || 0).padStart(2, '0');
+  const tiles = [
+    ['Turns remembered', fmtInt(p.turns.length)],
+    ['Agents', fmtInt(p.agents.length)],
+    ['Active days', fmtInt(m.active_days || 0)],
+    ['Turns a week', (m.per_week || 0).toFixed(1)],
+    ['First remembered', m.first_seen ? new Date(m.first_seen).toLocaleDateString() : '—'],
+    ['Busiest hour', `${hour}:00 <small>UTC</small>`],
+  ].map(([k, v]) => `<div class="stat"><div class="k">${escapeHtml(k)}</div><div class="v">${v}</div></div>`).join('');
+
+  const summary = p.summary
+    ? `<div class="report">${renderMarkdownDoc(p.summary)}</div>`
+    : emptyHtml('No written profile yet. The background pass writes one from your turns on its next run.', true);
+  const behind = p.summary && p.summary_for && p.fingerprint && p.summary_for !== p.fingerprint
+    ? `<div class="page-note">Written ${escapeHtml(timeAgo(p.summary_at))} from the turns as they stood then; you have had new turns since, and the next run will rewrite it.</div>`
+    : (p.summary ? `<div class="page-note">Written ${escapeHtml(timeAgo(p.summary_at))} by the background pass, from the turns below.</div>` : '');
+
+  const groups = [
+    ['Agents', p.agents.map(a => `<span class="chip">${escapeHtml(agentLabel(a.agent))} <b>${fmtInt(a.turns)}</b></span>`).join('')],
+    ['Channels', contextCountsHtml(m.channels || [], '')],
+    ['Repositories', contextCountsHtml(m.repos || [], '')],
+  ].filter(([, html]) => html)
+    .map(([title, html]) => `<div class="group-title">${escapeHtml(title)}</div><div class="chip-row">${html}</div>`).join('');
+
+  return `<div class="stats">${tiles}</div>${summary}${behind}${groups}
+    <div class="page-note"><a href="/ui/context" onclick="event.preventDefault();setContextTab('history')">Read the ${escapeHtml(plural(p.turns.length, 'turn'))} this is written from →</a></div>`;
+}
+
+function setContextTab(tab) {
+  contextState.tab = tab;
+  renderContextPage();
+}
+
 function renderContextPage() {
   const summaryEl = document.getElementById('context-summary');
+  const tabs = document.getElementById('context-tabs');
   const pills = document.getElementById('context-agent-pills');
+  const search = document.getElementById('context-search');
   const body = document.getElementById('context-body');
-  const clear = () => { summaryEl.innerHTML = ''; pills.innerHTML = ''; };
+  const clear = () => { summaryEl.innerHTML = ''; tabs.innerHTML = ''; pills.innerHTML = ''; search.hidden = true; };
   const p = contextState.profile;
   if (contextState.error) {
     clear();
@@ -3153,24 +3197,37 @@ function renderContextPage() {
     body.innerHTML = emptyHtml('Sign in to see what the agents remember of you.', true);
     return;
   }
+  const history = contextState.tab === 'history';
+  tabs.innerHTML = [['summary', 'Summary'], ['history', 'History']]
+    .map(([id, label]) => `<button class="pill${history === (id === 'history') ? ' active' : ''}" data-tab="${id}">${label}</button>`).join('');
+  const person = [p.person && p.person.title, p.person && p.person.timezone].filter(Boolean).join(' · ');
   summaryEl.innerHTML = [
+    person ? `<span class="chip">${escapeHtml(person)}</span>` : '',
     `<span class="chip">${plural(p.turns.length, 'turn')} remembered</span>`,
-    `<span class="chip">${plural(p.agents.length, 'agent')}</span>`,
     `<span class="chip">${fmtBytes(p.bytes)}</span>`,
     `<span class="chip">kept <b>${fmtInt(p.retention_days)}d</b> after your last turn</span>`,
-    `<span class="chip">at most <b>${fmtInt(p.max_turns)}</b> turns per agent</span>`,
     `<span class="chip">recall <b>${p.semantic ? 'by meaning' : 'most recent'}</b></span>`,
     p.updated ? `<span class="chip" title="${escapeHtml(new Date(p.updated).toLocaleString())}">aggregated ${escapeHtml(timeAgo(p.updated))}</span>` : '',
     ...p.identities.map(id => `<span class="chip">stored as <b>${escapeHtml(id)}</b></span>`),
   ].filter(Boolean).join('');
+
+  if (!p.turns.length) {
+    pills.innerHTML = '';
+    search.hidden = true;
+    body.innerHTML = emptyHtml('No agent has remembered a turn of yours yet. Ask one something in Slack or from Chats and it appears here.', true);
+    return;
+  }
+  if (!history) {
+    pills.innerHTML = '';
+    search.hidden = true;
+    body.innerHTML = contextSummaryHtml(p);
+    return;
+  }
+  search.hidden = false;
   pills.innerHTML = p.agents.length > 1
     ? [['all', 'All agents']].concat(p.agents.map(a => [a.agent, agentLabel(a.agent)]))
         .map(([id, label]) => `<button class="pill${contextState.agent === id ? ' active' : ''}" data-agent="${escapeHtml(id)}">${escapeHtml(label)}</button>`).join('')
     : '';
-  if (!p.turns.length) {
-    body.innerHTML = emptyHtml('No agent has remembered a turn of yours yet. Ask one something in Slack or from Chats and it appears here.', true);
-    return;
-  }
   const turns = contextTurns();
   body.innerHTML = turns.length
     ? turns.map(contextTurnHtml).join('')
@@ -3201,6 +3258,11 @@ document.getElementById('context-body').addEventListener('toggle', e => {
   if (!d) return;
   if (d.open) contextState.open.add(d.dataset.id); else contextState.open.delete(d.dataset.id);
 }, true);
+
+document.getElementById('context-tabs').addEventListener('click', e => {
+  const b = e.target.closest('.pill');
+  if (b) setContextTab(b.dataset.tab);
+});
 
 document.getElementById('context-agent-pills').addEventListener('click', e => {
   const b = e.target.closest('.pill');
@@ -3281,8 +3343,7 @@ function renderIdentity() {
     <div class="id-section"><h3>${INTEGRATION_LOGOS.slack}Slack<span class="tag ${me.slack ? 'slack' : ''}">${me.slack ? 'matched' : 'not found'}</span></h3>${slackSection}</div>
     <div class="id-section"><h3>${INTEGRATION_LOGOS.jira}Atlassian<span class="tag">${!me.atlassian_connected ? 'not connected' : me.atlassian ? 'matched' : 'not found'}</span></h3>${atlassianSection}</div>
     <div class="id-section"><h3>${CONTEXT_ICON}Your context<span class="tag">${escapeHtml(ctxTag)}</span></h3>
-      <div class="id-note">What the agents remember from your own turns, gathered from every agent you have worked with.</div>
-      <div class="actions"><button class="btn-mini" type="button" onclick="openMyContext()">Open</button></div>
+      <div class="id-note">A profile of what you work on, written from your turns with every agent. <a href="/ui/context" onclick="event.preventDefault();openMyContext()">Open&nbsp;→</a></div>
     </div>
     <div class="id-foot">Resolved ${me.resolved_at ? timeAgo(me.resolved_at) : 'just now'} from your sign-in</div>`;
 }

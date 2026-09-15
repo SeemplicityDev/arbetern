@@ -232,6 +232,20 @@ func (c *Client) GetUserInfo(userID string) (*slack.User, error) {
 	return user, nil
 }
 
+// GetChannelName returns a channel's name, without the leading #. Requires a
+// conversations read scope for the channel type; a DM has no name and comes
+// back empty.
+func (c *Client) GetChannelName(channelID string) (string, error) {
+	ch, err := c.api.GetConversationInfo(&slack.GetConversationInfoInput{ChannelID: channelID})
+	if err != nil {
+		return "", fmt.Errorf("failed to get channel info: %w", err)
+	}
+	if ch == nil {
+		return "", nil
+	}
+	return ch.Name, nil
+}
+
 // GetUserByEmail looks up a Slack user by their email address.
 // Requires the users:read.email scope on the bot token.
 func (c *Client) GetUserByEmail(email string) (*slack.User, error) {

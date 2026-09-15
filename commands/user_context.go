@@ -36,14 +36,33 @@ type UserContextStore struct {
 	index  atomic.Pointer[vectors.Index]
 	shared atomic.Pointer[map[string]bool]
 	tasks  atomic.Pointer[queue.Queue]
-	linker atomic.Pointer[IdentityLinker]
+	enrich atomic.Pointer[ProfileEnricher]
 }
 
-// IdentityLinker maps one stored identity key to the other keys the same
-// person is recorded under — the Slack ID the bot sees and the email the
-// console signs them in with are the same person, and only the caller can
-// resolve one to the other.
-type IdentityLinker func(ctx context.Context, id string) []string
+// ProfileEnricher supplies the parts of a person's profile the store cannot
+// derive from the stored turns on its own. Every method is best-effort: an
+// empty or failed answer degrades the profile, never the turn that produced
+// it, so the store works with no enricher at all.
+type ProfileEnricher interface {
+	// Link maps one stored identity key to the other keys the same person is
+	// recorded under. The Slack ID the bot sees and the email the console
+	// signs them in with are one person, and only the caller can resolve one
+	// to the other.
+	Link(ctx context.Context, id string) []string
+	// Person describes who the identities belong to, outside their turns.
+	Person(ctx context.Context, ids []string) PersonFacts
+	// ChannelName turns a channel ID into its name, without the leading #.
+	ChannelName(ctx context.Context, id string) string
+	// Summarize writes the profile's prose from the prompt it is given.
+	Summarize(ctx context.Context, system, user string) (string, error)
+}
+
+// PersonFacts is what the platform knows about a person outside their turns.
+type PersonFacts struct {
+	Name     string `json:"name,omitempty"`
+	Title    string `json:"title,omitempty"`
+	Timezone string `json:"timezone,omitempty"`
+}
 
 const (
 	userContextPrefix = "user-context/"
@@ -98,6 +117,19 @@ const (
 	userProfileElsewhereBytes = 2 * 1024
 	// One deferred or background profile write.
 	userProfileWriteTimeout = 60 * time.Second
+	// The written summary costs a model call, so a pass writes at most this
+	// many and only rewrites one whose turns have moved on and that is at
+	// least this old. A cold start converges over a few passes instead of
+	// calling the model once per person at once.
+	userProfileSummaryBudget  = 25
+	userProfileSummaryMinAge  = 6 * time.Hour
+	userProfileSummaryTimeout = 2 * time.Minute
+	// How much of a person's history the summary is written from.
+	userProfileSummaryTurns   = 60
+	userProfileSummaryAnswers = 15
+	userProfileSummaryAnswer  = 400
+	// How many counted labels a profile keeps.
+	userProfileTopCounts = 12
 )
 
 // safeIDRe restricts agent IDs and user IDs to characters that are safe
@@ -186,12 +218,24 @@ func (s *UserContextStore) SetSharedAgents(agentIDs []string) {
 	s.shared.Store(&m)
 }
 
-// SetIdentityLinker installs the resolver that folds a person's identities
-// together. Without one every identity is treated as its own person.
-func (s *UserContextStore) SetIdentityLinker(fn IdentityLinker) {
-	if s != nil && fn != nil {
-		s.linker.Store(&fn)
+// SetEnricher installs what the profiles are built with beyond the stored
+// turns: identity links, who the person is, channel names and the model that
+// writes the summary. Without one, profiles are still aggregated — by identity
+// key alone, counted but not described.
+func (s *UserContextStore) SetEnricher(e ProfileEnricher) {
+	if s != nil && e != nil {
+		s.enrich.Store(&e)
 	}
+}
+
+func (s *UserContextStore) enricher() ProfileEnricher {
+	if s == nil {
+		return nil
+	}
+	if e := s.enrich.Load(); e != nil {
+		return *e
+	}
+	return nil
 }
 
 // Semantic reports whether retrieval is similarity-based.
@@ -511,6 +555,26 @@ type UserContextAgentMemory struct {
 	Newest time.Time `json:"newest"`
 }
 
+// UserContextCount is one thing a person's turns keep touching, and how often.
+type UserContextCount struct {
+	Name  string `json:"name"`
+	Label string `json:"label,omitempty"`
+	Count int    `json:"count"`
+}
+
+// UserContextMetrics is what the turns say about a person by counting rather
+// than by inference: where they work, on what, and how often.
+type UserContextMetrics struct {
+	Turns       int                `json:"turns"`
+	Channels    []UserContextCount `json:"channels,omitempty"`
+	Repos       []UserContextCount `json:"repos,omitempty"`
+	FirstSeen   time.Time          `json:"first_seen,omitempty"`
+	LastSeen    time.Time          `json:"last_seen,omitempty"`
+	ActiveDays  int                `json:"active_days"`
+	PerWeek     float64            `json:"per_week"`
+	BusiestHour int                `json:"busiest_hour"`
+}
+
 // UserContextProfile is one person's whole stored context — every agent that
 // remembers them, every turn, newest first — aggregated from the per-agent
 // documents and cached in the bucket under each of the person's identities.
@@ -518,10 +582,20 @@ type UserContextAgentMemory struct {
 // rebuilt from them on a schedule and safe to delete at any time.
 type UserContextProfile struct {
 	Identities []string                 `json:"identities"`
+	Person     PersonFacts              `json:"person"`
+	Metrics    UserContextMetrics       `json:"metrics"`
 	Agents     []UserContextAgentMemory `json:"agents"`
 	Turns      []UserContextTurn        `json:"turns"`
 	Bytes      int64                    `json:"bytes"`
 	Updated    time.Time                `json:"updated"`
+	// Summary is the written profile: what this person works on, in markdown.
+	// It costs a model call, so it is written by the background pass and only
+	// when the turns behind it have actually moved on.
+	Summary   string    `json:"summary,omitempty"`
+	SummaryAt time.Time `json:"summary_at,omitempty"`
+	// SummaryFor is the fingerprint the summary was written from, so a profile
+	// can say whether its prose still matches its turns.
+	SummaryFor string `json:"summary_for,omitempty"`
 	// Fingerprint covers what the profile is made of, not when it was made, so
 	// a rebuild that finds nothing new writes nothing.
 	Fingerprint string `json:"fingerprint,omitempty"`
@@ -671,9 +745,9 @@ func (s *UserContextStore) identities(ctx context.Context, ids []string) []strin
 	for _, id := range ids {
 		add(id)
 	}
-	if link := s.linker.Load(); link != nil {
+	if e := s.enricher(); e != nil {
 		for _, id := range append([]string(nil), out...) {
-			for _, alias := range (*link)(ctx, id) {
+			for _, alias := range e.Link(ctx, id) {
 				add(alias)
 			}
 		}
@@ -737,6 +811,83 @@ func (s *UserContextStore) cachedProfile(ctx context.Context, ids []string) (*Us
 	return nil, false
 }
 
+// repoRe finds the repositories a person's turns point at. Only full GitHub
+// URLs count: a bare "owner/name" in prose is as often a path or a ratio.
+var repoRe = regexp.MustCompile(`github\.com/([A-Za-z0-9_.\-]{1,64})/([A-Za-z0-9_.\-]{1,64})`)
+
+// countTop turns a tally into the most frequent entries, highest first.
+func countTop(tally map[string]int, labels map[string]string, n int) []UserContextCount {
+	out := make([]UserContextCount, 0, len(tally))
+	for name, count := range tally {
+		out = append(out, UserContextCount{Name: name, Label: labels[name], Count: count})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Count != out[j].Count {
+			return out[i].Count > out[j].Count
+		}
+		return out[i].Name < out[j].Name
+	})
+	if len(out) > n {
+		out = out[:n]
+	}
+	return out
+}
+
+// measure counts what the turns touch. Channel names are resolved through the
+// enricher when it can, and fall back to the raw ID when it cannot.
+func (s *UserContextStore) measure(ctx context.Context, turns []UserContextTurn) UserContextMetrics {
+	m := UserContextMetrics{Turns: len(turns)}
+	if len(turns) == 0 {
+		return m
+	}
+	channels, repos, days := map[string]int{}, map[string]int{}, map[string]bool{}
+	var hours [24]int
+	for _, t := range turns {
+		if t.Channel != "" {
+			channels[t.Channel]++
+		}
+		seen := map[string]bool{}
+		for _, m := range repoRe.FindAllStringSubmatch(t.Question+"\n"+t.Answer, -1) {
+			repo := m[1] + "/" + strings.TrimSuffix(m[2], ".git")
+			if seen[repo] {
+				continue
+			}
+			seen[repo] = true
+			repos[repo]++
+		}
+		days[t.At.UTC().Format("2006-01-02")] = true
+		hours[t.At.UTC().Hour()]++
+		if m.FirstSeen.IsZero() || t.At.Before(m.FirstSeen) {
+			m.FirstSeen = t.At
+		}
+		if t.At.After(m.LastSeen) {
+			m.LastSeen = t.At
+		}
+	}
+	names := map[string]string{}
+	if e := s.enricher(); e != nil {
+		for id := range channels {
+			if name := e.ChannelName(ctx, id); name != "" {
+				names[id] = "#" + name
+			}
+		}
+	}
+	m.Channels = countTop(channels, names, userProfileTopCounts)
+	m.Repos = countTop(repos, nil, userProfileTopCounts)
+	m.ActiveDays = len(days)
+	for h, n := range hours {
+		if n > hours[m.BusiestHour] {
+			m.BusiestHour = h
+		}
+	}
+	weeks := m.LastSeen.Sub(m.FirstSeen).Hours() / (24 * 7)
+	if weeks < 1 {
+		weeks = 1
+	}
+	m.PerWeek = float64(len(turns)) / weeks
+	return m
+}
+
 // aggregate builds a person's profile from the per-agent documents. objs is a
 // listing of userContextPrefix already in hand, or nil to list it.
 func (s *UserContextStore) aggregate(ctx context.Context, ids []string, objs []store.Object) (UserContextProfile, error) {
@@ -783,6 +934,10 @@ func (s *UserContextStore) aggregate(ctx context.Context, ids []string, objs []s
 	sort.Slice(out.Agents, func(i, j int) bool { return out.Agents[i].Agent < out.Agents[j].Agent })
 	sort.Slice(out.Turns, func(i, j int) bool { return out.Turns[i].At.After(out.Turns[j].At) })
 	out.trim()
+	out.Metrics = s.measure(ctx, out.Turns)
+	if e := s.enricher(); e != nil {
+		out.Person = e.Person(ctx, ids)
+	}
 	out.stamp()
 	return out, nil
 }
@@ -860,6 +1015,110 @@ func (s *UserContextStore) noteProfileTurn(ctx context.Context, agentID, userID 
 	return err
 }
 
+// profileSummarySystem is the brief for the written profile. It is read by the
+// person it describes, so it is grounded in their own turns and says when it
+// does not know something rather than filling the gap.
+const profileSummarySystem = `You are writing a short profile of one person, for that person to read about themselves, from the record of what they have asked a set of internal assistants.
+
+Write GitHub-flavoured Markdown with these sections, in this order, and nothing else:
+
+## What you work on
+Two or three sentences. The areas, systems and recurring problems the questions are about.
+
+## Where you work
+The channels, repositories and tools that come up most, and what each is used for as far as the questions show. Skip any of these you have no evidence for.
+
+## How you use the assistants
+What this person asks each assistant for, and how that differs between them.
+
+## Recent focus
+What the last couple of weeks have been about, if that differs from the whole record.
+
+Rules:
+- Ground every claim in the questions you are given. Say "the record does not show" rather than guessing.
+- Address the reader as "you".
+- Be specific: name the systems, repositories and channels rather than describing them in the abstract.
+- No preamble, no closing summary, no praise, no advice.
+- Never repeat credentials, tokens or personal data that appear in the questions.
+- Under 400 words.`
+
+// summaryPrompt assembles what the model is given: who the person is, what the
+// counts say, and the questions themselves, newest first.
+func summaryPrompt(p *UserContextProfile) string {
+	var sb strings.Builder
+	sb.WriteString("The person\n")
+	if p.Person.Name != "" {
+		fmt.Fprintf(&sb, "- Name: %s\n", p.Person.Name)
+	}
+	if p.Person.Title != "" {
+		fmt.Fprintf(&sb, "- Job title: %s\n", p.Person.Title)
+	}
+	if p.Person.Timezone != "" {
+		fmt.Fprintf(&sb, "- Time zone: %s\n", p.Person.Timezone)
+	}
+	fmt.Fprintf(&sb, "\nThe record\n- %d turns with %d assistant(s) over %d active day(s), about %.1f a week\n",
+		p.Metrics.Turns, len(p.Agents), p.Metrics.ActiveDays, p.Metrics.PerWeek)
+	if !p.Metrics.FirstSeen.IsZero() {
+		fmt.Fprintf(&sb, "- First recorded %s, most recent %s\n",
+			p.Metrics.FirstSeen.UTC().Format("2006-01-02"), p.Metrics.LastSeen.UTC().Format("2006-01-02"))
+	}
+	for _, a := range p.Agents {
+		fmt.Fprintf(&sb, "- Assistant %q: %d turns\n", a.Agent, a.Turns)
+	}
+	for _, c := range p.Metrics.Channels {
+		name := c.Label
+		if name == "" {
+			name = "an unnamed channel"
+		}
+		fmt.Fprintf(&sb, "- Channel %s: %d turns\n", name, c.Count)
+	}
+	for _, r := range p.Metrics.Repos {
+		fmt.Fprintf(&sb, "- Repository %s: mentioned in %d turns\n", r.Name, r.Count)
+	}
+	sb.WriteString("\nThe questions, newest first\n")
+	for i, t := range p.Turns {
+		if i >= userProfileSummaryTurns {
+			break
+		}
+		fmt.Fprintf(&sb, "\n[%s | %s] %s\n", t.At.UTC().Format("2006-01-02"), t.Agent, t.Question)
+		if i < userProfileSummaryAnswers && t.Answer != "" {
+			fmt.Fprintf(&sb, "  answered: %s\n", text.Truncate(t.Answer, userProfileSummaryAnswer))
+		}
+	}
+	return sb.String()
+}
+
+// staleSummary reports whether the profile's prose should be rewritten: it has
+// none, or its turns have moved on and the prose has had time to age.
+func staleSummary(p *UserContextProfile) bool {
+	if strings.TrimSpace(p.Summary) == "" {
+		return true
+	}
+	return p.SummaryFor != p.Fingerprint && time.Since(p.SummaryAt) >= userProfileSummaryMinAge
+}
+
+// summarize writes the profile's prose. It is the only part of the aggregation
+// that costs a model call, so it runs in the background pass and nowhere else.
+func (s *UserContextStore) summarize(ctx context.Context, p *UserContextProfile) error {
+	e := s.enricher()
+	if e == nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, userProfileSummaryTimeout)
+	defer cancel()
+	out, err := e.Summarize(ctx, profileSummarySystem, summaryPrompt(p))
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(out) == "" {
+		return nil
+	}
+	p.Summary = strings.TrimSpace(out)
+	p.SummaryAt = time.Now().UTC()
+	p.SummaryFor = p.Fingerprint
+	return nil
+}
+
 // groupIdentities folds the identities that belong to the same person into one
 // group. A link may only resolve one way — a Slack ID knows its email, an
 // email key cannot be turned back into a Slack ID — so the groups are built by
@@ -934,7 +1193,8 @@ func (s *UserContextStore) rebuildProfiles(ctx context.Context) {
 		sources = append(sources, userID)
 	}
 	expected := map[string]bool{}
-	people, written := 0, 0
+	people, written, summarised := 0, 0, 0
+	budget := userProfileSummaryBudget
 	for _, ids := range s.groupIdentities(ctx, sources) {
 		prof, err := s.aggregate(ctx, ids, objs)
 		if err != nil {
@@ -947,6 +1207,17 @@ func (s *UserContextStore) rebuildProfiles(ctx context.Context) {
 		people++
 		for _, id := range prof.Identities {
 			expected[profileKey(id)] = true
+		}
+		if cached, ok := s.cachedProfile(ctx, prof.Identities); ok {
+			prof.Summary, prof.SummaryAt, prof.SummaryFor = cached.Summary, cached.SummaryAt, cached.SummaryFor
+		}
+		if budget > 0 && staleSummary(&prof) {
+			budget--
+			if err := s.summarize(ctx, &prof); err != nil {
+				log.Printf("[user-context] profile summary failed: %v", err)
+			} else {
+				summarised++
+			}
 		}
 		n, err := s.writeProfile(ctx, prof)
 		if err != nil {
@@ -971,7 +1242,8 @@ func (s *UserContextStore) rebuildProfiles(ctx context.Context) {
 		removed++
 	}
 	if written > 0 || removed > 0 {
-		log.Printf("[user-context] profiles: %d person(s), %d copy(ies) written, %d stale removed", people, written, removed)
+		log.Printf("[user-context] profiles: %d person(s), %d copy(ies) written, %d summarised, %d stale removed",
+			people, written, summarised, removed)
 	}
 }
 

@@ -76,22 +76,42 @@ from any source is a single GET with no indirection.
 |---|---|---|
 | Incremental | On every recorded turn, in the `user-context` queue task | Merges the new turn into the person's cached profile inside a conditional write, so the aggregate is current within seconds. Two replicas recording turns for the same person cannot lose one another's |
 | Rebuild | At start and every hour, on the replica holding the scheduling lease, after the TTL sweep and the index repair | Re-derives every profile from the per-agent documents, writes only the ones whose content actually changed, and deletes the ones whose documents are gone |
-| On read | A `/api/me/context` request that finds no cached profile | Builds it live and caches it in the background, so a person who has never been aggregated still gets an answer |
+| On read | A `/api/me/context` request that finds no cached profile | Builds the turns and metrics live and caches them in the background, so a person who has never been aggregated still gets an answer. The written profile is not produced here: a page load must never wait on a model call |
 
 **Self-healing.** The per-agent documents stay the source of truth and the
 profile is derived, so anything that goes wrong with it is repaired rather than
 carried: a missed or failed incremental update, a profile half-written by a
 replica that died, one left behind after the TTL sweep removed its documents,
 and one written before two identities were known to belong to the same person
-are all corrected by the next rebuild. Deleting the whole `user-profiles/`
-prefix is a supported operation; it costs one rebuild.
+are all corrected by the next rebuild. The prose is carried forward across the
+rebuilds that do not rewrite it, so a rebuild never costs a person their
+profile. Deleting the whole `user-profiles/` prefix is a supported operation;
+it costs one rebuild, plus one model call per person over the passes that
+follow.
+
+**What is in it.** Three things, in rising order of cost. The *turns*
+themselves, merged and ordered. *Metrics* counted from them rather than
+inferred — the channels and GitHub repositories the turns keep touching, the
+first and last turn, active days, turns a week, the busiest hour — recomputed
+on every aggregation, free. And the *written profile*: a markdown description
+of what this person works on, where, and how they use each agent, produced by
+a model call over their own turns and the metrics above.
+
+**Cost of the written profile.** It is the only part of the aggregation that
+calls a model, so it is confined to the hourly pass and rationed there: at most
+25 summaries per pass, and a profile is only rewritten when its turns have
+actually moved on *and* its prose is at least 6 hours old. A cold start
+converges over a few passes instead of summarising everyone at once. The call
+is recorded in the usage ledger under source `profile` and agent `platform` —
+it is platform overhead, not an agent answering anyone. With no model client
+wired, turns and metrics are still aggregated; only the prose is missing.
 
 **Caps.** A profile holds at most 300 turns and 256 KiB, dropping the oldest —
 larger than one agent's document because it merges all of them, bounded so the
 prompt-side read stays one small object. Storage is roughly the user-context
 prefix again, times the number of identities a person has.
 
-**What agents get from it.** On every turn the agent's own document remains the
+**What the agents get from it.** On every turn the agent's own document remains the
 authority for its own turns. The profile adds two things: the turns this person
 had with *this* agent under another identity, merged into the same working
 memory and semantic pools so Slack and the console are one conversation; and a

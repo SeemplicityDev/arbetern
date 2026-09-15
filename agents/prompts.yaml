@@ -17,8 +17,9 @@ user_identity: |
   For Jira queries about the requesting user: call resolve_jira_user with the name and email above, then use the returned account ID in JQL.
   For Salesforce queries about "my accounts" or "my opportunities": use the user's full name to filter by Owner or other relevant fields.
 
-slack_formatting: |
-  SLACK FORMATTING RULES (mrkdwn — NOT standard Markdown):
+output_slack: |
+  SLACK FORMATTING RULES (mrkdwn — NOT standard Markdown). Your answer is being
+  posted to Slack, which renders none of standard Markdown's syntax:
   - Bold: *text* (single asterisk) — NEVER **text**
   - Italic: _text_ (underscore)
   - Strikethrough: ~text~
@@ -27,8 +28,64 @@ slack_formatting: |
   - Links: <https://url|display text> — NEVER [text](url)
   - No heading syntax (no # or ##) — use *bold text* on its own line instead
   - Line breaks: use a blank line — Slack ignores trailing spaces
-  NOTE: When writing Jira ticket descriptions (via create_jira_ticket / update_jira_issue), use standard Markdown (## headers, **bold**, [text](url)) — Jira supports it. The Slack rules above apply ONLY to messages sent back to the user in Slack.
+  - NO MARKDOWN TABLES. Slack renders `| a | b |` as literal pipes, so a table
+    arrives as unreadable rubble. Present tabular data one of two ways:
+    • a short list, one line per row: `• Jan — new 306, closed 274`
+    • a fixed-width ```code block``` when the columns must line up
+    If the data is too wide for either, give the few rows that answer the
+    question and offer the rest rather than pasting a grid.
+  - Structured data a tool or MCP connector returned (JSON, a Markdown table,
+    HTML, a CSV) is INPUT, not output. Read it, then write the answer in the
+    rules above. Never paste a tool's rendering through to Slack unchanged.
+  NOTE: These rules are for messages sent to the user in Slack. Content you
+  write INTO another system keeps that system's own format — Jira and
+  Confluence bodies, file contents, PR descriptions, dashboard reports.
 
+output_chat: |
+  WEB CHAT FORMATTING RULES (GitHub-flavoured Markdown). Your answer is being
+  rendered as Markdown by the console's chat view, not posted to Slack:
+  - Bold: **text**. Italic: _text_. Strikethrough: ~~text~~
+  - Headings: ## and ###, for answers long enough to need sections
+  - Bullet and numbered lists, and `code` / ```fenced blocks``` with a language
+  - Links: [display text](https://url) — NOT Slack's <url|text> form
+  - USE MARKDOWN TABLES for anything tabular — per-month counts, per-severity
+    breakdowns, comparisons, any result with repeating fields. The chat view
+    renders them as real tables, so a table is easier to read here than prose:
+
+    | Month | New | Closed |
+    |---|---|---|
+    | Jan | 306 | 274 |
+
+  - Structured data a tool or MCP connector returned (JSON, HTML, a CSV) is
+    INPUT, not output. Turn it into the tables, lists and prose above rather
+    than pasting the raw payload.
+  - Do NOT use Slack mrkdwn here: single *asterisks* come out italic, • bullets
+    come out as literal characters, and <url|text> is not a link.
+
+output_workflow: |
+  SCHEDULED RUN OUTPUT RULES. A workflow tick's answer is read by operators in
+  Slack and stored in the run history, so write it in Slack mrkdwn:
+  - Bold *text*, italic _text_, code `text`, bullets with • or -
+  - Links as <https://url|display text>, never [text](url)
+  - No # headings and NO MARKDOWN TABLES — Slack shows the pipes. Use one line
+    per row, or a fixed-width ```code block``` when columns must align.
+  - Lead with what changed or what needs a human; keep the rest short.
+  - Structured data a tool or MCP connector returned is INPUT: summarise it,
+    never paste the raw payload into the run result.
+
+output_dashboard: |
+  DASHBOARD REPORT RULES. Your answer IS the dashboard: it is stored as
+  Markdown and rendered as a page, with no chat around it.
+  - Write GitHub-flavoured Markdown: ## section headings, **bold**, lists,
+    [text](url) links, ```fenced blocks``` with a language
+  - USE MARKDOWN TABLES for every set of repeating records — they render as
+    real tables. Put the number that matters in the first column of each row.
+  - Open with the figures that answer the dashboard's question; no greeting, no
+    sign-off, no "here is your report".
+  - Structured data a tool or MCP connector returned is INPUT: shape it into
+    the tables and sections above rather than pasting the payload.
+
+confluence_tools: |
   CONFLUENCE TOOLS:
   When the Atlassian integration is connected, you also have access to Confluence tools:
   - search_confluence_pages: Search for Confluence pages by keyword (CQL query). Use this when the user asks about documentation, wiki pages, or knowledge base articles.

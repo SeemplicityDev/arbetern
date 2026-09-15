@@ -262,10 +262,7 @@ func (h *GeneralHandler) recordUsage(model, userID string, u llm.Usage, comp llm
 	if h.billing == nil || u.TotalTokens == 0 {
 		return
 	}
-	src := h.billingSource
-	if src == "" {
-		src = billing.SourceSlack
-	}
+	src := h.source()
 	// Attribute interactive turns (Slack / chat) to the human who prompted
 	// them; scheduled workflow ticks are attributed via the workflow name, not
 	// the creator, so the user ID is omitted for them.
@@ -588,8 +585,31 @@ func (h *GeneralHandler) ExecuteChat(ctx context.Context, userID string, history
 	return res.Final, nil
 }
 
+// source is where this turn's answer is going. Slack is the default because a
+// handler built for a slash command carries no explicit source.
+func (h *GeneralHandler) source() string {
+	if h.billingSource == "" {
+		return billing.SourceSlack
+	}
+	return h.billingSource
+}
+
+// systemPrompt is the agent's prompt plus the formatting rules for the
+// destination this turn is answering into: the same answer is read by Slack,
+// by the console's Markdown chat view and by a stored dashboard report, and
+// each renders a different syntax.
 func (h *GeneralHandler) systemPrompt() string {
-	return h.prompts.SystemPrompt("general")
+	return withOutputRules(h.prompts, "general", h.source())
+}
+
+// withOutputRules appends the destination's formatting block to a system
+// prompt, last so it is the most recent instruction the model reads.
+func withOutputRules(p PromptProvider, key, source string) string {
+	prompt := p.SystemPrompt(key)
+	if rules := p.OutputPrompt(source); rules != "" {
+		prompt += "\n\n" + rules
+	}
+	return prompt
 }
 
 func (h *GeneralHandler) buildTools() []llm.Tool {
@@ -5465,9 +5485,23 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 			if err != nil {
 				return fmt.Sprintf("Error calling %s on MCP connector %s: %v", t.Tool.Name, t.ConnectorName, err)
 			}
-			return out
+			return mcpResultNote(h.source()) + out
 		}
 		return fmt.Sprintf("Unknown tool: %s", name)
+	}
+}
+
+// mcpResultNote rides in front of every MCP connector's payload. A connector
+// returns whatever shape suits it — JSON, a Markdown table, HTML — and the
+// model is one step from passing that shape straight through to a destination
+// that cannot render it. The reminder sits where the payload arrives, which is
+// the last thing read before the answer is written.
+func mcpResultNote(source string) string {
+	switch source {
+	case billing.SourceChat, billing.SourceDashboard:
+		return "[MCP connector data — this is input, not an answer. Re-render it as GitHub-flavoured Markdown, using a table for tabular results.]\n"
+	default:
+		return "[MCP connector data — this is input, not an answer. Re-render it as Slack mrkdwn: no Markdown tables, no [text](url) links.]\n"
 	}
 }
 

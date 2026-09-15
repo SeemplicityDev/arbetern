@@ -46,6 +46,9 @@ const (
 	SourceWorkflow  = "workflow"
 	SourceChat      = "chat"
 	SourceDashboard = "dashboard"
+	// SourceProfile is the platform describing a person from their own turns,
+	// not an agent answering anyone.
+	SourceProfile = "profile"
 )
 
 // Event is one billable LLM turn. Cost is derived from Model + token counts at
