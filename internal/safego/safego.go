@@ -11,6 +11,7 @@
 package safego
 
 import (
+	"context"
 	"log"
 	"runtime/debug"
 	"time"
@@ -26,6 +27,24 @@ func Go(name string, fn func()) {
 func Run(name string, fn func()) {
 	defer Recover(name)
 	fn()
+}
+
+// Tick runs fn every interval, each run guarded on its own, until ctx ends. Use
+// it for reconcilers and sweepers, where there is nothing to drain on the way
+// out; Every is the variant for buffers that must be flushed at shutdown.
+func Tick(ctx context.Context, name string, interval time.Duration, fn func()) {
+	Go(name, func() {
+		t := time.NewTicker(interval)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				Run(name, fn)
+			}
+		}
+	})
 }
 
 // Every runs fn on each tick until stop is closed, then once more, and closes

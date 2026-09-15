@@ -303,6 +303,9 @@ func New(ctx context.Context, b *store.Backend) (*Store, error) {
 	if err := s.load(ctx); err != nil {
 		return nil, fmt.Errorf("load metrics: %w", err)
 	}
+	if n := s.Months(); n > 0 {
+		log.Printf("[metrics] loaded %d month(s) of performance data from %s", n, b)
+	}
 	return s, nil
 }
 
@@ -487,6 +490,76 @@ func capRecent(list []Turn) []Turn {
 	return list
 }
 
+// activeMonths are the aggregates a refresh re-reads: the current month and the
+// one before it. A sample is stamped when it is recorded and flushed within
+// seconds, so an older aggregate can no longer change — re-reading the whole
+// history every interval would be waste that grows with the deployment's age.
+func activeMonths(now time.Time) []string {
+	now = now.UTC()
+	first := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
+	return []string{monthKey(now), monthKey(first.AddDate(0, 0, -1))}
+}
+
+// Refresh picks up what other replicas wrote, then re-applies whatever this one
+// has buffered but not yet flushed.
+//
+// Without it a replica only ever saw the samples it recorded itself: the merge
+// on flush adopts the shared document, but a replica serving nothing but the
+// console never flushes, so it would report zero while its siblings reported
+// the truth — and which one answered the request decided what you saw.
+func (s *Store) Refresh(ctx context.Context) error {
+	fresh := map[string]*monthData{}
+	for _, mk := range activeMonths(time.Now()) {
+		m, _, err := store.GetJSON[monthData](ctx, s.b, monthObjectKey(mk))
+		switch {
+		case errors.Is(err, store.ErrNotFound):
+			continue
+		case err != nil:
+			return err
+		}
+		if !monthRe.MatchString(m.Month) {
+			continue
+		}
+		m.ensureMaps()
+		fresh[m.Month] = m
+	}
+	recent, err := s.loadRecent(ctx)
+	if err != nil {
+		return err
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	// Only a month that was just replaced by the stored copy needs its buffered
+	// samples put back: every other cached month still carries them from when
+	// they were recorded, and applying them again would count them twice.
+	for mk, m := range fresh {
+		s.months[mk] = m
+		if p := s.pending[mk]; p != nil {
+			apply(m, p)
+		}
+	}
+	// The feed, by contrast, is replaced wholesale, so everything buffered here
+	// goes back on top of it.
+	for _, p := range s.pending {
+		recent = append(recent, p.turns...)
+	}
+	s.recent = capRecent(recent)
+	return nil
+}
+
+func (s *Store) loadRecent(ctx context.Context) ([]Turn, error) {
+	rec, _, err := store.GetJSON[[]Turn](ctx, s.b, recentKey)
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		return nil, nil
+	case err != nil:
+		return nil, err
+	}
+	return *rec, nil
+}
+
+// load reads every stored month at boot, when the set of them is not yet known.
 func (s *Store) load(ctx context.Context) error {
 	err := store.LoadMatching(ctx, s.b, Prefix, "perf-", func(key string, m *monthData) {
 		if !monthRe.MatchString(m.Month) {
@@ -499,18 +572,21 @@ func (s *Store) load(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	rec, _, err := store.GetJSON[[]Turn](ctx, s.b, recentKey)
-	switch {
-	case errors.Is(err, store.ErrNotFound):
-	case err != nil:
+	recent, err := s.loadRecent(ctx)
+	if err != nil {
 		return err
-	default:
-		s.recent = capRecent(*rec)
 	}
-	if n := len(s.months); n > 0 {
-		log.Printf("[metrics] loaded %d month(s) of performance data from %s", n, s.b)
-	}
+	s.recent = capRecent(recent)
 	return nil
+}
+
+// StartRefresh reconciles with the bucket every interval until ctx ends.
+func (s *Store) StartRefresh(ctx context.Context, interval time.Duration) {
+	safego.Tick(ctx, "metrics: refresh", interval, func() {
+		if err := s.Refresh(ctx); err != nil {
+			log.Printf("[metrics] refresh: %v", err)
+		}
+	})
 }
 
 // Runtime is the live process picture that no stored series can give.

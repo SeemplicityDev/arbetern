@@ -71,10 +71,17 @@ and immutability plus ETags replace explicit invalidation.
   buffered in memory and merged into their stored month aggregate with a
   conditional write — every 15 seconds for usage, every 20 for performance.
   Several replicas recording at once fold their samples into the same object
-  without losing each other's turns; the merged result becomes the local view,
-  so the Usage and Performance tabs on any replica converge to the global
-  numbers. Latency is kept as a histogram precisely because it merges by
-  addition, so percentiles survive both the merge and the month rollup.
+  without losing each other's turns. Latency is kept as a histogram precisely
+  because it merges by addition, so percentiles survive both the merge and the
+  month rollup.
+
+  Merging on flush only updates the replica doing the flushing, so these two
+  reconcile on the same 30-second cycle as every other registry: each replica
+  re-reads the current and previous month (older aggregates can no longer
+  change) plus the recent feed, and re-applies whatever it still has buffered.
+  Without that a replica serving only the console would report zero while its
+  siblings reported the truth, and which one answered decided what the Usage and
+  Performance tabs showed.
 
 ## Replicas and leases
 

@@ -1729,11 +1729,19 @@ function queueNote(sum) {
   return out;
 }
 
+// Panels the summary fills in; they are blanked together while it is missing so
+// the page says what is going on instead of showing empty frames.
+const PERF_PANELS = ['p-hist', 'p-agent', 'p-source', 'p-outcome', 'p-queue', 'p-deps', 'p-model', 'p-tool', 'p-slow'];
+
 function renderPerformance() {
   renderPerfGlance();
   const sum = metricsSummary;
   const $ = id => document.getElementById(id);
-  if (!sum) return;
+  if (!sum) {
+    const note = metricsFetched ? 'Performance stats unavailable.' : 'Loading…';
+    PERF_PANELS.forEach(id => { const el = $(id); if (el) el.innerHTML = emptyHtml(note); });
+    return;
+  }
   const t = sum.turns || {};
   const l = t.latency || {};
   $('perf-p50').textContent = l.count ? ms(l.p50_ms) : '—';

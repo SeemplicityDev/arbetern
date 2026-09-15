@@ -2849,6 +2849,7 @@ func main() {
 	for _, start := range []func(context.Context, time.Duration){
 		wfRegistry.StartRefresh, dashRegistry.StartRefresh, chatRegistry.StartRefresh,
 		skillRegistry.StartRefresh, mcpRegistry.StartRefresh,
+		billingStore.StartRefresh, perfStore.StartRefresh,
 	} {
 		start(context.Background(), stateRefreshInterval)
 	}
