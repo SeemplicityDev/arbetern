@@ -1925,71 +1925,71 @@ function applyAgentExtras() {
   });
 }
 
-// A card is a summary, not an inventory: an agent with a dozen workflows and
-// ten integrations would otherwise push every other card off the screen. Each
-// list shows a few and says how many more there are.
-const AGENT_PREVIEW = { integrations: 4, dashboards: 3, workflows: 3 };
+// A card names how many workflows and dashboards an agent has and opens them
+// on request: an agent with a dozen of each would otherwise push every other
+// card off the screen. Integrations stay listed — they are what the agent can
+// reach, and that is the card's point.
+const AGENT_LIST_CAP = 10;
 const agentExpanded = new Set();
 
-function agentSectionKey(agentId, section) { return agentId + ':' + section; }
+function agentListKey(agentId, kind, suffix) { return agentId + ':' + kind + (suffix || ''); }
 
-// The lists are re-rendered whenever workflow or dashboard data lands, so what
-// is expanded is held here rather than in the DOM that gets replaced.
-function agentSlice(list, agentId, section) {
-  const open = agentExpanded.has(agentSectionKey(agentId, section));
-  const preview = AGENT_PREVIEW[section];
-  return { shown: open || list.length <= preview ? list : list.slice(0, preview), open };
-}
-
-function agentMoreHtml(list, agentId, section) {
+// The lists are rebuilt whenever workflow or dashboard data lands, so what is
+// open is held here rather than in the DOM that gets replaced.
+function agentListHtml(kind, agentId, label, list, chipHtml) {
   const aid = safeId(agentId);
-  const hidden = list.length - AGENT_PREVIEW[section];
-  if (!aid || hidden <= 0) return '';
-  const label = agentSlice(list, aid, section).open ? 'Show less' : `+${fmtInt(hidden)} more`;
-  return `<button type="button" class="agent-more" onclick="toggleAgentSection(event, '${aid}', '${section}')">${label}</button>`;
+  if (!aid || !list.length) return '';
+  const open = agentExpanded.has(agentListKey(aid, kind));
+  const all = agentExpanded.has(agentListKey(aid, kind, ':all'));
+  const shown = all ? list : list.slice(0, AGENT_LIST_CAP);
+  const rest = list.length - shown.length;
+  const more = rest > 0
+    ? `<button type="button" class="agent-more" onclick="showAllAgentList(event, '${aid}', '${kind}')">+${fmtInt(rest)} more</button>`
+    : '';
+  return `<details class="agent-${kind} agent-list" data-agent="${aid}" data-kind="${kind}"${open ? ' open' : ''}>`
+    + `<summary class="agent-${kind}-label">${escapeHtml(label)} <span>${fmtInt(list.length)}</span></summary>`
+    + `<div class="agent-${kind}-list">${shown.map(chipHtml).join('')}${more}</div></details>`;
 }
 
-// Only the card that was clicked is rebuilt. Re-rendering the grid would
-// replay every card's entry animation for the sake of one list.
-function toggleAgentSection(e, agentId, section) {
+function showAllAgentList(e, agentId, kind) {
   e.preventDefault();
   e.stopPropagation();
   const aid = safeId(agentId);
   if (!aid) return;
-  const key = agentSectionKey(aid, section);
-  if (agentExpanded.has(key)) agentExpanded.delete(key); else agentExpanded.add(key);
+  agentExpanded.add(agentListKey(aid, kind, ':all'));
   const card = document.querySelector(`#agents-grid .agent-card[data-agent-id="${aid}"]`);
   if (!card) return;
-  if (section === 'integrations') {
-    const badges = card.querySelector('.agent-integrations');
-    if (badges) badges.outerHTML = renderAgentBadges(aid);
-    return;
-  }
+  // Only this card is rebuilt: re-rendering the grid would replay every
+  // card's entry animation for the sake of one list.
   card.querySelectorAll('.agent-dashboards, .agent-workflows').forEach(el => el.remove());
   card.insertAdjacentHTML('beforeend', renderAgentDashboards(aid) + renderAgentWorkflows(aid));
 }
 
+// A details toggle does not bubble; capture reaches it anyway.
+document.getElementById('agents-grid').addEventListener('toggle', e => {
+  const d = e.target.closest ? e.target.closest('details.agent-list') : null;
+  if (!d) return;
+  const key = agentListKey(d.dataset.agent, d.dataset.kind);
+  if (d.open) agentExpanded.add(key); else agentExpanded.delete(key);
+}, true);
+
 function renderAgentDashboards(agentId) {
   const aid = safeId(agentId);
   const list = aid ? (AGENT_DASHBOARDS[aid] || []) : [];
-  if (list.length === 0) return '';
-  const chips = agentSlice(list, aid, 'dashboards').shown.map(d => {
+  return agentListHtml('dashboards', aid, 'Available dashboards', list, d => {
     const did = safeId(d.id);
     if (!did) return '';
     const label = escapeHtml(d.short_name || d.name || d.id);
     const url = detailPath('dashboard', aid, did);
     const title = escapeHtml(d.name + (d.description ? ' — ' + d.description : ''));
     return `<a class="agent-dashboard-chip" href="${url}" data-link title="${title}">${label}<button class="dash-delete" type="button" title="Delete dashboard" onclick="event.preventDefault();event.stopPropagation();deleteDashboard('${aid}','${did}');">×</button></a>`;
-  }).join('');
-  return `<div class="agent-dashboards"><div class="agent-dashboards-label">Available dashboards <span>${fmtInt(list.length)}</span></div>`
-    + `<div class="agent-dashboards-list">${chips}${agentMoreHtml(list, aid, 'dashboards')}</div></div>`;
+  });
 }
 
 function renderAgentWorkflows(agentId) {
   const aid = safeId(agentId);
   const list = aid ? (AGENT_WORKFLOWS[aid] || []) : [];
-  if (list.length === 0) return '';
-  const chips = agentSlice(list, aid, 'workflows').shown.map(w => {
+  return agentListHtml('workflows', aid, 'Scheduled workflows', list, w => {
     const wid = safeId(w.id);
     if (!wid) return '';
     const label = escapeHtml(w.short_name || w.name || w.id);
@@ -1997,24 +1997,22 @@ function renderAgentWorkflows(agentId) {
     const title = escapeHtml(w.name + (w.description ? ' — ' + w.description : '') + ' · cron ' + (w.cron || '—'));
     const cls = w.last_error ? ' err' : '';
     return `<a class="agent-workflow-chip${cls}" href="${url}" data-link title="${title}">${label}<button class="wf-delete" type="button" title="Delete workflow" onclick="event.preventDefault();event.stopPropagation();deleteWorkflow('${aid}','${wid}');">×</button></a>`;
-  }).join('');
-  return `<div class="agent-workflows"><div class="agent-workflows-label">Scheduled workflows <span>${fmtInt(list.length)}</span></div>`
-    + `<div class="agent-workflows-list">${chips}${agentMoreHtml(list, aid, 'workflows')}</div></div>`;
+  });
 }
 
 function renderAgentBadges(agentId) {
   const integrations = AGENT_INTEGRATIONS[agentId];
   if (!integrations || integrations.length === 0) return '';
-  const badges = agentSlice(integrations, agentId, 'integrations').shown.map(ig => {
+  const badges = integrations.map(ig => {
     const logo = getIntegrationLogo(ig.id);
     const cls = ig.planned ? ' planned' : '';
     return `<span class="agent-integration-badge${cls}" title="${escapeHtml(ig.name)}${ig.planned ? ' (planned)' : ''}">${logo}<span class="badge-label">${escapeHtml(ig.name)}</span>${ig.planned ? '<span class="planned-tag">soon</span>' : ''}</span>`;
   }).join('');
-  return `<div class="agent-integrations">${badges}${agentMoreHtml(integrations, agentId, 'integrations')}</div>`;
+  return `<div class="agent-integrations">${badges}</div>`;
 }
 
 function openAgent(id, e) {
-  if (e && e.target.closest('a, button')) return;
+  if (e && e.target.closest('a, button, summary')) return;
   const agent = agentById(id);
   if (!agent) return;
   const color = hashColor(agent.name);
