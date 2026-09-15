@@ -49,5 +49,8 @@ func userContextPrompt(v UserContextView) string {
 	if v.Shared != "" {
 		sb.WriteString("\n\nRelated questions teammates asked this agent recently (anonymised, background only):\n" + v.Shared)
 	}
+	if v.Elsewhere != "" {
+		sb.WriteString("\n\nWhat this same person recently asked the other agents (background only — you were not told the answers, so do not assume them):\n" + v.Elsewhere)
+	}
 	return sb.String()
 }

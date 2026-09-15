@@ -72,6 +72,7 @@ var uiPages = map[string]bool{
 	"changelog":    true,
 	"billing":      true,
 	"performance":  true,
+	"context":      true,
 }
 
 // ── Integration permission types & cache ────────────────────────────────────
@@ -706,6 +707,55 @@ type identity struct {
 	Atlassian          *atlassianIdentity `json:"atlassian,omitempty"`
 	AtlassianConnected bool               `json:"atlassian_connected"`
 	ResolvedAt         time.Time          `json:"resolved_at"`
+}
+
+// identityLinks resolves one stored user-context identity to the others the
+// same person is recorded under. Only the Slack direction can be resolved —
+// a member ID gives the email, and the email gives the key the console records
+// that person under — because the stored email key is a one-way hash.
+// Lookups are cached, negatives included, so the background aggregation does
+// not call Slack once per person per pass.
+type identityLinks struct {
+	mu      sync.Mutex
+	entries map[string]identityLinkEntry
+	ttl     time.Duration
+	slack   *slack.Client
+}
+
+type identityLinkEntry struct {
+	ids     []string
+	fetched time.Time
+}
+
+func newIdentityLinks(slackClient *slack.Client, ttl time.Duration) *identityLinks {
+	return &identityLinks{entries: make(map[string]identityLinkEntry), ttl: ttl, slack: slackClient}
+}
+
+func (c *identityLinks) resolve(_ context.Context, id string) []string {
+	if c == nil || c.slack == nil || !slackUserIDRe.MatchString(id) {
+		return nil
+	}
+	c.mu.Lock()
+	if e, ok := c.entries[id]; ok && time.Since(e.fetched) < c.ttl {
+		c.mu.Unlock()
+		return e.ids
+	}
+	c.mu.Unlock()
+
+	var ids []string
+	user, err := c.slack.GetUserInfo(id)
+	switch {
+	case err != nil:
+		log.Printf("[user-context] slack users.info %s failed: %v", id, err)
+	case user != nil:
+		if email := strings.TrimSpace(user.Profile.Email); email != "" {
+			ids = []string{commands.UserContextID(email)}
+		}
+	}
+	c.mu.Lock()
+	c.entries[id] = identityLinkEntry{ids: ids, fetched: time.Now()}
+	c.mu.Unlock()
+	return ids
 }
 
 type identityCache struct {
@@ -2036,6 +2086,7 @@ func main() {
 		}
 	}
 	userContextStore.SetSharedAgents(sharedAgents)
+	userContextStore.SetIdentityLinker(newIdentityLinks(slackClient, 24*time.Hour).resolve)
 	userContextStore.UseQueue(tasks)
 	log.Printf("User-context store: %suser-context/ (TTL=%s, semantic=%t, shared agents=%d)", backend, commands.UserContextTTL, userContextStore.Semantic(), len(sharedAgents))
 
@@ -2575,6 +2626,34 @@ func main() {
 			BackendAdmin bool     `json:"backend_admin"`
 			SkillAgents  []string `json:"skill_agents"`
 		}{identities.lookup(clientEmail(r), slackClient, jiraClient, cfg.AtlassianURL), canManageMCP(r), canViewBackend(r), skillAgentsFor(r)})
+	})
+
+	// API: the signed-in person's own stored context, aggregated across every
+	// agent. This is not the backend view under a different name: it reads only
+	// the documents keyed to the identities this request authenticated as, so
+	// it needs no allow-list to show someone their own memory.
+	apiMux.HandleFunc("/api/me/context", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Cache-Control", "no-store")
+		me := identities.lookup(clientEmail(r), slackClient, jiraClient, cfg.AtlassianURL)
+		if me.Anonymous {
+			httpx.WriteJSON(w, http.StatusOK, map[string]bool{"anonymous": true})
+			return
+		}
+		ids := []string{me.Email}
+		if me.Slack != nil {
+			ids = append(ids, me.Slack.ID)
+		}
+		profile, err := userContextStore.Profile(r.Context(), ids)
+		if err != nil {
+			log.Printf("[user-context] profile for %s failed: %v", redactEmail(me.Email), err)
+			http.Error(w, "failed to read your stored context", http.StatusBadGateway)
+			return
+		}
+		httpx.WriteJSON(w, http.StatusOK, profile)
 	})
 
 	// API: UI settings.

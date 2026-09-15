@@ -283,6 +283,21 @@
         <div id="backend-body"><div class="empty tall">Loading…</div></div>
       </section>
 
+      <section class="page" data-page="context" hidden>
+        <div class="page-head">
+          <div>
+            <h1 class="page-title">Your context</h1>
+            <p class="page-desc">Everything the agents remember from your own turns, in Slack and in this console. Only you see this page.</p>
+          </div>
+          <div class="page-actions">
+            <div class="pills" id="context-agent-pills"></div>
+            <input class="search-input" id="context-search" type="search" placeholder="Filter your turns…" autocomplete="off" aria-label="Filter remembered turns">
+          </div>
+        </div>
+        <div class="chip-row" id="context-summary"></div>
+        <div id="context-body"><div class="empty tall">Loading…</div></div>
+      </section>
+
       <section class="page" data-page="workflow" hidden><div id="wf-detail"></div></section>
       <section class="page" data-page="dashboard" hidden><div id="dash-detail"></div></section>
 

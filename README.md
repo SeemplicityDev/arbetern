@@ -256,6 +256,7 @@ URL:
 | Pull requests | `/ui/pulls` | Open pull requests the agents authored, found by the marker every arbetern-written PR body carries: agent, requester, entry source (Slack / chat / workflow) and age, filterable by agent; ready-for-review PRs are listed first, drafts last with a draft label |
 | Tickets | `/ui/tickets` | Unresolved Jira issues assigned to the account behind the Atlassian integration: type, status, priority, reporter, labels and age, filterable by project |
 | Backend | `/ui/backend` | Read-only browser of the state bucket laid out as folders, with an object viewer that masks secret-looking values, plus a sample of the vector index; visible only to the Slack user groups or emails in `backendView` (closed when none are set) |
+| Your context | `/ui/context` | Everything the agents remember of the signed-in person, aggregated across every agent and every identity they are recorded under (Slack ID, email), newest first, filterable by agent and text. Served from the cached aggregate the background pass maintains, so the page is one object read. Reached from the user button, not the rail, and open to anyone signed in: it reads only what is keyed to the identities the request authenticated as, so it needs no allow-list |
 | Changelog | `/ui/changelog` | Latest commits to the arbetern repository |
 | Performance | `/ui/performance` | Recorded statistics: response-time percentiles and their distribution, time to the model's first round, the split between model and tool time, rounds and tool calls per turn, how turns end, provider round-trip latency with retries and rate limits, per-tool latency, the slowest recent turns, the deferred-work backlog, and which optional services are currently being skipped |
 | Usage & Billing | `/ui/billing` | Estimated LLM spend by agent, model, source, user and workflow (`/billing` redirects here) |
@@ -288,6 +289,7 @@ raw samples, so percentiles survive both the merge across replicas and the
 month rollup.
 
 - The top-right user button shows who is signed in (`/api/me`): the email verified by the SSO proxy, resolved to the Slack profile (name, handle, title, time zone) via `users.lookupByEmail`, and to the Atlassian account (name, account ID) when that integration is connected. Without a proxy it reads "Not signed in".
+- The same menu opens **Your context** (`/api/me/context`): how many turns the agents currently remember of you, and a page listing them.
 - Drop a `logo.png` into `ui/` to replace the default icon
 - Set `UI_HEADER` env var to customize the top-bar title
 - Agents with `chat_enabled` expose a full-screen chat at `/ui/<agent>/chat` — a deep-linkable, reload-safe URL you can bookmark or share
@@ -356,12 +358,14 @@ Every Slack-driven request — DMs, channel mentions, slash commands, and in-thr
 | **Working memory** | Per `(agent, user, channel)` | The user-context entries of the last 10 minutes in the same channel, read from the state bucket on every request so any replica sees the same conversation | Up to 10 turns, each capped like a user-context entry |
 | **User context (persistent)** | Per `(agent, user)`, shared across DMs, channels and web chat | Document in the state bucket at `user-context/<agent>/<user>.json`. 30-day TTL on inactivity (refreshed on every append) | Each entry capped at 800 chars (question) + 1200 chars (answer). Recency mode: up to 50 entries and 96 KiB, all injected. Semantic mode (`S3_VECTORS_INDEX_ARN`): up to 200 entries stored; the closest matches from the last 90 days (cosine distance ≤ 0.6 and within 0.2 of the best) plus the 2 latest injected, capped at 24 KiB |
 | **Shared memory** (opt-in) | Per agent with `shared_memory: true` | Semantic mode only: up to 4 related turns of other users of the agent, rendered without names | 8 KiB |
+| **Cross-agent profile** | Per person, not per identity: the Slack member ID the bot records and the email the console records are folded into one | Aggregate at `user-profiles/<identity>.json`, refreshed as each turn is recorded and rebuilt hourly from the per-agent documents (see [docs/STATE.md](docs/STATE.md#aggregated-per-person-context)) | Contributes two things to the prompt: this person's turns with *this* agent under their other identities, merged into the working memory and semantic pools, and the last 6 questions they asked the *other* agents — questions only, 2 KiB |
 
 ### How it flows
 
 1. **Read on every request.** All layers are assembled before the LLM is called. The user-context document is read for DMs, channels and web chat — `channelID` is *not* part of its key, so every turn of a user merges into the same per-user document; each entry records the channel it came from, which is what scopes the working memory. In semantic mode the question is embedded and the closest prior turns are selected from the vector index.
-2. **Append on every completed turn.** When the model finishes, a compact `(question, answer, channel)` entry is appended to the user-context document (and embedded into the index in semantic mode). Web chat turns are keyed by the signed-in email. Scheduled workflow ticks (`ExecuteHeadless`) intentionally skip persistence.
-3. **Cache reuse.** The channel-history cache TTL is wired to `THREAD_SESSION_TTL`, so a multi-turn thread reuses the same cached 50-message window for the entire session window without re-hitting Slack.
+2. **Aggregate follows the person, not the key.** The agent's own document stays the authority for its own turns; the person's cached profile supplies the rest, in one GET. That is what makes a question asked in the console a continuation of one asked in Slack, and what lets an agent see, as background, what its colleagues are being asked by the same person.
+3. **Append on every completed turn.** When the model finishes, a compact `(question, answer, channel)` entry is appended to the user-context document (and embedded into the index in semantic mode). Web chat turns are keyed by the signed-in email. Scheduled workflow ticks (`ExecuteHeadless`) intentionally skip persistence, and so do turns with no answer and turns the loop ended by giving up on a model that kept writing a tool call as text — a give-up reply keeps the question it failed on, which would otherwise win the semantic match against the real answer to the same question later.
+4. **Cache reuse.** The channel-history cache TTL is wired to `THREAD_SESSION_TTL`, so a multi-turn thread reuses the same cached 50-message window for the entire session window without re-hitting Slack.
 
 ### Knobs
 

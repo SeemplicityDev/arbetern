@@ -82,8 +82,14 @@ type toolLoop struct {
 // loopResult is how the loop ended, with the turn's cumulative usage and the
 // timing split between the model and the tools it called.
 type loopResult struct {
-	Outcome       loopOutcome
-	Final         string
+	Outcome loopOutcome
+	Final   string
+	// Degraded marks a Final the loop produced by giving up rather than by
+	// answering. It is still replied to the requester, but it is never
+	// recorded as a remembered turn: a give-up reply keeps the question it
+	// failed on, so stored it would win the semantic match against the real
+	// answer to the same question later.
+	Degraded      bool
 	FinishReason  string
 	LastTruncated string
 	Model         string
@@ -244,11 +250,15 @@ func (h *GeneralHandler) runToolLoop(ctx context.Context, lp toolLoop) (res loop
 				res.Outcome = loopEmpty
 				return res, nil
 			}
-			if name := narratedToolCall(content, lp.tools); name != "" && narrationRetries < maxNarrationRetries {
-				narrationRetries++
-				log.Printf("%s model described a %s call instead of making it (retry %d)", lp.logPrefix, name, narrationRetries)
-				messages = append(messages, llm.NewChatMessage("assistant", content), llm.NewChatMessage("user", narrationNudge(name)))
-				continue
+			if name := narratedToolCall(content, lp.tools); name != "" {
+				if narrationRetries < maxNarrationRetries {
+					narrationRetries++
+					log.Printf("%s model described a %s call instead of making it (retry %d)", lp.logPrefix, name, narrationRetries)
+					messages = append(messages, llm.NewChatMessage("assistant", content), llm.NewChatMessage("user", narrationNudge(name)))
+					continue
+				}
+				log.Printf("%s still narrating a %s call after %d retries; replying without remembering the turn", lp.logPrefix, name, narrationRetries)
+				res.Degraded = true
 			}
 			res.Outcome = loopCompleted
 			res.Final = content

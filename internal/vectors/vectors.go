@@ -271,6 +271,37 @@ func Eq(fields map[string]any) map[string]any {
 	return And(clauses...)
 }
 
+// In builds a metadata filter requiring field to be one of values. A single
+// value collapses to an equality filter, and no values to nil so And skips it.
+func In(field string, values []string) map[string]any {
+	switch len(values) {
+	case 0:
+		return nil
+	case 1:
+		return map[string]any{field: map[string]any{"$eq": values[0]}}
+	}
+	list := make([]any, 0, len(values))
+	for _, v := range values {
+		list = append(list, v)
+	}
+	return map[string]any{field: map[string]any{"$in": list}}
+}
+
+// NotIn builds a metadata filter requiring field to be none of values.
+func NotIn(field string, values []string) map[string]any {
+	switch len(values) {
+	case 0:
+		return nil
+	case 1:
+		return Ne(field, values[0])
+	}
+	list := make([]any, 0, len(values))
+	for _, v := range values {
+		list = append(list, v)
+	}
+	return map[string]any{field: map[string]any{"$nin": list}}
+}
+
 // Ne builds a metadata filter requiring field to differ from value.
 func Ne(field string, value any) map[string]any {
 	return map[string]any{field: map[string]any{"$ne": value}}

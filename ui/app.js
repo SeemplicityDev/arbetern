@@ -72,11 +72,12 @@ const INTEGRATION_LOGOS = {
 
 const SOURCE_LABELS = { slack: 'Slack commands', chat: 'Web chat', workflow: 'Scheduled workflows', dashboard: 'Dashboard renders' };
 const SLACK_ID_RE = /^[UW][A-Z0-9]{6,}$/;
-const PAGES = ['overview', 'integrations', 'mcp', 'agents', 'chats', 'skills', 'workflows', 'dashboards', 'pulls', 'tickets', 'changelog', 'performance', 'billing', 'backend'];
+const PAGES = ['overview', 'integrations', 'mcp', 'agents', 'chats', 'skills', 'workflows', 'dashboards', 'pulls', 'tickets', 'changelog', 'performance', 'billing', 'backend', 'context'];
 const PAGE_TITLES = {
   overview: 'Overview', integrations: 'Integrations', mcp: 'MCP & Connectors', agents: 'Agents', chats: 'Chats',
   skills: 'Skills', workflows: 'Workflows', dashboards: 'Dashboards', pulls: 'Pull requests', tickets: 'Tickets',
   changelog: 'Changelog', performance: 'Performance', billing: 'Usage & Billing', backend: 'Backend',
+  context: 'Your context',
 };
 const OUTCOME_LABELS = {
   completed: 'Answered', empty: 'Ran out of content', max_rounds: 'Hit the round limit',
@@ -126,6 +127,7 @@ let ticketsState = { list: null, error: null };
 let ticketFilter = 'all';
 let ticketQuery = '';
 let backendState = { summary: null, objects: null, truncated: false, error: null, tab: 'state', path: '', query: '', file: null, vectors: null };
+let contextState = { profile: null, error: null, agent: 'all', query: '', open: new Set() };
 
 function escapeHtml(str) {
   return String(str == null ? '' : str)
@@ -371,6 +373,7 @@ function renderViews() {
     renderWorkflowsPage, renderDashboardsPage, renderPullsPage, renderSkillsPage, renderMCPPage, renderChatsPage, renderChanges,
     () => { if (billingSummary) renderBilling(billingSummary); },
     renderPerformance,
+    () => { if (contextState.profile) renderContextPage(); },
   ];
   for (const paint of painters) {
     try { paint(); } catch (err) { console.error('render failed:', err); }
@@ -402,6 +405,9 @@ function loadPage(page) {
     case 'backend':
       renderBackendPage();
       return loadBackend();
+    case 'context':
+      renderContextPage();
+      return loadMyContext();
     case 'changelog':
       renderChanges();
       return loadChanges();
@@ -3094,6 +3100,120 @@ async function testConnector(id, btn) {
   renderFleet();
 }
 
+/* Your context — the turns the agents remember of you, across every agent.
+   Served per-identity, so it needs no allow-list and shows nobody else's. */
+
+const CONTEXT_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>';
+
+function contextTurns() {
+  const p = contextState.profile;
+  if (!p || !p.turns) return [];
+  const q = contextState.query.trim().toLowerCase();
+  return p.turns.filter(t =>
+    (contextState.agent === 'all' || t.agent === contextState.agent) &&
+    (!q || (t.question || '').toLowerCase().includes(q) || (t.answer || '').toLowerCase().includes(q)));
+}
+
+function contextTurnHtml(t) {
+  const question = t.question || '(no question recorded)';
+  return `<details class="run" data-id="${escapeHtml(t.id)}"${contextState.open.has(t.id) ? ' open' : ''}>
+    <summary>
+      <span class="run-time">${escapeHtml(fmtDateTime(t.at))}</span>
+      ${agentChip(t.agent)}
+      <span class="turn-q">${escapeHtml(question)}</span>
+      ${t.channel ? `<span class="turn-channel">${escapeHtml(t.channel)}</span>` : ''}
+    </summary>
+    <div class="run-body">
+      <div class="turn-label">You asked</div>
+      <div class="rich">${escapeHtml(question)}</div>
+      <div class="turn-label">The agent answered</div>
+      <div class="rich">${renderSlackMarkdown(t.answer)}</div>
+    </div>
+  </details>`;
+}
+
+function renderContextPage() {
+  const summaryEl = document.getElementById('context-summary');
+  const pills = document.getElementById('context-agent-pills');
+  const body = document.getElementById('context-body');
+  const clear = () => { summaryEl.innerHTML = ''; pills.innerHTML = ''; };
+  const p = contextState.profile;
+  if (contextState.error) {
+    clear();
+    body.innerHTML = emptyHtml('Your stored context is unavailable right now.', true);
+    return;
+  }
+  if (!p) {
+    clear();
+    body.innerHTML = emptyHtml('Loading your context…', true);
+    return;
+  }
+  if (p.anonymous) {
+    clear();
+    body.innerHTML = emptyHtml('Sign in to see what the agents remember of you.', true);
+    return;
+  }
+  summaryEl.innerHTML = [
+    `<span class="chip">${plural(p.turns.length, 'turn')} remembered</span>`,
+    `<span class="chip">${plural(p.agents.length, 'agent')}</span>`,
+    `<span class="chip">${fmtBytes(p.bytes)}</span>`,
+    `<span class="chip">kept <b>${fmtInt(p.retention_days)}d</b> after your last turn</span>`,
+    `<span class="chip">at most <b>${fmtInt(p.max_turns)}</b> turns per agent</span>`,
+    `<span class="chip">recall <b>${p.semantic ? 'by meaning' : 'most recent'}</b></span>`,
+    p.updated ? `<span class="chip" title="${escapeHtml(new Date(p.updated).toLocaleString())}">aggregated ${escapeHtml(timeAgo(p.updated))}</span>` : '',
+    ...p.identities.map(id => `<span class="chip">stored as <b>${escapeHtml(id)}</b></span>`),
+  ].filter(Boolean).join('');
+  pills.innerHTML = p.agents.length > 1
+    ? [['all', 'All agents']].concat(p.agents.map(a => [a.agent, agentLabel(a.agent)]))
+        .map(([id, label]) => `<button class="pill${contextState.agent === id ? ' active' : ''}" data-agent="${escapeHtml(id)}">${escapeHtml(label)}</button>`).join('')
+    : '';
+  if (!p.turns.length) {
+    body.innerHTML = emptyHtml('No agent has remembered a turn of yours yet. Ask one something in Slack or from Chats and it appears here.', true);
+    return;
+  }
+  const turns = contextTurns();
+  body.innerHTML = turns.length
+    ? turns.map(contextTurnHtml).join('')
+    : emptyHtml('No remembered turn matches this filter.', true);
+}
+
+async function loadMyContext(force) {
+  if (!force && recentlyFetched('me-context')) return;
+  try {
+    contextState.profile = await fetchJSON('/api/me/context');
+    contextState.error = null;
+  } catch (err) {
+    contextState.error = err;
+  }
+  renderContextPage();
+  renderIdentity();
+}
+
+function openMyContext() {
+  setIdentityOpen(false);
+  navigate('context');
+}
+
+// A repaint rebuilds the list, so which turns are expanded is kept here
+// rather than in the DOM. toggle does not bubble; capture reaches it anyway.
+document.getElementById('context-body').addEventListener('toggle', e => {
+  const d = e.target.closest ? e.target.closest('details[data-id]') : null;
+  if (!d) return;
+  if (d.open) contextState.open.add(d.dataset.id); else contextState.open.delete(d.dataset.id);
+}, true);
+
+document.getElementById('context-agent-pills').addEventListener('click', e => {
+  const b = e.target.closest('.pill');
+  if (!b) return;
+  contextState.agent = b.dataset.agent;
+  renderContextPage();
+});
+
+document.getElementById('context-search').addEventListener('input', e => {
+  contextState.query = e.target.value;
+  renderContextPage();
+});
+
 /* Identity */
 let identityData = null;
 
@@ -3154,9 +3274,16 @@ function renderIdentity() {
     ]);
   }
 
+  const ctx = contextState.profile;
+  const ctxTag = contextState.error ? 'unavailable' : (ctx && !ctx.anonymous ? plural(ctx.turns.length, 'turn') : 'loading…');
+
   pop.innerHTML = `<div class="id-head">${avatarHtml(displayName, s.avatar, false)}<div><div class="id-title">${escapeHtml(displayName)}</div><div class="id-sub" title="${escapeHtml(me.email)}">${escapeHtml(me.email)}</div></div></div>
     <div class="id-section"><h3>${INTEGRATION_LOGOS.slack}Slack<span class="tag ${me.slack ? 'slack' : ''}">${me.slack ? 'matched' : 'not found'}</span></h3>${slackSection}</div>
     <div class="id-section"><h3>${INTEGRATION_LOGOS.jira}Atlassian<span class="tag">${!me.atlassian_connected ? 'not connected' : me.atlassian ? 'matched' : 'not found'}</span></h3>${atlassianSection}</div>
+    <div class="id-section"><h3>${CONTEXT_ICON}Your context<span class="tag">${escapeHtml(ctxTag)}</span></h3>
+      <div class="id-note">What the agents remember from your own turns, gathered from every agent you have worked with.</div>
+      <div class="actions"><button class="btn-mini" type="button" onclick="openMyContext()">Open</button></div>
+    </div>
     <div class="id-foot">Resolved ${me.resolved_at ? timeAgo(me.resolved_at) : 'just now'} from your sign-in</div>`;
 }
 
@@ -3169,7 +3296,9 @@ function setIdentityOpen(open) {
 
 document.getElementById('user-button').addEventListener('click', e => {
   e.stopPropagation();
-  setIdentityOpen(document.getElementById('user-pop').hidden);
+  const open = document.getElementById('user-pop').hidden;
+  setIdentityOpen(open);
+  if (open && !contextState.profile && !contextState.error) loadMyContext();
 });
 document.addEventListener('click', e => {
   if (!e.target.closest('#user-menu')) setIdentityOpen(false);

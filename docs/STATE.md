@@ -28,6 +28,7 @@ IAM policy.
 | `metrics/perf-YYYY-MM.json`, `metrics/recent.json` | Performance series: turn, model-call and tool latency histograms and outcome counts. Carries no identity — keyed by agent, entry path, model, backend and tool only |
 | `queue/<topic>/<task>.json` | Deferred work waiting to run (see below). A `user-context` task carries the turn it is about to write, so until it is processed the same conversation text lives here as well as under `user-context/` |
 | `user-context/<agent>/<user>.json` | Per-user rolling context (`{"entries":[{id,at,c,q,a}]}`, `c` = channel) |
+| `user-profiles/<identity>.json` | Aggregated per-person context, derived from the documents above: one copy per identity that person is recorded under, each holding the same merged view. Derived state — safe to delete, rebuilt on the hour |
 | `sessions/<channel>/<thread>.json`, `sessions/_stats.json` | Slack thread sessions and their counters |
 | `gitops/<kind>.json` | Status of the last GitOps reconcile, shared with every replica |
 | `catalog/manifest.json` | What the catalog search index currently holds |
@@ -44,6 +45,58 @@ the emails or domains in `BACKEND_VIEW_EMAILS`.
 It fails closed: with both unset the page and every `/api/backend` route answer
 403, so the view stays off until you deliberately name who may open it. Reads
 are capped at 1 MiB per object and served with `Cache-Control: no-store`.
+
+One prefix has a second, unrestricted door. The **Your context** page
+(`/ui/context`, API `/api/me/context`) aggregates `user-context/<agent>/<user>.json`
+across every agent for the person making the request — the Slack ID and the
+email they are recorded under — and nothing else. It is keyed by the identity
+the request authenticated as rather than by an allow-list, so anyone signed in
+can read their own remembered turns without being able to reach anybody else's.
+
+## Aggregated per-person context
+
+`user-context/<agent>/<user>.json` answers "what does *this agent* remember of
+*this key*". Two things it cannot answer: what a person has been doing across
+the other agents, and that the Slack member ID the bot records and the email
+the console records are the same person. `user-profiles/<identity>.json` is the
+aggregate that does, and because it is one object it is also what the console
+page and the prompt path read instead of walking the whole prefix.
+
+**Identity.** A person is a group of identity keys. The only resolvable link is
+the Slack direction — `users.info` gives a member ID's email, and the email
+gives the key the console records them under — because the stored email key is
+a one-way hash. Groups are therefore built by union, not by expanding each key
+on its own, so a person comes out as one group whichever of their keys is seen
+first. The same aggregate is written under every key in the group, so a lookup
+from any source is a single GET with no indirection.
+
+**When it is built.** Three layers, each covering the one before it:
+
+| Layer | When | What it does |
+|---|---|---|
+| Incremental | On every recorded turn, in the `user-context` queue task | Merges the new turn into the person's cached profile inside a conditional write, so the aggregate is current within seconds. Two replicas recording turns for the same person cannot lose one another's |
+| Rebuild | At start and every hour, on the replica holding the scheduling lease, after the TTL sweep and the index repair | Re-derives every profile from the per-agent documents, writes only the ones whose content actually changed, and deletes the ones whose documents are gone |
+| On read | A `/api/me/context` request that finds no cached profile | Builds it live and caches it in the background, so a person who has never been aggregated still gets an answer |
+
+**Self-healing.** The per-agent documents stay the source of truth and the
+profile is derived, so anything that goes wrong with it is repaired rather than
+carried: a missed or failed incremental update, a profile half-written by a
+replica that died, one left behind after the TTL sweep removed its documents,
+and one written before two identities were known to belong to the same person
+are all corrected by the next rebuild. Deleting the whole `user-profiles/`
+prefix is a supported operation; it costs one rebuild.
+
+**Caps.** A profile holds at most 300 turns and 256 KiB, dropping the oldest —
+larger than one agent's document because it merges all of them, bounded so the
+prompt-side read stays one small object. Storage is roughly the user-context
+prefix again, times the number of identities a person has.
+
+**What agents get from it.** On every turn the agent's own document remains the
+authority for its own turns. The profile adds two things: the turns this person
+had with *this* agent under another identity, merged into the same working
+memory and semantic pools so Slack and the console are one conversation; and a
+short background block of what they recently asked the *other* agents —
+questions only, never answers, capped at six lines.
 
 ## How the cache works
 
@@ -146,7 +199,7 @@ Each topic chooses its delivery mode:
 
 | Topic | Mode | What it defers |
 |---|---|---|
-| `user-context` | at-least-once, 4 attempts | Writing a finished turn into the user's rolling context and indexing its vector. Retries are safe: the entry ID travels with the task, so a redelivered task recognises the write it already made instead of appending the turn twice |
+| `user-context` | at-least-once, 4 attempts | Writing a finished turn into the user's rolling context, indexing its vector, and folding it into that person's aggregated profile. Retries are safe: the entry ID travels with the task, so a redelivered task recognises the write it already made instead of appending the turn twice. A failed profile update is logged rather than retried — the hourly rebuild repairs it |
 | `workflow-run` | at-most-once | Manual "Run now" and event-triggered (`on_success` / `on_failure`) runs. The task is dropped the moment it is claimed: a tick opens pull requests and posts to Slack, so a run lost to a crash is far cheaper than one replayed after it. The per-workflow lease still prevents two replicas running the same workflow at once |
 
 A failed at-least-once task is rescheduled with exponential backoff (30s

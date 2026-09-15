@@ -379,7 +379,9 @@ func (h *GeneralHandler) Execute(channelID, userID, text, responseURL, auditTS s
 	switch res.Outcome {
 	case loopCompleted:
 		log.Printf("[user=%s channel=%s] general query completed successfully", userID, channelID)
-		h.persistUserContext(ctx, userID, channelID, text, res.Final)
+		if !res.Degraded {
+			h.persistUserContext(ctx, userID, channelID, text, res.Final)
+		}
 		reply(res.Final)
 	case loopNoChoices:
 		reply("No response from the model.")
@@ -580,7 +582,7 @@ func (h *GeneralHandler) ExecuteChat(ctx context.Context, userID string, history
 		return "", fmt.Errorf("chat exceeded max tool rounds (%d)", res.Rounds)
 	}
 	log.Printf("%s completed after %d rounds", logPrefix, res.Rounds)
-	if memoryUser != "" {
+	if memoryUser != "" && !res.Degraded {
 		h.persistUserContext(ctx, memoryUser, "", userMessage, res.Final)
 	}
 	return res.Final, nil
