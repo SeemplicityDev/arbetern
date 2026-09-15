@@ -1014,6 +1014,9 @@ html[data-sidebar="collapsed"] .sidebar-collapse svg { transform: rotate(180deg)
 .agent-dashboards, .agent-workflows { margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--border); }
 .agent-dashboards-label, .agent-workflows-label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-muted); margin-bottom: 6px; }
 .agent-dashboards-list, .agent-workflows-list { display: flex; flex-wrap: wrap; gap: 6px; }
+.agent-dashboards-label span, .agent-workflows-label span { font-family: var(--font-mono); color: var(--text); }
+.agent-more { font-size: 11px; font-weight: 500; padding: 3px 9px; border-radius: 6px; background: transparent; border: 1px dashed var(--border); color: var(--text-muted); cursor: pointer; font-family: inherit; }
+.agent-more:hover { color: var(--text-bright); border-color: var(--text-muted); }
 .agent-dashboard-chip { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; font-weight: 500; padding: 3px 8px; border-radius: 6px; background: rgba(114, 151, 189, 0.08); border: 1px solid rgba(114, 151, 189, 0.28); color: var(--accent); text-decoration: none; transition: all 0.15s ease; }
 .agent-dashboard-chip:hover { background: rgba(114, 151, 189, 0.16); }
 .agent-workflow-chip { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; font-weight: 500; padding: 3px 8px; border-radius: 6px; background: rgba(131, 176, 138, 0.08); border: 1px solid rgba(131, 176, 138, 0.28); color: var(--green); text-decoration: none; transition: all 0.15s ease; }
