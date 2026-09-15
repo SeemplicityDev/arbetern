@@ -17,7 +17,7 @@ An orchestration platform for AI agents in the enterprise. Each agent lives in i
 
 ### Screenshots
 
-UI screenshots — home, dashboards, workflow grid, workflow editor — are in [screenshots/SCREENSHOTS.md](screenshots/SCREENSHOTS.md).
+UI screenshots — overview, integrations, MCP & connectors, agents, performance — are in [screenshots/SCREENSHOTS.md](screenshots/SCREENSHOTS.md).
 
 ### Architecture — [Bernoulli Naive Bayes](https://en.wikipedia.org/wiki/Naive_Bayes_classifier) by Design
 

@@ -1,52 +1,52 @@
 # Screenshots
 
-A visual tour of the Arbetern UI.
+A visual tour of the Arbetern console. Every page renders inside the same
+shell — collapsible side rail, light/dark toggle — so the tour follows the
+rail from top to bottom.
 
-## Home
+## Overview
 
-The console opens on the **Overview** audit dashboard (who asks which agent,
-requests over time, fleet health) with a collapsible side rail for the other
-pages. The screenshots below predate the side rail and show the
-**integrations** page — every configured integration with its live
-permission / auth state.
+The console opens on **Overview**: who is putting the agents to work, through
+which door, and how much. The "who asks whom" matrix cross-tabs users against
+agents, next to request volume and estimated token spend for the selected
+window (7 / 30 / 90 days, all time). Below it, response-time headlines, the
+agent roster with per-agent volume, top users, and where requests come from.
 
-![Home — integrations](home_integrations_light.png)
+![Overview](overview.png)
 
-![Home — integrations](home_integrations_dark.png)
+## Integrations
 
-Scrolling down reveals the **agents** roster alongside the changelog feed.
+Every connector the agents can reach, with its live permission and auth state
+— Slack, GitHub, Jira, Confluence, NVD, Salesforce, Chorus, Datadog, AWS,
+Azure, Databricks, ClickHouse Cloud, Freshworks, Google Drive / Sheets. Each
+card names the credential type behind it; opening one shows scopes and tools.
 
-![Home — agents](home_agents.png)
+![Integrations](integrations.png)
 
-Clicking an agent card expands its **prompt set** — one panel per prompt
-(general, security, debug, etc.) with the exact text sent to the LLM.
+## MCP & Connectors
 
-![Home — agent card](home_agent_card.png)
+Model Context Protocol servers the agents can call. Register a server, test it
+to discover its tools, then pick which agents may use them. The card shows the
+enabled state, the discovered tool list, which agents are allowed, and when the
+server was last checked.
 
-## Dashboards
+![MCP & Connectors](mcp_connectors.png)
 
-A dashboard view — scheduled snapshots of an agent's data sources rendered
-as Markdown and refreshed on the cadence configured at creation time.
+## Agents
 
-![Dashboard](dashboard.png)
+The roster. Each card carries the agent's description, active state, prompt
+count, and the integrations it is wired to. Expanding a card reveals its
+scheduled workflows and available dashboards; where chat is enabled, the card
+opens one directly.
 
-## Workflows — Grid
+![Agents](agents.png)
 
-The workflow grid for an agent: each card shows the schedule, last-run
-status, and the live "running" badge while a tick is in flight.
+## Performance
 
-![Workflow grid](workflow_grid.png)
+How long the agents take to answer, where that time goes, and how often a turn
+ends without an answer — median and p95 response, first-round latency, answered
+rate, time in tools, output speed. The distribution histogram and the by-agent
+and by-entry-path tables break the same numbers down. Nothing on this page is
+tied to a person, a channel, or a prompt.
 
-Opening a workflow card reveals per-run history, prompt, and the detected
-source/output integrations.
-
-![Workflow grid — expanded](workflow_grid_2.png)
-
-## Workflow Editor
-
-Editing a workflow: prompt, schedule (`cron` UTC expression), trigger
-type, and the auto-detected source/output integration flow diagram.
-
-![Workflow editor](workflow_edit.png)
-
-
+![Performance](performance.png)
