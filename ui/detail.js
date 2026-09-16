@@ -404,6 +404,7 @@ const FLOW_INTEGRATIONS = [
     readKeys: ['drive_list_folders', 'drive_find_file', 'drive_read_file', 'sheets_read_range', 'sheets_get_spreadsheet_info'],
     writeKeys: ['sheets_append_row'] },
   { id: 'nvd', name: 'NVD', kind: 'source', keys: ['nvd', 'cve', 'vulnerabilit'] },
+  { id: 'document360', name: 'Document360', kind: 'source', keys: ['document360_list_workspaces', 'document360_search', 'document360_list_categories', 'document360_list_articles', 'document360_get_article', 'document360', 'knowledge base article', 'help center article'] },
   { id: 'workflow', name: 'Workflow', kind: 'both', keys: ['call_workflow', 'sub-workflow', 'child workflow'] },
 ];
 

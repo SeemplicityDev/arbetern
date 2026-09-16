@@ -18,6 +18,7 @@ import (
 	"github.com/justmike1/arbetern/dashboards"
 	"github.com/justmike1/arbetern/databricks"
 	"github.com/justmike1/arbetern/datadog"
+	"github.com/justmike1/arbetern/document360"
 	"github.com/justmike1/arbetern/freshworks"
 	"github.com/justmike1/arbetern/github"
 	"github.com/justmike1/arbetern/google"
@@ -31,37 +32,38 @@ import (
 )
 
 type Router struct {
-	slackClient      SlackClient
-	ghClient         *github.Client
-	modelsClient     *llm.Client
-	codeModelsClient *llm.Client
-	jiraClient       *atlassian.Client
-	nvdClient        *nvd.Client
-	sfClient         *salesforce.Client
-	chorusClient     *chorus.Client
-	datadogClients   *datadog.MultiClient
-	awsClient        *aws.Client
-	azureClient      *azure.Client
-	databricksClient *databricks.Client
-	clickhouseClient *clickhouse.Client
-	freshworksClient *freshworks.Client
-	googleClient     *google.Client
-	dashboards       *dashboards.Registry
-	workflows        *workflows.Registry
-	mcp              *mcp.Registry
-	contextProvider  *ContextProvider
-	catalog          *catalog.Index
-	prompts          PromptProvider
-	agentID          string
-	appURL           string
-	sessions         *SessionStore
-	maxToolRounds    int
-	userContextStore *UserContextStore
-	billing          UsageRecorder
-	perf             PerfRecorder
+	slackClient       SlackClient
+	ghClient          *github.Client
+	modelsClient      *llm.Client
+	codeModelsClient  *llm.Client
+	jiraClient        *atlassian.Client
+	nvdClient         *nvd.Client
+	sfClient          *salesforce.Client
+	chorusClient      *chorus.Client
+	datadogClients    *datadog.MultiClient
+	awsClient         *aws.Client
+	azureClient       *azure.Client
+	databricksClient  *databricks.Client
+	clickhouseClient  *clickhouse.Client
+	freshworksClient  *freshworks.Client
+	document360Client *document360.Client
+	googleClient      *google.Client
+	dashboards        *dashboards.Registry
+	workflows         *workflows.Registry
+	mcp               *mcp.Registry
+	contextProvider   *ContextProvider
+	catalog           *catalog.Index
+	prompts           PromptProvider
+	agentID           string
+	appURL            string
+	sessions          *SessionStore
+	maxToolRounds     int
+	userContextStore  *UserContextStore
+	billing           UsageRecorder
+	perf              PerfRecorder
 }
 
-func NewRouter(slackClient SlackClient, ghClient *github.Client, modelsClient *llm.Client, codeModelsClient *llm.Client, jiraClient *atlassian.Client, nvdClient *nvd.Client, sfClient *salesforce.Client, chorusClient *chorus.Client, datadogClients *datadog.MultiClient, awsClient *aws.Client, azureClient *azure.Client, databricksClient *databricks.Client, clickhouseClient *clickhouse.Client, freshworksClient *freshworks.Client, googleClient *google.Client, dashboardRegistry *dashboards.Registry, workflowRegistry *workflows.Registry, pp PromptProvider, agentID, appURL string, sessions *SessionStore, maxToolRounds int, userContextStore *UserContextStore, usage UsageRecorder) *Router {
+func NewRouter(slackClient SlackClient, ghClient *github.Client, modelsClient *llm.Client, codeModelsClient *llm.Client, jiraClient *atlassian.Client, nvdClient *nvd.Client, sfClient *salesforce.Client, chorusClient *chorus.Client, datadogClients *datadog.MultiClient, awsClient *aws.Client, azureClient *azure.Client, databricksClient *databricks.Client, clickhouseClient *clickhouse.Client, freshworksClient *freshworks.Client, googleClient *google.Client, document360Client *document360.Client, dashboardRegistry *dashboards.Registry, workflowRegistry *workflows.Registry, pp PromptProvider, agentID, appURL string, sessions *SessionStore, maxToolRounds int, userContextStore *UserContextStore, usage UsageRecorder) *Router {
 	// Channel-context cache reuses the thread session window so that an
 	// active in-thread conversation does not re-fetch Slack history on
 	// every turn. Falls back to the package default when sessions is nil.
@@ -72,31 +74,32 @@ func NewRouter(slackClient SlackClient, ghClient *github.Client, modelsClient *l
 		}
 	}
 	return &Router{
-		slackClient:      slackClient,
-		ghClient:         ghClient,
-		modelsClient:     modelsClient,
-		codeModelsClient: codeModelsClient,
-		jiraClient:       jiraClient,
-		nvdClient:        nvdClient,
-		sfClient:         sfClient,
-		chorusClient:     chorusClient,
-		datadogClients:   datadogClients,
-		awsClient:        awsClient,
-		azureClient:      azureClient,
-		databricksClient: databricksClient,
-		clickhouseClient: clickhouseClient,
-		freshworksClient: freshworksClient,
-		googleClient:     googleClient,
-		dashboards:       dashboardRegistry,
-		workflows:        workflowRegistry,
-		contextProvider:  NewContextProvider(slackClient, cacheTTL),
-		prompts:          pp,
-		agentID:          agentID,
-		appURL:           appURL,
-		sessions:         sessions,
-		maxToolRounds:    maxToolRounds,
-		userContextStore: userContextStore,
-		billing:          usage,
+		slackClient:       slackClient,
+		ghClient:          ghClient,
+		modelsClient:      modelsClient,
+		codeModelsClient:  codeModelsClient,
+		jiraClient:        jiraClient,
+		nvdClient:         nvdClient,
+		sfClient:          sfClient,
+		chorusClient:      chorusClient,
+		datadogClients:    datadogClients,
+		awsClient:         awsClient,
+		azureClient:       azureClient,
+		databricksClient:  databricksClient,
+		clickhouseClient:  clickhouseClient,
+		freshworksClient:  freshworksClient,
+		document360Client: document360Client,
+		googleClient:      googleClient,
+		dashboards:        dashboardRegistry,
+		workflows:         workflowRegistry,
+		contextProvider:   NewContextProvider(slackClient, cacheTTL),
+		prompts:           pp,
+		agentID:           agentID,
+		appURL:            appURL,
+		sessions:          sessions,
+		maxToolRounds:     maxToolRounds,
+		userContextStore:  userContextStore,
+		billing:           usage,
 	}
 }
 
@@ -253,36 +256,37 @@ func (r *Router) newDebugHandler(userContext string) *DebugHandler {
 
 func (r *Router) newGeneralHandler(userContext string, session *ThreadSession) *GeneralHandler {
 	return &GeneralHandler{
-		slackClient:      r.slackClient,
-		ghClient:         r.ghClient,
-		modelsClient:     r.modelsClient,
-		codeModelsClient: r.codeModelsClient,
-		jiraClient:       r.jiraClient,
-		nvdClient:        r.nvdClient,
-		sfClient:         r.sfClient,
-		chorusClient:     r.chorusClient,
-		datadogClients:   r.datadogClients,
-		awsClient:        r.awsClient,
-		azureClient:      r.azureClient,
-		databricksClient: r.databricksClient,
-		clickhouseClient: r.clickhouseClient,
-		freshworksClient: r.freshworksClient,
-		googleClient:     r.googleClient,
-		dashboards:       r.dashboards,
-		workflows:        r.workflows,
-		mcp:              r.mcp,
-		contextProvider:  r.contextProvider,
-		catalog:          r.catalog,
-		prompts:          r.prompts,
-		agentID:          r.agentID,
-		appURL:           r.appURL,
-		maxToolRounds:    r.maxToolRounds,
-		userContext:      userContext,
-		session:          session,
-		userContextStore: r.userContextStore,
-		billing:          r.billing,
-		billingSource:    billing.SourceSlack,
-		perf:             r.perf,
+		slackClient:       r.slackClient,
+		ghClient:          r.ghClient,
+		modelsClient:      r.modelsClient,
+		codeModelsClient:  r.codeModelsClient,
+		jiraClient:        r.jiraClient,
+		nvdClient:         r.nvdClient,
+		sfClient:          r.sfClient,
+		chorusClient:      r.chorusClient,
+		datadogClients:    r.datadogClients,
+		awsClient:         r.awsClient,
+		azureClient:       r.azureClient,
+		databricksClient:  r.databricksClient,
+		clickhouseClient:  r.clickhouseClient,
+		freshworksClient:  r.freshworksClient,
+		document360Client: r.document360Client,
+		googleClient:      r.googleClient,
+		dashboards:        r.dashboards,
+		workflows:         r.workflows,
+		mcp:               r.mcp,
+		contextProvider:   r.contextProvider,
+		catalog:           r.catalog,
+		prompts:           r.prompts,
+		agentID:           r.agentID,
+		appURL:            r.appURL,
+		maxToolRounds:     r.maxToolRounds,
+		userContext:       userContext,
+		session:           session,
+		userContextStore:  r.userContextStore,
+		billing:           r.billing,
+		billingSource:     billing.SourceSlack,
+		perf:              r.perf,
 	}
 }
 

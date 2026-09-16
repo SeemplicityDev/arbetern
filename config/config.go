@@ -120,6 +120,13 @@ type Credentials struct {
 	FreshworksCRMDomain string `cred:"freshworks-crm-domain"`  // Freshworks CRM host, e.g. "acme.myfreshworks.com".
 	FreshworksCRMAPIKey string `cred:"freshworks-crm-api-key"` // Freshworks CRM API key.
 
+	// Document360 knowledge base (read-only) — a scoped API key against the
+	// v3 customer API. The project is discovered when the key sees exactly
+	// one; the region selects the API host.
+	Document360APIKey    string `cred:"document360-api-key"`    // Scoped API key (d360_sk_…), sent as X-API-Key.
+	Document360ProjectID string `cred:"document360-project-id"` // Optional. Project UUID; required only when the key sees several projects.
+	Document360Region    string `cred:"document360-region"`     // Optional. API region: eu (default), us or ca.
+
 	// Google Drive / Sheets — a service-account key with the JWT-bearer grant
 	// (arbetern is headless, so there is no interactive OAuth flow and no
 	// domain-wide delegation; the account acts as itself).
@@ -392,6 +399,13 @@ func (c *Config) FreshworksConfigured() bool {
 	return c.FreshdeskConfigured() || c.FreshchatConfigured() || c.FreshworksCRMConfigured()
 }
 
+// Document360Configured returns true when the API key is present. The project
+// ID and region are optional; the first real request is the authoritative
+// health check.
+func (c *Config) Document360Configured() bool {
+	return strings.TrimSpace(c.Document360APIKey) != ""
+}
+
 // GoogleConfigured returns true when the service-account key is present. The
 // folder IDs are optional: with none set, the connector adopts whatever has been
 // shared with the service account, which is the intended way to run it. The
@@ -457,6 +471,10 @@ func Load() (*Config, error) {
 			FreshchatAPIToken:   os.Getenv("FRESHCHAT_API_TOKEN"),
 			FreshworksCRMDomain: os.Getenv("FRESHWORKS_CRM_DOMAIN"),
 			FreshworksCRMAPIKey: os.Getenv("FRESHWORKS_CRM_API_KEY"),
+
+			Document360APIKey:    os.Getenv("DOCUMENT360_API_KEY"),
+			Document360ProjectID: os.Getenv("DOCUMENT360_PROJECT_ID"),
+			Document360Region:    os.Getenv("DOCUMENT360_REGION"),
 
 			GoogleCredentialsJSON: os.Getenv("GOOGLE_CREDENTIALS_JSON"),
 			GoogleDriveFolderIDs:  os.Getenv("GOOGLE_DRIVE_FOLDER_IDS"),

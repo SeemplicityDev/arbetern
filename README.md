@@ -59,7 +59,7 @@ Bayes.
 | **agent-q** | QA & Test Engineer | Analyzes test failures, reviews test coverage, suggests test cases, and triages flaky tests |
 | **goldsai** | Security Researcher | Assesses CVE impact on your codebase, audits dependencies, reviews code for vulnerabilities, and recommends remediation |
 | **seihin** (製品) | Sr. Technical Product Manager | Reviews and refines Jira tickets, rewrites descriptions with PM best practices, manages ticket quality at scale |
-| **pulse** | Customer Success Engineer | Tracks account health, surfaces renewal signals from Salesforce, analyzes call intelligence and deal momentum from Chorus, reads Freshworks support tickets, chats and CRM records, reads files and appends to Google Sheets in shared Drive folders, manages CS workflows, and coordinates with Jira |
+| **pulse** | Customer Success Engineer | Tracks account health, surfaces renewal signals from Salesforce, analyzes call intelligence and deal momentum from Chorus, reads Freshworks support tickets, chats and CRM records, searches and reads Document360 knowledge-base articles, reads files and appends to Google Sheets in shared Drive folders, manages CS workflows, and coordinates with Jira |
 
 ## Quick Start
 
@@ -170,7 +170,7 @@ Every stateful feature (workflows, dashboards, chat, billing, skills, MCP connec
 </details>
 
 <details>
-<summary><b>Other integrations</b> — NVD, Salesforce, Chorus, Datadog, AWS, Azure, Databricks, ClickHouse, Freshworks, Google Drive / Sheets</summary>
+<summary><b>Other integrations</b> — NVD, Salesforce, Chorus, Datadog, AWS, Azure, Databricks, ClickHouse, Freshworks, Document360, Google Drive / Sheets</summary>
 
 | Variable | Description |
 |---|---|
@@ -192,6 +192,7 @@ Every stateful feature (workflows, dashboards, chat, billing, skills, MCP connec
 | `FRESHDESK_DOMAIN` / `FRESHDESK_API_KEY` | Freshdesk host (e.g. `acme.freshdesk.com`) + API key. Enables the Freshdesk ticket tools for the **pulse and seihin agents** — read, plus private notes and tags on a ticket (the key's agent role must allow editing tickets). See [docs/FRESHWORKS.md](docs/FRESHWORKS.md) |
 | `FRESHCHAT_URL` / `FRESHCHAT_API_TOKEN` | Freshchat API base incl. `/v2` (e.g. `https://acme-123.freshchat.com/v2`) + Bearer token. Enables the read-only Freshchat conversation tools for the **pulse and seihin agents** |
 | `FRESHWORKS_CRM_DOMAIN` / `FRESHWORKS_CRM_API_KEY` | Freshworks CRM host (e.g. `acme.myfreshworks.com`) + API key. Enables the read-only CRM search/contact/deal tools for the **pulse and seihin agents**. See [docs/FRESHWORKS.md](docs/FRESHWORKS.md) |
+| `DOCUMENT360_API_KEY` | Document360 scoped API key (`d360_sk_…`, sent as `X-API-Key`). Enables the read-only `document360_list_workspaces`, `document360_search`, `document360_list_categories`, `document360_list_articles` and `document360_get_article` tools for the **pulse agent only**. Give the key a read-only content role. Optional `DOCUMENT360_PROJECT_ID` (only when the key sees several projects) and `DOCUMENT360_REGION` (`eu` default, `us`, `ca`). See [docs/DOCUMENT360.md](docs/DOCUMENT360.md) |
 | `GOOGLE_CREDENTIALS_JSON` | Google service-account key, base64 of the JSON key file. The only required value — access is granted by **sharing a Drive folder** with the service account's email (Editor to allow appends), which the connector discovers on its own. Enables `drive_list_folders`, `drive_find_file`, `drive_read_file`, `sheets_get_spreadsheet_info`, `sheets_read_range` and the batched `sheets_append_row` for the **pulse agent only**. Auth is the JWT-bearer grant (headless — no interactive OAuth, no domain-wide delegation). Optional `GOOGLE_DRIVE_FOLDER_IDS` confines it to specific folders; optional `GOOGLE_SCOPES` overrides the default `spreadsheets` + `drive.readonly` (adding `.../auth/drive` also enables `drive_copy_file`, which provisions a sheet by copying a template). See [docs/GOOGLE.md](docs/GOOGLE.md) |
 
 </details>
@@ -1011,6 +1012,7 @@ nvd/                 # NVD (National Vulnerability Database) CVE API client
 salesforce/          # Salesforce REST API client (SOQL queries, OAuth 2.0)
 chorus/              # Chorus (ZoomInfo) REST API client (call intelligence, deal momentum)
 google/              # Google Drive + Sheets client (service-account JWT, shared-folder discovery, streaming reads, batched writes)
+document360/         # Document360 v3 client (read-only knowledge-base search, categories, articles)
 slack/               # Slack webhook handler + response helpers
 prompts/             # YAML prompt loader + agent discovery
 dashboards/          # dashboard registry, sync runner, executor + CRUD API
@@ -1109,6 +1111,7 @@ transport, limits and roadmap.
 | Databricks SQL | [docs/DATABRICKS.md](docs/DATABRICKS.md) | ovad, pulse |
 | ClickHouse Cloud | [docs/CLICKHOUSE.md](docs/CLICKHOUSE.md) | ovad only |
 | Freshworks (Freshdesk + Freshchat + CRM) | [docs/FRESHWORKS.md](docs/FRESHWORKS.md) | pulse, seihin |
+| Document360 | [docs/DOCUMENT360.md](docs/DOCUMENT360.md) | pulse only |
 | Google Drive / Sheets | [docs/GOOGLE.md](docs/GOOGLE.md) | pulse only |
 | Headroom (LLM compression) | [docs/HEADROOM.md](docs/HEADROOM.md) | Optional infra — all backends |
 

@@ -23,6 +23,7 @@ import (
 	"github.com/justmike1/arbetern/dashboards"
 	"github.com/justmike1/arbetern/databricks"
 	"github.com/justmike1/arbetern/datadog"
+	"github.com/justmike1/arbetern/document360"
 	"github.com/justmike1/arbetern/freshworks"
 	"github.com/justmike1/arbetern/github"
 	"github.com/justmike1/arbetern/google"
@@ -59,37 +60,38 @@ func init() {
 }
 
 type GeneralHandler struct {
-	slackClient      SlackClient
-	ghClient         *github.Client
-	modelsClient     *llm.Client
-	codeModelsClient *llm.Client
-	jiraClient       *atlassian.Client
-	nvdClient        *nvd.Client
-	sfClient         *salesforce.Client
-	chorusClient     *chorus.Client
-	datadogClients   *datadog.MultiClient
-	awsClient        *aws.Client
-	azureClient      *azure.Client
-	databricksClient *databricks.Client
-	clickhouseClient *clickhouse.Client
-	freshworksClient *freshworks.Client
-	googleClient     *google.Client
-	dashboards       *dashboards.Registry
-	workflows        *workflows.Registry
-	mcp              *mcp.Registry
-	mcpTools         map[string]mcp.AgentTool
-	contextProvider  *ContextProvider
-	catalog          *catalog.Index
-	prompts          PromptProvider
-	agentID          string
-	appURL           string
-	maxToolRounds    int
-	userContext      string
-	currentChannelID string
-	currentAuditTS   string
-	branchMgr        *BranchManager
-	session          *ThreadSession
-	userContextStore *UserContextStore
+	slackClient       SlackClient
+	ghClient          *github.Client
+	modelsClient      *llm.Client
+	codeModelsClient  *llm.Client
+	jiraClient        *atlassian.Client
+	nvdClient         *nvd.Client
+	sfClient          *salesforce.Client
+	chorusClient      *chorus.Client
+	datadogClients    *datadog.MultiClient
+	awsClient         *aws.Client
+	azureClient       *azure.Client
+	databricksClient  *databricks.Client
+	clickhouseClient  *clickhouse.Client
+	freshworksClient  *freshworks.Client
+	googleClient      *google.Client
+	document360Client *document360.Client
+	dashboards        *dashboards.Registry
+	workflows         *workflows.Registry
+	mcp               *mcp.Registry
+	mcpTools          map[string]mcp.AgentTool
+	contextProvider   *ContextProvider
+	catalog           *catalog.Index
+	prompts           PromptProvider
+	agentID           string
+	appURL            string
+	maxToolRounds     int
+	userContext       string
+	currentChannelID  string
+	currentAuditTS    string
+	branchMgr         *BranchManager
+	session           *ThreadSession
+	userContextStore  *UserContextStore
 	// billing records the token cost of each turn for the Usage & Billing
 	// tab. Optional — nil disables tracking. billingSource and the workflow
 	// fields tag the recorded event with its entry path.
@@ -2194,6 +2196,86 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 				},
 			)
 		}
+	}
+
+	// Document360 (read-only) — gated to the customer-success agent
+	// (restrictedIntegrations: pulse) and to the key having been accepted, so
+	// the tools never advertise themselves while the project is unresolved.
+	if h.canUseIntegration(integrationDocument360) && h.document360Client != nil && h.document360Client.Ready() {
+		tools = append(tools,
+			llm.Tool{
+				Type: "function",
+				Function: llm.ToolFunction{
+					Name:        ToolDocument360ListWorkspaces,
+					Description: "List the workspaces (knowledge-base versions) in the Document360 project, with their IDs and which one is the default. Takes no arguments. Every other document360_* tool uses the default workspace when workspace_id is omitted, so call this only when the user names a specific version/workspace or a search should target a non-default one.",
+					Parameters:  json.RawMessage(`{"type":"object","properties":{}}`),
+				},
+			},
+			llm.Tool{
+				Type: "function",
+				Function: llm.ToolFunction{
+					Name:        ToolDocument360Search,
+					Description: "Keyword search across the PUBLISHED, visible articles of a Document360 workspace. This is the primary tool for answering 'what do our docs say about X' / 'is there a help article on Y'. Returns matching article titles and article_ids only — call document360_get_article on the best hits to read the content before answering. Use short keyword phrases (product feature, error text, customer-facing term) rather than full sentences; if a search returns nothing, try fewer or alternative keywords, then browse with document360_list_categories. Drafts and unpublished articles are never returned.",
+					Parameters: json.RawMessage(`{
+						"type":"object",
+						"properties":{
+							"query":{"type":"string","description":"Keyword phrase to search for."},
+							"workspace_id":{"type":"string","description":"Optional workspace ID, slug or name from document360_list_workspaces. Omit for the default workspace."},
+							"lang_code":{"type":"string","description":"Optional language code such as 'en' or 'pt-BR'. Omit for the workspace default."},
+							"page":{"type":"integer","description":"1-based results page. Omit for the first page."},
+							"page_size":{"type":"integer","description":"Results per page, 1-100. Default 10."}
+						},
+						"required":["query"]
+					}`),
+				},
+			},
+			llm.Tool{
+				Type: "function",
+				Function: llm.ToolFunction{
+					Name:        ToolDocument360ListCategories,
+					Description: "List the full category tree of a Document360 workspace (nested, with category IDs). Use it to understand how the knowledge base is organised or to find the right section when a keyword search is too broad; then pass a category id to document360_list_articles.",
+					Parameters: json.RawMessage(`{
+						"type":"object",
+						"properties":{
+							"workspace_id":{"type":"string","description":"Optional workspace ID, slug or name. Omit for the default workspace."},
+							"lang_code":{"type":"string","description":"Optional language code such as 'en'. Omit for the workspace default."}
+						}
+					}`),
+				},
+			},
+			llm.Tool{
+				Type: "function",
+				Function: llm.ToolFunction{
+					Name:        ToolDocument360ListArticles,
+					Description: "List articles in a Document360 workspace with their article_ids, status and last-updated date, newest pages first as stored. Pass category_id (from document360_list_categories) to narrow to one category — the tool scans the workspace and keeps only that category's articles. Without a category it returns one page; pass page to walk further. Use document360_get_article to read any listed article.",
+					Parameters: json.RawMessage(`{
+						"type":"object",
+						"properties":{
+							"workspace_id":{"type":"string","description":"Optional workspace ID, slug or name. Omit for the default workspace."},
+							"category_id":{"type":"string","description":"Optional category ID to filter by."},
+							"lang_code":{"type":"string","description":"Optional language code such as 'en'."},
+							"page":{"type":"integer","description":"1-based page when no category_id is given. Omit for the first page."},
+							"page_size":{"type":"integer","description":"Articles per page when no category_id is given, 1-100. Default 25."}
+						}
+					}`),
+				},
+			},
+			llm.Tool{
+				Type: "function",
+				Function: llm.ToolFunction{
+					Name:        ToolDocument360GetArticle,
+					Description: "Read one Document360 article by article_id: title, status, public link and the latest PUBLISHED body as text (snippets and variables resolved). Use after document360_search or document360_list_articles. Quote or summarise from the returned text and include the article link in your answer; long bodies are truncated with a note.",
+					Parameters: json.RawMessage(`{
+						"type":"object",
+						"properties":{
+							"article_id":{"type":"string","description":"Article ID (UUID) from a search hit or listing."},
+							"lang_code":{"type":"string","description":"Optional language code such as 'en'. Omit for the project default."}
+						},
+						"required":["article_id"]
+					}`),
+				},
+			},
+		)
 	}
 
 	// Google Drive / Sheets — gated to the customer-success agent
@@ -5487,6 +5569,106 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		log.Printf("[user=%s channel=%s] freshworks_crm_get_deal (id=%d)", userID, channelID, args.DealID)
 		return freshworks.FormatCRMDeal(deal)
 
+	// ---- Document360 (pulse only, read-only) ----
+
+	case ToolDocument360ListWorkspaces:
+		if errMsg := requireReady("Document360", h.document360Client); errMsg != "" {
+			return errMsg
+		}
+		list, err := h.document360Client.ListWorkspaces(ctx)
+		if err != nil {
+			return document360ToolErr("listing Document360 workspaces", userID, channelID, err)
+		}
+		log.Printf("[user=%s channel=%s] document360_list_workspaces (results=%d)", userID, channelID, len(list))
+		return document360.FormatWorkspaces(h.document360Client.ProjectLabel(), list)
+
+	case ToolDocument360Search:
+		if errMsg := requireReady("Document360", h.document360Client); errMsg != "" {
+			return errMsg
+		}
+		args, errMsg := parseToolArgs[struct {
+			Query       string `json:"query"`
+			WorkspaceID string `json:"workspace_id"`
+			LangCode    string `json:"lang_code"`
+			Page        int    `json:"page"`
+			PageSize    int    `json:"page_size"`
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
+		}
+		if strings.TrimSpace(args.Query) == "" {
+			return preconditionErrf("Error: query is required.")
+		}
+		res, err := h.document360Client.Search(ctx, args.WorkspaceID, args.Query, args.LangCode, args.Page, args.PageSize)
+		if err != nil {
+			return document360ToolErr("searching Document360", userID, channelID, err)
+		}
+		log.Printf("[user=%s channel=%s] document360_search (workspace=%s, query_len=%d, hits=%d)",
+			userID, channelID, res.Workspace.ID, len(args.Query), len(res.Hits))
+		return document360.FormatSearch(res)
+
+	case ToolDocument360ListCategories:
+		if errMsg := requireReady("Document360", h.document360Client); errMsg != "" {
+			return errMsg
+		}
+		args, errMsg := parseToolArgs[struct {
+			WorkspaceID string `json:"workspace_id"`
+			LangCode    string `json:"lang_code"`
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
+		}
+		ws, tree, err := h.document360Client.ListCategories(ctx, args.WorkspaceID, args.LangCode)
+		if err != nil {
+			return document360ToolErr("listing Document360 categories", userID, channelID, err)
+		}
+		log.Printf("[user=%s channel=%s] document360_list_categories (workspace=%s, roots=%d)", userID, channelID, ws.ID, len(tree))
+		return document360.FormatCategories(ws, tree)
+
+	case ToolDocument360ListArticles:
+		if errMsg := requireReady("Document360", h.document360Client); errMsg != "" {
+			return errMsg
+		}
+		args, errMsg := parseToolArgs[struct {
+			WorkspaceID string `json:"workspace_id"`
+			CategoryID  string `json:"category_id"`
+			LangCode    string `json:"lang_code"`
+			Page        int    `json:"page"`
+			PageSize    int    `json:"page_size"`
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
+		}
+		list, err := h.document360Client.ListArticles(ctx, args.WorkspaceID, args.CategoryID, args.LangCode, args.Page, args.PageSize)
+		if err != nil {
+			return document360ToolErr("listing Document360 articles", userID, channelID, err)
+		}
+		log.Printf("[user=%s channel=%s] document360_list_articles (workspace=%s, category=%s, results=%d, pages=%d)",
+			userID, channelID, list.Workspace.ID, args.CategoryID, len(list.Articles), list.PagesScanned)
+		return document360.FormatArticles(list)
+
+	case ToolDocument360GetArticle:
+		if errMsg := requireReady("Document360", h.document360Client); errMsg != "" {
+			return errMsg
+		}
+		args, errMsg := parseToolArgs[struct {
+			ArticleID string `json:"article_id"`
+			LangCode  string `json:"lang_code"`
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
+		}
+		if strings.TrimSpace(args.ArticleID) == "" {
+			return preconditionErrf("Error: article_id is required.")
+		}
+		article, err := h.document360Client.GetArticle(ctx, args.ArticleID, args.LangCode)
+		if err != nil {
+			return document360ToolErr("reading the Document360 article", userID, channelID, err)
+		}
+		log.Printf("[user=%s channel=%s] document360_get_article (id=%s, status=%s, chars=%d)",
+			userID, channelID, article.ID, article.Status, len(article.PlainContent()))
+		return document360.FormatArticle(article)
+
 	// ---- Google Drive / Sheets (pulse only) ----
 
 	case ToolDriveListFolders:
@@ -5753,6 +5935,15 @@ func googleToolErr(action, userID, channelID string, err error) string {
 	var scope *google.ErrOutOfScope
 	if errors.As(err, &scope) {
 		return preconditionErrf("Error %s: %v", action, err)
+	}
+	return fmt.Sprintf("Error %s: %v", action, err)
+}
+
+// document360ToolErr logs the API's own diagnostic and returns the sanitized
+// message the model may see.
+func document360ToolErr(action, userID, channelID string, err error) string {
+	if detail := document360.ErrorDetail(err); detail != "" {
+		log.Printf("[user=%s channel=%s] document360 error while %s: %s", userID, channelID, action, detail)
 	}
 	return fmt.Sprintf("Error %s: %v", action, err)
 }

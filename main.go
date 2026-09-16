@@ -32,6 +32,7 @@ import (
 	dashgitops "github.com/justmike1/arbetern/dashboards/gitopssync"
 	"github.com/justmike1/arbetern/databricks"
 	"github.com/justmike1/arbetern/datadog"
+	"github.com/justmike1/arbetern/document360"
 	"github.com/justmike1/arbetern/freshworks"
 	"github.com/justmike1/arbetern/github"
 	"github.com/justmike1/arbetern/google"
@@ -40,6 +41,7 @@ import (
 	"github.com/justmike1/arbetern/internal/queue"
 	"github.com/justmike1/arbetern/internal/safego"
 	"github.com/justmike1/arbetern/internal/store"
+	"github.com/justmike1/arbetern/internal/ttlcache"
 	"github.com/justmike1/arbetern/internal/vectors"
 	"github.com/justmike1/arbetern/llm"
 	"github.com/justmike1/arbetern/mcp"
@@ -1307,6 +1309,7 @@ func refreshIntegrations(
 	clickhouseClient *clickhouse.Client,
 	freshworksClient *freshworks.Client,
 	googleClient *google.Client,
+	document360Client *document360.Client,
 	modelsClient *llm.Client,
 	codeModelsClient *llm.Client,
 ) {
@@ -1834,6 +1837,29 @@ func refreshIntegrations(
 		})
 	}
 
+	// --- Document360 (knowledge base, read-only) ---
+	{
+		d360Connected := document360Client != nil && document360Client.Ready()
+		d360Perms := []permission{
+			{Scope: "projects.read", Description: "Resolve the project and list its workspaces (GET /v3/projects, /workspaces)", Required: true, Granted: boolPtr(d360Connected)},
+			{Scope: "articles.read", Description: "List categories and articles, and read published article content", Required: true, Granted: boolPtr(d360Connected)},
+			{Scope: "search.read", Description: "Keyword search over published, visible articles in a workspace", Required: true, Granted: boolPtr(d360Connected)},
+		}
+		activeD360 := map[string]string{}
+		if document360Client != nil {
+			activeD360["Region"] = document360Client.Region()
+			activeD360["Project"] = document360Client.ProjectLabel()
+		}
+		result = append(result, integration{
+			ID:           "document360",
+			Name:         "Document360",
+			Configured:   cfg.Document360Configured(),
+			AuthMode:     "Scoped API key (X-API-Key)",
+			Permissions:  d360Perms,
+			ActiveModels: activeD360,
+		})
+	}
+
 	// --- Google Drive / Sheets ---
 	{
 		gConnected := googleClient != nil && googleClient.Ready()
@@ -1913,10 +1939,11 @@ func startIntegrationsRefresher(
 	clickhouseClient *clickhouse.Client,
 	freshworksClient *freshworks.Client,
 	googleClient *google.Client,
+	document360Client *document360.Client,
 	modelsClient *llm.Client,
 	codeModelsClient *llm.Client,
 ) {
-	refreshIntegrations(cfg, slackClient, ghClient, jiraClient, sfClient, chorusClient, datadogClients, awsClient, azureClient, databricksClient, clickhouseClient, freshworksClient, googleClient, modelsClient, codeModelsClient)
+	refreshIntegrations(cfg, slackClient, ghClient, jiraClient, sfClient, chorusClient, datadogClients, awsClient, azureClient, databricksClient, clickhouseClient, freshworksClient, googleClient, document360Client, modelsClient, codeModelsClient)
 
 	safego.Go("integrations: refresh loop", func() {
 		ticker := time.NewTicker(1 * time.Hour)
@@ -1924,7 +1951,7 @@ func startIntegrationsRefresher(
 		for range ticker.C {
 			// Guarded per tick so one bad refresh cannot end the loop.
 			safego.Run("integrations: refresh", func() {
-				refreshIntegrations(cfg, slackClient, ghClient, jiraClient, sfClient, chorusClient, datadogClients, awsClient, azureClient, databricksClient, clickhouseClient, freshworksClient, googleClient, modelsClient, codeModelsClient)
+				refreshIntegrations(cfg, slackClient, ghClient, jiraClient, sfClient, chorusClient, datadogClients, awsClient, azureClient, databricksClient, clickhouseClient, freshworksClient, googleClient, document360Client, modelsClient, codeModelsClient)
 			})
 		}
 	})
@@ -2133,6 +2160,19 @@ func main() {
 		log.Printf("Freshworks integration enabled (products: %v)", freshworksClient.Products())
 	}
 
+	// Document360 client (read-only) — a scoped API key against the v3
+	// customer API. The project is verified or discovered in the background
+	// with retries, so the tools appear once the key is accepted.
+	var document360Client *document360.Client
+	if cfg.Document360Configured() {
+		if c, err := document360.NewClient(cfg.Document360APIKey, cfg.Document360ProjectID, cfg.Document360Region); err != nil {
+			log.Printf("Document360 integration disabled — invalid configuration: %v", err)
+		} else {
+			document360Client = c
+			log.Printf("Document360 integration enabled (region: %s, project: %s)", c.Region(), c.ProjectLabel())
+		}
+	}
+
 	// Google Drive / Sheets client — a service account authenticating with the
 	// JWT-bearer grant. Scope is the Drive share itself: the client discovers
 	// every folder and shared drive that has been shared with the account and
@@ -2187,7 +2227,7 @@ func main() {
 	}
 
 	// Start background integration permission refresher (runs once now, then every hour).
-	startIntegrationsRefresher(cfg, slackClient, ghClient, jiraClient, sfClient, chorusClient, datadogClients, awsClient, azureClient, databricksClient, clickhouseClient, freshworksClient, googleClient, modelsClient, codeModelsClient)
+	startIntegrationsRefresher(cfg, slackClient, ghClient, jiraClient, sfClient, chorusClient, datadogClients, awsClient, azureClient, databricksClient, clickhouseClient, freshworksClient, googleClient, document360Client, modelsClient, codeModelsClient)
 
 	// State backend: every registry below reads and writes the S3 bucket and
 	// keeps only a cache in memory, so any replica can serve any request and a
@@ -2388,20 +2428,21 @@ func main() {
 		// the shared client (no extra connections, no extra goroutines).
 		agentCfg := cfg.ForAgent(agentID)
 		agentClients := buildAgentScopedClients(cfg, agentCfg, agentID, agentIntegrationClients{
-			jira:       jiraClient,
-			sf:         sfClient,
-			chorus:     chorusClient,
-			datadog:    datadogClients,
-			aws:        awsClient,
-			azure:      azureClient,
-			nvd:        nvdClient,
-			databricks: databricksClient,
-			clickhouse: clickhouseClient,
-			freshworks: freshworksClient,
-			google:     googleClient,
+			jira:        jiraClient,
+			sf:          sfClient,
+			chorus:      chorusClient,
+			datadog:     datadogClients,
+			aws:         awsClient,
+			azure:       azureClient,
+			nvd:         nvdClient,
+			databricks:  databricksClient,
+			clickhouse:  clickhouseClient,
+			freshworks:  freshworksClient,
+			google:      googleClient,
+			document360: document360Client,
 		})
 
-		router := commands.NewRouter(slackClient, ghClient, modelsClient, codeModelsClient, agentClients.jira, agentClients.nvd, agentClients.sf, agentClients.chorus, agentClients.datadog, agentClients.aws, agentClients.azure, agentClients.databricks, agentClients.clickhouse, agentClients.freshworks, agentClients.google, dashRegistry, wfRegistry, ap, agent.ID, cfg.AppURL, sessions, cfg.MaxToolRounds, userContextStore, billingStore)
+		router := commands.NewRouter(slackClient, ghClient, modelsClient, codeModelsClient, agentClients.jira, agentClients.nvd, agentClients.sf, agentClients.chorus, agentClients.datadog, agentClients.aws, agentClients.azure, agentClients.databricks, agentClients.clickhouse, agentClients.freshworks, agentClients.google, agentClients.document360, dashRegistry, wfRegistry, ap, agent.ID, cfg.AppURL, sessions, cfg.MaxToolRounds, userContextStore, billingStore)
 		router.SetMCP(mcpRegistry)
 		router.SetCatalog(catalogIndex)
 		router.SetPerf(perfStore)
@@ -2836,7 +2877,7 @@ func main() {
 	})
 
 	// API: latest changes (commits from the arbetern repo).
-	changelog := newTTLCache(changelogCacheTTL, func(ctx context.Context) ([]github.CommitSummary, error) {
+	changelog := ttlcache.New(changelogCacheTTL, func(ctx context.Context) ([]github.CommitSummary, error) {
 		commits, err := ghClient.ListCommits(ctx, changelogOwner, changelogRepo, "", "", "", time.Time{}, time.Time{}, 20)
 		if err != nil {
 			return nil, err
@@ -2853,7 +2894,7 @@ func main() {
 			http.Error(w, "GitHub integration not configured", http.StatusServiceUnavailable)
 			return
 		}
-		commits, err := changelog.get(r.Context())
+		commits, err := changelog.Get(r.Context())
 		if err != nil {
 			http.Error(w, fmt.Sprintf("failed to fetch commits: %v", err), http.StatusInternalServerError)
 			return
@@ -2863,7 +2904,7 @@ func main() {
 	})
 
 	// API: open pull requests the agents authored, found by the body marker.
-	pulls := newTTLCache(pullsCacheTTL, func(ctx context.Context) ([]github.AutomatedPR, error) {
+	pulls := ttlcache.New(pullsCacheTTL, func(ctx context.Context) ([]github.AutomatedPR, error) {
 		prs, err := ghClient.ListOpenAutomatedPullRequests(ctx)
 		if err != nil {
 			return nil, err
@@ -2880,7 +2921,7 @@ func main() {
 			http.Error(w, "GitHub integration not configured", http.StatusServiceUnavailable)
 			return
 		}
-		prs, err := pulls.get(r.Context())
+		prs, err := pulls.Get(r.Context())
 		if err != nil {
 			http.Error(w, fmt.Sprintf("failed to fetch pull requests: %v", err), http.StatusInternalServerError)
 			return
@@ -2890,7 +2931,7 @@ func main() {
 	})
 
 	// API: unresolved Jira issues assigned to the integration's own account.
-	tickets := newTTLCache(ticketsCacheTTL, func(context.Context) ([]atlassian.IssueSummary, error) {
+	tickets := ttlcache.New(ticketsCacheTTL, func(context.Context) ([]atlassian.IssueSummary, error) {
 		return jiraClient.AssignedIssues(200)
 	})
 	jiraReady := func() bool { return jiraClient != nil && jiraClient.Ready() }
@@ -2899,7 +2940,7 @@ func main() {
 			http.Error(w, "Jira integration not configured", http.StatusServiceUnavailable)
 			return
 		}
-		issues, err := tickets.get(r.Context())
+		issues, err := tickets.Get(r.Context())
 		if err != nil {
 			http.Error(w, "failed to fetch tickets", http.StatusInternalServerError)
 			return
@@ -2914,7 +2955,7 @@ func main() {
 		safego.Go("warm: tickets", func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
-			if _, err := tickets.get(ctx); err != nil {
+			if _, err := tickets.Get(ctx); err != nil {
 				log.Printf("warn: tickets warm-up failed: %v", err)
 			}
 		})
@@ -2930,14 +2971,14 @@ func main() {
 		safego.Go("warm: changelog", func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
-			if _, err := changelog.get(ctx); err != nil {
+			if _, err := changelog.Get(ctx); err != nil {
 				log.Printf("warn: changelog warm-up failed: %v", err)
 			}
 		})
 		safego.Go("warm: pull requests", func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
-			if _, err := pulls.get(ctx); err != nil {
+			if _, err := pulls.Get(ctx); err != nil {
 				log.Printf("warn: pull requests warm-up failed: %v", err)
 			}
 		})

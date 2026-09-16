@@ -8,7 +8,6 @@ import (
 	"log"
 	"net/http"
 	"net/url"
-	"regexp"
 	"strings"
 	"time"
 
@@ -670,7 +669,7 @@ func FormatEngagements(engagements []Engagement) string {
 		if e.MeetingSummary != nil && *e.MeetingSummary != "" {
 			summary := strings.ReplaceAll(*e.MeetingSummary, "<br>", "\n")
 			summary = strings.ReplaceAll(summary, "<br/>", "\n")
-			summary = stripHTMLTags(summary)
+			summary = text.StripHTML(summary)
 			fmt.Fprintf(&sb, "   📝 %s\n", text.Truncate(summary, 300))
 		}
 
@@ -913,10 +912,4 @@ func formatAmount(amount float64) string {
 		return fmt.Sprintf("$%.0fK", amount/1_000)
 	}
 	return fmt.Sprintf("$%.0f", amount)
-}
-
-// stripHTMLTags removes HTML tags from a string.
-func stripHTMLTags(s string) string {
-	re := regexp.MustCompile(`<[^>]*>`)
-	return strings.TrimSpace(re.ReplaceAllString(s, ""))
 }

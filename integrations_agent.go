@@ -14,6 +14,7 @@ import (
 	"github.com/justmike1/arbetern/config"
 	"github.com/justmike1/arbetern/databricks"
 	"github.com/justmike1/arbetern/datadog"
+	"github.com/justmike1/arbetern/document360"
 	"github.com/justmike1/arbetern/freshworks"
 	"github.com/justmike1/arbetern/google"
 	"github.com/justmike1/arbetern/nvd"
@@ -25,17 +26,18 @@ import (
 // Helm chart the app rebuilds only the clients whose credentials actually
 // changed for that agent and reuses the shared globals for everything else.
 type agentIntegrationClients struct {
-	jira       *atlassian.Client
-	sf         *salesforce.Client
-	chorus     *chorus.Client
-	datadog    *datadog.MultiClient
-	aws        *aws.Client
-	azure      *azure.Client
-	nvd        *nvd.Client
-	databricks *databricks.Client
-	clickhouse *clickhouse.Client
-	freshworks *freshworks.Client
-	google     *google.Client
+	jira        *atlassian.Client
+	sf          *salesforce.Client
+	chorus      *chorus.Client
+	datadog     *datadog.MultiClient
+	aws         *aws.Client
+	azure       *azure.Client
+	nvd         *nvd.Client
+	databricks  *databricks.Client
+	clickhouse  *clickhouse.Client
+	freshworks  *freshworks.Client
+	google      *google.Client
+	document360 *document360.Client
 }
 
 // buildAgentScopedClients returns a set of integration clients tailored for a
@@ -205,6 +207,21 @@ func buildAgentScopedClients(
 				scope = "pinned to " + strings.Join(pinned, ", ")
 			}
 			log.Printf("Google override for agent %q (service account: %s, scope: %s)", agentID, c.ServiceAccountEmail(), scope)
+		}
+	}
+
+	if agentCfg.Document360APIKey != globalCfg.Document360APIKey ||
+		agentCfg.Document360ProjectID != globalCfg.Document360ProjectID ||
+		agentCfg.Document360Region != globalCfg.Document360Region {
+		if !agentCfg.Document360Configured() {
+			log.Printf("Document360 override for agent %q has no API key — integration disabled for this agent", agentID)
+			out.document360 = nil
+		} else if c, err := document360.NewClient(agentCfg.Document360APIKey, agentCfg.Document360ProjectID, agentCfg.Document360Region); err != nil {
+			log.Printf("Document360 override for agent %q is invalid — integration disabled for this agent: %v", agentID, err)
+			out.document360 = nil
+		} else {
+			out.document360 = c
+			log.Printf("Document360 override for agent %q (region: %s, project: %s)", agentID, c.Region(), c.ProjectLabel())
 		}
 	}
 

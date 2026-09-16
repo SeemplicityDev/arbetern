@@ -128,6 +128,16 @@ secretValues:
   # freshchat-api-token: "your-freshchat-api-token"             # Admin → API Tokens (Bearer JWT)
   # freshworks-crm-domain: "acme.myfreshworks.com"              # Freshworks CRM host
   # freshworks-crm-api-key: "your-freshworks-crm-api-key"       # Settings → API Settings
+  # Document360 (optional — enables the read-only document360_list_workspaces / document360_search /
+  # document360_list_categories / document360_list_articles / document360_get_article tools for the
+  # pulse agent only).
+  # Auth is a scoped API key (Settings → Knowledge base portal → API keys). Create it with a read-only
+  # content role and scope it to the workspaces the agent may read; the connector only ever issues GETs.
+  # Only the key is required — the project is discovered when the key sees exactly one. Prefer mounting
+  # it under customCredentials.pulse below so the key never reaches other agents. See docs/DOCUMENT360.md.
+  # document360-api-key: "your-document360-api-key"              # the d360_sk_ secret shown once on creation
+  # document360-project-id: "00000000-0000-0000-0000-000000000000"   # optional: only when the key sees several projects
+  # document360-region: "eu"                                          # optional: eu (default), us or ca
   # Google Drive / Sheets (optional — enables drive_list_folders / drive_find_file /
   # drive_read_file / sheets_get_spreadsheet_info / sheets_read_range / sheets_append_row
   # for the pulse agent only).
@@ -236,6 +246,11 @@ secretValues:
 #     freshchat-api-token: "REPLACE_ME"
 #     freshworks-crm-domain: "acme.myfreshworks.com"
 #     freshworks-crm-api-key: "REPLACE_ME"
+#     # Document360 is gated to pulse in code; mounting it here keeps the key
+#     # off every other agent. Read-only. See docs/DOCUMENT360.md.
+#     document360-api-key: "REPLACE_ME"
+#     # document360-project-id: "00000000-0000-0000-0000-000000000000"   # optional
+#     # document360-region: "eu"                                          # optional: eu, us or ca
 #     # Google Drive / Sheets is gated to pulse in code; mounting it here keeps
 #     # the credentials off every other agent, which matters because the shared
 #     # folders hold commercial and customer data. Only the key is needed — the

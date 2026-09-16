@@ -184,19 +184,20 @@ func isNilClient(c OAuthClient) bool {
 // absent from restrictedIntegrations); they exist so the single toolIntegration
 // catalogue in tools.go can name their owner without gating them.
 const (
-	integrationNVD        = "nvd"
-	integrationSalesforce = "salesforce"
-	integrationChorus     = "chorus"
-	integrationAtlassian  = "atlassian" // Jira + Confluence (shared client).
-	integrationDatadog    = "datadog"
-	integrationAWS        = "aws"
-	integrationDatabricks = "databricks"
-	integrationClickHouse = "clickhouse"
-	integrationFreshworks = "freshworks"
-	integrationGoogle     = "google" // Google Drive + Sheets (shared service-account client).
-	integrationGitHub     = "github"
-	integrationSlack      = "slack"
-	integrationAzure      = "azure"
+	integrationNVD         = "nvd"
+	integrationSalesforce  = "salesforce"
+	integrationChorus      = "chorus"
+	integrationAtlassian   = "atlassian" // Jira + Confluence (shared client).
+	integrationDatadog     = "datadog"
+	integrationAWS         = "aws"
+	integrationDatabricks  = "databricks"
+	integrationClickHouse  = "clickhouse"
+	integrationFreshworks  = "freshworks"
+	integrationGoogle      = "google" // Google Drive + Sheets (shared service-account client).
+	integrationDocument360 = "document360"
+	integrationGitHub      = "github"
+	integrationSlack       = "slack"
+	integrationAzure       = "azure"
 )
 
 // restrictedIntegrations is the single source of truth for hard per-agent
@@ -240,6 +241,9 @@ var restrictedIntegrations = map[string][]string{
 	// a wider grant is much larger than the folder itself — keep this list at
 	// one agent unless there is a concrete reason to widen it.
 	integrationGoogle: {"pulse"},
+	// Document360 (knowledge base, read-only) is exposed to the customer-success
+	// agent only.
+	integrationDocument360: {"pulse"},
 }
 
 // ToolsForIntegration returns the sorted tool names owned by the given
@@ -312,6 +316,8 @@ var sensitiveArgTools = map[string][]string{
 	ToolSheetsReadRange: {"range", "ranges"},
 	ToolDriveFindFile:   {"names", "name_contains"},
 	ToolDriveCopyFile:   {"source", "new_name"},
+	// Search terms name the customers and problems people look up.
+	ToolDocument360Search: {"query"},
 }
 
 // redactToolArgsForLog renders a tool call's arguments for a log line, replacing

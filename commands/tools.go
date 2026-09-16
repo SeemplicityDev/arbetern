@@ -134,6 +134,13 @@ const (
 	ToolFreshworksCRMGetContact          = "freshworks_crm_get_contact"
 	ToolFreshworksCRMGetDeal             = "freshworks_crm_get_deal"
 
+	// Document360 (knowledge base, read-only).
+	ToolDocument360ListWorkspaces = "document360_list_workspaces"
+	ToolDocument360Search         = "document360_search"
+	ToolDocument360ListCategories = "document360_list_categories"
+	ToolDocument360ListArticles   = "document360_list_articles"
+	ToolDocument360GetArticle     = "document360_get_article"
+
 	// Google Drive / Sheets.
 	ToolSheetsAppendRow  = "sheets_append_row"
 	ToolSheetsReadRange  = "sheets_read_range"
@@ -283,6 +290,13 @@ var toolIntegration = map[string]string{
 	ToolFreshworksCRMSearch:              integrationFreshworks,
 	ToolFreshworksCRMGetContact:          integrationFreshworks,
 	ToolFreshworksCRMGetDeal:             integrationFreshworks,
+
+	// Document360 (knowledge base, read-only).
+	ToolDocument360ListWorkspaces: integrationDocument360,
+	ToolDocument360Search:         integrationDocument360,
+	ToolDocument360ListCategories: integrationDocument360,
+	ToolDocument360ListArticles:   integrationDocument360,
+	ToolDocument360GetArticle:     integrationDocument360,
 
 	// Google Drive / Sheets.
 	ToolSheetsAppendRow:  integrationGoogle,

@@ -368,6 +368,27 @@ spec:
                   name: {{ .Values.secretName }}
                   key: google-scopes
             {{- end }}
+            {{- if index .Values.secretValues "document360-api-key" }}
+            - name: DOCUMENT360_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: document360-api-key
+            {{- if index .Values.secretValues "document360-project-id" }}
+            - name: DOCUMENT360_PROJECT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: document360-project-id
+            {{- end }}
+            {{- if index .Values.secretValues "document360-region" }}
+            - name: DOCUMENT360_REGION
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: document360-region
+            {{- end }}
+            {{- end }}
             - name: GOMEMLIMIT
               value: {{ .Values.goRuntime.goMemLimit | quote }}
             - name: GOGC

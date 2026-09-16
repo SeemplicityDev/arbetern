@@ -14,6 +14,7 @@ import (
 
 	"github.com/justmike1/arbetern/internal/httpx"
 	"github.com/justmike1/arbetern/internal/store"
+	"github.com/justmike1/arbetern/internal/ttlcache"
 	"github.com/justmike1/arbetern/internal/vectors"
 )
 
@@ -33,7 +34,7 @@ type backendView struct {
 	store   *store.Backend
 	index   atomic.Pointer[vectors.Index]
 	allow   func(*http.Request) bool
-	listing *ttlCache[[]store.Object]
+	listing *ttlcache.Cache[[]store.Object]
 }
 
 type backendObject struct {
@@ -44,7 +45,7 @@ type backendObject struct {
 
 func newBackendView(b *store.Backend, allow func(*http.Request) bool) *backendView {
 	v := &backendView{store: b, allow: allow}
-	v.listing = newTTLCache(backendListingTTL, func(ctx context.Context) ([]store.Object, error) {
+	v.listing = ttlcache.New(backendListingTTL, func(ctx context.Context) ([]store.Object, error) {
 		return b.List(ctx, "")
 	})
 	return v
@@ -84,7 +85,7 @@ func (v *backendView) writeJSON(w http.ResponseWriter, payload any) {
 }
 
 func (v *backendView) objects(ctx context.Context) ([]store.Object, bool, error) {
-	objs, err := v.listing.get(ctx)
+	objs, err := v.listing.Get(ctx)
 	if err != nil {
 		return nil, false, err
 	}
