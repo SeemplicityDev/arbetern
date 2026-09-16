@@ -138,6 +138,73 @@ function escapeHtml(str) {
     .replace(/'/g, '&#39;');
 }
 
+/* Dialogs: promise-based replacements for alert / confirm / prompt. Requests
+   queue so two callers never fight over the single dialog element. */
+let dialogState = null;
+let dialogQueue = Promise.resolve();
+
+function showDialog(opts) {
+  const run = () => new Promise(resolve => {
+    const overlay = document.getElementById('dialog-overlay');
+    const box = document.getElementById('dialog');
+    const input = document.getElementById('dialog-input');
+    const ok = document.getElementById('dialog-ok');
+    const cancel = document.getElementById('dialog-cancel');
+    const isPrompt = opts.kind === 'prompt';
+    document.getElementById('dialog-title').textContent = opts.title || '';
+    document.getElementById('dialog-message').textContent = opts.message || '';
+    box.dataset.tone = opts.tone || 'info';
+    input.hidden = !isPrompt;
+    input.value = isPrompt ? (opts.value || '') : '';
+    input.placeholder = opts.placeholder || '';
+    ok.textContent = opts.okLabel || 'OK';
+    ok.className = 'btn-mini ' + (opts.tone === 'danger' ? 'danger solid' : 'primary');
+    cancel.textContent = opts.cancelLabel || 'Cancel';
+    cancel.hidden = opts.kind === 'alert';
+    dialogState = { kind: opts.kind, resolve, restore: document.activeElement };
+    overlay.classList.add('active');
+    if (isPrompt) { input.focus(); input.select(); } else ok.focus();
+  });
+  const p = dialogQueue.then(run, run);
+  dialogQueue = p.catch(() => {});
+  return p;
+}
+
+function settleDialog(accepted) {
+  const st = dialogState;
+  if (!st) return;
+  dialogState = null;
+  document.getElementById('dialog-overlay').classList.remove('active');
+  const value = document.getElementById('dialog-input').value;
+  if (st.restore && st.restore.focus && document.contains(st.restore)) st.restore.focus();
+  if (st.kind === 'prompt') st.resolve(accepted ? value : null);
+  else if (st.kind === 'confirm') st.resolve(!!accepted);
+  else st.resolve();
+}
+
+function uiAlert(message, opts) { return showDialog(Object.assign({ kind: 'alert', message }, opts || {})); }
+function uiConfirm(message, opts) { return showDialog(Object.assign({ kind: 'confirm', message }, opts || {})); }
+function uiPrompt(message, value, opts) { return showDialog(Object.assign({ kind: 'prompt', message, value }, opts || {})); }
+function uiError(title, err) {
+  return uiAlert(err && err.message ? err.message : String(err), { title, tone: 'danger' });
+}
+
+document.getElementById('dialog-ok').addEventListener('click', () => settleDialog(true));
+document.getElementById('dialog-cancel').addEventListener('click', () => settleDialog(false));
+document.getElementById('dialog-overlay').addEventListener('click', e => {
+  if (e.target === e.currentTarget) settleDialog(false);
+});
+document.getElementById('dialog').addEventListener('keydown', e => {
+  if (!dialogState) return;
+  if (e.key === 'Enter' && e.target.id === 'dialog-input') { e.preventDefault(); settleDialog(true); return; }
+  if (e.key !== 'Tab') return;
+  const focusable = Array.from(e.currentTarget.querySelectorAll('input:not([hidden]), button:not([hidden])'));
+  if (!focusable.length) return;
+  const first = focusable[0], last = focusable[focusable.length - 1];
+  if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+  else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+});
+
 function safeExternalUrl(value) {
   try {
     const url = new URL(String(value || ''), window.location.origin);
@@ -995,7 +1062,7 @@ async function syncGitops(kind, btn) {
     const r = await fetch(`/api/${kind}/_gitops/sync`, { method: 'POST' });
     if (!r.ok) throw new Error((await r.text()) || ('HTTP ' + r.status));
   } catch (err) {
-    alert('Sync failed: ' + err);
+    await uiError('Sync failed', err);
     await loadGitops(kind, true);
     return;
   }
@@ -1123,27 +1190,27 @@ function renderWorkflowsPage() {
 }
 
 async function runWorkflow(agentId, id, btn) {
-  if (!confirm('Run this workflow now? It uses the agent’s LLM tool loop and counts toward usage.')) return;
+  if (!(await uiConfirm('It uses the agent’s LLM tool loop and counts toward usage.', { title: 'Run this workflow now?', okLabel: 'Run now' }))) return;
   if (btn) { btn.disabled = true; btn.textContent = 'Queued'; }
   try {
     const r = await fetch(`/api/workflows/${encodeURIComponent(agentId)}/${encodeURIComponent(id)}/run`, { method: 'POST' });
     if (!r.ok) throw new Error((await r.text()) || ('HTTP ' + r.status));
   } catch (err) {
-    alert('Failed to start workflow: ' + err);
+    await uiError('Failed to start workflow', err);
   }
   delete lastFetched.workflows;
   setTimeout(loadWorkflows, 1500);
 }
 
 async function deleteWorkflow(agentId, id) {
-  if (!confirm('Delete this workflow? This stops its schedule and removes its stored data.')) return;
+  if (!(await uiConfirm('This stops its schedule and removes its stored data.', { title: 'Delete this workflow?', tone: 'danger', okLabel: 'Delete' }))) return;
   try {
     const r = await fetch(`/api/workflows/${encodeURIComponent(agentId)}/${encodeURIComponent(id)}`, { method: 'DELETE' });
     if (!r.ok && r.status !== 204) throw new Error('HTTP ' + r.status);
     delete lastFetched.workflows;
     await loadWorkflows();
   } catch (err) {
-    alert('Failed to delete workflow: ' + err);
+    await uiError('Failed to delete workflow', err);
   }
 }
 
@@ -1214,14 +1281,14 @@ function renderDashboardsPage() {
 }
 
 async function deleteDashboard(agentId, id) {
-  if (!confirm('Delete this dashboard? This stops its sync and removes its stored data.')) return;
+  if (!(await uiConfirm('This stops its sync and removes its stored data.', { title: 'Delete this dashboard?', tone: 'danger', okLabel: 'Delete' }))) return;
   try {
     const r = await fetch(`/api/dashboards/${encodeURIComponent(agentId)}/${encodeURIComponent(id)}`, { method: 'DELETE' });
     if (!r.ok && r.status !== 204) throw new Error('HTTP ' + r.status);
     delete lastFetched.dashboards;
     await loadDashboards();
   } catch (err) {
-    alert('Failed to delete dashboard: ' + err);
+    await uiError('Failed to delete dashboard', err);
   }
 }
 
@@ -2305,14 +2372,14 @@ async function newChat(agent) {
 }
 
 async function removeConversation(convId) {
-  if (!confirm('Delete this conversation? This removes its history for everyone.')) return;
+  if (!(await uiConfirm('This removes its history for everyone.', { title: 'Delete this conversation?', tone: 'danger', okLabel: 'Delete' }))) return;
   const agent = chatAgentId;
   try {
     await apiDeleteConversation(agent, convId);
     if (chatConvId === convId) chatConvId = null;
     await openLatestOrNew(agent);
   } catch (err) {
-    alert('Failed to delete conversation: ' + err);
+    await uiError('Failed to delete conversation', err);
   }
 }
 
@@ -2323,7 +2390,7 @@ async function renameConversationPrompt(convId, btn) {
     const nameEl = row.querySelector('.fs-conv-name');
     if (nameEl) current = nameEl.textContent || '';
   }
-  const title = prompt('Rename conversation', current.trim());
+  const title = await uiPrompt('', current.trim(), { title: 'Rename conversation', okLabel: 'Rename', placeholder: 'Conversation title' });
   if (title == null) return;
   const trimmed = title.trim();
   if (!trimmed) return;
@@ -2331,7 +2398,7 @@ async function renameConversationPrompt(convId, btn) {
     await apiRenameConversation(chatAgentId, convId, trimmed);
     await refreshConvList(chatAgentId);
   } catch (err) {
-    alert('Failed to rename conversation: ' + err);
+    await uiError('Failed to rename conversation', err);
   }
 }
 
@@ -2478,6 +2545,7 @@ document.getElementById('fs-chat-input').addEventListener('keydown', e => {
 
 document.addEventListener('keydown', e => {
   if (e.key !== 'Escape') return;
+  if (dialogState) { settleDialog(false); return; }
   if (!document.getElementById('user-pop').hidden) { setIdentityOpen(false); return; }
   if (document.getElementById('form-overlay').classList.contains('active')) { closeForm(); return; }
   if (document.documentElement.dataset.drawer === 'open') { closeDrawer(); return; }
@@ -2809,29 +2877,30 @@ document.getElementById('chat-new-btn').addEventListener('click', async () => {
     const conv = await apiCreateConversation(chatsAgent);
     openFullChat(chatsAgent, conv.id);
   } catch (err) {
-    alert(err && err.status === 403 ? 'You don’t have access to this agent’s chat.' : 'Failed to start a chat: ' + err);
+    if (err && err.status === 403) await uiAlert('You don’t have access to this agent’s chat.', { title: 'No access', tone: 'warn' });
+    else await uiError('Failed to start a chat', err);
   }
 });
 
 async function renameChatFromList(id) {
   const c = chatsList && chatsList.list ? chatsList.list.find(x => x.id === id) : null;
-  const title = prompt('Rename conversation', c ? c.title || '' : '');
+  const title = await uiPrompt('', c ? c.title || '' : '', { title: 'Rename conversation', okLabel: 'Rename', placeholder: 'Conversation title' });
   if (title == null || !title.trim()) return;
   try {
     await apiRenameConversation(chatsAgent, id, title.trim());
   } catch (err) {
-    alert('Failed to rename conversation: ' + err);
+    await uiError('Failed to rename conversation', err);
   }
   chatsList = null;
   loadChats();
 }
 
 async function deleteChatFromList(id) {
-  if (!confirm('Delete this conversation? This removes its history for everyone.')) return;
+  if (!(await uiConfirm('This removes its history for everyone.', { title: 'Delete this conversation?', tone: 'danger', okLabel: 'Delete' }))) return;
   try {
     await apiDeleteConversation(chatsAgent, id);
   } catch (err) {
-    alert('Failed to delete conversation: ' + err);
+    await uiError('Failed to delete conversation', err);
   }
   chatsList = null;
   loadChats();
@@ -2975,18 +3044,18 @@ async function toggleSkill(id, enabled) {
   try {
     await apiSend(`/api/skills/${encodeURIComponent(id)}`, 'PATCH', { enabled });
   } catch (err) {
-    alert('Failed to update skill: ' + err.message);
+    await uiError('Failed to update skill', err);
   }
   delete lastFetched.skills;
   await loadSkills();
 }
 
 async function deleteSkill(id) {
-  if (!confirm('Delete this skill? Agents stop following it immediately.')) return;
+  if (!(await uiConfirm('Agents stop following it immediately.', { title: 'Delete this skill?', tone: 'danger', okLabel: 'Delete' }))) return;
   try {
     await apiSend(`/api/skills/${encodeURIComponent(id)}`, 'DELETE');
   } catch (err) {
-    alert('Failed to delete skill: ' + err.message);
+    await uiError('Failed to delete skill', err);
   }
   delete lastFetched.skills;
   await loadSkills();
@@ -3115,18 +3184,18 @@ async function toggleConnector(id, enabled) {
   try {
     await apiSend(`/api/mcp/${encodeURIComponent(id)}`, 'PATCH', { enabled });
   } catch (err) {
-    alert('Failed to update connector: ' + err.message);
+    await uiError('Failed to update connector', err);
   }
   delete lastFetched.mcp;
   await loadMCP();
 }
 
 async function deleteConnector(id) {
-  if (!confirm('Delete this connector? Its tools disappear from the agents immediately.')) return;
+  if (!(await uiConfirm('Its tools disappear from the agents immediately.', { title: 'Delete this connector?', tone: 'danger', okLabel: 'Delete' }))) return;
   try {
     await apiSend(`/api/mcp/${encodeURIComponent(id)}`, 'DELETE');
   } catch (err) {
-    alert('Failed to delete connector: ' + err.message);
+    await uiError('Failed to delete connector', err);
   }
   delete lastFetched.mcp;
   await loadMCP();
@@ -3141,7 +3210,7 @@ async function testConnector(id, btn) {
       if (i >= 0) mcpData.list[i] = c;
     }
   } catch (err) {
-    alert('Test failed: ' + err.message);
+    await uiError('Connector test failed', err);
   }
   renderMCPPage();
   renderFleet();

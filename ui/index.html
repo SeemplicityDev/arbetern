@@ -576,6 +576,18 @@
     </section>
   </div>
 
+  <div class="dialog-overlay" id="dialog-overlay">
+    <div class="dialog" id="dialog" role="dialog" aria-modal="true" aria-labelledby="dialog-title" aria-describedby="dialog-message" tabindex="-1">
+      <div class="dialog-title" id="dialog-title"></div>
+      <div class="dialog-message" id="dialog-message"></div>
+      <input class="form-input dialog-input" id="dialog-input" type="text" autocomplete="off" spellcheck="false" hidden>
+      <div class="actions dialog-actions">
+        <button class="btn-mini" type="button" id="dialog-cancel">Cancel</button>
+        <button class="btn-mini primary" type="button" id="dialog-ok">OK</button>
+      </div>
+    </div>
+  </div>
+
   <script src="/ui/detail.js"></script>
   <script src="/ui/app.js"></script>
 </body>

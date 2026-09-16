@@ -245,13 +245,13 @@ function runHtml(r, open) {
 async function wfdRun(btn) {
   const w = detailEntity;
   if (!w) return;
-  if (!confirm('Run this workflow now? It uses the agent’s LLM tool loop and counts toward usage.')) return;
+  if (!(await uiConfirm('It uses the agent’s LLM tool loop and counts toward usage.', { title: 'Run this workflow now?', okLabel: 'Run now' }))) return;
   btn.disabled = true;
   btn.textContent = 'Queued…';
   try {
     await apiSend(`${detailApi('workflow', w.agent, w.id)}/run`, 'POST', {});
   } catch (err) {
-    alert('Failed to start workflow: ' + err.message);
+    await uiError('Failed to start workflow', err);
   }
   delete lastFetched.workflows;
   loadWorkflows();
@@ -265,7 +265,7 @@ async function wfdToggle(btn) {
   try {
     await apiSend(detailApi('workflow', w.agent, w.id), 'PATCH', { enabled: !w.enabled });
   } catch (err) {
-    alert('Failed to update workflow: ' + err.message);
+    await uiError('Failed to update workflow', err);
   }
   delete lastFetched.workflows;
   loadWorkflows();
@@ -275,11 +275,11 @@ async function wfdToggle(btn) {
 async function wfdDelete() {
   const w = detailEntity;
   if (!w) return;
-  if (!confirm('Delete this workflow? This stops its schedule and removes its stored data.')) return;
+  if (!(await uiConfirm('This stops its schedule and removes its stored data.', { title: 'Delete this workflow?', tone: 'danger', okLabel: 'Delete' }))) return;
   try {
     await apiSend(detailApi('workflow', w.agent, w.id), 'DELETE');
   } catch (err) {
-    alert('Failed to delete workflow: ' + err.message);
+    await uiError('Failed to delete workflow', err);
     return;
   }
   delete lastFetched.workflows;
@@ -613,7 +613,7 @@ async function ddRerender(btn) {
     await apiSend(`${detailApi('dashboard', d.agent, d.template_id)}/render`, 'POST', { inputs: d.inputs || {}, interval: d.sync_interval || '' });
     scheduleDetailPoll(3000);
   } catch (err) {
-    alert('Re-render failed: ' + err.message);
+    await uiError('Re-render failed', err);
     btn.disabled = false;
     btn.textContent = 'Re-render';
   }
@@ -622,11 +622,11 @@ async function ddRerender(btn) {
 async function ddDelete() {
   const d = detailEntity;
   if (!d) return;
-  if (!confirm('Delete this dashboard? This stops its sync and removes its stored data.')) return;
+  if (!(await uiConfirm('This stops its sync and removes its stored data.', { title: 'Delete this dashboard?', tone: 'danger', okLabel: 'Delete' }))) return;
   try {
     await apiSend(detailApi('dashboard', d.agent, d.id), 'DELETE');
   } catch (err) {
-    alert('Failed to delete dashboard: ' + err.message);
+    await uiError('Failed to delete dashboard', err);
     return;
   }
   delete lastFetched.dashboards;
