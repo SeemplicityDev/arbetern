@@ -62,6 +62,7 @@ env:
   # CHAT_RETENTION: "168h"  # How long an idle UI chat conversation is kept before auto-deletion (Go duration). Default 168h (1 week).
   # MAX_TOOL_ROUNDS: "200"  # Max LLM tool-call rounds per request. Default 200; raise for very long multi-step workflows.
   # AWS_REGION: "us-east-1"   # Region used to sign Cost Explorer SigV4 calls. CE is global; leave as us-east-1 unless you have a reason not to.
+  # The read-only Athena tools need no settings: each call names its own region, workgroup, catalog and database. Only the IAM permissions matter — see docs/AWS.md.
   # AZURE_AUTHORITY_HOST: "https://login.microsoftonline.com"   # Override only for sovereign clouds (Azure Government, China).
   # AZURE_MANAGEMENT_HOST: "https://management.azure.com"       # Override only for sovereign clouds.
 
@@ -263,9 +264,11 @@ secretValues:
   # dd-api-key-eu: ""   # Datadog EU API key (datadoghq.eu)
   # dd-app-key-eu: ""   # Datadog EU Application key
   # AWS Cost Explorer (optional — enables aws_get_cost_and_usage / aws_get_cost_forecast /
-  # aws_list_dimension_values). Preferred auth in-cluster is IRSA: annotate the service
+  # aws_list_dimension_values, and the read-only aws_athena_* query tools).
+  # Preferred auth in-cluster is IRSA: annotate the service
   # account (`serviceAccount.annotations.eks.amazonaws.com/role-arn: ...`) with an IAM
-  # role that has `ce:GetCostAndUsage`, `ce:GetCostForecast`, `ce:GetDimensionValues`.
+  # role that has `ce:GetCostAndUsage`, `ce:GetCostForecast`, `ce:GetDimensionValues`
+  # (and the Athena / Glue / S3 read permissions in docs/AWS.md for the Athena tools).
   # The static credentials below are a fallback for non-EKS clusters.
   # aws-access-key-id: ""       # IAM access key ID
   # aws-secret-access-key: ""   # IAM secret access key

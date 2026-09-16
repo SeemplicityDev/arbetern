@@ -23,6 +23,7 @@ env:
   # AZURE_BILLING_ACCOUNT_ID: ""  # Azure billing account scope for cost queries; falls back to the subscription scope when unset.
   # WORKFLOW_RUN_HISTORY: "20"  # How many past runs each workflow keeps in its history.
   # AWS_REGION: "us-east-1"   # Cost Explorer SigV4 signing region. CE is global; us-east-1 is the canonical choice.
+  # The read-only Athena tools need no settings — each call names its own region, workgroup, catalog and database. See docs/AWS.md for the IAM permissions.
 
 # Headroom context-compression sidecar (optional — cuts LLM token usage).
 # When enabled, arbetern compresses each conversation via the in-pod headroom
@@ -72,7 +73,8 @@ secretValues:
   # dd-app-key-us: "your-dd-app-key-us"   # Datadog US → Organization Settings → Application Keys
   # dd-api-key-eu: "your-dd-api-key-eu"   # Datadog EU (datadoghq.eu) → Organization Settings → API Keys
   # dd-app-key-eu: "your-dd-app-key-eu"   # Datadog EU → Organization Settings → Application Keys
-  # AWS Cost Explorer (optional — enables aws_get_cost_and_usage / aws_get_cost_forecast / aws_list_dimension_values).
+  # AWS Cost Explorer (optional — enables aws_get_cost_and_usage / aws_get_cost_forecast /
+  # aws_list_dimension_values, and the read-only aws_athena_* query tools).
   # Preferred auth on EKS is IRSA — annotate the service account instead of setting static keys:
   #   serviceAccount:
   #     annotations:

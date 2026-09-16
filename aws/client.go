@@ -1,5 +1,5 @@
-// Package aws wraps the subset of AWS APIs arbetern needs — currently only
-// Cost Explorer. Credentials are resolved via the default AWS SDK v2 chain
+// Package aws wraps the subset of AWS APIs arbetern needs: Cost Explorer,
+// S3, and Athena. Credentials are resolved via the default AWS SDK v2 chain
 // (environment variables, shared config/credentials files, EKS IRSA /
 // EC2 IMDS), so the same binary works locally and in-cluster without any
 // arbetern-specific plumbing.
@@ -20,6 +20,7 @@ import (
 
 	awsv2 "github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/athena"
 	"github.com/aws/aws-sdk-go-v2/service/costexplorer"
 	cetypes "github.com/aws/aws-sdk-go-v2/service/costexplorer/types"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -46,14 +47,20 @@ const (
 	MaxDays = 90
 )
 
-// Client wraps the AWS SDK clients arbetern uses (Cost Explorer and S3).
-// The Cost Explorer client is signed for a single region (us-east-1 by
-// default); S3 is genuinely regional, so per-bucket S3 clients are built
-// lazily in each bucket's own region (see s3.go).
+// Client wraps the AWS SDK clients arbetern uses (Cost Explorer, S3 and
+// Athena). The Cost Explorer client is signed for a single region (us-east-1
+// by default); S3 and Athena are genuinely regional, so their clients are
+// built lazily per region (see s3.go, athena.go).
 type Client struct {
 	ce     *costexplorer.Client
 	cfg    awsv2.Config
 	region string
+
+	// athenaMu guards the lazily-populated Athena clients. Athena is regional
+	// and every call names its own region, so clients are cached per region
+	// rather than fixed at construction (see athena.go).
+	athenaMu      sync.Mutex
+	athenaClients map[string]*athena.Client // region -> Athena client
 
 	// s3mu guards the lazily-populated S3 maps. S3 is regional: an object
 	// must be addressed through a client signed for the bucket's region, so
@@ -85,6 +92,7 @@ func NewClient(ctx context.Context, region string) (*Client, error) {
 		ce:            costexplorer.NewFromConfig(cfg),
 		cfg:           cfg,
 		region:        region,
+		athenaClients: make(map[string]*athena.Client),
 		s3Clients:     make(map[string]*s3.Client),
 		bucketRegions: make(map[string]string),
 	}, nil

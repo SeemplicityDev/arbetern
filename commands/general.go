@@ -1803,6 +1803,65 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 		})
 	}
 
+	// Athena tools — read-only SQL over the Cost and Usage Report and any
+	// other table in the Glue catalog. Nothing is configured at deploy time:
+	// the region, workgroup, catalog and database come from the call (an
+	// agent's prompt or skill, or the discovery tools below), and the IAM
+	// policy is what bounds where a query may run. This is the surface for
+	// cost questions Cost Explorer cannot answer — CUR keeps the resource
+	// tags (namespace, workload, pod) its aggregated dimensions drop.
+	if h.canUseIntegration(integrationAWS) && h.awsClient != nil {
+		tools = append(tools, llm.Tool{
+			Type: "function",
+			Function: llm.ToolFunction{
+				Name:        ToolAWSAthenaQuery,
+				Description: "Run read-only SQL (Trino dialect) through Amazon Athena and get the rows back inline. Use this for cost attribution Cost Explorer cannot do — cost per Kubernetes namespace / workload / pod, per resource tag, or per individual resource id — by querying the Cost and Usage Report table, and for any other table in the Glue catalog. 'workgroup' and 'database' are REQUIRED and are not configured anywhere: take them from your instructions if they name them, otherwise discover them with aws_athena_catalogs (workgroups) and aws_athena_schema (databases and tables). ALWAYS filter on the table's partition columns (billing period / date) in the WHERE clause: Athena bills per byte scanned, so an unpartitioned scan over a CUR table is both slow and expensive — aws_athena_schema returns a table's partition keys for exactly this. Aggregate with GROUP BY / SUM in SQL rather than returning raw line items: only 500 rows come back by default (5000 max), and a truncated result silently hides rows your totals would need. Only read statements are accepted (SELECT / WITH / SHOW / DESCRIBE / EXPLAIN / VALUES); INSERT, CREATE TABLE AS, UNLOAD, MSCK REPAIR and every other write is rejected before it reaches AWS. A query is cancelled if it runs longer than 3 minutes.",
+				Parameters: json.RawMessage(`{
+					"type":"object",
+					"properties":{
+						"sql":{"type":"string","description":"The read-only SQL to run (Trino dialect). Include a partition filter in WHERE and aggregate in SQL."},
+						"workgroup":{"type":"string","description":"Athena workgroup to run in. It also decides where results are written. Discover the ones this role may use with aws_athena_catalogs."},
+						"database":{"type":"string","description":"Glue database (schema) to run against. Discover with aws_athena_schema."},
+						"catalog":{"type":"string","description":"Optional data catalog name. Defaults to AwsDataCatalog, the built-in Glue catalog."},
+						"region":{"type":"string","description":"Optional AWS region holding the workgroup and catalog (e.g. 'us-east-1'). Defaults to the deployment's signing region."},
+						"output_location":{"type":"string","description":"Optional s3://bucket/prefix/ for results. Rarely needed — omit it so the workgroup's own result location is used."},
+						"max_rows":{"type":"integer","description":"Maximum rows to return (1-5000). Defaults to 500. Raise it only when the rows are genuinely needed — prefer aggregating in SQL."}
+					},
+					"required":["sql","workgroup","database"]
+				}`),
+			},
+		}, llm.Tool{
+			Type: "function",
+			Function: llm.ToolFunction{
+				Name:        ToolAWSAthenaSchema,
+				Description: "Inspect the Glue catalog behind Athena so you can write a correct query: with no arguments it lists the databases in the catalog; with 'database' it lists that database's tables; with 'database' + 'table' it returns that table's columns and — importantly — its partition keys, which your WHERE clause must filter on to keep the scan cheap. Always call this before aws_athena_query rather than guessing table or column names (CUR tables have hundreds of columns with non-obvious names).",
+				Parameters: json.RawMessage(`{
+					"type":"object",
+					"properties":{
+						"database":{"type":"string","description":"Glue database to list tables from. Omit (with no table) to list the databases instead."},
+						"table":{"type":"string","description":"Table to describe. Returns its columns and partition keys. Requires 'database'."},
+						"catalog":{"type":"string","description":"Optional data catalog name. Defaults to AwsDataCatalog."},
+						"search":{"type":"string","description":"Optional table-name filter applied server-side when listing a database's tables."},
+						"workgroup":{"type":"string","description":"Optional workgroup whose permissions scope the metadata lookup. Pass the workgroup you intend to query with if metadata access is restricted."},
+						"region":{"type":"string","description":"Optional AWS region. Defaults to the deployment's signing region."}
+					}
+				}`),
+			},
+		}, llm.Tool{
+			Type: "function",
+			Function: llm.ToolFunction{
+				Name:        ToolAWSAthenaCatalogs,
+				Description: "List the Athena workgroups and data catalogs available in a region. Use this when you need the 'workgroup' for aws_athena_query and your instructions do not name one — the workgroup decides where a query runs and where its results are written, and only the ones this deployment's IAM role is permitted to use will actually work.",
+				Parameters: json.RawMessage(`{
+					"type":"object",
+					"properties":{
+						"region":{"type":"string","description":"Optional AWS region to list in (e.g. 'us-east-1'). Defaults to the deployment's signing region."}
+					}
+				}`),
+			},
+		})
+	}
+
 	// Azure tools — Cost Management API scoped at the configured
 	// management group (defaults to the tenant root MG, i.e. tenant-wide).
 	// Enabled when AZURE_TENANT_ID / AZURE_CLIENT_ID /
@@ -4885,6 +4944,86 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		log.Printf("[user=%s channel=%s] aws s3_list_objects (s3://%s/%s, region=%s, %d objects)",
 			userID, channelID, res.Bucket, res.Prefix, res.Region, len(res.Objects))
 		return aws.FormatS3List(res)
+
+	case ToolAWSAthenaQuery:
+		if h.awsClient == nil {
+			return "Error: AWS integration is not configured. Set AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY (or AWS_PROFILE, or EKS IRSA via AWS_WEB_IDENTITY_TOKEN_FILE + AWS_ROLE_ARN) to enable the Athena tools."
+		}
+		args, errMsg := parseToolArgs[struct {
+			SQL            string `json:"sql"`
+			Workgroup      string `json:"workgroup"`
+			Database       string `json:"database"`
+			Catalog        string `json:"catalog"`
+			Region         string `json:"region"`
+			OutputLocation string `json:"output_location"`
+			MaxRows        int    `json:"max_rows"`
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
+		}
+		res, err := h.awsClient.AthenaQuery(ctx, aws.AthenaQueryOpts{
+			SQL:            args.SQL,
+			Workgroup:      args.Workgroup,
+			Database:       args.Database,
+			Catalog:        args.Catalog,
+			Region:         args.Region,
+			OutputLocation: args.OutputLocation,
+			MaxRows:        args.MaxRows,
+		})
+		if err != nil {
+			return fmt.Sprintf("Error running Athena query: %v", err)
+		}
+		log.Printf("[user=%s channel=%s] aws athena_query (region=%s, workgroup=%s, db=%s, %d rows, %d bytes scanned, id=%s)",
+			userID, channelID, res.Region, res.Workgroup, res.Database, res.RowCount, res.DataScannedBytes, res.QueryExecutionID)
+		return aws.FormatAthenaQuery(res)
+
+	case ToolAWSAthenaSchema:
+		if h.awsClient == nil {
+			return "Error: AWS integration is not configured. Set AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY (or AWS_PROFILE, or EKS IRSA via AWS_WEB_IDENTITY_TOKEN_FILE + AWS_ROLE_ARN) to enable the Athena tools."
+		}
+		args, errMsg := parseToolArgs[struct {
+			Database  string `json:"database"`
+			Table     string `json:"table"`
+			Catalog   string `json:"catalog"`
+			Search    string `json:"search"`
+			Workgroup string `json:"workgroup"`
+			Region    string `json:"region"`
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
+		}
+		res, err := h.awsClient.AthenaSchema(ctx, aws.AthenaSchemaOpts{
+			Database:  args.Database,
+			Table:     args.Table,
+			Catalog:   args.Catalog,
+			Search:    args.Search,
+			Workgroup: args.Workgroup,
+			Region:    args.Region,
+		})
+		if err != nil {
+			return fmt.Sprintf("Error reading Athena catalog: %v", err)
+		}
+		log.Printf("[user=%s channel=%s] aws athena_schema (region=%s, catalog=%s, db=%s, table=%s, %d databases, %d tables)",
+			userID, channelID, res.Region, res.Catalog, res.Database, args.Table, len(res.Databases), len(res.Tables))
+		return aws.FormatAthenaSchema(res)
+
+	case ToolAWSAthenaCatalogs:
+		if h.awsClient == nil {
+			return "Error: AWS integration is not configured. Set AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY (or AWS_PROFILE, or EKS IRSA via AWS_WEB_IDENTITY_TOKEN_FILE + AWS_ROLE_ARN) to enable the Athena tools."
+		}
+		args, errMsg := parseToolArgs[struct {
+			Region string `json:"region"`
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
+		}
+		res, err := h.awsClient.AthenaCatalogs(ctx, aws.AthenaCatalogsOpts{Region: args.Region})
+		if err != nil {
+			return fmt.Sprintf("Error listing Athena workgroups: %v", err)
+		}
+		log.Printf("[user=%s channel=%s] aws athena_catalogs (region=%s, %d workgroups, %d catalogs)",
+			userID, channelID, res.Region, len(res.Workgroups), len(res.Catalogs))
+		return aws.FormatAthenaCatalogs(res)
 
 	// ---- Azure Cost Management tools ----
 

@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/justmike1/arbetern/internal/safego"
+	"github.com/justmike1/arbetern/internal/sqlguard"
 
 	"github.com/justmike1/arbetern/internal/text"
 )
@@ -291,7 +292,7 @@ func (c *Client) Query(ctx context.Context, sqlText string, params []QueryParam,
 	if err != nil {
 		return nil, err
 	}
-	if err := validateReadOnlySQL(sqlText); err != nil {
+	if err := readOnlySQL.Validate(sqlText); err != nil {
 		return nil, err
 	}
 	rowLimit := opts.RowLimit
@@ -625,134 +626,24 @@ func validateWorkspaceHost(host string) error {
 	return fmt.Errorf("not a Databricks workspace domain")
 }
 
-// readOnlyLeadKeywords are the statement-leading verbs we permit; anything
-// else is rejected. DECLARE / SET / USE / BEGIN / END cover the session setup
-// that can precede a reporting SELECT in a multi-statement script.
-var readOnlyLeadKeywords = map[string]bool{
-	"SELECT": true, "WITH": true, "SHOW": true, "DESCRIBE": true, "DESC": true,
-	"EXPLAIN": true, "VALUES": true, "TABLE": true, "DECLARE": true, "SET": true,
-	"USE": true, "BEGIN": true, "END": true,
-}
-
-// mutatingKeywords are verbs that write data, change schema or alter
-// privileges. They are rejected even after an allowed leading keyword (e.g. a
-// `WITH … INSERT` CTE). REPLACE (`DECLARE OR REPLACE VARIABLE`) and COMMIT are
-// intentionally excluded so they don't reject legitimate reporting queries.
-var mutatingKeywords = map[string]bool{
-	"INSERT": true, "UPDATE": true, "DELETE": true, "MERGE": true, "UPSERT": true,
-	"CREATE": true, "DROP": true, "ALTER": true, "TRUNCATE": true, "UNDROP": true,
-	"RENAME": true, "GRANT": true, "REVOKE": true, "COPY": true, "LOAD": true,
-	"OVERWRITE": true, "RESTORE": true, "OPTIMIZE": true, "VACUUM": true,
-	"REPAIR": true, "MSCK": true, "REFRESH": true, "CACHE": true, "UNCACHE": true,
-}
-
-// validateReadOnlySQL checks that every `;`-separated statement begins with an
-// allowed lead keyword and contains no mutating keyword (outside strings,
-// quoted identifiers and comments). It returns an error naming the first
-// offender; a script with no statement is rejected.
-func validateReadOnlySQL(sqlText string) error {
-	sawStatement := false
-	for _, toks := range scanSQLStatements(sqlText) {
-		if len(toks) == 0 {
-			continue
-		}
-		sawStatement = true
-		if !readOnlyLeadKeywords[toks[0]] {
-			return fmt.Errorf("statement starting with %q is not allowed; only read-only statements may run (SELECT / WITH / SHOW / DESCRIBE / EXPLAIN / VALUES, plus DECLARE / SET / USE for session setup)", toks[0])
-		}
-		for _, t := range toks {
-			if mutatingKeywords[t] {
-				return fmt.Errorf("statement contains the mutating keyword %q; INSERT / UPDATE / DELETE / MERGE / CREATE / DROP / ALTER and other write operations are forbidden", t)
-			}
-		}
-	}
-	if !sawStatement {
-		return fmt.Errorf("no SQL statement found")
-	}
-	return nil
-}
-
-// scanSQLStatements splits sql at top-level semicolons and returns the
-// uppercased word tokens of each statement, ignoring anything inside string
-// literals, quoted identifiers (`…`) and comments so they can't affect
-// statement boundaries or keyword detection.
-func scanSQLStatements(sql string) [][]string {
-	var (
-		stmts [][]string
-		cur   []string
-		tok   strings.Builder
-	)
-	flushTok := func() {
-		if tok.Len() > 0 {
-			cur = append(cur, strings.ToUpper(tok.String()))
-			tok.Reset()
-		}
-	}
-	flushStmt := func() {
-		flushTok()
-		stmts = append(stmts, cur)
-		cur = nil
-	}
-
-	i, n := 0, len(sql)
-	for i < n {
-		ch := sql[i]
-		switch {
-		case ch == '-' && i+1 < n && sql[i+1] == '-':
-			// Line comment: skip to end of line.
-			flushTok()
-			i += 2
-			for i < n && sql[i] != '\n' {
-				i++
-			}
-		case ch == '/' && i+1 < n && sql[i+1] == '*':
-			// Block comment: skip to closing */.
-			flushTok()
-			i += 2
-			for i+1 < n && (sql[i] != '*' || sql[i+1] != '/') {
-				i++
-			}
-			i += 2
-		case ch == '\'' || ch == '"' || ch == '`':
-			// Quoted span: string literal or quoted identifier. Skip its
-			// contents so nothing inside is tokenized. Handle doubled-quote
-			// escapes for all three, and backslash escapes for string
-			// literals (Spark's default), but not for `…` identifiers.
-			flushTok()
-			quote := ch
-			backslashEscapes := quote == '\'' || quote == '"'
-			i++
-			for i < n {
-				if backslashEscapes && sql[i] == '\\' && i+1 < n {
-					i += 2
-					continue
-				}
-				if sql[i] == quote {
-					if i+1 < n && sql[i+1] == quote {
-						i += 2
-						continue
-					}
-					i++
-					break
-				}
-				i++
-			}
-		case ch == ';':
-			flushStmt()
-			i++
-		case (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || ch == '_':
-			tok.WriteByte(ch)
-			i++
-		case ch >= '0' && ch <= '9' && tok.Len() > 0:
-			// A digit extends an identifier already started (e.g. t1); a digit
-			// that starts a token is part of a number, which we skip.
-			tok.WriteByte(ch)
-			i++
-		default:
-			flushTok()
-			i++
-		}
-	}
-	flushStmt()
-	return stmts
+// readOnlySQL is the Databricks read-only vocabulary. DECLARE / SET / USE /
+// BEGIN / END cover the session setup that can precede a reporting SELECT in a
+// multi-statement script. REPLACE (`DECLARE OR REPLACE VARIABLE`) and COMMIT
+// are intentionally absent from Mutating so they don't reject legitimate
+// reporting queries.
+var readOnlySQL = sqlguard.Rules{
+	Lead: map[string]bool{
+		"SELECT": true, "WITH": true, "SHOW": true, "DESCRIBE": true, "DESC": true,
+		"EXPLAIN": true, "VALUES": true, "TABLE": true, "DECLARE": true, "SET": true,
+		"USE": true, "BEGIN": true, "END": true,
+	},
+	Mutating: map[string]bool{
+		"INSERT": true, "UPDATE": true, "DELETE": true, "MERGE": true, "UPSERT": true,
+		"CREATE": true, "DROP": true, "ALTER": true, "TRUNCATE": true, "UNDROP": true,
+		"RENAME": true, "GRANT": true, "REVOKE": true, "COPY": true, "LOAD": true,
+		"OVERWRITE": true, "RESTORE": true, "OPTIMIZE": true, "VACUUM": true,
+		"REPAIR": true, "MSCK": true, "REFRESH": true, "CACHE": true, "UNCACHE": true,
+	},
+	AllowedDesc:   "SELECT / WITH / SHOW / DESCRIBE / EXPLAIN / VALUES, plus DECLARE / SET / USE for session setup",
+	ForbiddenDesc: "INSERT / UPDATE / DELETE / MERGE / CREATE / DROP / ALTER",
 }

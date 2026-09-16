@@ -1,6 +1,6 @@
 # AWS Integration
 
-Arbetern uses AWS in three ways:
+Arbetern uses AWS in four ways:
 
 - **State backend (required)** — every piece of service state lives in the
   S3 bucket named by `S3_BACKEND_ARN`; optionally an S3 Vectors index turns
@@ -9,6 +9,9 @@ Arbetern uses AWS in three ways:
   by service / account / region.
 - **S3 tools** — read, write, and list objects from agents and workflows (for
   example persisting a daily CSV report, or reading back a manifest).
+- **Athena tools** — read-only SQL over the Cost and Usage Report (and any
+  other table in the Glue catalog), for the cost attribution Cost Explorer
+  cannot do: per Kubernetes namespace, workload, pod, or resource tag.
 
 All of them reuse the standard SDK credential chain, so adding more services
 later (CloudWatch, EC2, …) reuses the same auth plumbing.
@@ -19,8 +22,8 @@ later (CloudWatch, EC2, …) reuses the same auth plumbing.
 > a Bedrock API key (`AWS_BEARER_TOKEN_BEDROCK`) or, if that is unset, with this
 > same SigV4 credential chain (needing only `bedrock:InvokeModel`). See
 > [LLM backends](../README.md#llm-backends). The `AWS_REGION` and IAM
-> permissions documented here are for the cost/S3 tools; Bedrock uses its own
-> `BEDROCK_REGION`.
+> permissions documented here are for the cost / S3 / Athena tools; Bedrock
+> uses its own `BEDROCK_REGION`.
 
 ## Required Credentials
 
@@ -46,9 +49,15 @@ section below.
 | `AWS_WEB_IDENTITY_TOKEN_FILE`, `AWS_ROLE_ARN` | no | Set automatically on EKS when IRSA is configured on the service account |
 | `AWS_REGION` | no | Region used to sign Cost Explorer SigV4 calls. Default `us-east-1` (the only region that hosts the CE endpoint). Cost data returned is account-global regardless of this value |
 
+**Athena needs no configuration of its own.** Credentials are the only AWS
+setting in the deployment: the region, workgroup, catalog and database are
+arguments of each tool call, supplied by the agent's prompt or Skill or
+discovered at run time, and the IAM policy is what bounds where a query can
+actually run. Region defaults to `AWS_REGION` when a call doesn't name one.
+
 The state backend resolves credentials at boot and refuses to start without
-them. The AWS *tools* (Cost Explorer **and** S3) are only enabled when at
-least one of these looks present (`AWS_ACCESS_KEY_ID`, `AWS_PROFILE`,
+them. The AWS *tools* (Cost Explorer, S3 **and** Athena) are only enabled when
+at least one of these looks present (`AWS_ACCESS_KEY_ID`, `AWS_PROFILE`,
 `AWS_WEB_IDENTITY_TOKEN_FILE`, `AWS_ROLE_ARN`,
 `AWS_SHARED_CREDENTIALS_FILE`). On startup the server calls
 `Credentials.Retrieve()` so misconfiguration fails loudly with a log line
@@ -110,6 +119,74 @@ features you use.
       "Resource": "*"
     },
     {
+      "Sid": "AthenaWorkgroup",
+      "Effect": "Allow",
+      "Action": [
+        "athena:StartQueryExecution",
+        "athena:StopQueryExecution",
+        "athena:GetQueryExecution",
+        "athena:GetQueryResults",
+        "athena:GetWorkGroup",
+        "athena:GetDataCatalog",
+        "athena:GetDatabase",
+        "athena:ListDatabases",
+        "athena:GetTableMetadata",
+        "athena:ListTableMetadata"
+      ],
+      "Resource": [
+        "arn:aws:athena:us-east-1:123456789012:workgroup/your-athena-workgroup",
+        "arn:aws:athena:us-east-1:123456789012:datacatalog/AwsDataCatalog"
+      ]
+    },
+    {
+      "Sid": "AthenaDiscovery",
+      "Effect": "Allow",
+      "Action": ["athena:ListWorkGroups", "athena:ListDataCatalogs"],
+      "Resource": "*"
+    },
+    {
+      "Sid": "AthenaGlueCatalogRead",
+      "Effect": "Allow",
+      "Action": [
+        "glue:GetDatabase",
+        "glue:GetDatabases",
+        "glue:GetTable",
+        "glue:GetTables",
+        "glue:GetPartition",
+        "glue:GetPartitions"
+      ],
+      "Resource": [
+        "arn:aws:glue:us-east-1:123456789012:catalog",
+        "arn:aws:glue:us-east-1:123456789012:database/your-cur-database",
+        "arn:aws:glue:us-east-1:123456789012:table/your-cur-database/*"
+      ]
+    },
+    {
+      "Sid": "AthenaSourceData",
+      "Effect": "Allow",
+      "Action": ["s3:GetObject", "s3:ListBucket", "s3:GetBucketLocation"],
+      "Resource": [
+        "arn:aws:s3:::your-cur-bucket",
+        "arn:aws:s3:::your-cur-bucket/*"
+      ]
+    },
+    {
+      "Sid": "AthenaQueryResults",
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject",
+        "s3:PutObject",
+        "s3:ListBucket",
+        "s3:GetBucketLocation",
+        "s3:AbortMultipartUpload",
+        "s3:ListMultipartUploadParts"
+      ],
+      "Resource": [
+        "arn:aws:s3:::your-athena-results-bucket",
+        "arn:aws:s3:::your-athena-results-bucket/your-athena-workgroup/*"
+      ]
+    },
+    {
       "Sid": "S3Tools",
       "Effect": "Allow",
       "Action": ["s3:GetObject", "s3:PutObject"],
@@ -135,6 +212,15 @@ features you use.
 > workflows that grouped- or filter-pivot aggressively can rack up real
 > dollars — prefer one grouped call over N filtered calls, and avoid
 > looping over services.
+
+> **Athena scope:** the four Athena statements are only needed if agents use
+> the `aws_athena_*` tools. Pin the workgroup ARN to the one workgroup
+> arbetern may use — the workgroup is what decides where results are written,
+> so pinning it plus the result prefix bounds every write the integration can
+> make. `s3:ListBucket` on the source and result buckets can be narrowed
+> further with an `s3:prefix` condition. Arbetern itself never issues a write
+> statement (see *Read-only enforcement* below), but the policy should not
+> rely on that.
 
 > **S3 tools scope:** `S3Tools` / `S3ToolsList` are only needed if agents use
 > the `aws_s3_*` tools. Replace `your-bucket` with the bucket(s) they should
@@ -233,6 +319,9 @@ tools disabled; any agent call trying `aws_*` tools returns a clear
 | **aws_s3_put_object** | Write (upload) text content to an S3 object, creating or overwriting it at the given key — e.g. persist a daily CSV report. Accepts a bucket name, an `s3://bucket/key` URI, or an `arn:aws:s3:::bucket/key` ARN. S3 objects are immutable, so "append" means get + concatenate + put |
 | **aws_s3_get_object** | Read (download) the text content of an S3 object. Returns the body plus size and last-modified time; bodies over 1 MiB are truncated. A `NoSuchKey` error is the normal signal the object doesn't exist yet |
 | **aws_s3_list_objects** | List objects in a bucket, optionally under a key prefix, sorted by key (so date-stamped filenames come back chronologically). Single page, capped at 1000 keys |
+| **aws_athena_query** | Run read-only SQL (Trino dialect) in a named workgroup and database, returning the rows inline. Blocks until the query finishes, then reports the rows plus how many bytes it scanned. 500 rows by default, 5000 max; cancelled after 3 minutes. Optional `region` and `output_location` |
+| **aws_athena_schema** | Browse the Glue catalog: databases, a database's tables, or one table's columns **and partition keys**. The model is told to call this before writing a query rather than guessing column names |
+| **aws_athena_catalogs** | List the Athena workgroups and data catalogs in a region — how an agent finds the `workgroup` a query needs when its prompt doesn't name one |
 
 The three Cost Explorer tools cap time windows at 90 days per call and
 validate date format (`YYYY-MM-DD`; `end` is exclusive, matching Cost
@@ -240,6 +329,54 @@ Explorer's convention). The S3 tools auto-detect each bucket's region — so a
 bucket in `eu-central-1` works even though Cost Explorer signs in
 `us-east-1` — and cap a single `get` / `list` response at 1 MiB / 1000 keys
 respectively.
+
+## Cost Attribution with Athena
+
+Cost Explorer aggregates away the detail that answers "which team is this
+bill?". The Cost and Usage Report does not: every line item keeps its resource
+id and its resource tags, so a CUR table in Glue can attribute EKS spend to a
+namespace, a workload, or a pod. That is what the Athena tools are for.
+
+Three tools come with the AWS integration, and none of them are configured:
+
+- `aws_athena_catalogs` — which workgroups and data catalogs exist in a region.
+- `aws_athena_schema` — databases, a database's tables, or one table's columns
+  and partition keys.
+- `aws_athena_query` — the query itself, naming a workgroup and database.
+
+An agent gets the workgroup and database from its prompt or its console Skill
+when they are known, and discovers them otherwise. The workgroup carries the
+result location, so arbetern writes nowhere else — the query tool's
+`output_location` argument can override it but normally should not be passed.
+
+Only the workgroups the IAM role is permitted to use will actually run a
+query; `aws_athena_catalogs` lists what Athena reports in the region, which is
+a superset when `athena:ListWorkGroups` is granted on `*`.
+
+**Partition filters are not optional.** Athena bills per byte scanned, and a
+CUR table holds every line item of every account. A query without a filter on
+the table's partition columns scans the whole report; with one it scans a
+single billing period. `aws_athena_schema` returns a table's partition keys
+precisely so the model can filter on them, and the query tool's description
+tells it to call that first and to aggregate in SQL rather than pulling raw
+line items back. A result is capped at 500 rows (5000 max) and a query is
+cancelled after 3 minutes — an abandoned scan keeps reading S3 and keeps
+billing, so arbetern stops it rather than leaving it running.
+
+### Read-only enforcement
+
+Two independent layers, because either alone is a single point of failure:
+
+1. **IAM** — the policy above grants no write action anywhere except the
+   workgroup's own result prefix, which Athena needs to return rows at all.
+2. **Statement validation** — every statement is tokenized and rejected unless
+   it starts with `SELECT` / `WITH` / `SHOW` / `DESCRIBE` / `EXPLAIN` /
+   `VALUES` and contains no write verb anywhere. `INSERT`, `CREATE TABLE AS`,
+   `UNLOAD`, `MSCK REPAIR`, `ALTER`, `DROP` and friends are refused before the
+   query is submitted, including when hidden behind a read-looking prefix such
+   as a `WITH … INSERT` CTE. Keywords inside string literals, quoted
+   identifiers and comments are ignored, so they cannot be used to smuggle one
+   past.
 
 ## Date Handling
 
@@ -262,6 +399,10 @@ which is what you want for a "daily cost summary" posted at morning UTC.
 /ovad forecast our AWS spend for the next 30 days
 /ovad which services grew the most week-over-week
 /ovad list the exact service names that had cost in the last 30 days
+/ovad what did EKS cost per namespace last month
+/ovad break down last month's EKS spend by workload for the platform namespace
+/ovad which pods drove the biggest cost increase week-over-week
+/ovad what columns does the CUR table have
 ```
 
 ## Example Workflow: Daily Cost Summary
@@ -319,6 +460,27 @@ console (the **Edit** button on `/ui/<agent>/workflow/<id>`).
   `arn:aws:s3:::your-bucket/*`) or `s3:ListBucket` (bucket ARN
   `arn:aws:s3:::your-bucket`), or the bucket name in the policy doesn't
   match the bucket you're addressing.
+
+**`AccessDeniedException` from `aws_athena_query`**
+- The role is missing one of the Athena, Glue, or S3 statements above, or the
+  workgroup named in the call is not the one the policy pins. Note Athena
+  needs *three* kinds of access to run one query: the workgroup, the Glue
+  catalog entries, and the S3 objects behind the table — plus write access to
+  the result prefix.
+
+**`workgroup is required` / `database is required` from `aws_athena_query`**
+- Nothing is configured server-side by design. Name them in the agent's prompt
+  or Skill, or have the agent call `aws_athena_catalogs` / `aws_athena_schema`
+  first.
+
+**`statement starting with "…" is not allowed`**
+- The model tried a write (CTAS, `INSERT`, `UNLOAD`, `MSCK REPAIR`). Arbetern
+  refuses these by design; rephrase the request as a `SELECT`.
+
+**Athena query cancelled after 3 minutes, or a huge `scanned` figure**
+- The query is missing a partition filter and is scanning the whole report.
+  Call `aws_athena_schema` for the table's partition keys and constrain them
+  in the `WHERE` clause.
 
 **`Rate exceeded` from Cost Explorer**
 - Cost Explorer is rate-limited per account (default 1 request / sec). If

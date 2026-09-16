@@ -7,7 +7,7 @@ package clickhouse
 // a name to a database or table lives in the agent's prompt, not here.
 //
 // Read-only is enforced two ways: a SELECT-only database user (recommended in
-// the docs) and validateReadOnlyCH, which rejects any non-read-only statement
+// the docs) and readOnlyCH, which rejects any non-read-only statement
 // before it is sent.
 
 import (
@@ -18,6 +18,8 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+
+	"github.com/justmike1/arbetern/internal/sqlguard"
 )
 
 const (
@@ -54,7 +56,7 @@ type chQueryResponse struct {
 
 // Query runs read-only SQL against the configured service endpoint and returns
 // the rows. rowLimit caps the rows (<=0 uses the default; above the max is
-// clamped). It rejects anything not clearly read-only (see validateReadOnlyCH).
+// clamped). It rejects anything not clearly read-only (see readOnlyCH).
 func (c *Client) Query(ctx context.Context, sqlText string, rowLimit int) (*SQLQueryResult, error) {
 	sqlText = strings.TrimSpace(sqlText)
 	if sqlText == "" {
@@ -63,7 +65,7 @@ func (c *Client) Query(ctx context.Context, sqlText string, rowLimit int) (*SQLQ
 	if c.queryEndpoint == "" || c.queryUser == "" {
 		return nil, fmt.Errorf("ClickHouse SQL query interface is not configured (set clickhouse-query-endpoint and clickhouse-query-user)")
 	}
-	if err := validateReadOnlyCH(sqlText); err != nil {
+	if err := readOnlyCH.Validate(sqlText); err != nil {
 		return nil, err
 	}
 	if rowLimit <= 0 || rowLimit > maxQueryRowLimit {
@@ -159,129 +161,20 @@ func queryError(status int, body []byte) error {
 	return fmt.Errorf("clickhouse query error (HTTP %d): %s", status, msg)
 }
 
-// readOnlyLeadKeywordsCH are the statement-leading verbs the query tool
-// permits. Anything else (INSERT, ALTER, CREATE, DROP, …) is rejected.
-var readOnlyLeadKeywordsCH = map[string]bool{
-	"SELECT": true, "WITH": true, "SHOW": true, "DESCRIBE": true, "DESC": true,
-	"EXISTS": true, "EXPLAIN": true, "VALUES": true,
-}
-
-// mutatingKeywordsCH are verbs that write data or change schema/privileges/
-// session state. They are rejected even after an allowed leading keyword (e.g.
-// a `WITH … INSERT`) so a read-only-looking prefix can't smuggle a mutation.
-var mutatingKeywordsCH = map[string]bool{
-	"INSERT": true, "ALTER": true, "CREATE": true, "DROP": true, "DETACH": true,
-	"ATTACH": true, "RENAME": true, "TRUNCATE": true, "OPTIMIZE": true, "GRANT": true,
-	"REVOKE": true, "KILL": true, "SYSTEM": true, "UPDATE": true, "DELETE": true,
-	"MOVE": true, "FREEZE": true, "UNFREEZE": true, "SET": true, "WATCH": true,
-}
-
-// validateReadOnlyCH checks that every `;`-separated statement begins with an
-// allowed lead keyword and contains no mutating keyword (outside strings,
-// quoted identifiers and comments). It returns an error naming the first
-// offender.
-func validateReadOnlyCH(sqlText string) error {
-	sawStatement := false
-	for _, toks := range scanCHStatements(sqlText) {
-		if len(toks) == 0 {
-			continue
-		}
-		sawStatement = true
-		if !readOnlyLeadKeywordsCH[toks[0]] {
-			return fmt.Errorf("statement starting with %q is not allowed; only read-only statements may run (SELECT / WITH / SHOW / DESCRIBE / EXISTS / EXPLAIN / VALUES)", toks[0])
-		}
-		for _, t := range toks {
-			if mutatingKeywordsCH[t] {
-				return fmt.Errorf("statement contains the mutating keyword %q; INSERT / ALTER / CREATE / DROP / DELETE / SET and other write operations are forbidden", t)
-			}
-		}
-	}
-	if !sawStatement {
-		return fmt.Errorf("no SQL statement found")
-	}
-	return nil
-}
-
-// scanCHStatements splits sql at top-level semicolons and returns the
-// uppercased word tokens of each statement, ignoring anything inside string
-// literals, quoted identifiers (`…`) and comments so they can't affect
-// statement boundaries or keyword detection.
-func scanCHStatements(sql string) [][]string {
-	var (
-		stmts [][]string
-		cur   []string
-		tok   strings.Builder
-	)
-	flushTok := func() {
-		if tok.Len() > 0 {
-			cur = append(cur, strings.ToUpper(tok.String()))
-			tok.Reset()
-		}
-	}
-	flushStmt := func() {
-		flushTok()
-		stmts = append(stmts, cur)
-		cur = nil
-	}
-
-	i, n := 0, len(sql)
-	for i < n {
-		ch := sql[i]
-		switch {
-		case ch == '-' && i+1 < n && sql[i+1] == '-':
-			// Line comment: skip to end of line.
-			flushTok()
-			i += 2
-			for i < n && sql[i] != '\n' {
-				i++
-			}
-		case ch == '/' && i+1 < n && sql[i+1] == '*':
-			// Block comment: skip to closing */.
-			flushTok()
-			i += 2
-			for i+1 < n && (sql[i] != '*' || sql[i+1] != '/') {
-				i++
-			}
-			i += 2
-		case ch == '\'' || ch == '"' || ch == '`':
-			// Quoted span: string literal or quoted identifier. Skip its
-			// contents. Handle doubled-quote escapes for all three and
-			// backslash escapes inside string literals.
-			flushTok()
-			quote := ch
-			backslashEscapes := quote == '\'' || quote == '"'
-			i++
-			for i < n {
-				if backslashEscapes && sql[i] == '\\' && i+1 < n {
-					i += 2
-					continue
-				}
-				if sql[i] == quote {
-					if i+1 < n && sql[i+1] == quote {
-						i += 2
-						continue
-					}
-					i++
-					break
-				}
-				i++
-			}
-		case ch == ';':
-			flushStmt()
-			i++
-		case (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || ch == '_':
-			tok.WriteByte(ch)
-			i++
-		case ch >= '0' && ch <= '9' && tok.Len() > 0:
-			// A digit extends an identifier already started (e.g. t1); a digit
-			// that starts a token is part of a number, which we skip.
-			tok.WriteByte(ch)
-			i++
-		default:
-			flushTok()
-			i++
-		}
-	}
-	flushStmt()
-	return stmts
+// readOnlyCH is the ClickHouse read-only vocabulary: statements may only
+// begin with a reading verb, and no write / schema / session-changing verb may
+// appear anywhere in them.
+var readOnlyCH = sqlguard.Rules{
+	Lead: map[string]bool{
+		"SELECT": true, "WITH": true, "SHOW": true, "DESCRIBE": true, "DESC": true,
+		"EXISTS": true, "EXPLAIN": true, "VALUES": true,
+	},
+	Mutating: map[string]bool{
+		"INSERT": true, "ALTER": true, "CREATE": true, "DROP": true, "DETACH": true,
+		"ATTACH": true, "RENAME": true, "TRUNCATE": true, "OPTIMIZE": true, "GRANT": true,
+		"REVOKE": true, "KILL": true, "SYSTEM": true, "UPDATE": true, "DELETE": true,
+		"MOVE": true, "FREEZE": true, "UNFREEZE": true, "SET": true, "WATCH": true,
+	},
+	AllowedDesc:   "SELECT / WITH / SHOW / DESCRIBE / EXISTS / EXPLAIN / VALUES",
+	ForbiddenDesc: "INSERT / ALTER / CREATE / DROP / DELETE / SET",
 }

@@ -1638,10 +1638,11 @@ func refreshIntegrations(
 		})
 	}
 
-	// --- AWS (Bedrock LLM + Cost Explorer) ---
-	// One cloud-provider entry covering both services, mirroring the Azure
+	// --- AWS (Bedrock LLM + Cost Explorer + Athena) ---
+	// One cloud-provider entry covering every AWS service, mirroring the Azure
 	// entry (Azure OpenAI + Cost Management). Bedrock is the LLM backend;
-	// Cost Explorer is a tool source. Either can be configured independently.
+	// Cost Explorer and Athena are tool sources. Each can be configured
+	// independently.
 	{
 		awsConnected := awsClient != nil
 		bedrockConnected := cfg.UseBedrock() && modelsClient != nil
@@ -1656,6 +1657,14 @@ func refreshIntegrations(
 			permission{Scope: "ce:GetCostAndUsage", Description: "Query daily / monthly cost and usage aggregates with optional group-by (SERVICE, LINKED_ACCOUNT, …)", Required: true, Granted: boolPtr(awsConnected)},
 			permission{Scope: "ce:GetCostForecast", Description: "Forecast upcoming cost (tomorrow through +30 days by default)", Required: true, Granted: boolPtr(awsConnected)},
 			permission{Scope: "ce:GetDimensionValues", Description: "Enumerate valid dimension values (service names, accounts, usage types) for filtering", Required: false, Granted: boolPtr(awsConnected)},
+			permission{Scope: "athena:StartQueryExecution", Description: "Run read-only SQL in a workgroup the role is allowed to use (Cost and Usage Report queries)", Required: false, Granted: boolPtr(awsConnected)},
+			permission{Scope: "athena:GetQueryExecution / GetQueryResults", Description: "Poll a running query and fetch its rows", Required: false, Granted: boolPtr(awsConnected)},
+			permission{Scope: "athena:StopQueryExecution", Description: "Cancel a query that exceeds the 3-minute cap so a runaway scan stops accruing cost", Required: false, Granted: boolPtr(awsConnected)},
+			permission{Scope: "athena:ListWorkGroups / ListDataCatalogs", Description: "Discover which workgroups and data catalogs this role may query", Required: false, Granted: boolPtr(awsConnected)},
+			permission{Scope: "athena:ListDatabases / ListTableMetadata / GetTableMetadata", Description: "Browse the Glue catalog: databases, tables, columns and partition keys", Required: false, Granted: boolPtr(awsConnected)},
+			permission{Scope: "glue:GetDatabase* / GetTable* / GetPartition*", Description: "Read the Glue catalog entries backing the queried tables", Required: false, Granted: boolPtr(awsConnected)},
+			permission{Scope: "s3:GetObject / ListBucket (query source data)", Description: "Read the objects Athena scans, e.g. the Cost and Usage Report", Required: false, Granted: boolPtr(awsConnected)},
+			permission{Scope: "s3:PutObject (query results)", Description: "Write query results under the workgroup's result prefix", Required: false, Granted: boolPtr(awsConnected)},
 		)
 
 		active := map[string]string{}
@@ -1679,7 +1688,7 @@ func refreshIntegrations(
 			}
 		}
 		if cfg.AWSConfigured() {
-			authModes = append(authModes, "SDK default credential chain (Cost Explorer)")
+			authModes = append(authModes, "SDK default credential chain (Cost Explorer / S3 / Athena)")
 		}
 
 		result = append(result, integration{

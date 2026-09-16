@@ -104,6 +104,9 @@ const (
 	ToolAWSS3PutObject         = "aws_s3_put_object"
 	ToolAWSS3GetObject         = "aws_s3_get_object"
 	ToolAWSS3ListObjects       = "aws_s3_list_objects"
+	ToolAWSAthenaQuery         = "aws_athena_query"
+	ToolAWSAthenaSchema        = "aws_athena_schema"
+	ToolAWSAthenaCatalogs      = "aws_athena_catalogs"
 
 	// Azure.
 	ToolAzureGetCostAndUsage     = "azure_get_cost_and_usage"
@@ -249,6 +252,9 @@ var toolIntegration = map[string]string{
 	ToolAWSS3PutObject:         integrationAWS,
 	ToolAWSS3GetObject:         integrationAWS,
 	ToolAWSS3ListObjects:       integrationAWS,
+	ToolAWSAthenaQuery:         integrationAWS,
+	ToolAWSAthenaSchema:        integrationAWS,
+	ToolAWSAthenaCatalogs:      integrationAWS,
 
 	// Azure (open to all agents).
 	ToolAzureGetCostAndUsage:     integrationAzure,
