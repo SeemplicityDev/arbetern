@@ -96,6 +96,27 @@ func FormatTicketConversations(ticketID int64, convs []TicketConversation) strin
 	return sb.String()
 }
 
+// FormatNoteAdded confirms a private-note write.
+func FormatNoteAdded(ticketID int64, note *TicketConversation) string {
+	if note == nil {
+		return fmt.Sprintf("Private note added to Freshdesk ticket #%d (internal-only).", ticketID)
+	}
+	return fmt.Sprintf("Private note `%d` added to Freshdesk ticket #%d (internal-only, not visible to the requester).", note.ID, ticketID)
+}
+
+// FormatTagsAdded reports the outcome of a tag write, keeping the no-op case
+// distinct so a caller can tell "already tagged" from "just tagged".
+func FormatTagsAdded(ticketID int64, tags []string, changed bool) string {
+	list := strings.Join(tags, ", ")
+	if list == "" {
+		list = "(none)"
+	}
+	if !changed {
+		return fmt.Sprintf("Freshdesk ticket #%d already carried those tags — nothing was written. Tags: %s", ticketID, list)
+	}
+	return fmt.Sprintf("Freshdesk ticket #%d tagged. Tags are now: %s", ticketID, list)
+}
+
 // FormatAgents renders resolved Freshdesk agents, highlighting the agent_id to
 // use in a ticket search.
 func FormatAgents(agents []Agent) string {

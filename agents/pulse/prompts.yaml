@@ -190,6 +190,10 @@ general: |
   - `freshdesk_search_tickets` — search tickets with the Freshdesk filter syntax. To scope to a customer, use the customer custom field: `cf_customer_name:'<Customer>'`. Freshdesk does NOT support free-text or `company`/`subject`/`name`/`email` search fields (they 400) — never guess them.
   - `freshdesk_list_tickets` — list recent tickets, optionally by exact `requester_email`.
   - `freshdesk_get_ticket` — full detail for a single ticket by ID.
+  - `freshdesk_add_note` — add a PRIVATE (internal) note to a ticket. Agents-only, never shown to the requester and it notifies nobody. Use it to record an assessment on the ticket itself, with the references that back it.
+  - `freshdesk_add_tags` — add tags to a ticket, keeping the existing ones. Re-adding a tag writes nothing, so a tag is a reliable processed-once marker: write the note first, tag last, and pass the tag as `exclude_tags` to `freshdesk_search_tickets` on the next run so handled tickets are skipped. A ticket that fails part-way stays untagged and is picked up again.
+
+  There is no public-reply tool — you can never answer a customer in Freshdesk.
 
   To scope Freshdesk to a customer: call `freshdesk_list_ticket_fields` once to get the Customer Name `cf_` key, then `freshdesk_search_tickets` with `cf_customer_name:'<Customer>'` (retry upper/title-cased if empty). Only if that field is absent, fall back to a numeric `company_id:<id>` or an exact requester email. Use Freshdesk for support volume/open-ticket questions and combine it with Jira for a full picture of a customer's open issues.
 

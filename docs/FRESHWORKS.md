@@ -5,14 +5,17 @@ Arbetern integrates with the **Freshworks** product suite so the **pulse**
 and sales context directly from Slack:
 
 - **Freshdesk** (ticketing) — list, search and read support tickets and their
-  conversation threads.
+  conversation threads, and record an outcome on a ticket as a private note or
+  a tag.
 - **Freshchat** (conversations) — read live-chat conversations and their
   messages.
 - **Freshworks CRM / Freshsales** (sales) — search contacts, deals and
   accounts, and read a contact or deal by ID.
 
-All tools are **read-only** (list / search / get). None of them create or
-modify anything in Freshworks.
+Freshchat and the CRM are **read-only** (list / search / get). Freshdesk is
+read-only apart from two writes on an existing ticket: a **private note**
+(internal, never shown to the requester) and a **tag**. Nothing creates, closes
+or replies to a ticket, and no tool can send anything to a customer.
 
 > **Scope: this integration is restricted to the `pulse` and `seihin` agents.**
 > The Freshworks tools are advertised exclusively to those agents and the
@@ -33,9 +36,11 @@ work.
 |---|---|---|
 | `freshdesk_list_tickets` | Freshdesk | List recent tickets (newest-updated first), optionally filtered by `updated_since` or by requester email |
 | `freshdesk_get_ticket` | Freshdesk | Get one ticket by ID, optionally with its conversation thread |
-| `freshdesk_search_tickets` | Freshdesk | Search tickets with the Freshdesk filter query syntax (e.g. `priority:4 AND status:2`, `agent_id:123`, `company_id:99`). Valid fields only: status, priority, type, tag, agent_id, group_id, company_id, created_at, updated_at, due_by, fr_due_by, cf_<custom> — there is no free-text/`company`/`subject` search |
+| `freshdesk_search_tickets` | Freshdesk | Search tickets with the Freshdesk filter query syntax (e.g. `priority:4 AND status:2`, `agent_id:123`, `company_id:99`). Valid fields only: status, priority, type, tag, agent_id, group_id, company_id, created_at, updated_at, due_by, fr_due_by, cf_<custom> — there is no free-text/`company`/`subject` search. `page` (1..10, 30 per page) walks a longer backlog; `exclude_tags` drops matched tickets carrying a tag, since the query syntax has no negation operator |
 | `freshdesk_find_agent` | Freshdesk | Resolve an agent's `agent_id` by email or name (for `agent_id:<id>` searches of assigned tickets) |
 | `freshdesk_list_ticket_fields` | Freshdesk | List ticket fields (system + custom); use it to find a custom attribute's exact `cf_<name>` key (e.g. "Customer Name" → `cf_customer_name`) to scope a search by customer |
+| `freshdesk_add_note` | Freshdesk | Add a **private** (internal) note to a ticket — visible to Freshdesk agents only, never to the requester, and it notifies nobody |
+| `freshdesk_add_tags` | Freshdesk | Add tags to a ticket, keeping its existing tags. Re-adding a tag writes nothing and says so, which makes a tag a processed-once marker |
 | `freshchat_get_conversation` | Freshchat | Get a conversation header by conversation ID |
 | `freshchat_get_conversation_messages` | Freshchat | Get the messages in a conversation |
 | `freshworks_crm_search` | CRM | Search contacts, deals and accounts by term |
@@ -125,9 +130,29 @@ customCredentials:
     freshworks-crm-api-key: "..."
 ```
 
+## Recurring jobs
+
+`exclude_tags` and `freshdesk_add_tags` are designed to work together, so a
+scheduled workflow can process each ticket exactly once without keeping state
+of its own:
+
+1. Search for the tickets to handle and pass the marker tag in `exclude_tags`,
+   so anything already handled is filtered out.
+2. Do the work for one ticket, then write the result with `freshdesk_add_note`.
+3. Tag the ticket **last**, with `freshdesk_add_tags`.
+
+Because the tag is written last, a ticket that errors part-way through stays
+untagged and is simply picked up again on the next run. The tag is sticky: a
+tagged ticket is never revisited, even if the requester updates it later.
+
 ## Security
 
-- All tools are **read-only**; there is no write path to Freshworks.
+- Freshchat and CRM are **read-only**. The only writes are a private note and a
+  tag on a Freshdesk ticket; there is no path to reply to a requester, change a
+  ticket's status or assignment, or write to Freshchat or the CRM.
+- The note and tag writes need a Freshdesk API key whose agent role permits
+  editing tickets. A read-only key keeps the tools advertised but every write
+  fails with HTTP 403.
 - API keys/tokens are provided via environment variables (Kubernetes Secrets in
   the Helm chart) and are never logged.
 - Access is restricted to the `pulse` and `seihin` agents via the central

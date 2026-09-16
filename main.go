@@ -1814,6 +1814,7 @@ func refreshIntegrations(
 	{
 		fwPerms := []permission{
 			{Scope: "freshdesk.tickets.read", Description: "Read Freshdesk tickets and conversations", Required: false, Granted: boolPtr(cfg.FreshdeskConfigured())},
+			{Scope: "freshdesk.tickets.write", Description: "Add private (internal) notes and tags to Freshdesk tickets", Required: false, Granted: boolPtr(cfg.FreshdeskConfigured())},
 			{Scope: "freshchat.conversations.read", Description: "Read Freshchat conversations and messages", Required: false, Granted: boolPtr(cfg.FreshchatConfigured())},
 			{Scope: "crm.records.read", Description: "Read Freshworks CRM contacts, deals and search", Required: false, Granted: boolPtr(cfg.FreshworksCRMConfigured())},
 		}

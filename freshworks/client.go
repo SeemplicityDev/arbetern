@@ -1,5 +1,5 @@
-// Package freshworks wraps the read-only subset of the Freshworks suite that
-// arbetern surfaces to agents:
+// Package freshworks wraps the subset of the Freshworks suite that arbetern
+// surfaces to agents:
 //
 //   - Freshdesk (ticketing)     — https://<domain>/api/v2
 //   - Freshchat (conversations) — https://<region>.freshchat.com/v2
@@ -7,14 +7,17 @@
 //
 // Each product authenticates differently, so the umbrella Client holds one
 // optional sub-client per product; a product without credentials stays nil and
-// its tools are not advertised. All operations are read-only.
+// its tools are not advertised. Freshchat and CRM are read-only; Freshdesk also
+// writes a private note or a tag back onto a ticket.
 package freshworks
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"html"
 	"io"
 	"net/http"
 	"net/url"
@@ -25,6 +28,8 @@ import (
 const (
 	maxResponseBody = 10 << 20 // Response body cap for io.LimitReader (10 MB).
 	httpTimeout     = 30 * time.Second
+	// maxSearchPages is the last page the Freshdesk filter endpoint serves.
+	maxSearchPages = 10
 )
 
 // Client is the Freshworks umbrella client. Any sub-client may be nil when that
@@ -78,12 +83,25 @@ func (c *Client) Products() []string {
 	return p
 }
 
-// doGet performs an authenticated GET and decodes the JSON body into out. It
-// maps non-2xx responses to an error including a snippet of the body.
+// doGet performs an authenticated GET and decodes the JSON body into out.
 func doGet(ctx context.Context, httpClient *http.Client, fullURL, authHeader, authValue, accept string, out any) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fullURL, nil)
+	return doJSON(ctx, httpClient, http.MethodGet, fullURL, authHeader, authValue, accept, nil, out)
+}
+
+// doJSON performs an authenticated request, sending body as JSON when non-nil,
+// and decodes the JSON response into out. It maps non-2xx responses to an error
+// including a snippet of the body.
+func doJSON(ctx context.Context, httpClient *http.Client, method, fullURL, authHeader, authValue, accept string, body []byte, out any) error {
+	var payload io.Reader
+	if body != nil {
+		payload = bytes.NewReader(body)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, fullURL, payload)
 	if err != nil {
 		return err
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
 	}
 	req.Header.Set(authHeader, authValue)
 	if accept == "" {
@@ -97,12 +115,12 @@ func doGet(ctx context.Context, httpClient *http.Client, fullURL, authHeader, au
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
 	if err != nil {
 		return fmt.Errorf("reading response: %w", err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		snippet := strings.TrimSpace(string(body))
+		snippet := strings.TrimSpace(string(respBody))
 		if len(snippet) > 500 {
 			snippet = snippet[:500] + "…"
 		}
@@ -111,7 +129,7 @@ func doGet(ctx context.Context, httpClient *http.Client, fullURL, authHeader, au
 	if out == nil {
 		return nil
 	}
-	if err := json.Unmarshal(body, out); err != nil {
+	if err := json.Unmarshal(respBody, out); err != nil {
 		return fmt.Errorf("decoding response: %w", err)
 	}
 	return nil
@@ -146,6 +164,14 @@ func (d *DeskClient) get(ctx context.Context, path string, query url.Values, out
 		u += "?" + query.Encode()
 	}
 	return doGet(ctx, d.httpClient, u, "Authorization", d.authValue, "application/json", out)
+}
+
+func (d *DeskClient) send(ctx context.Context, method, path string, payload, out any) error {
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("encoding request: %w", err)
+	}
+	return doJSON(ctx, d.httpClient, method, d.baseURL+path, "Authorization", d.authValue, "application/json", body, out)
 }
 
 // ListTickets returns recent tickets, newest-updated first. updatedSince
@@ -230,10 +256,22 @@ func (d *DeskClient) GetTicket(ctx context.Context, ticketID int64, includeConve
 	return &ticket, nil
 }
 
+// TicketSearchOpts narrows a ticket search beyond what the filter query itself
+// can express.
+type TicketSearchOpts struct {
+	// Page is the 1-based result page; 0 selects the first page.
+	Page int
+	// ExcludeTags drops matched tickets carrying any of these tags. The filter
+	// syntax has no negation operator, so "does not carry tag X" can only be
+	// expressed over the returned results.
+	ExcludeTags []string
+}
+
 // SearchTickets runs a Freshdesk ticket search query using the Freshdesk filter
 // syntax, e.g. `priority:4 AND status:2`. The value is wrapped in the double
-// quotes the endpoint requires.
-func (d *DeskClient) SearchTickets(ctx context.Context, query string) ([]Ticket, int, error) {
+// quotes the endpoint requires. The returned total is Freshdesk's match count,
+// counted before ExcludeTags is applied.
+func (d *DeskClient) SearchTickets(ctx context.Context, query string, opts TicketSearchOpts) ([]Ticket, int, error) {
 	if !d.Ready() {
 		return nil, 0, fmt.Errorf("freshdesk not configured")
 	}
@@ -243,11 +281,14 @@ func (d *DeskClient) SearchTickets(ctx context.Context, query string) ([]Ticket,
 	}
 	q := url.Values{}
 	q.Set("query", `"`+query+`"`)
+	if opts.Page > 0 {
+		q.Set("page", clampStr(opts.Page, 1, maxSearchPages, 1))
+	}
 	var resp ticketSearchResponse
 	if err := d.get(ctx, "/api/v2/search/tickets", q, &resp); err != nil {
 		return nil, 0, err
 	}
-	return resp.Results, resp.Total, nil
+	return excludeTagged(resp.Results, opts.ExcludeTags), resp.Total, nil
 }
 
 // ListTicketFields returns the Freshdesk ticket fields (system + custom). Custom
@@ -266,6 +307,54 @@ func (d *DeskClient) ListTicketFields(ctx context.Context) ([]TicketField, error
 		}
 	}
 	return fields, nil
+}
+
+// AddPrivateNote appends an internal note to a ticket. Private notes are
+// visible to Freshdesk agents only and are never shown to the requester.
+func (d *DeskClient) AddPrivateNote(ctx context.Context, ticketID int64, body string) (*TicketConversation, error) {
+	if !d.Ready() {
+		return nil, fmt.Errorf("freshdesk not configured")
+	}
+	if ticketID <= 0 {
+		return nil, fmt.Errorf("ticket id is required")
+	}
+	body = strings.TrimSpace(body)
+	if body == "" {
+		return nil, fmt.Errorf("note body is required")
+	}
+	payload := map[string]any{"body": noteHTML(body), "private": true}
+	var note TicketConversation
+	if err := d.send(ctx, http.MethodPost, fmt.Sprintf("/api/v2/tickets/%d/notes", ticketID), payload, &note); err != nil {
+		return nil, err
+	}
+	return &note, nil
+}
+
+// AddTags adds tags to a ticket, leaving its existing tags in place, and
+// returns the resulting list along with whether the ticket was actually
+// updated. An update replaces the whole tag array, so the current tags are read
+// first and merged; when every tag is already present nothing is written, which
+// is what makes a tag usable as an idempotency marker.
+func (d *DeskClient) AddTags(ctx context.Context, ticketID int64, tags []string) ([]string, bool, error) {
+	if !d.Ready() {
+		return nil, false, fmt.Errorf("freshdesk not configured")
+	}
+	if ticketID <= 0 {
+		return nil, false, fmt.Errorf("ticket id is required")
+	}
+	current, err := d.GetTicket(ctx, ticketID, false)
+	if err != nil {
+		return nil, false, err
+	}
+	merged, changed := mergeTags(current.Tags, tags)
+	if !changed {
+		return current.Tags, false, nil
+	}
+	var updated Ticket
+	if err := d.send(ctx, http.MethodPut, fmt.Sprintf("/api/v2/tickets/%d", ticketID), map[string]any{"tags": merged}, &updated); err != nil {
+		return nil, false, err
+	}
+	return updated.Tags, true, nil
 }
 
 // ChatClient talks to the Freshchat v2 API. Auth is a Bearer JWT.
@@ -466,4 +555,65 @@ func clampStr(n, lo, hi, def int) string {
 		n = hi
 	}
 	return fmt.Sprintf("%d", n)
+}
+
+// noteHTML renders plain text as the HTML body a Freshdesk note stores. The API
+// keeps the body verbatim, so line breaks have to be markup or a multi-line
+// note renders as one run-on paragraph.
+func noteHTML(s string) string {
+	return strings.ReplaceAll(html.EscapeString(strings.ReplaceAll(s, "\r\n", "\n")), "\n", "<br />")
+}
+
+// normalizeTag folds a tag for comparison; Freshdesk treats tags
+// case-insensitively.
+func normalizeTag(tag string) string { return strings.ToLower(strings.TrimSpace(tag)) }
+
+// mergeTags appends the tags not already present, keeping the existing order,
+// and reports whether anything was added.
+func mergeTags(existing, add []string) ([]string, bool) {
+	present := make(map[string]struct{}, len(existing))
+	for _, tag := range existing {
+		present[normalizeTag(tag)] = struct{}{}
+	}
+	merged := append([]string(nil), existing...)
+	changed := false
+	for _, tag := range add {
+		key := normalizeTag(tag)
+		if key == "" {
+			continue
+		}
+		if _, ok := present[key]; ok {
+			continue
+		}
+		present[key] = struct{}{}
+		merged = append(merged, strings.TrimSpace(tag))
+		changed = true
+	}
+	return merged, changed
+}
+
+func excludeTagged(tickets []Ticket, tags []string) []Ticket {
+	blocked := make(map[string]struct{}, len(tags))
+	for _, tag := range tags {
+		if key := normalizeTag(tag); key != "" {
+			blocked[key] = struct{}{}
+		}
+	}
+	if len(blocked) == 0 {
+		return tickets
+	}
+	kept := make([]Ticket, 0, len(tickets))
+	for _, t := range tickets {
+		skip := false
+		for _, tag := range t.Tags {
+			if _, ok := blocked[normalizeTag(tag)]; ok {
+				skip = true
+				break
+			}
+		}
+		if !skip {
+			kept = append(kept, t)
+		}
+	}
+	return kept
 }

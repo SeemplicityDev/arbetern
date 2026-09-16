@@ -116,7 +116,9 @@ secretValues:
   # clickhouse-query-endpoint: "https://abc123.us-east-1.aws.clickhouse.cloud:8443"
   # clickhouse-query-user: "readonly"
   # clickhouse-query-password: "REPLACE_ME"
-  # Freshworks suite (optional, read-only — enables Freshdesk / Freshchat / CRM tools for the pulse and seihin agents).
+  # Freshworks suite (optional — enables Freshdesk / Freshchat / CRM tools for the pulse and seihin agents).
+  # Freshchat and CRM are read-only; Freshdesk also writes private notes and tags, so its API key needs an
+  # agent role that may edit tickets (a read-only key leaves the writes failing with HTTP 403).
   # Each product is configured independently; set only the ones you use. The domains are non-secret;
   # the API keys/tokens are. All keys are gated to pulse and seihin in code — prefer mounting them under
   # customCredentials.pulse (and customCredentials.seihin) below so the material never reaches other agents. See docs/FRESHWORKS.md.

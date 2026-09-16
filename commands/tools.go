@@ -126,6 +126,8 @@ const (
 	ToolFreshdeskSearchTickets           = "freshdesk_search_tickets"
 	ToolFreshdeskFindAgent               = "freshdesk_find_agent"
 	ToolFreshdeskListTicketFields        = "freshdesk_list_ticket_fields"
+	ToolFreshdeskAddNote                 = "freshdesk_add_note"
+	ToolFreshdeskAddTags                 = "freshdesk_add_tags"
 	ToolFreshchatGetConversation         = "freshchat_get_conversation"
 	ToolFreshchatGetConversationMessages = "freshchat_get_conversation_messages"
 	ToolFreshworksCRMSearch              = "freshworks_crm_search"
@@ -274,6 +276,8 @@ var toolIntegration = map[string]string{
 	ToolFreshdeskSearchTickets:           integrationFreshworks,
 	ToolFreshdeskFindAgent:               integrationFreshworks,
 	ToolFreshdeskListTicketFields:        integrationFreshworks,
+	ToolFreshdeskAddNote:                 integrationFreshworks,
+	ToolFreshdeskAddTags:                 integrationFreshworks,
 	ToolFreshchatGetConversation:         integrationFreshworks,
 	ToolFreshchatGetConversationMessages: integrationFreshworks,
 	ToolFreshworksCRMSearch:              integrationFreshworks,

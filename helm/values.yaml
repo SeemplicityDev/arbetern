@@ -311,7 +311,9 @@ secretValues:
   # clickhouse-query-endpoint: ""     # Service HTTPS endpoint, e.g. https://abc123.us-east-1.aws.clickhouse.cloud:8443
   # clickhouse-query-user: ""         # Read-only database username (HTTP Basic username)
   # clickhouse-query-password: ""     # Database password (HTTP Basic password)
-  # Freshworks suite (optional, read-only — enables Freshdesk / Freshchat / CRM tools for the pulse and seihin agents).
+  # Freshworks suite (optional — enables Freshdesk / Freshchat / CRM tools for the pulse and seihin agents).
+  # Freshchat and CRM are read-only; Freshdesk also writes private notes and tags, which needs an API key
+  # whose agent role may edit tickets.
   # Each product is configured independently; set only the products you use. See docs/FRESHWORKS.md.
   # freshdesk-domain: ""               # Freshdesk host, e.g. acme.freshdesk.com
   # freshdesk-api-key: ""             # Freshdesk API key (Profile settings → Your API Key)

@@ -2006,10 +2006,10 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 		})
 	}
 
-	// Freshworks suite (read-only) — gated to the customer-success and
-	// product-management agents
-	// (restrictedIntegrations: pulse) and per-product on the sub-client being
-	// configured, so only the products with credentials advertise their tools.
+	// Freshworks suite — gated to the customer-success and product-management
+	// agents (restrictedIntegrations: pulse, seihin) and per-product on the
+	// sub-client being configured, so only the products with credentials
+	// advertise their tools.
 	if h.canUseIntegration(integrationFreshworks) && h.freshworksClient != nil {
 		if h.freshworksClient.Desk.Ready() {
 			tools = append(tools,
@@ -2048,11 +2048,13 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 					Type: "function",
 					Function: llm.ToolFunction{
 						Name:        ToolFreshdeskSearchTickets,
-						Description: "Search Freshdesk tickets using the Freshdesk filter query syntax, e.g. \"priority:4 AND status:2\" for urgent open tickets, or \"agent_id:123\" or \"tag:'escalated'\". Do NOT wrap the query in quotes yourself. ONLY these fields are valid: status, priority, type, tag, agent_id, group_id, company_id, created_at, updated_at, due_by, fr_due_by, plus CUSTOM fields as cf_<name>. Free-text search and fields like 'company', 'subject', 'description', 'email' or 'name' are NOT supported and return HTTP 400 — do not guess them. To scope tickets to a customer, the reliable way is a customer custom field: call freshdesk_list_ticket_fields to get its exact cf_<name> (e.g. a 'Customer Name' field → cf_customer_name), then query cf_<name>:'<Customer>'. Alternatively use a numeric company_id ('company_id:<id>'), or freshdesk_list_tickets with an exact requester email. Returns matching tickets with status and priority.",
+						Description: "Search Freshdesk tickets using the Freshdesk filter query syntax, e.g. \"priority:4 AND status:2\" for urgent open tickets, or \"agent_id:123\" or \"tag:'escalated'\". Do NOT wrap the query in quotes yourself. ONLY these fields are valid: status, priority, type, tag, agent_id, group_id, company_id, created_at, updated_at, due_by, fr_due_by, plus CUSTOM fields as cf_<name>. Free-text search and fields like 'company', 'subject', 'description', 'email' or 'name' are NOT supported and return HTTP 400 — do not guess them. To scope tickets to a customer, the reliable way is a customer custom field: call freshdesk_list_ticket_fields to get its exact cf_<name> (e.g. a 'Customer Name' field → cf_customer_name), then query cf_<name>:'<Customer>'. Alternatively use a numeric company_id ('company_id:<id>'), or freshdesk_list_tickets with an exact requester email. Returns matching tickets with status and priority. The syntax has NO negation operator: to skip tickets carrying a tag, pass exclude_tags rather than trying to write NOT into the query.",
 						Parameters: json.RawMessage(`{
 							"type":"object",
 							"properties":{
-								"query":{"type":"string","description":"Freshdesk filter query, e.g. 'priority:4 AND status:2', 'company_id:1234', or a custom-field scope like \"cf_customer_name:'Acme'\". Valid fields ONLY: status, priority, type, tag, agent_id, group_id, company_id, created_at, updated_at, due_by, fr_due_by, cf_<custom>. No free-text; no 'company'/'subject'/'email'/'name' fields."}
+								"query":{"type":"string","description":"Freshdesk filter query, e.g. 'priority:4 AND status:2', 'company_id:1234', or a custom-field scope like \"cf_customer_name:'Acme'\". Valid fields ONLY: status, priority, type, tag, agent_id, group_id, company_id, created_at, updated_at, due_by, fr_due_by, cf_<custom>. No free-text; no 'company'/'subject'/'email'/'name' fields."},
+								"page":{"type":"integer","description":"1-based result page, 1..10 (30 matches per page). Omit for the first page; use it to walk a backlog larger than one page."},
+								"exclude_tags":{"type":"array","items":{"type":"string"},"description":"Optional. Drop matched tickets carrying any of these tags (case-insensitive). This is the only way to express 'does NOT have tag X' — e.g. exclude the marker tag freshdesk_add_tags writes once a ticket has been processed, so a recurring job only sees unprocessed tickets."}
 							},
 							"required":["query"]
 						}`),
@@ -2078,6 +2080,36 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 						Name:        ToolFreshdeskListTicketFields,
 						Description: "List Freshdesk ticket fields (system + custom). Use this to discover the exact cf_<name> key for a custom attribute (e.g. a 'Customer Name' field) so you can scope a ticket search with freshdesk_search_tickets query cf_<name>:'<value>'. Takes no arguments.",
 						Parameters:  json.RawMessage(`{"type":"object","properties":{}}`),
+					},
+				},
+				llm.Tool{
+					Type: "function",
+					Function: llm.ToolFunction{
+						Name:        ToolFreshdeskAddNote,
+						Description: "Add a PRIVATE note to a Freshdesk ticket. The note is internal: it is visible to Freshdesk agents only, is never shown to the requester, and sends the customer no email or notification. Use it to record an analysis, assessment or triage outcome on the ticket itself. Pass plain text — line breaks are preserved. There is no public-reply tool, so this can never answer the customer.",
+						Parameters: json.RawMessage(`{
+							"type":"object",
+							"properties":{
+								"ticket_id":{"type":"integer","description":"Numeric Freshdesk ticket ID."},
+								"body":{"type":"string","description":"Note text. Plain text, line breaks preserved. Include the references (ticket keys, document names, code paths) that back any conclusion you state."}
+							},
+							"required":["ticket_id","body"]
+						}`),
+					},
+				},
+				llm.Tool{
+					Type: "function",
+					Function: llm.ToolFunction{
+						Name:        ToolFreshdeskAddTags,
+						Description: "Add tags to a Freshdesk ticket, keeping the tags it already carries. Tags are case-insensitive; adding one that is already present writes nothing and says so. That makes a tag a reliable processed-once marker for a recurring job: tag the ticket AFTER the work on it succeeded, then pass the same tag as exclude_tags to freshdesk_search_tickets on the next run to skip it. Tag last — a ticket left untagged is simply picked up again.",
+						Parameters: json.RawMessage(`{
+							"type":"object",
+							"properties":{
+								"ticket_id":{"type":"integer","description":"Numeric Freshdesk ticket ID."},
+								"tags":{"type":"array","items":{"type":"string"},"description":"Tags to add. Existing tags are preserved."}
+							},
+							"required":["ticket_id","tags"]
+						}`),
 					},
 				},
 			)
@@ -5249,7 +5281,9 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 			return preconditionErrf("Error: Freshdesk integration is not connected.")
 		}
 		args, errMsg := parseToolArgs[struct {
-			Query string `json:"query"`
+			Query       string   `json:"query"`
+			Page        int      `json:"page"`
+			ExcludeTags []string `json:"exclude_tags"`
 		}](argsJSON)
 		if errMsg != "" {
 			return errMsg
@@ -5257,12 +5291,19 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		if strings.TrimSpace(args.Query) == "" {
 			return preconditionErrf("Error: query is required.")
 		}
-		tickets, total, err := h.freshworksClient.Desk.SearchTickets(ctx, args.Query)
+		opts := freshworks.TicketSearchOpts{Page: args.Page, ExcludeTags: args.ExcludeTags}
+		tickets, total, err := h.freshworksClient.Desk.SearchTickets(ctx, args.Query, opts)
 		if err != nil {
 			return fmt.Sprintf("Error searching Freshdesk tickets: %v", err)
 		}
-		log.Printf("[user=%s channel=%s] freshdesk_search_tickets (query=%q, total=%d)", userID, channelID, args.Query, total)
-		return freshworks.FormatTicketList(tickets, fmt.Sprintf("Freshdesk search (%d total)", total))
+		log.Printf("[user=%s channel=%s] freshdesk_search_tickets (query=%q, page=%d, excluded_tags=%d, kept=%d, total=%d)",
+			userID, channelID, args.Query, args.Page, len(args.ExcludeTags), len(tickets), total)
+		header := fmt.Sprintf("Freshdesk search (%d total)", total)
+		if len(args.ExcludeTags) > 0 {
+			header = fmt.Sprintf("Freshdesk search (%d of %d total after excluding %s)",
+				len(tickets), total, strings.Join(args.ExcludeTags, ", "))
+		}
+		return freshworks.FormatTicketList(tickets, header)
 
 	case ToolFreshdeskFindAgent:
 		if h.freshworksClient == nil || !h.freshworksClient.Desk.Ready() {
@@ -5295,6 +5336,54 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		}
 		log.Printf("[user=%s channel=%s] freshdesk_list_ticket_fields (count=%d)", userID, channelID, len(fields))
 		return freshworks.FormatTicketFields(fields)
+
+	case ToolFreshdeskAddNote:
+		if h.freshworksClient == nil || !h.freshworksClient.Desk.Ready() {
+			return preconditionErrf("Error: Freshdesk integration is not connected.")
+		}
+		args, errMsg := parseToolArgs[struct {
+			TicketID int64  `json:"ticket_id"`
+			Body     string `json:"body"`
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
+		}
+		if args.TicketID <= 0 {
+			return preconditionErrf("Error: ticket_id is required. Nothing was written.")
+		}
+		if strings.TrimSpace(args.Body) == "" {
+			return preconditionErrf("Error: body is required. Nothing was written.")
+		}
+		note, err := h.freshworksClient.Desk.AddPrivateNote(ctx, args.TicketID, args.Body)
+		if err != nil {
+			return fmt.Sprintf("Error adding note to Freshdesk ticket #%d: %v", args.TicketID, err)
+		}
+		log.Printf("[user=%s channel=%s] freshdesk_add_note (ticket=%d, note=%d)", userID, channelID, args.TicketID, note.ID)
+		return freshworks.FormatNoteAdded(args.TicketID, note)
+
+	case ToolFreshdeskAddTags:
+		if h.freshworksClient == nil || !h.freshworksClient.Desk.Ready() {
+			return preconditionErrf("Error: Freshdesk integration is not connected.")
+		}
+		args, errMsg := parseToolArgs[struct {
+			TicketID int64    `json:"ticket_id"`
+			Tags     []string `json:"tags"`
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
+		}
+		if args.TicketID <= 0 {
+			return preconditionErrf("Error: ticket_id is required. Nothing was written.")
+		}
+		if len(args.Tags) == 0 {
+			return preconditionErrf("Error: tags is required. Nothing was written.")
+		}
+		tags, changed, err := h.freshworksClient.Desk.AddTags(ctx, args.TicketID, args.Tags)
+		if err != nil {
+			return fmt.Sprintf("Error tagging Freshdesk ticket #%d: %v", args.TicketID, err)
+		}
+		log.Printf("[user=%s channel=%s] freshdesk_add_tags (ticket=%d, added=%v, changed=%t)", userID, channelID, args.TicketID, args.Tags, changed)
+		return freshworks.FormatTagsAdded(args.TicketID, tags, changed)
 
 	case ToolFreshchatGetConversation:
 		if h.freshworksClient == nil || !h.freshworksClient.Chat.Ready() {
