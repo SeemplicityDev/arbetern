@@ -1560,11 +1560,11 @@ function renderBackendPage() {
   tabs.innerHTML = [['state', 'State'], ['vectors', 'Vectors']].map(([id, label]) =>
     `<button class="pill${backendState.tab === id ? ' active' : ''}" data-tab="${id}">${label}</button>`).join('');
   const chips = [
-    `<span class="chip">bucket <b>${escapeHtml(s.state.bucket)}</b></span>`,
-    s.state.prefix ? `<span class="chip">prefix <b>${escapeHtml(s.state.prefix)}</b></span>` : '',
-    `<span class="chip">region <b>${escapeHtml(s.state.region)}</b></span>`,
+    `<span class="chip">bucket <b class="key">${escapeHtml(s.state.bucket)}</b></span>`,
+    s.state.prefix ? `<span class="chip">prefix <b class="key">${escapeHtml(s.state.prefix)}</b></span>` : '',
+    `<span class="chip">region <b class="key">${escapeHtml(s.state.region)}</b></span>`,
     `<span class="chip">${plural(s.state.objects, 'object')}${s.state.truncated ? '+' : ''} · ${fmtBytes(s.state.bytes)}</span>`,
-    s.vectors ? `<span class="chip">vectors <b>${escapeHtml(s.vectors.bucket || s.vectors.arn)}</b> / <b>${escapeHtml(s.vectors.name || '')}</b> · ${escapeHtml(s.vectors.metric || '')}</span>` : '<span class="chip">vectors <b>not configured</b></span>',
+    s.vectors ? `<span class="chip">vectors <b class="key">${escapeHtml(s.vectors.bucket || s.vectors.arn)}</b> / <b class="key">${escapeHtml(s.vectors.name || '')}</b> · ${escapeHtml(s.vectors.metric || '')}</span>` : '<span class="chip">vectors <b>not configured</b></span>',
   ].filter(Boolean).join('');
   summaryEl.innerHTML = chips;
   if (backendState.tab === 'vectors') {
@@ -3242,6 +3242,13 @@ function contextSummaryHtml(p) {
     <div class="page-note after-block"><a href="/ui/context" onclick="event.preventDefault();setContextTab('history')">Read the ${escapeHtml(plural(p.turns.length, 'turn'))} this is written from →</a></div>`;
 }
 
+function recallNote(p) {
+  const cap = p.max_turns ? ` Up to ${fmtInt(p.max_turns)} turns are kept for recall.` : '';
+  return p.semantic
+    ? `When you ask an agent something, it is given the remembered turns closest in meaning to your question, not just the latest ones.${cap}`
+    : `When you ask an agent something, it is given your most recent remembered turns, in order.${cap}`;
+}
+
 function setContextTab(tab) {
   contextState.tab = tab;
   renderContextPage();
@@ -3279,9 +3286,9 @@ function renderContextPage() {
     `<span class="chip">${plural(p.turns.length, 'turn')} remembered</span>`,
     `<span class="chip">${fmtBytes(p.bytes)}</span>`,
     `<span class="chip">kept <b>${fmtInt(p.retention_days)}d</b> after your last turn</span>`,
-    `<span class="chip">recall <b>${p.semantic ? 'by meaning' : 'most recent'}</b></span>`,
+    `<span class="chip" title="${escapeHtml(recallNote(p))}">recall <b>${p.semantic ? 'by meaning' : 'most recent'}</b></span>`,
     p.updated ? `<span class="chip" title="${escapeHtml(new Date(p.updated).toLocaleString())}">aggregated ${escapeHtml(timeAgo(p.updated))}</span>` : '',
-    ...p.identities.map(id => `<span class="chip">stored as <b>${escapeHtml(id)}</b></span>`),
+    ...p.identities.map(id => `<span class="chip">stored as <b class="key">${escapeHtml(id)}</b></span>`),
   ].filter(Boolean).join('');
 
   if (!p.turns.length) {
