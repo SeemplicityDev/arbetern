@@ -82,32 +82,43 @@ type ArticleSummary struct {
 	ModifiedAt    string `json:"modified_at"`
 }
 
-// SearchHit is one keyword-search match.
+// SearchHit is one keyword-search match. Body, URL, BodyNote and
+// MatchedQueries are filled in by the client, not by the API.
 type SearchHit struct {
 	ArticleID  string `json:"article_id"`
 	Title      string `json:"title"`
 	CategoryID string `json:"category_id"`
 	Slug       string `json:"slug"`
 	Version    int    `json:"version"`
+
+	URL            string   `json:"-"`
+	Body           string   `json:"-"`
+	BodyNote       string   `json:"-"`
+	MatchedQueries []string `json:"-"`
 }
 
-// SearchResult is one page of search hits with the workspace it ran in.
+// SearchResult is the merged result of one search call, which may have run
+// several phrasings of the same question.
 type SearchResult struct {
-	Query      string
-	Workspace  Workspace
-	LangCode   string
-	Hits       []SearchHit
-	Pagination Pagination
+	Queries     []string
+	Failed      []string // phrasings whose own request failed
+	Workspace   Workspace
+	LangCode    string
+	Hits        []SearchHit
+	Pagination  Pagination
+	Duplicates  int // hits dropped because another phrasing already returned them
+	ContentRead int // hits whose body was read inline
 }
 
-// ArticleList is one page of article summaries, optionally narrowed to a
-// category on the client side.
+// ArticleList is one page of article summaries, or every article in one
+// category, filtered from the cached workspace listing.
 type ArticleList struct {
-	Workspace    Workspace
-	CategoryID   string
-	Articles     []ArticleSummary
-	Pagination   Pagination
-	PagesScanned int
+	Workspace  Workspace
+	CategoryID string
+	Articles   []ArticleSummary
+	Pagination Pagination
+	Scanned    int  // articles examined to produce this result
+	Cached     bool // the workspace listing was already in memory
 }
 
 // Author is an article contributor.

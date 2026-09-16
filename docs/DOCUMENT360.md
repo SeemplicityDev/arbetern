@@ -22,13 +22,30 @@ tool that could.
 | Tool | Description |
 |---|---|
 | `document360_list_workspaces` | List the project's workspaces (knowledge-base versions) with IDs; marks the default. Other tools use the default when `workspace_id` is omitted |
-| `document360_search` | Keyword search across the **published, visible** articles of a workspace. Returns titles and `article_id`s; drafts are never returned. `page` / `page_size` (1..100) paginate |
+| `document360_search` | Keyword search across the **published, visible** articles of a workspace. Takes up to 3 phrasings in `queries`, run in parallel and merged with duplicates collapsed. With `include_content=true` the top `content_limit` hits (default 3, max 5) come back with their article text inline. Drafts are never returned |
 | `document360_list_categories` | The workspace's nested category tree with category IDs |
-| `document360_list_articles` | One page of article summaries (ID, status, version, last updated). With `category_id` the connector scans the workspace and keeps only that category's articles, since the API has no server-side category filter |
-| `document360_get_article` | One article by `article_id`: title, status, public link and the latest **published** body as text, with snippets and variables resolved. Long bodies are truncated with a note |
+| `document360_list_articles` | One page of article summaries (ID, status, version, last updated). With `category_id` the connector filters the cached workspace listing, since the API has no server-side category filter |
+| `document360_get_article` | Up to 5 articles by `article_ids`, read in parallel: title, status, public link and the latest **published** body as text, with snippets and variables resolved. Failures are reported per article, so one stale ID does not fail the call |
 
 `workspace_id` accepts a workspace ID, slug or name and is matched against the
 listed workspaces, so an unknown value is refused rather than sent to the API.
+
+### Call shape
+
+The two batching tools exist because the obvious one-at-a-time pattern —
+search, read an article, search again, read another — costs a tool round and a
+model turn per step. A question is meant to be answered in two rounds:
+
+1. `document360_search` with every phrasing in `queries` and
+   `include_content=true`. Hits are merged across phrasings and the top ones
+   arrive with their text already in the result.
+2. `document360_get_article` with `article_ids` for anything else worth
+   reading in full, in one call.
+
+A hit whose article cannot be read is reported inline and the rest of the
+batch still returns. The error tells the model not to request that ID again:
+the search index outlives deleted and re-scoped articles, so a 404 there is
+expected rather than a fault to retry around.
 
 ## Required Credentials
 
@@ -88,7 +105,7 @@ customCredentials:
     document360-api-key: "d360_sk_…"
 ```
 
-## Reliability
+## Reliability and cost
 
 - Every call is a `GET`, so a retry can never duplicate a side effect.
 - `429` and `5xx` responses and transport errors are retried up to four times
@@ -96,9 +113,19 @@ customCredentials:
 - When the API reports an exhausted per-minute read window
   (`X-RateLimit-Remaining: 0`, or a `429`), the connector pauses new requests
   until the window resets instead of spending retries on further `429`s.
+- A batched call runs at most 4 requests concurrently, so a batch cannot spend
+  the key's per-minute read allowance in one burst.
 - The workspace list is cached for ten minutes with single-flight refresh; a
   failed refresh keeps serving the last good list.
-- Category and filtered-article walks are bounded (at most ten pages each) so
+- Article bodies and the workspace article listing are cached for five minutes,
+  keyed by language, with single-flight fetches and a bounded entry count.
+  Re-reading an article inside one answer, or across workflow ticks, is free,
+  and asking about several categories walks the listing once rather than once
+  per category. Failures are never cached.
+- A `404` on an article's published version is retried once without the
+  published constraint, so an article that is indexed but has no resolvable
+  published version in that language still returns.
+- Category and article-listing walks are bounded (at most ten pages each) so
   one question cannot exhaust the key's rate limit.
 
 ## Security

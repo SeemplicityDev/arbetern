@@ -46,8 +46,27 @@ const (
 
 	// workspacesTTL is how long the workspace list is served from memory.
 	workspacesTTL = 10 * time.Minute
+	// contentTTL is how long article bodies and workspace article listings are
+	// served from memory. A knowledge base changes far more slowly than an
+	// agent re-reads it, so this collapses the repeat fetches a multi-step
+	// answer (and every workflow tick) would otherwise make.
+	contentTTL = 5 * time.Minute
+	// maxCachedArticles bounds the article-body cache.
+	maxCachedArticles = 256
+	// maxCachedListings bounds the workspace article-listing cache.
+	maxCachedListings = 8
 	// connectRetryInterval paces the startup probe until the project resolves.
 	connectRetryInterval = 30 * time.Second
+
+	// maxConcurrent bounds in-flight requests for one batched tool call, so a
+	// batch cannot burn the key's per-minute read allowance in one burst.
+	maxConcurrent = 4
+	// maxBatchArticles caps how many articles one call may read.
+	maxBatchArticles = 5
+	// maxBatchQueries caps how many phrasings one search call may run.
+	maxBatchQueries = 3
+	// maxInlineContent caps how many hits a search may inline bodies for.
+	maxInlineContent = 5
 
 	// maxPageSize is the API's page_size ceiling.
 	maxPageSize = 100
@@ -89,6 +108,8 @@ type Client struct {
 	pauseUntil time.Time // set when the API reports an exhausted window
 
 	workspaces *ttlcache.Cache[[]Workspace]
+	articles   *ttlcache.Keyed[string, *Article]
+	listings   *ttlcache.Keyed[string, []ArticleSummary]
 }
 
 // NewClient builds a client for the given key, optional project ID and region
@@ -115,6 +136,8 @@ func NewClient(apiKey, projectID, region string) (*Client, error) {
 		httpClient:        &http.Client{Timeout: httpTimeout},
 	}
 	c.workspaces = ttlcache.New(workspacesTTL, c.fetchWorkspaces)
+	c.articles = ttlcache.NewKeyed(contentTTL, maxCachedArticles, c.fetchArticle)
+	c.listings = ttlcache.NewKeyed(contentTTL, maxCachedListings, c.fetchListing)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
@@ -324,9 +347,41 @@ func (c *Client) ListCategories(ctx context.Context, workspaceRef, langCode stri
 
 // ── Articles ───────────────────────────────────────────────────────────────
 
-// ListArticles returns one page of article summaries. With categoryID set it
-// walks pages from `page` onward and keeps only that category's articles,
-// because the API has no server-side category filter.
+func listingKey(workspaceID, lang string) string { return workspaceID + "|" + lang }
+func articleKey(articleID, lang string) string   { return articleID + "|" + lang }
+
+// fetchListing walks a workspace's article pages once. The API has no
+// server-side category filter, so a per-category question is answered from
+// this list instead of re-walking every page for each category asked about.
+func (c *Client) fetchListing(ctx context.Context, key string) ([]ArticleSummary, error) {
+	workspaceID, lang, _ := strings.Cut(key, "|")
+	base, err := c.projectPath(ctx)
+	if err != nil {
+		return nil, err
+	}
+	q := url.Values{"page_size": {strconv.Itoa(maxPageSize)}}
+	if lang != "" {
+		q.Set("lang_code", lang)
+	}
+	var all []ArticleSummary
+	err = c.walkPages(ctx, base+"/workspaces/"+url.PathEscape(workspaceID)+"/articles", q, maxListPages, func(data json.RawMessage) (int, error) {
+		var rows []ArticleSummary
+		if err := json.Unmarshal(data, &rows); err != nil {
+			return 0, err
+		}
+		all = append(all, rows...)
+		return len(rows), nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return all, nil
+}
+
+// ListArticles returns article summaries. Without a category it serves one
+// page straight from the API. With one it filters the cached workspace
+// listing, so asking about several categories costs one walk, not one per
+// category.
 func (c *Client) ListArticles(ctx context.Context, workspaceRef, categoryID, langCode string, page, pageSize int) (*ArticleList, error) {
 	ws, err := c.resolveWorkspace(ctx, workspaceRef)
 	if err != nil {
@@ -337,79 +392,116 @@ func (c *Client) ListArticles(ctx context.Context, workspaceRef, categoryID, lan
 		return nil, err
 	}
 	categoryID = strings.TrimSpace(categoryID)
-	if page < 1 {
-		page = 1
-	}
-	pageSize = clamp(pageSize, 1, maxPageSize, 25)
-
-	q := url.Values{
-		"page":                {strconv.Itoa(page)},
-		"page_size":           {strconv.Itoa(pageSize)},
-		"include_total_count": {"true"},
-	}
-	if l := normalizeLang(langCode); l != "" {
-		q.Set("lang_code", l)
-	}
-	path := base + "/workspaces/" + url.PathEscape(ws.ID) + "/articles"
+	lang := normalizeLang(langCode)
 	out := &ArticleList{Workspace: ws, CategoryID: categoryID}
 
 	if categoryID == "" {
+		if page < 1 {
+			page = 1
+		}
+		q := url.Values{
+			"page":                {strconv.Itoa(page)},
+			"page_size":           {strconv.Itoa(clamp(pageSize, 1, maxPageSize, 25))},
+			"include_total_count": {"true"},
+		}
+		if lang != "" {
+			q.Set("lang_code", lang)
+		}
 		var rows []ArticleSummary
-		pg, err := c.getPage(ctx, path, q, &rows)
+		pg, err := c.getPage(ctx, base+"/workspaces/"+url.PathEscape(ws.ID)+"/articles", q, &rows)
 		if err != nil {
 			return nil, err
 		}
-		out.Articles, out.Pagination, out.PagesScanned = rows, pg, 1
+		out.Articles, out.Pagination, out.Scanned = rows, pg, len(rows)
 		return out, nil
 	}
 
-	// Filtered walk: read full pages so fewer round-trips cover the workspace.
-	q.Set("page_size", strconv.Itoa(maxPageSize))
-	q.Set("page", "1")
-	var last Pagination
-	err = c.walkPages(ctx, path, q, maxListPages, func(data json.RawMessage) (int, error) {
-		var rows []ArticleSummary
-		if err := json.Unmarshal(data, &rows); err != nil {
-			return 0, err
-		}
-		for _, a := range rows {
-			if strings.EqualFold(a.CategoryID, categoryID) {
-				out.Articles = append(out.Articles, a)
-			}
-		}
-		out.PagesScanned++
-		return len(rows), nil
-	}, &last)
+	key := listingKey(ws.ID, lang)
+	_, out.Cached = c.listings.Cached(key)
+	all, err := c.listings.Get(ctx, key)
 	if err != nil {
 		return nil, err
 	}
-	out.Pagination = last
+	for _, a := range all {
+		if strings.EqualFold(a.CategoryID, categoryID) {
+			out.Articles = append(out.Articles, a)
+		}
+	}
+	out.Scanned = len(all)
 	return out, nil
 }
 
-// GetArticle fetches the latest published version of an article, rendered
-// for display so snippets and variables are resolved.
+// fetchArticle reads one article, preferring its published version. A 404
+// there is retried once without the published constraint, because an article
+// the search index still lists may have no resolvable published version in
+// the requested language.
+func (c *Client) fetchArticle(ctx context.Context, key string) (*Article, error) {
+	articleID, lang, _ := strings.Cut(key, "|")
+	base, err := c.projectPath(ctx)
+	if err != nil {
+		return nil, err
+	}
+	path := base + "/articles/" + url.PathEscape(articleID)
+
+	read := func(published bool) (*Article, error) {
+		q := url.Values{
+			"content_mode": {"display"},
+			"published":    {strconv.FormatBool(published)},
+		}
+		if lang != "" {
+			q.Set("lang_code", lang)
+		}
+		var a Article
+		if err := c.get(ctx, path, q, &a, nil); err != nil {
+			return nil, err
+		}
+		return &a, nil
+	}
+
+	a, err := read(true)
+	if err == nil {
+		return a, nil
+	}
+	var ae *APIError
+	if errors.As(err, &ae) && ae.Status == http.StatusNotFound {
+		if a, retryErr := read(false); retryErr == nil {
+			return a, nil
+		}
+	}
+	return nil, err
+}
+
+// GetArticle fetches one article, rendered for display so snippets and
+// variables are resolved. Results are cached briefly.
 func (c *Client) GetArticle(ctx context.Context, articleID, langCode string) (*Article, error) {
 	articleID = strings.TrimSpace(articleID)
 	if articleID == "" {
 		return nil, errors.New("article_id is required")
 	}
-	base, err := c.projectPath(ctx)
-	if err != nil {
-		return nil, err
+	return c.articles.Get(ctx, articleKey(articleID, normalizeLang(langCode)))
+}
+
+// ArticleResult pairs one requested article ID with its outcome, so a batch
+// read reports per-article failures instead of failing as a whole.
+type ArticleResult struct {
+	ID      string
+	Article *Article
+	Err     error
+}
+
+// GetArticles reads several articles concurrently, in the order requested.
+// Duplicate IDs are collapsed and the batch is capped at maxBatchArticles.
+func (c *Client) GetArticles(ctx context.Context, articleIDs []string, langCode string) ([]ArticleResult, error) {
+	ids := dedupeStrings(articleIDs, maxBatchArticles)
+	if len(ids) == 0 {
+		return nil, errors.New("article_id is required")
 	}
-	q := url.Values{
-		"content_mode": {"display"},
-		"published":    {"true"},
-	}
-	if l := normalizeLang(langCode); l != "" {
-		q.Set("lang_code", l)
-	}
-	var a Article
-	if err := c.get(ctx, base+"/articles/"+url.PathEscape(articleID), q, &a, nil); err != nil {
-		return nil, err
-	}
-	return &a, nil
+	out := make([]ArticleResult, len(ids))
+	runConcurrent(ctx, len(ids), maxConcurrent, func(ctx context.Context, i int) {
+		a, err := c.GetArticle(ctx, ids[i], langCode)
+		out[i] = ArticleResult{ID: ids[i], Article: a, Err: err}
+	})
+	return out, nil
 }
 
 // PlainContent returns the article body as readable text: Markdown as-is,
@@ -429,14 +521,29 @@ func (a *Article) PlainContent() string {
 
 // ── Search ─────────────────────────────────────────────────────────────────
 
-// Search runs a keyword search over the published, visible articles of a
-// workspace. Hits carry titles and IDs; GetArticle reads the content.
-func (c *Client) Search(ctx context.Context, workspaceRef, query, langCode string, page, pageSize int) (*SearchResult, error) {
-	query = strings.TrimSpace(query)
-	if query == "" {
+// SearchOptions describes one search call, which may carry several phrasings
+// of the same question and may inline the top hits' article bodies.
+type SearchOptions struct {
+	WorkspaceRef   string
+	Queries        []string
+	LangCode       string
+	Page           int
+	PageSize       int
+	IncludeContent bool
+	ContentLimit   int
+}
+
+// Search runs keyword searches over the published, visible articles of a
+// workspace. Several queries run concurrently and their hits are merged with
+// duplicates collapsed, so alternative phrasings cost one call rather than
+// one round each. With IncludeContent the top hits' bodies are read and
+// returned inline, which answers most questions without a follow-up call.
+func (c *Client) Search(ctx context.Context, opts SearchOptions) (*SearchResult, error) {
+	queries := dedupeStrings(opts.Queries, maxBatchQueries)
+	if len(queries) == 0 {
 		return nil, errors.New("query is required")
 	}
-	ws, err := c.resolveWorkspace(ctx, workspaceRef)
+	ws, err := c.resolveWorkspace(ctx, opts.WorkspaceRef)
 	if err != nil {
 		return nil, err
 	}
@@ -444,25 +551,149 @@ func (c *Client) Search(ctx context.Context, workspaceRef, query, langCode strin
 	if err != nil {
 		return nil, err
 	}
+	page := opts.Page
 	if page < 1 {
 		page = 1
 	}
-	pageSize = clamp(pageSize, 1, maxPageSize, 10)
-	q := url.Values{
-		"query":     {query},
-		"page":      {strconv.Itoa(page)},
-		"page_size": {strconv.Itoa(pageSize)},
+	pageSize := clamp(opts.PageSize, 1, maxPageSize, 10)
+	lang := normalizeLang(opts.LangCode)
+	path := base + "/workspaces/" + url.PathEscape(ws.ID) + "/search"
+
+	type queryResult struct {
+		hits []SearchHit
+		pg   Pagination
+		err  error
 	}
-	lang := normalizeLang(langCode)
-	if lang != "" {
-		q.Set("lang_code", lang)
+	results := make([]queryResult, len(queries))
+	runConcurrent(ctx, len(queries), maxConcurrent, func(ctx context.Context, i int) {
+		q := url.Values{
+			"query":     {queries[i]},
+			"page":      {strconv.Itoa(page)},
+			"page_size": {strconv.Itoa(pageSize)},
+		}
+		if lang != "" {
+			q.Set("lang_code", lang)
+		}
+		var hits []SearchHit
+		pg, err := c.getPage(ctx, path, q, &hits)
+		results[i] = queryResult{hits: hits, pg: pg, err: err}
+	})
+
+	out := &SearchResult{Queries: queries, Workspace: ws, LangCode: lang}
+	seen := make(map[string]int, pageSize*len(queries))
+	var firstErr error
+	for i, r := range results {
+		if r.err != nil {
+			if firstErr == nil {
+				firstErr = r.err
+			}
+			out.Failed = append(out.Failed, queries[i])
+			continue
+		}
+		if out.Pagination.PageSize == 0 {
+			out.Pagination = r.pg
+		} else if r.pg.HasMore {
+			out.Pagination.HasMore = true
+		}
+		for _, h := range r.hits {
+			if idx, dup := seen[h.ArticleID]; dup {
+				out.Hits[idx].MatchedQueries = appendUnique(out.Hits[idx].MatchedQueries, queries[i])
+				out.Duplicates++
+				continue
+			}
+			h.MatchedQueries = []string{queries[i]}
+			seen[h.ArticleID] = len(out.Hits)
+			out.Hits = append(out.Hits, h)
+		}
 	}
-	var hits []SearchHit
-	pg, err := c.getPage(ctx, base+"/workspaces/"+url.PathEscape(ws.ID)+"/search", q, &hits)
-	if err != nil {
-		return nil, err
+	// Every phrasing failing is a failed call; some failing still answers.
+	if len(out.Failed) == len(queries) {
+		return nil, firstErr
 	}
-	return &SearchResult{Query: query, Workspace: ws, LangCode: lang, Hits: hits, Pagination: pg}, nil
+	if !opts.IncludeContent || len(out.Hits) == 0 {
+		return out, nil
+	}
+
+	limit := clamp(opts.ContentLimit, 1, maxInlineContent, 3)
+	if limit > len(out.Hits) {
+		limit = len(out.Hits)
+	}
+	runConcurrent(ctx, limit, maxConcurrent, func(ctx context.Context, i int) {
+		a, err := c.GetArticle(ctx, out.Hits[i].ArticleID, lang)
+		if err != nil {
+			out.Hits[i].BodyNote = "content unavailable: " + err.Error()
+			return
+		}
+		out.Hits[i].Body = a.PlainContent()
+		out.Hits[i].URL = a.URL
+	})
+	out.ContentRead = limit
+	return out, nil
+}
+
+// ── Concurrency ────────────────────────────────────────────────────────────
+
+// runConcurrent calls fn for every index below n, at most limit at a time,
+// and returns once all have finished. fn records its own result; a cancelled
+// context is reported by the per-item error each fn observes.
+func runConcurrent(ctx context.Context, n, limit int, fn func(ctx context.Context, i int)) {
+	if n <= 0 {
+		return
+	}
+	if limit < 1 {
+		limit = 1
+	}
+	if limit > n {
+		limit = n
+	}
+	idx := make(chan int, n)
+	for i := 0; i < n; i++ {
+		idx <- i
+	}
+	close(idx)
+	var wg sync.WaitGroup
+	wg.Add(limit)
+	for w := 0; w < limit; w++ {
+		go func() {
+			defer wg.Done()
+			for i := range idx {
+				fn(ctx, i)
+			}
+		}()
+	}
+	wg.Wait()
+}
+
+// dedupeStrings trims, drops blanks and duplicates (case-insensitively) and
+// caps the result, preserving the caller's order.
+func dedupeStrings(in []string, max int) []string {
+	seen := make(map[string]bool, len(in))
+	out := make([]string, 0, len(in))
+	for _, v := range in {
+		v = strings.TrimSpace(v)
+		if v == "" {
+			continue
+		}
+		k := strings.ToLower(v)
+		if seen[k] {
+			continue
+		}
+		seen[k] = true
+		out = append(out, v)
+		if max > 0 && len(out) == max {
+			break
+		}
+	}
+	return out
+}
+
+func appendUnique(list []string, v string) []string {
+	for _, e := range list {
+		if e == v {
+			return list
+		}
+	}
+	return append(list, v)
 }
 
 // ── Request plumbing ───────────────────────────────────────────────────────
@@ -717,7 +948,11 @@ func (e *APIError) Error() string {
 	case e.Status == http.StatusForbidden:
 		return "the Document360 API key is not allowed to read this resource: its role or content scope excludes it, or the feature is not in the plan. Retrying will not help."
 	case e.Status == http.StatusNotFound:
-		return "Document360 has no such resource. The ID may be wrong, unpublished, or outside the key's scope — re-resolve it with document360_search or document360_list_articles."
+		// The search index outlives deleted and re-scoped articles, so a hit
+		// whose ID 404s here is normal. Say plainly that the ID is spent:
+		// without that, a model re-requests it and then re-searches, which is
+		// several wasted rounds for an article that does not exist.
+		return "Document360 cannot return this article: the ID is stale, the article is unpublished in this language, or it is outside the API key's content scope. Do NOT request this ID again — use a different hit from the results you already have."
 	case e.Status == http.StatusTooManyRequests:
 		return "Document360 rate-limited the request and it did not succeed after several retries. Wait a minute, then retry with fewer or smaller calls."
 	case e.Status >= 500:

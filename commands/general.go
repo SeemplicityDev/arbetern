@@ -2215,17 +2215,19 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 				Type: "function",
 				Function: llm.ToolFunction{
 					Name:        ToolDocument360Search,
-					Description: "Keyword search across the PUBLISHED, visible articles of a Document360 workspace. This is the primary tool for answering 'what do our docs say about X' / 'is there a help article on Y'. Returns matching article titles and article_ids only — call document360_get_article on the best hits to read the content before answering. Use short keyword phrases (product feature, error text, customer-facing term) rather than full sentences; if a search returns nothing, try fewer or alternative keywords, then browse with document360_list_categories. Drafts and unpublished articles are never returned.",
+					Description: "Keyword search across the PUBLISHED, visible articles of a Document360 workspace. This is the primary tool for answering 'what do our docs say about X' / 'is there a help article on Y'. ALWAYS pass every phrasing you want to try in ONE call via 'queries' (up to 3) — they run in parallel and their hits are merged and de-duplicated, so three phrasings cost one round instead of three. Set include_content=true to get the top hits' article text inline, which usually answers the question with no follow-up call at all; leave it false only when you want a cheap list of titles. Use short keyword phrases (product feature, error text, customer-facing term), not full sentences. If nothing matches, try different keywords once, then browse with document360_list_categories. Drafts and unpublished articles are never returned.",
 					Parameters: json.RawMessage(`{
 						"type":"object",
 						"properties":{
-							"query":{"type":"string","description":"Keyword phrase to search for."},
+							"queries":{"type":"array","items":{"type":"string"},"description":"Up to 3 keyword phrasings of the SAME question, searched in parallel and merged. Prefer this over repeated calls."},
+							"query":{"type":"string","description":"A single keyword phrase. Use 'queries' instead when you have more than one phrasing."},
+							"include_content":{"type":"boolean","description":"When true, the article text of the top hits is returned inline (excerpted). Use it whenever you intend to read the results — it saves a whole round of document360_get_article calls."},
+							"content_limit":{"type":"integer","description":"How many top hits to inline content for when include_content is true, 1-5. Default 3."},
 							"workspace_id":{"type":"string","description":"Optional workspace ID, slug or name from document360_list_workspaces. Omit for the default workspace."},
 							"lang_code":{"type":"string","description":"Optional language code such as 'en' or 'pt-BR'. Omit for the workspace default."},
 							"page":{"type":"integer","description":"1-based results page. Omit for the first page."},
 							"page_size":{"type":"integer","description":"Results per page, 1-100. Default 10."}
-						},
-						"required":["query"]
+						}
 					}`),
 				},
 			},
@@ -2264,14 +2266,14 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 				Type: "function",
 				Function: llm.ToolFunction{
 					Name:        ToolDocument360GetArticle,
-					Description: "Read one Document360 article by article_id: title, status, public link and the latest PUBLISHED body as text (snippets and variables resolved). Use after document360_search or document360_list_articles. Quote or summarise from the returned text and include the article link in your answer; long bodies are truncated with a note.",
+					Description: "Read Document360 articles by ID: title, status, public link and the latest PUBLISHED body as text (snippets and variables resolved). Pass EVERY article you want in one call via 'article_ids' (up to 5) — they are fetched in parallel and one unreadable article no longer costs a whole round. Use after document360_search or document360_list_articles. Quote or summarise from the returned text and include the article link in your answer. An article reported as unreadable is stale or out of scope: pick a different hit rather than requesting that same ID again. Long bodies are truncated with a note, and the per-article budget shrinks as the batch grows.",
 					Parameters: json.RawMessage(`{
 						"type":"object",
 						"properties":{
-							"article_id":{"type":"string","description":"Article ID (UUID) from a search hit or listing."},
+							"article_ids":{"type":"array","items":{"type":"string"},"description":"Up to 5 article IDs (UUIDs) from search hits or a listing, read in parallel. Prefer this over repeated single calls."},
+							"article_id":{"type":"string","description":"A single article ID. Use 'article_ids' instead when you need more than one."},
 							"lang_code":{"type":"string","description":"Optional language code such as 'en'. Omit for the project default."}
-						},
-						"required":["article_id"]
+						}
 					}`),
 				},
 			},
@@ -5587,24 +5589,39 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 			return errMsg
 		}
 		args, errMsg := parseToolArgs[struct {
-			Query       string `json:"query"`
-			WorkspaceID string `json:"workspace_id"`
-			LangCode    string `json:"lang_code"`
-			Page        int    `json:"page"`
-			PageSize    int    `json:"page_size"`
+			Queries        []string `json:"queries"`
+			Query          string   `json:"query"`
+			IncludeContent bool     `json:"include_content"`
+			ContentLimit   int      `json:"content_limit"`
+			WorkspaceID    string   `json:"workspace_id"`
+			LangCode       string   `json:"lang_code"`
+			Page           int      `json:"page"`
+			PageSize       int      `json:"page_size"`
 		}](argsJSON)
 		if errMsg != "" {
 			return errMsg
 		}
-		if strings.TrimSpace(args.Query) == "" {
-			return preconditionErrf("Error: query is required.")
+		queries := append([]string{}, args.Queries...)
+		if strings.TrimSpace(args.Query) != "" {
+			queries = append(queries, args.Query)
 		}
-		res, err := h.document360Client.Search(ctx, args.WorkspaceID, args.Query, args.LangCode, args.Page, args.PageSize)
+		if len(queries) == 0 {
+			return preconditionErrf("Error: pass queries (up to 3 phrasings) or query.")
+		}
+		res, err := h.document360Client.Search(ctx, document360.SearchOptions{
+			WorkspaceRef:   args.WorkspaceID,
+			Queries:        queries,
+			LangCode:       args.LangCode,
+			Page:           args.Page,
+			PageSize:       args.PageSize,
+			IncludeContent: args.IncludeContent,
+			ContentLimit:   args.ContentLimit,
+		})
 		if err != nil {
 			return document360ToolErr("searching Document360", userID, channelID, err)
 		}
-		log.Printf("[user=%s channel=%s] document360_search (workspace=%s, query_len=%d, hits=%d)",
-			userID, channelID, res.Workspace.ID, len(args.Query), len(res.Hits))
+		log.Printf("[user=%s channel=%s] document360_search (workspace=%s, queries=%d, hits=%d, merged=%d, inlined=%d, failed=%d)",
+			userID, channelID, res.Workspace.ID, len(res.Queries), len(res.Hits), res.Duplicates, res.ContentRead, len(res.Failed))
 		return document360.FormatSearch(res)
 
 	case ToolDocument360ListCategories:
@@ -5643,8 +5660,8 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		if err != nil {
 			return document360ToolErr("listing Document360 articles", userID, channelID, err)
 		}
-		log.Printf("[user=%s channel=%s] document360_list_articles (workspace=%s, category=%s, results=%d, pages=%d)",
-			userID, channelID, list.Workspace.ID, args.CategoryID, len(list.Articles), list.PagesScanned)
+		log.Printf("[user=%s channel=%s] document360_list_articles (workspace=%s, category=%s, results=%d, scanned=%d, cached=%t)",
+			userID, channelID, list.Workspace.ID, args.CategoryID, len(list.Articles), list.Scanned, list.Cached)
 		return document360.FormatArticles(list)
 
 	case ToolDocument360GetArticle:
@@ -5652,22 +5669,37 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 			return errMsg
 		}
 		args, errMsg := parseToolArgs[struct {
-			ArticleID string `json:"article_id"`
-			LangCode  string `json:"lang_code"`
+			ArticleIDs []string `json:"article_ids"`
+			ArticleID  string   `json:"article_id"`
+			LangCode   string   `json:"lang_code"`
 		}](argsJSON)
 		if errMsg != "" {
 			return errMsg
 		}
-		if strings.TrimSpace(args.ArticleID) == "" {
-			return preconditionErrf("Error: article_id is required.")
+		ids := append([]string{}, args.ArticleIDs...)
+		if strings.TrimSpace(args.ArticleID) != "" {
+			ids = append(ids, args.ArticleID)
 		}
-		article, err := h.document360Client.GetArticle(ctx, args.ArticleID, args.LangCode)
+		if len(ids) == 0 {
+			return preconditionErrf("Error: pass article_ids (up to 5) or article_id.")
+		}
+		results, err := h.document360Client.GetArticles(ctx, ids, args.LangCode)
 		if err != nil {
-			return document360ToolErr("reading the Document360 article", userID, channelID, err)
+			return document360ToolErr("reading the Document360 articles", userID, channelID, err)
 		}
-		log.Printf("[user=%s channel=%s] document360_get_article (id=%s, status=%s, chars=%d)",
-			userID, channelID, article.ID, article.Status, len(article.PlainContent()))
-		return document360.FormatArticle(article)
+		read, chars := 0, 0
+		for _, r := range results {
+			if r.Err != nil {
+				log.Printf("[user=%s channel=%s] document360_get_article (id=%s) failed: %s",
+					userID, channelID, r.ID, document360.ErrorDetail(r.Err))
+				continue
+			}
+			read++
+			chars += len(r.Article.PlainContent())
+		}
+		log.Printf("[user=%s channel=%s] document360_get_article (requested=%d, read=%d, chars=%d)",
+			userID, channelID, len(results), read, chars)
+		return document360.FormatArticleBatch(results)
 
 	// ---- Google Drive / Sheets (pulse only) ----
 

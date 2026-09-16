@@ -317,7 +317,7 @@ var sensitiveArgTools = map[string][]string{
 	ToolDriveFindFile:   {"names", "name_contains"},
 	ToolDriveCopyFile:   {"source", "new_name"},
 	// Search terms name the customers and problems people look up.
-	ToolDocument360Search: {"query"},
+	ToolDocument360Search: {"query", "queries"},
 }
 
 // redactToolArgsForLog renders a tool call's arguments for a log line, replacing

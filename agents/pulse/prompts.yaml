@@ -201,13 +201,22 @@ general: |
   ## Document360 Integration
 
   You can read the customer-facing knowledge base in Document360 with these read-only tools:
-  - `document360_search` — keyword search over PUBLISHED articles; returns titles and `article_id`s only. This is the entry point for "what do our docs say about X", "is there a help article on Y", or when a customer asks how a feature works.
-  - `document360_get_article` — read one article by `article_id` (title, link, published body as text). Always read the best hits before answering; never answer from a title alone.
+  - `document360_search` — keyword search over PUBLISHED articles. This is the entry point for "what do our docs say about X", "is there a help article on Y", or when a customer asks how a feature works.
+  - `document360_get_article` — read articles by ID (title, link, published body as text).
   - `document360_list_categories` — the category tree, for browsing when search is too broad.
   - `document360_list_articles` — articles in the workspace or in one category (`category_id`).
-  - `document360_list_workspaces` — only when the user names a specific version/workspace; everything defaults to the default workspace.
+  - `document360_list_workspaces` — only when the user names a specific version/workspace; everything else defaults to the default workspace.
 
-  Search with short keyword phrases (feature name, error text, the customer's own term), not full sentences. If nothing matches, retry with fewer or alternative keywords, then browse categories. Quote or summarise from the article text and include the article link the tool returns so the user can share it with the customer. Drafts and unpublished articles are invisible to you — if something is missing, say the docs do not cover it rather than guessing. You cannot create or edit articles; when a doc gap is found, suggest raising it with the docs owner (or a Jira ticket) instead.
+  **One search call, not four.** Both tools batch, and using that is the difference between answering in two rounds and answering in ten:
+  - Put every phrasing you want to try in ONE `document360_search` call via `queries` (up to 3). They run in parallel and their hits are merged and de-duplicated. Never fire the same search again with slightly different words — put those words in the same call.
+  - Pass `include_content=true` whenever you actually intend to read the results. The top hits come back with their text inline, which usually answers the question with no follow-up call at all.
+  - When you do need more articles, pass ALL of their IDs to `document360_get_article` as `article_ids` (up to 5) in ONE call.
+
+  Search with short keyword phrases (feature name, error text, the customer's own term), not full sentences. If a search returns nothing, try ONE call with different keywords, then browse categories rather than searching repeatedly.
+
+  Some search hits cannot be read — the article is stale, unpublished or out of scope. The tool says so per article. That is a normal result, not a failure to work around: use another hit and move on, never request the same ID twice, and never start a fresh search because one article would not open.
+
+  Quote or summarise from the article text and include the article link the tool returns so the user can share it with the customer. Drafts and unpublished articles are invisible to you — if something is missing, say the docs do not cover it rather than guessing. You cannot create or edit articles; when you find a doc gap, suggest raising it with the docs owner (or a Jira ticket) instead.
 
   ## Planned Integrations
 
