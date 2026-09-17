@@ -456,24 +456,40 @@ func (r *Router) RunDashboardPrompt(ctx context.Context, userID, dashboardID, da
 	return h.ExecuteHeadless(ctx, userID, prompt)
 }
 
+// chatFallbackUser is the usage-reporting bucket for a web chat turn whose
+// sender has no resolvable Slack account, so those turns stay attributable as
+// a group rather than being dropped from per-user reporting entirely.
+const chatFallbackUser = "ui-chat"
+
 // RunChat runs an interactive UI chat turn through this agent's LLM tool-loop,
 // giving the centralized web chat the same tool access (GitHub, Jira, Datadog,
 // Databricks, …) as a Slack command. history is the prior transcript (oldest
 // first) and userMessage is the new turn. userEmail is the OAuth-proxy-verified
 // sender (or "" when no proxy is in front); it lets a created Jira ticket record
-// Reporter = the requesting human. There is no Slack channel or thread, so
-// Slack-only tools are suppressed (headless) and the final assistant text is
-// returned to the caller (the chat registry) to persist and display.
+// Reporter = the requesting human. userSlackID is that same person's Slack
+// member ID when the caller could resolve it, which attributes the turn to them
+// in usage reporting and on anything the turn opens (PR body, Jira reporter)
+// exactly as a Slack command would; it falls back to the chatFallbackUser
+// bucket when the sender has no resolvable Slack account. There is no Slack
+// channel or thread, so Slack-only tools are suppressed (headless) and the
+// final assistant text is returned to the caller (the chat registry) to persist
+// and display.
 //
 // Returns the reply text or the first tool-loop error.
-func (r *Router) RunChat(ctx context.Context, userEmail string, history []llm.ChatMessage, userMessage string, tracker *progress.Tracker) (string, error) {
+func (r *Router) RunChat(ctx context.Context, userEmail, userSlackID string, history []llm.ChatMessage, userMessage string, tracker *progress.Tracker) (string, error) {
 	if strings.TrimSpace(userMessage) == "" {
 		return "", fmt.Errorf("chat message is empty")
 	}
-	userContext := fmt.Sprintf("Interactive chat with the %s agent through the web UI (no Slack thread). Answer directly and use tools to fetch real data before responding.", r.agentID)
+	userContext := fmt.Sprintf("Interactive chat with the %s agent through the web UI (no Slack thread). Answer directly and use tools to fetch real data before responding. The only reader is the requesting user themselves, so never write their user ID or a <@...> mention into a reply: here it is inert text, not a ping.", r.agentID)
 	h := r.newGeneralHandler(userContext, nil)
 	h.headless = true
 	h.requesterEmail = userEmail
 	h.billingSource = billing.SourceChat
-	return h.ExecuteChat(ctx, "ui-chat", history, userMessage, tracker)
+	attrUser := strings.TrimSpace(userSlackID)
+	// Only a real member ID is trusted as an identity: anything else would put
+	// an unverified name into usage reporting and into whatever the turn opens.
+	if !slackUserIDRe.MatchString(attrUser) {
+		attrUser = chatFallbackUser
+	}
+	return h.ExecuteChat(ctx, attrUser, history, userMessage, tracker)
 }

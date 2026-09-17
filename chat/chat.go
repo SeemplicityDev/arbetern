@@ -98,11 +98,13 @@ type Message struct {
 }
 
 // Responder produces an assistant reply for an agent given the prior
-// transcript (most recent last) and the new user message. user is the
-// resolved sender identity (the OAuth-proxy-verified email when a proxy is in
-// front, else any client-supplied name), or "" when unknown. It is implemented
-// in main using the shared LLM client and the agent's system prompt.
-type Responder func(ctx context.Context, agent, user string, history []Message, userMessage string, tracker *progress.Tracker) (string, error)
+// transcript (most recent last) and the new user message. owner is the
+// conversation owner: the OAuth-proxy-verified email, or "" when no proxy is
+// in front. A client-supplied name is never passed here — the responder acts
+// on the sender's behalf, so it must only ever see a verified identity. It is
+// implemented in main using the shared LLM client and the agent's system
+// prompt.
+type Responder func(ctx context.Context, agent, owner string, history []Message, userMessage string, tracker *progress.Tracker) (string, error)
 
 // transcript is the stored shape of a single conversation, kept at
 // <Prefix><agent>/<id>.json.
@@ -472,22 +474,24 @@ func (r *Registry) Start(agent, id, owner, user, message string) error {
 		}
 		return err
 	}
-	r.run(ctx, cancel, agent, id, user, message, contextMsgs, tracker)
+	r.run(ctx, cancel, agent, id, owner, message, contextMsgs, tracker)
 	return nil
 }
 
-// run produces one reply in the background and appends it. The turn is
-// journalled for its whole life, so one cut short by a restart is found and
-// either run again or reported, rather than leaving the conversation waiting
-// on an answer that is never coming.
-func (r *Registry) run(ctx context.Context, cancel context.CancelFunc, agent, id, user, message string, contextMsgs []Message, tracker *progress.Tracker) {
+// run produces one reply in the background and appends it. owner is the
+// verified identity the turn runs as, and is what the journal carries so a
+// resumed turn runs as the same person. The turn is journalled for its whole
+// life, so one cut short by a restart is found and either run again or
+// reported, rather than leaving the conversation waiting on an answer that is
+// never coming.
+func (r *Registry) run(ctx context.Context, cancel context.CancelFunc, agent, id, owner, message string, contextMsgs []Message, tracker *progress.Tracker) {
 	key := store.Key(agent, id)
 	safego.Go("chat: turn "+key, func() {
 		defer cancel()
-		ctx, inflight := r.inflight.Begin(ctx, JournalKind, key, user)
+		ctx, inflight := r.inflight.Begin(ctx, JournalKind, key, owner)
 		stop := make(chan struct{})
 		tracker.Watch(stop, pendingFlushEvery, pendingFlushEvery, func(s progress.Snapshot) { r.flushPending(ctx, key, s) })
-		reply, err := r.respond(ctx, agent, user, contextMsgs, message, tracker)
+		reply, err := r.respond(ctx, agent, owner, contextMsgs, message, tracker)
 		close(stop)
 		if ctx.Err() != nil {
 			inflight.Interrupted()
@@ -534,8 +538,10 @@ func (r *Registry) UseJournal(j *journal.Journal) {
 }
 
 // resume re-runs the last question of a conversation whose turn was lost. The
-// transcript is the record of what was asked, so nothing has to be carried
-// through the journal but the identity that asked it.
+// transcript is the record of both what was asked and who owns it, so the
+// resumed turn runs as the stored owner rather than as whatever identity the
+// journal entry was written with — an entry can predate a change to what that
+// field holds, and the turn acts on the owner's behalf.
 func (r *Registry) resume(e journal.Entry) error {
 	agent, id := splitKey(e.Target)
 	t, ok := r.docs.Get(e.Target)
@@ -553,7 +559,7 @@ func (r *Registry) resume(e journal.Entry) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), turnTimeout)
 	tracker := progress.NewTracker()
-	r.run(ctx, cancel, agent, id, e.Detail, t.Messages[last].Content, trimContext(t.Messages[:last]), tracker)
+	r.run(ctx, cancel, agent, id, t.Owner, t.Messages[last].Content, trimContext(t.Messages[:last]), tracker)
 	return nil
 }
 

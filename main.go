@@ -631,7 +631,8 @@ func (c *emailUserIDCache) resolve(slackClient *slack.Client, email string) stri
 }
 
 // slackUserIDRe matches Slack member IDs, the only user keys worth resolving
-// to a display name (chat turns are already keyed by email).
+// to a display name (the fallback bucket for an unresolvable chat sender is
+// not one, and is shown as-is).
 var slackUserIDRe = regexp.MustCompile(`^[UW][A-Z0-9]{6,}$`)
 
 type userNameCache struct {
@@ -2482,14 +2483,14 @@ func main() {
 	setToolDescriptions(routers)
 
 	// Centralized per-agent chat (UI-driven). Disabled per agent by default;
-	// enabled via `chat_enabled: true` in the agent's config.yaml. There is no
-	// user auth yet, so each agent's conversations are shared by every viewer.
-	// The responder replays recent history and runs the agent's full tool
-	// loop (RunChat) so the chat can use the same integrations as a Slack
-	// command.
+	// enabled via `chat_enabled: true` in the agent's config.yaml. Every
+	// conversation is scoped to the identity that opened it, so a viewer only
+	// ever sees their own. The responder replays recent history and runs the
+	// agent's full tool loop (RunChat) so the chat can use the same
+	// integrations as a Slack command.
 	sessions.SetRouterResolver(func(agentID string) *commands.Router { return routers[agentID] })
 
-	chatRegistry := chat.New(backend, func(ctx context.Context, agentID, user string, history []chat.Message, userMessage string, tracker *progress.Tracker) (string, error) {
+	chatRegistry := chat.New(backend, func(ctx context.Context, agentID, owner string, history []chat.Message, userMessage string, tracker *progress.Tracker) (string, error) {
 		router := routers[agentID]
 		if router == nil {
 			return "", fmt.Errorf("no router configured for agent %q", agentID)
@@ -2506,9 +2507,13 @@ func main() {
 		// Datadog, Databricks, …) and multi-round agentic loop as a Slack
 		// command — replacing the old single-shot, tool-less completion that
 		// could only role-play "running the query" without executing anything.
-		// user is the OAuth-proxy-verified email (when present) used to
-		// attribute a created Jira ticket's reporter to the requester.
-		return router.RunChat(ctx, user, msgs, userMessage, tracker)
+		// owner is the OAuth-proxy-verified email (when present) used to
+		// attribute a created Jira ticket's reporter to the requester, and is
+		// resolved to the sender's Slack member ID — the same lookup the chat
+		// authorizer already made for this request, so it is served from cache
+		// — so the turn is attributed to the person in usage reporting instead
+		// of to one shared web-chat bucket.
+		return router.RunChat(ctx, owner, emailUserCache.resolve(slackClient, owner), msgs, userMessage, tracker)
 	})
 	chatRegistry.UseJournal(inflight)
 	if err := chatRegistry.Load(bootCtx); err != nil {

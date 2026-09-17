@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/justmike1/arbetern/billing"
 	"github.com/justmike1/arbetern/github"
 	"github.com/justmike1/arbetern/internal/httpx"
 	"github.com/justmike1/arbetern/slack"
@@ -86,13 +87,28 @@ func slackAttribution(userID, userName string) string {
 func (h *GeneralHandler) buildPRBody(userID, userName, supplied, fallback string) string {
 	body := fallback
 	if supplied = strings.TrimSpace(supplied); supplied != "" {
-		body = supplied + "\n\n---\n_Automated via Slack by " + slackAttribution(userID, userName) + "_"
+		body = supplied + "\n\n---\n_Automated via " + h.prOrigin() + " by " + slackAttribution(userID, userName) + "_"
 	}
 	user := ""
 	if slackUserIDRe.MatchString(strings.TrimSpace(userID)) {
 		user = strings.TrimSpace(userID)
 	}
 	return body + "\n" + github.PRMarker(h.agentID, h.billingSource, user)
+}
+
+// prOrigin names the entry path a write-tool call arrived through, for the
+// attribution line reviewers read on the PR it opens.
+func (h *GeneralHandler) prOrigin() string {
+	switch h.source() {
+	case billing.SourceChat:
+		return "the web chat"
+	case billing.SourceWorkflow:
+		return "a scheduled workflow"
+	case billing.SourceDashboard:
+		return "a dashboard render"
+	default:
+		return "Slack"
+	}
 }
 
 var slackUserIDRe = regexp.MustCompile(`^[UW][A-Z0-9]{6,}$`)

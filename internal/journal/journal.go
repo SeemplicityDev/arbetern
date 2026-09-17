@@ -50,6 +50,12 @@ const (
 	// spend a later run's retry budget.
 	carryWindow = time.Hour
 
+	// activeTTL bounds how stale the fleet-wide in-flight view served to
+	// readers may be. One listing serves every reader in the window, so a
+	// console polling a running workflow every few seconds costs at most one
+	// listing per window however many people are watching.
+	activeTTL = 5 * time.Second
+
 	defaultMaxAttempts = 2
 	defaultMaxAge      = time.Hour
 	maxPerSweep        = 8
@@ -111,11 +117,58 @@ type Journal struct {
 
 	mu    sync.RWMutex
 	kinds map[string]Handler
+
+	amu    sync.Mutex
+	active map[string]activeView
+}
+
+// activeView is one listing of a kind's live entries, shared by every reader
+// for activeTTL.
+type activeView struct {
+	at      time.Time
+	targets map[string]bool
 }
 
 // New returns a journal over b. Register each kind before starting recovery.
 func New(b *store.Backend) *Journal {
-	return &Journal{b: b, holder: store.InstanceID(), kinds: map[string]Handler{}}
+	return &Journal{b: b, holder: store.InstanceID(), kinds: map[string]Handler{}, active: map[string]activeView{}}
+}
+
+// Active reports which targets of kind are in flight anywhere in the fleet,
+// as of a listing at most activeTTL old. An entry is written when work starts
+// and heartbeated by whichever replica runs it, so this is the only view of
+// "running" that holds across replicas: a runner's own in-memory flag says
+// nothing about a run another pod picked up, and deferred work is claimed by
+// any replica, not just the scheduling leader. An entry whose heartbeat has
+// stopped is interrupted work waiting for the sweep, not a live run, and is
+// left out. On a listing error the last good view is served, because reporting
+// nothing in flight would read as "finished". The returned map is shared and
+// must not be modified.
+func (j *Journal) Active(ctx context.Context, kind string) map[string]bool {
+	if j == nil || j.b == nil || !kindRe.MatchString(kind) {
+		return nil
+	}
+	j.amu.Lock()
+	defer j.amu.Unlock()
+	if v, ok := j.active[kind]; ok && time.Since(v.at) < activeTTL {
+		return v.targets
+	}
+	prefix := Prefix + kind + "/"
+	objs, err := j.b.List(ctx, prefix)
+	if err != nil {
+		log.Printf("[journal] active %s: %v", kind, err)
+		return j.active[kind].targets
+	}
+	now := time.Now()
+	targets := make(map[string]bool, len(objs))
+	for _, o := range objs {
+		if now.Sub(o.LastModified) >= staleAfter {
+			continue
+		}
+		targets[strings.TrimSuffix(strings.TrimPrefix(o.Key, prefix), ".json")] = true
+	}
+	j.active[kind] = activeView{at: now, targets: targets}
+	return targets
 }
 
 // Register installs the recovery handler for a kind.

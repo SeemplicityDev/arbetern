@@ -630,11 +630,12 @@ func (r *Registry) Get(agent, id string) (*Workflow, bool) {
 // List returns all workflows, optionally filtered by agent, sorted by creation time asc.
 func (r *Registry) List(agent string) []*Workflow {
 	out := make([]*Workflow, 0)
+	active := r.activeRuns()
 	r.docs.Range(func(_ string, w *Workflow) {
 		if agent != "" && w.Agent != agent {
 			return
 		}
-		w.Running = r.isRunning(w.Agent, w.ID)
+		w.Running = r.isRunningIn(active, w.Agent, w.ID)
 		out = append(out, w)
 	})
 	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt < out[j].CreatedAt })
@@ -650,12 +651,34 @@ func (r *Registry) ListSummaries(agent string) []*Workflow {
 	return list
 }
 
-// isRunning reports whether this replica has a tick of the workflow in flight.
+// isRunning reports whether a tick of the workflow is in flight anywhere in
+// the fleet.
 func (r *Registry) isRunning(agent, id string) bool {
+	return r.isRunningIn(r.activeRuns(), agent, id)
+}
+
+// activeRuns is the set of runs in flight across the fleet, keyed agent/id.
+// Callers ranging over the documents fetch it first: Range holds their lock
+// for the whole walk, and the listing behind this must not happen under it.
+func (r *Registry) activeRuns() map[string]bool {
 	r.mu.RLock()
-	defer r.mu.RUnlock()
+	jr := r.inflight
+	r.mu.RUnlock()
+	return jr.Active(context.Background(), JournalKind)
+}
+
+// isRunningIn answers for one workflow against an already-fetched active set.
+// The local busy flag alone is not enough: runners exist only on the replica
+// holding the scheduling lease, while a manual or queued run is claimed by
+// whichever replica drains the queue. A run on the other pod would otherwise
+// read as finished, and the console would show the previous run's status —
+// "ok" — while the workflow was still going. The journal is written and
+// heartbeated by whoever runs the tick, so it answers for every replica.
+func (r *Registry) isRunningIn(active map[string]bool, agent, id string) bool {
+	r.mu.RLock()
 	run := r.runners[key(agent, id)]
-	return run != nil && run.busy.Load() != 0
+	r.mu.RUnlock()
+	return (run != nil && run.busy.Load() != 0) || active[agent+"/"+id]
 }
 
 // UpdateOpts carries the editable fields of a workflow. Any field left at
@@ -906,11 +929,12 @@ var errUnchanged = errors.New("unchanged")
 // ListBySource returns copies of workflows whose Source equals src.
 func (r *Registry) ListBySource(src string) []*Workflow {
 	out := make([]*Workflow, 0)
+	active := r.activeRuns()
 	r.docs.Range(func(_ string, w *Workflow) {
 		if w.Source != src {
 			return
 		}
-		w.Running = r.isRunning(w.Agent, w.ID)
+		w.Running = r.isRunningIn(active, w.Agent, w.ID)
 		out = append(out, w)
 	})
 	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt < out[j].CreatedAt })
