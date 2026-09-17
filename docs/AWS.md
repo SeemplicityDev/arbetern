@@ -403,6 +403,9 @@ which is what you want for a "daily cost summary" posted at morning UTC.
 /ovad break down last month's EKS spend by workload for the platform namespace
 /ovad which pods drove the biggest cost increase week-over-week
 /ovad what columns does the CUR table have
+/hermes list the athena catalogs and databases
+/hermes what partition columns does the events table have in athena
+/hermes count rows per day in the events table for the last 7 days
 ```
 
 ## Example Workflow: Daily Cost Summary

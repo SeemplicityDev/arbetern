@@ -93,10 +93,10 @@ secretValues:
   # azure-client-secret: "your-azure-client-secret"
   # azure-billing-account-id: ""     # EA enrollment number (preferred for EA tenants)
   # azure-management-group-id: ""    # MG scope (preferred for non-EA tenants); defaults to tenant root MG
-  # Databricks SQL warehouse (optional — enables the read-only databricks_query tool for the ovad agent only).
+  # Databricks SQL warehouse (optional — enables the read-only databricks_query tool for the ovad, pulse and hermes agents).
   # OAuth M2M: create a workspace service principal + OAuth secret, grant it CAN USE on the warehouse and
   # SELECT on the catalogs/schemas you want queryable. All four keys are required. See docs/DATABRICKS.md.
-  # Tip: prefer mounting these under customCredentials.ovad below so only ovad gets them.
+  # Tip: prefer mounting these under customCredentials.<agent> below so only those agents get them.
   # databricks-host: "https://dbc-1234abcd-5678.cloud.databricks.com"
   # databricks-client-id: "00000000-0000-0000-0000-000000000000"
   # databricks-client-secret: "your-databricks-oauth-secret"
@@ -104,14 +104,14 @@ secretValues:
   # Optional — extra workspaces a single query may target via databricks_query's host/warehouse_id
   # arguments (comma-separated). Needed only for reports that span several regional workspaces.
   # databricks-allowed-hosts: "https://dbc-eu-1234.cloud.databricks.com,https://dbc-us-5678.cloud.databricks.com"
-  # ClickHouse Cloud (optional — enables the read-only clickhouse_usage_cost tool for the ovad agent only).
+  # ClickHouse Cloud (optional — enables the read-only clickhouse_usage_cost tool for the ovad and hermes agents).
   # HTTP Basic auth: create an API key (key ID + secret) in the ClickHouse Cloud console and note your
   # organization ID. All three keys are required. See docs/CLICKHOUSE.md.
-  # Tip: prefer mounting these under customCredentials.ovad below so only ovad gets them.
+  # Tip: prefer mounting these under customCredentials.<agent> below so only those agents get them.
   # clickhouse-key-id: "your-clickhouse-key-id"
   # clickhouse-key-secret: "your-clickhouse-key-secret"
   # clickhouse-organization-id: "00000000-0000-0000-0000-000000000000"
-  # ClickHouse SQL query interface (optional — enables the read-only clickhouse_query tool for ovad).
+  # ClickHouse SQL query interface (optional — enables the read-only clickhouse_query tool for ovad and hermes).
   # Point at a service's HTTPS endpoint and authenticate with a database user that has ONLY SELECT/SHOW.
   # clickhouse-query-endpoint: "https://abc123.us-east-1.aws.clickhouse.cloud:8443"
   # clickhouse-query-user: "readonly"
@@ -220,14 +220,14 @@ secretValues:
 #   ovad:
 #     sf-consumer-key: "REPLACE_ME"
 #     sf-consumer-secret: "REPLACE_ME"
-#     # Databricks is gated to ovad in code, so mounting it here keeps the
-#     # credentials off every other agent. See docs/DATABRICKS.md.
+#     # Databricks is gated to ovad/pulse/hermes in code, so mounting it here
+#     # keeps the credentials off every other agent. See docs/DATABRICKS.md.
 #     databricks-host: "https://dbc-1234abcd-5678.cloud.databricks.com"
 #     databricks-client-id: "00000000-0000-0000-0000-000000000000"
 #     databricks-client-secret: "REPLACE_ME"
 #     databricks-warehouse-id: "1234567890abcdef"
 #     databricks-allowed-hosts: "https://dbc-eu-1234.cloud.databricks.com,https://dbc-us-5678.cloud.databricks.com"
-#     # ClickHouse Cloud is also gated to ovad in code; mounting it here keeps
+#     # ClickHouse is also gated to ovad/hermes in code; mounting it here keeps
 #     # the credentials off every other agent. See docs/CLICKHOUSE.md.
 #     clickhouse-key-id: "REPLACE_ME"
 #     clickhouse-key-secret: "REPLACE_ME"

@@ -1,6 +1,6 @@
 # ClickHouse Cloud Integration
 
-Arbetern integrates with **ClickHouse** so the **ovad** agent can:
+Arbetern integrates with **ClickHouse** so the **ovad** and **hermes** agents can:
 
 - pull an organization's **usage-cost report** from the **ClickHouse Cloud API**
   — a per-day, per-entity breakdown of spend in **ClickHouse Credits (CHC)**
@@ -10,13 +10,14 @@ Arbetern integrates with **ClickHouse** so the **ovad** agent can:
 
 The two surfaces are configured independently — enable either or both.
 
-> **Scope: this integration is restricted to the `ovad` agent only.** Its tools
-> are advertised exclusively to ovad and the dispatch layer rejects the call
-> from any other agent, even if its model fabricates the tool name. The
-> allowlist lives in one place — `restrictedIntegrations` in
-> [`commands/helpers.go`](../commands/helpers.go) (`"clickhouse": {"ovad"}`). To
-> expose ClickHouse to additional agents, add their IDs there; both tool
-> registration and dispatch read the same map.
+> **Scope: this integration is restricted to the `ovad` and `hermes` agents.**
+> Its tools are advertised exclusively to those two and the dispatch layer
+> rejects the call from any other agent, even if its model fabricates the tool
+> name. The allowlist lives in one place — `restrictedIntegrations` in
+> [`commands/helpers.go`](../commands/helpers.go)
+> (`"clickhouse": {"ovad", "hermes"}`). To expose ClickHouse to additional
+> agents, add their IDs there; both tool registration and dispatch read the
+> same map.
 
 The billing tool hits the read-only endpoint
 `GET /v1/organizations/{organizationId}/usageCost` and returns the grand total
@@ -152,28 +153,32 @@ non-empty in `secretValues`, so leaving the block unset cleanly disables the
 billing integration. The `CLICKHOUSE_QUERY_*` env vars are emitted independently
 when `clickhouse-query-endpoint` is non-empty.
 
-### Restricting to a single agent at deploy time
+### Restricting to the allowed agents at deploy time
 
-Because the tool is already gated to ovad in code, the simplest production setup
-is to mount the ClickHouse credentials **only for ovad** via the chart's
-per-agent credential overlay, instead of the global secret:
+Because the tools are already gated to ovad and hermes in code, the simplest
+production setup is to mount the ClickHouse credentials **only for those
+agents** via the chart's per-agent credential overlay, instead of the global
+secret:
 
 ```yaml
 createSecret: true
 
 customCredentials:
-  ovad:
+  ovad: &clickhouse-creds
     clickhouse-key-id: "your-clickhouse-key-id"
     clickhouse-key-secret: "your-clickhouse-key-secret"
     clickhouse-organization-id: "00000000-0000-0000-0000-000000000000"
     clickhouse-query-endpoint: "https://abc123.us-east-1.aws.clickhouse.cloud:8443"
     clickhouse-query-user: "arbetern_ro"
     clickhouse-query-password: "REPLACE_ME"
+  hermes: *clickhouse-creds
 ```
 
-This provisions `arbetern-ovad-secrets`, mounts it at
-`/etc/arbetern/agent-credentials/ovad/`, and the app overlays those keys on top
-of the global config for ovad only.
+This provisions `arbetern-ovad-secrets` and `arbetern-hermes-secrets`, mounts
+each at `/etc/arbetern/agent-credentials/<agent>/`, and the app overlays those
+keys on top of the global config for those agents only. Give hermes its own
+database user if you want the two agents' queries distinguishable in
+`system.query_log`.
 
 ## Available Tool
 
@@ -207,6 +212,10 @@ of the global config for ovad only.
 /ovad ClickHouse spend from 2024-12-01 to 2024-12-31 filtered to tag:Environment=Production
 /ovad in ClickHouse, list the databases
 /ovad in ClickHouse, how many rows does the findings table in the acme database have
+/hermes in ClickHouse, show create table acme.findings
+/hermes which tables in ClickHouse are the largest on disk
+/hermes are there stuck mutations in ClickHouse right now
+/hermes review the ORDER BY of acme.findings against this query: <SQL>
 ```
 
 ## Limitations

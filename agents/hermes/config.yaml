@@ -1,0 +1,16 @@
+name: Hermes
+
+# RBAC: Slack user group IDs that can access this agent.
+# Empty list = open to everyone. Override via CUSTOM_CONFIG_DIR in deployment.
+allowed_teams: []
+
+# Chat: when true, pressing this agent's card in the management UI opens a
+# shared chat with the agent's LLM persona. The conversation is centralized
+# (no per-user auth yet — everyone sees the same history) and stored in
+# the state bucket. Disabled by default.
+chat_enabled: false
+
+# Shared memory: when true, a user's question may be grounded in related
+# questions other users asked this agent (rendered without names). Leave off
+# for agents whose answers can be personal.
+shared_memory: false

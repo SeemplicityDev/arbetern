@@ -16,6 +16,17 @@ const AGENT_INTEGRATIONS = {
     { id: 'databricks', name: 'Databricks' },
     { id: 'clickhouse', name: 'ClickHouse' },
   ],
+  hermes: [
+    { id: 'github', name: 'GitHub' },
+    { id: 'jira', name: 'Jira' },
+    { id: 'confluence', name: 'Confluence' },
+    { id: 'slack', name: 'Slack' },
+    { id: 'azure', name: 'Azure' },
+    { id: 'datadog', name: 'Datadog' },
+    { id: 'aws', name: 'AWS' },
+    { id: 'databricks', name: 'Databricks' },
+    { id: 'clickhouse', name: 'ClickHouse' },
+  ],
   goldsai: [
     { id: 'github', name: 'GitHub' },
     { id: 'nvd', name: 'NVD' },

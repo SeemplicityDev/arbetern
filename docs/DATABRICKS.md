@@ -1,19 +1,19 @@
 # Databricks Integration
 
 Arbetern integrates with the **Databricks SQL Statement Execution API** so the
-**ovad** and **pulse** agents can run read-only SQL against a Databricks SQL warehouse and
+**ovad**, **pulse** and **hermes** agents can run read-only SQL against a Databricks SQL warehouse and
 return the results as a table — ad-hoc analytics over Unity Catalog tables and
 Databricks system tables (cost/DBU reporting from `system.billing.usage`, job
 run history, lineage, etc.).
 
-> **Scope: this integration is restricted to the `ovad` and `pulse` agents.**
-> The `databricks_query` tool is advertised only to those two and the dispatch
-> layer rejects the call from any other agent, even if its model fabricates
-> the tool name. The allowlist lives in one place —
+> **Scope: this integration is restricted to the `ovad`, `pulse` and `hermes`
+> agents.** The `databricks_query` tool is advertised only to those three and
+> the dispatch layer rejects the call from any other agent, even if its model
+> fabricates the tool name. The allowlist lives in one place —
 > `restrictedIntegrations` in [`commands/helpers.go`](../commands/helpers.go)
-> (`"databricks": {"ovad", "pulse"}`). To expose Databricks to additional
-> agents, add their IDs there; both tool registration and dispatch read the
-> same map.
+> (`"databricks": {"ovad", "pulse", "hermes"}`). To expose Databricks to
+> additional agents, add their IDs there; both tool registration and dispatch
+> read the same map.
 
 Each call runs **read-only SQL** on the warehouse. The `sql` may be a single
 statement or a script of several `;`-separated statements (e.g. `DECLARE`/`SET`
@@ -111,9 +111,9 @@ The chart only emits the `DATABRICKS_*` env vars when `databricks-host` is
 non-empty in `secretValues`, so leaving the block unset cleanly disables the
 integration.
 
-### Restricting to a single agent at deploy time
+### Restricting to the allowed agents at deploy time
 
-Because the tool is already gated to ovad/pulse in code, the simplest
+Because the tool is already gated to ovad/pulse/hermes in code, the simplest
 production setup is to mount the Databricks credentials **only for the agents
 that need them** via the chart's per-agent credential overlay, instead of the
 global secret. Each agent gets its own defaults and its own allowlist, so a
@@ -135,6 +135,14 @@ customCredentials:
     # No warehouse ID: one value cannot serve both workspaces, so each query's
     # warehouse is resolved in whichever workspace it targets. ovad above stays
     # pinned to its single default because it has no allowlist.
+    databricks-allowed-hosts: "https://dbc-eu-1234.cloud.databricks.com,https://dbc-us-5678.cloud.databricks.com"
+  hermes:
+    databricks-host: "https://dbc-1234abcd-5678.cloud.databricks.com"
+    databricks-client-id: "00000000-0000-0000-0000-000000000000"
+    databricks-client-secret: "dose..."
+    databricks-warehouse-id: "1234567890abcdef"
+    # A data-platform agent reviewing schemas across regions needs the same
+    # allowlist as the reporting agent; grant only the workspaces it reviews.
     databricks-allowed-hosts: "https://dbc-eu-1234.cloud.databricks.com,https://dbc-us-5678.cloud.databricks.com"
 ```
 
@@ -244,6 +252,10 @@ SELECT * FROM ai_forecast(TABLE(history), horizon => 30)
 /ovad in databricks, sum daily billing usage for the last 14 days
 /ovad forecast next month's databricks spend from system.billing.usage
 /ovad show me the columns of system.billing.usage in databricks
+/hermes describe detail on the silver findings table in databricks
+/hermes which delta tables have the worst small-file ratio
+/hermes show the partition columns of the gold layer tables
+/hermes why did last night's silver job read 4x more bytes than usual
 ```
 
 ## Limitations

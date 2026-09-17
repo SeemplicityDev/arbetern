@@ -203,7 +203,7 @@ const (
 // restrictedIntegrations is the single source of truth for hard per-agent
 // integration gating. Each key is an integration name and the value is the
 // set of agent IDs allowed to use it. It mirrors the per-agent integration
-// cards rendered in the dashboard UI (AGENT_INTEGRATIONS in ui/index.html): an
+// cards rendered in the dashboard UI (AGENT_INTEGRATIONS in ui/app.js): an
 // agent only gets a connector's tools — at both registration and dispatch —
 // when its ID appears in that connector's list here.
 //
@@ -223,16 +223,19 @@ var restrictedIntegrations = map[string][]string{
 	integrationSalesforce: {"pulse"},
 	integrationChorus:     {"pulse"},
 	// Jira + Confluence (shared Atlassian client) — every agent except security.
-	integrationAtlassian: {"ovad", "seihin", "agent-q", "pulse"},
-	// Observability: DevOps/SRE, customer-success, and incident-triage agents.
-	integrationDatadog: {"ovad", "pulse", "seihin"},
-	// AWS cost tooling is exposed to the DevOps/SRE agent only.
-	integrationAWS: {"ovad"},
+	integrationAtlassian: {"ovad", "seihin", "agent-q", "pulse", "hermes"},
+	// Observability: DevOps/SRE, customer-success, incident-triage and data
+	// platform agents.
+	integrationDatadog: {"ovad", "pulse", "seihin", "hermes"},
+	// AWS cost, S3 and Athena tooling: DevOps/SRE plus the data platform agent,
+	// which reads S3-backed tables through the Glue catalog.
+	integrationAWS: {"ovad", "hermes"},
 	// Databricks SQL: DevOps/SRE for platform analytics, customer-success for
-	// per-account reporting.
-	integrationDatabricks: {"ovad", "pulse"},
-	// ClickHouse Cloud billing is exposed to the DevOps/SRE agent only.
-	integrationClickHouse: {"ovad"},
+	// per-account reporting, data platform for lakehouse schema and pipeline work.
+	integrationDatabricks: {"ovad", "pulse", "hermes"},
+	// ClickHouse (usage cost + read-only SQL): DevOps/SRE and the data platform
+	// agent, which reviews schemas and query plans against live tables.
+	integrationClickHouse: {"ovad", "hermes"},
 	// Freshworks (Freshdesk tickets, Freshchat conversations, CRM) is exposed
 	// to the customer-success and product-management agents.
 	integrationFreshworks: {"pulse", "seihin"},

@@ -56,6 +56,7 @@ Bayes.
 | Agent | Profession | Description |
 |---|---|---|
 | **ovad** | DevOps & SRE Engineer | Debugs CI/CD failures, reads/modifies repo files, opens PRs, searches Datadog logs/monitors/infrastructure, runs read-only SQL on a Databricks warehouse, queries ClickHouse databases/tables read-only, and reports ClickHouse Cloud usage cost — all from a Slack slash command |
+| **hermes** | Big Data & Data Platform Engineer | Reviews and writes ClickHouse / PostgreSQL / Databricks schemas, DDLs and migrations via PRs, inspects live schemas and query plans with read-only SQL on ClickHouse, Databricks and Athena, designs ETL/DAG, CDC and backfill strategies, and reports lakehouse and ClickHouse platform cost |
 | **agent-q** | QA & Test Engineer | Analyzes test failures, reviews test coverage, suggests test cases, and triages flaky tests |
 | **goldsai** | Security Researcher | Assesses CVE impact on your codebase, audits dependencies, reviews code for vulnerabilities, and recommends remediation |
 | **seihin** (製品) | Sr. Technical Product Manager | Reviews and refines Jira tickets, rewrites descriptions with PM best practices, manages ticket quality at scale |
@@ -186,9 +187,9 @@ Every stateful feature (workflows, dashboards, chat, billing, skills, MCP connec
 | `AZURE_TENANT_ID` / `AZURE_CLIENT_ID` / `AZURE_CLIENT_SECRET` | AAD service-principal credentials for the Azure Cost Management tools. Service principal needs `Cost Management Reader` at the tenant root management group (or a narrower MG) for tenant-wide cost reporting across every subscription. Distinct from `AZURE_OPEN_AI_ENDPOINT` / `AZURE_API_KEY` (Azure OpenAI as LLM backend) |
 | `AZURE_MANAGEMENT_GROUP_ID` | Optional. Management-group scope for cost queries. Defaults to `AZURE_TENANT_ID` (tenant root MG — covers every subscription in the tenant) |
 | `AZURE_AUTHORITY_HOST` / `AZURE_MANAGEMENT_HOST` | Optional sovereign-cloud overrides (Azure Government, China). Default to the public-cloud endpoints |
-| `DATABRICKS_HOST` / `DATABRICKS_CLIENT_ID` / `DATABRICKS_CLIENT_SECRET` / `DATABRICKS_WAREHOUSE_ID` | Databricks SQL warehouse + OAuth M2M service-principal credentials. Enables the read-only `databricks_query` tool for the **ovad and pulse agents**. SP needs `CAN USE` on the warehouse + `SELECT` on the target catalogs/schemas. Optional `DATABRICKS_ALLOWED_HOSTS` lets one query target another workspace (e.g. a second region) via the tool's `host`/`warehouse_id` arguments. See [docs/DATABRICKS.md](docs/DATABRICKS.md) |
-| `CLICKHOUSE_KEY_ID` / `CLICKHOUSE_KEY_SECRET` / `CLICKHOUSE_ORGANIZATION_ID` | ClickHouse Cloud API key (HTTP Basic key ID + secret) and organization ID. Enables the read-only `clickhouse_usage_cost` billing tool for the **ovad agent only**. See [docs/CLICKHOUSE.md](docs/CLICKHOUSE.md) |
-| `CLICKHOUSE_QUERY_ENDPOINT` / `CLICKHOUSE_QUERY_USER` / `CLICKHOUSE_QUERY_PASSWORD` | ClickHouse service HTTPS endpoint (e.g. `https://…clickhouse.cloud:8443`) + a read-only database user. Enables the read-only `clickhouse_query` SQL tool for the **ovad agent only** (SELECT/SHOW/DESCRIBE/EXISTS; mutations rejected). Queries are tagged with the `arbetern` User-Agent in `system.query_log`. See [docs/CLICKHOUSE.md](docs/CLICKHOUSE.md) |
+| `DATABRICKS_HOST` / `DATABRICKS_CLIENT_ID` / `DATABRICKS_CLIENT_SECRET` / `DATABRICKS_WAREHOUSE_ID` | Databricks SQL warehouse + OAuth M2M service-principal credentials. Enables the read-only `databricks_query` tool for the **ovad, pulse and hermes agents**. SP needs `CAN USE` on the warehouse + `SELECT` on the target catalogs/schemas. Optional `DATABRICKS_ALLOWED_HOSTS` lets one query target another workspace (e.g. a second region) via the tool's `host`/`warehouse_id` arguments. See [docs/DATABRICKS.md](docs/DATABRICKS.md) |
+| `CLICKHOUSE_KEY_ID` / `CLICKHOUSE_KEY_SECRET` / `CLICKHOUSE_ORGANIZATION_ID` | ClickHouse Cloud API key (HTTP Basic key ID + secret) and organization ID. Enables the read-only `clickhouse_usage_cost` billing tool for the **ovad and hermes agents**. See [docs/CLICKHOUSE.md](docs/CLICKHOUSE.md) |
+| `CLICKHOUSE_QUERY_ENDPOINT` / `CLICKHOUSE_QUERY_USER` / `CLICKHOUSE_QUERY_PASSWORD` | ClickHouse service HTTPS endpoint (e.g. `https://…clickhouse.cloud:8443`) + a read-only database user. Enables the read-only `clickhouse_query` SQL tool for the **ovad and hermes agents** (SELECT/SHOW/DESCRIBE/EXISTS; mutations rejected). Queries are tagged with the `arbetern` User-Agent in `system.query_log`. See [docs/CLICKHOUSE.md](docs/CLICKHOUSE.md) |
 | `FRESHDESK_DOMAIN` / `FRESHDESK_API_KEY` | Freshdesk host (e.g. `acme.freshdesk.com`) + API key. Enables the Freshdesk ticket tools for the **pulse and seihin agents** — read, plus private notes and tags on a ticket (the key's agent role must allow editing tickets). See [docs/FRESHWORKS.md](docs/FRESHWORKS.md) |
 | `FRESHCHAT_URL` / `FRESHCHAT_API_TOKEN` | Freshchat API base incl. `/v2` (e.g. `https://acme-123.freshchat.com/v2`) + Bearer token. Enables the read-only Freshchat conversation tools for the **pulse and seihin agents** |
 | `FRESHWORKS_CRM_DOMAIN` / `FRESHWORKS_CRM_API_KEY` | Freshworks CRM host (e.g. `acme.myfreshworks.com`) + API key. Enables the read-only CRM search/contact/deal tools for the **pulse and seihin agents**. See [docs/FRESHWORKS.md](docs/FRESHWORKS.md) |
@@ -655,6 +656,18 @@ create dashboard "Prod incidents today" short-name prod-today, every 5m, with:
 </details>
 
 <details>
+<summary><code>/hermes</code> — Big Data & Data Platform</summary>
+
+```
+create dashboard "Lakehouse health" short-name lakehouse, every 1h, with:
+- databricks_query `SELECT sku_name, sum(usage_quantity) AS dbus FROM system.billing.usage WHERE usage_date >= :since GROUP BY sku_name ORDER BY dbus DESC` with parameters [{"name":"since","value":"2025-01-01","type":"DATE"}]
+- databricks_query `DESCRIBE DETAIL main.silver.events` (file count and size — spots a small-file problem)
+- clickhouse_usage_cost for the last 30 days
+```
+
+</details>
+
+<details>
 <summary><code>/agent-q</code> — QA & Test</summary>
 
 ```
@@ -991,6 +1004,9 @@ agents/              # agent definitions (one directory per agent)
   goldsai/
     config.yaml
     prompts.yaml     # Security Research agent prompts
+  hermes/
+    config.yaml
+    prompts.yaml     # Big Data & Data Platform Engineering agent prompts
   ovad/
     config.yaml
     prompts.yaml     # DevOps & SRE agent prompts
@@ -1102,14 +1118,14 @@ transport, limits and roadmap.
 |---|---|---|
 | Slack | [docs/SLACK_BOT.md](docs/SLACK_BOT.md) | All agents |
 | GitHub | [docs/GITHUB_PAT.md](docs/GITHUB_PAT.md) | ovad, agent-q, goldsai |
-| Atlassian (Jira + Confluence) | [docs/ATLASSIAN.md](docs/ATLASSIAN.md) | seihin, ovad, agent-q, goldsai, pulse |
+| Atlassian (Jira + Confluence) | [docs/ATLASSIAN.md](docs/ATLASSIAN.md) | seihin, ovad, agent-q, goldsai, pulse, hermes |
 | NVD | [NVD API](https://nvd.nist.gov/developers) | goldsai |
 | Salesforce | [docs/SALESFORCE.md](docs/SALESFORCE.md) | pulse |
 | Chorus / ZoomInfo | [docs/CHORUS.md](docs/CHORUS.md) | pulse |
-| AWS Cost Explorer + S3 + Athena | [docs/AWS.md](docs/AWS.md) | ovad (and any agent running AWS cost workflows) |
+| AWS Cost Explorer + S3 + Athena | [docs/AWS.md](docs/AWS.md) | ovad, hermes (and any agent running AWS cost workflows) |
 | Azure Cost Management | [docs/AZURE.md](docs/AZURE.md) | ovad (and any agent running Azure cost workflows) |
-| Databricks SQL | [docs/DATABRICKS.md](docs/DATABRICKS.md) | ovad, pulse |
-| ClickHouse Cloud | [docs/CLICKHOUSE.md](docs/CLICKHOUSE.md) | ovad only |
+| Databricks SQL | [docs/DATABRICKS.md](docs/DATABRICKS.md) | ovad, pulse, hermes |
+| ClickHouse Cloud | [docs/CLICKHOUSE.md](docs/CLICKHOUSE.md) | ovad, hermes |
 | Freshworks (Freshdesk + Freshchat + CRM) | [docs/FRESHWORKS.md](docs/FRESHWORKS.md) | pulse, seihin |
 | Document360 | [docs/DOCUMENT360.md](docs/DOCUMENT360.md) | pulse only |
 | Google Drive / Sheets | [docs/GOOGLE.md](docs/GOOGLE.md) | pulse only |

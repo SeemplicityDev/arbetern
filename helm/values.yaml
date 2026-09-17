@@ -286,7 +286,7 @@ secretValues:
   # azure-client-secret: ""           # Service principal client secret
   # azure-billing-account-id: ""      # EA enrollment number (e.g. 86462187). Wins over MG when set.
   # azure-management-group-id: ""     # Optional MG scope. Leave empty for tenant-wide (root MG = tenant ID)
-  # Databricks SQL warehouse (optional — enables the databricks_query tool for the ovad agent only).
+  # Databricks SQL warehouse (optional — enables the databricks_query tool for the ovad, pulse and hermes agents).
   # Auth is OAuth 2.0 machine-to-machine: create a workspace service principal, grant it CAN USE on the
   # target SQL warehouse plus SELECT on the catalogs/schemas you want queryable, then generate an OAuth
   # secret for it. Host + client ID + secret are required; the warehouse ID is optional.
@@ -299,13 +299,13 @@ secretValues:
   # workspaces the SAME service principal belongs to. Leave unset to pin every query to
   # databricks-host. Only https URLs on a Databricks domain are accepted.
   # databricks-allowed-hosts: ""    # e.g. "https://dbc-eu.cloud.databricks.com,https://dbc-us.cloud.databricks.com"
-  # ClickHouse Cloud (optional — enables the read-only clickhouse_usage_cost tool for the ovad agent only).
+  # ClickHouse Cloud (optional — enables the read-only clickhouse_usage_cost tool for the ovad and hermes agents).
   # Auth is HTTP Basic: create an API key (key ID + secret) in the ClickHouse Cloud console and note your
   # organization ID. All three keys are required to enable the integration. See docs/CLICKHOUSE.md.
   # clickhouse-key-id: ""             # Cloud API key ID (HTTP Basic username)
   # clickhouse-key-secret: ""         # Cloud API key secret (HTTP Basic password)
   # clickhouse-organization-id: ""    # Organization ID the usage-cost report covers
-  # ClickHouse SQL query interface (optional — enables the read-only clickhouse_query tool for the ovad agent).
+  # ClickHouse SQL query interface (optional — enables the read-only clickhouse_query tool for the ovad and hermes agents).
   # Points at a service's own HTTPS endpoint and authenticates with a database user that has ONLY SELECT/SHOW
   # privileges. The connector also refuses any non-read-only statement in code. See docs/CLICKHOUSE.md.
   # clickhouse-query-endpoint: ""     # Service HTTPS endpoint, e.g. https://abc123.us-east-1.aws.clickhouse.cloud:8443
