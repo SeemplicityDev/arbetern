@@ -121,6 +121,9 @@ type Queue struct {
 
 	wake chan struct{}
 	sem  chan struct{}
+	// done closes when the worker loop has returned and every task it had in
+	// flight has finished. See Drain.
+	done chan struct{}
 }
 
 // New returns a queue over b. Register topics before calling Start.
@@ -132,6 +135,7 @@ func New(b *store.Backend) *Queue {
 		topics: map[string]*registration{},
 		wake:   make(chan struct{}, 1),
 		sem:    make(chan struct{}, maxWorkers),
+		done:   make(chan struct{}),
 	}
 }
 
@@ -233,6 +237,7 @@ func (q *Queue) Start(ctx context.Context) {
 		return
 	}
 	safego.Go("queue: worker", func() {
+		defer close(q.done)
 		idle := 0
 		for {
 			found := 0
@@ -259,6 +264,21 @@ func (q *Queue) Start(ctx context.Context) {
 			t.Stop()
 		}
 	})
+}
+
+// Drain waits for the worker to stop and for the tasks it was running to
+// finish, or for ctx to end. A handler keeps running after the poll loop is
+// cancelled, so a shutdown that does not wait here kills work that was seconds
+// from completing — and for an at-most-once topic that work is simply gone.
+func (q *Queue) Drain(ctx context.Context) {
+	if q == nil || len(q.Topics()) == 0 {
+		return
+	}
+	select {
+	case <-q.done:
+	case <-ctx.Done():
+		log.Printf("[queue] drain deadline reached with tasks still running")
+	}
 }
 
 // pollOnce lists the whole queue prefix once — not once per topic, so adding a

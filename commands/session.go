@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/justmike1/arbetern/internal/journal"
 	"github.com/justmike1/arbetern/internal/safego"
 	"github.com/justmike1/arbetern/internal/store"
 )
@@ -337,6 +338,64 @@ func (s *SessionStore) keepAlive(sess *ThreadSession, stop <-chan struct{}) {
 			s.touch(sess)
 		}
 	}
+}
+
+// slackResumeWindow is how long after it was asked a Slack request may still
+// be answered by a resumed turn. Past it the person has moved on, and an
+// answer arriving unbidden in an old thread is worse than none.
+const slackResumeWindow = 15 * time.Minute
+
+// maxSlackTurnAttempts bounds how often one Slack turn is started across
+// restarts.
+const maxSlackTurnAttempts = 2
+
+// UseJournal recovers Slack turns that a restart cut short. The journal holds
+// the thread and the message; the session holds which agent owns the thread,
+// so a resumed turn is answered by the same agent that was asked. A turn that
+// already reached a mutating tool is reported rather than replayed.
+func (s *SessionStore) UseJournal(j *journal.Journal) {
+	if s == nil || j == nil {
+		return
+	}
+	j.Register(SlackJournalKind, journal.Handler{
+		MaxAttempts: maxSlackTurnAttempts,
+		MaxAge:      slackResumeWindow,
+		Resume: func(_ context.Context, e journal.Entry) error {
+			channelID, threadTS, userID, text, ok := parseTurnEntry(e)
+			if !ok {
+				return fmt.Errorf("malformed slack turn entry %q", e.Target)
+			}
+			sess := s.Lookup(channelID, threadTS)
+			if sess == nil || sess.Router == nil {
+				return fmt.Errorf("session %s/%s is gone", channelID, threadTS)
+			}
+			safego.Go("session: resume "+channelID+"/"+threadTS, func() {
+				sess.Router.ResumeTurn(channelID, threadTS, userID, text)
+			})
+			return nil
+		},
+		Abandon: func(_ context.Context, e journal.Entry, reason string) {
+			channelID, threadTS, _, _, ok := parseTurnEntry(e)
+			if !ok || s.slack == nil {
+				return
+			}
+			if err := s.slack.PostThreadReply(channelID, threadTS,
+				":warning: I couldn't finish this request — "+reason+". Nothing further will happen automatically; send it again when you're ready."); err != nil {
+				log.Printf("[session] interruption notice channel=%s thread=%s: %v", channelID, threadTS, err)
+			}
+		},
+	})
+}
+
+// parseTurnEntry splits a slack-turn entry back into the thread it belongs to
+// and the message that was being answered.
+func parseTurnEntry(e journal.Entry) (channelID, threadTS, userID, text string, ok bool) {
+	channelID, threadTS, ok = strings.Cut(e.Target, "/")
+	if !ok {
+		return "", "", "", "", false
+	}
+	userID, text, _ = strings.Cut(e.Detail, " ")
+	return channelID, threadTS, userID, text, strings.TrimSpace(text) != ""
 }
 
 // touch extends the session and writes it back, at most every few seconds.

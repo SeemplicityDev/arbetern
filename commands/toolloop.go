@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/justmike1/arbetern/internal/journal"
 	"github.com/justmike1/arbetern/internal/progress"
 	"github.com/justmike1/arbetern/internal/safego"
 	"github.com/justmike1/arbetern/llm"
@@ -315,7 +316,15 @@ func (h *GeneralHandler) executeToolsConcurrently(ctx context.Context, lp toolLo
 		results[i] = h.executeTool(ctx, lp.channelID, lp.userID, lp.auditTS, tc.Function.Name, tc.Function.Arguments)
 		h.recordTool(tc.Function.Name, time.Since(toolStart), results[i])
 	}
-	if len(calls) == 1 || anyMutating(calls) {
+	mutating := anyMutating(calls)
+	if mutating {
+		// Recorded before the call, not after: a crash between the write and
+		// the record is exactly the case this guards against, and an entry
+		// that says "no changes yet" would then be replayed on top of a pull
+		// request that already exists.
+		journal.NoteSideEffect(ctx)
+	}
+	if len(calls) == 1 || mutating {
 		for i := range calls {
 			run(i)
 		}

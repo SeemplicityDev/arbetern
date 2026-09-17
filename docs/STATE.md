@@ -6,6 +6,10 @@ in-memory cache of it. Any replica can serve any Slack command, chat turn or
 UI request; a replica that dies loses nothing, and a new one is ready as
 soon as it has loaded the bucket.
 
+That covers stored state. Work that was *running* when a replica went away is
+covered separately, by the in-flight journal described under
+[Recovering interrupted work](#recovering-interrupted-work).
+
 ```
 S3_BACKEND_ARN=arn:aws:s3:::acme-arbetern-state/prod
 ```
@@ -27,6 +31,7 @@ IAM policy.
 | `billing/usage-YYYY-MM.json`, `billing/recent.json` | Usage & billing ledger |
 | `metrics/perf-YYYY-MM.json`, `metrics/recent.json` | Performance series: turn, model-call and tool latency histograms and outcome counts. Carries no identity — keyed by agent, entry path, model, backend and tool only |
 | `queue/<topic>/<task>.json` | Deferred work waiting to run (see below). A `user-context` task carries the turn it is about to write, so until it is processed the same conversation text lives here as well as under `user-context/` |
+| `journal/<kind>/<target>.json` | Work that is running right now, one object per in-flight item, removed when it ends (see below). An object still here whose heartbeat has stopped is work a replica was doing when it went away |
 | `user-context/<agent>/<user>.json` | Per-user rolling context (`{"entries":[{id,at,c,q,a}]}`, `c` = channel) |
 | `user-profiles/<identity>.json` | Aggregated per-person context, derived from the documents above: one copy per identity that person is recorded under, each holding the same merged view. Derived state — safe to delete, rebuilt on the hour |
 | `sessions/<channel>/<thread>.json`, `sessions/_stats.json` | Slack thread sessions and their counters |
@@ -228,7 +233,7 @@ Each topic chooses its delivery mode:
 | Topic | Mode | What it defers |
 |---|---|---|
 | `user-context` | at-least-once, 4 attempts | Writing a finished turn into the user's rolling context, indexing its vector, and folding it into that person's aggregated profile. Retries are safe: the entry ID travels with the task, so a redelivered task recognises the write it already made instead of appending the turn twice. A failed profile update is logged rather than retried — the hourly rebuild repairs it |
-| `workflow-run` | at-most-once | Manual "Run now" and event-triggered (`on_success` / `on_failure`) runs. The task is dropped the moment it is claimed: a tick opens pull requests and posts to Slack, so a run lost to a crash is far cheaper than one replayed after it. The per-workflow lease still prevents two replicas running the same workflow at once |
+| `workflow-run` | at-most-once | Manual "Run now", event-triggered (`on_success` / `on_failure`), catch-up and resumed runs. The task is dropped the moment it is claimed: a tick opens pull requests and posts to Slack, so a run lost to a crash is far cheaper than one replayed blindly after it. What decides whether to replay is the journal, which knows whether the run had reached a mutating tool; the queue itself never retries this topic. The per-workflow lease still prevents two replicas running the same workflow at once |
 
 A failed at-least-once task is rescheduled with exponential backoff (30s
 doubling to 15 minutes) and dropped once its attempt budget is spent. A task
@@ -241,6 +246,83 @@ topic; a backlog that keeps growing means the fleet is behind.
 Moving the user-context write off the reply path is what it is for: the turn's
 memory is not read again until the *next* turn, so the requester's answer no
 longer waits on a conditional read-modify-write plus an embedding call.
+
+## Recovering interrupted work
+
+A lease says who *may* run something. It says nothing about what *was* running
+when a pod was killed mid-rollout, so that work used to disappear: a workflow
+tick ended as a cancelled run, a chat conversation sat on "answering" until its
+30-minute budget expired, and a Slack thread kept "Processing request" forever.
+
+`journal/<kind>/<target>.json` closes that gap. An entry is written the moment
+work starts and deleted when it ends, and its holder rewrites it every 20
+seconds. An entry whose heartbeat has been silent for two minutes is work that
+was interrupted, and the replica holding the scheduling lease sweeps for those
+once a minute:
+
+| Kind | Target | What a resume does |
+|---|---|---|
+| `workflow-run` | `<agent>/<id>` | Re-runs the tick through the `workflow-run` queue topic, so it lands on whichever replica has capacity |
+| `chat-turn` | `<agent>/<conversation>` | Answers the conversation's last question again. The transcript is the record of what was asked, so nothing but the asker's identity travels in the journal |
+| `slack-turn` | `<channel>/<thread>` | Re-runs the message in its own thread, answered by the agent the session records as owning it |
+
+Everything behind those entries calls models, opens pull requests and posts to
+Slack, so resuming is bounded on four axes. A run is never replayed twice for
+the same reason, and every refusal is reported where the work would have
+appeared — a run log entry, a message in the conversation, a reply in the
+thread — rather than being dropped quietly:
+
+- **Side effects.** The first mutating tool call in a turn — `modify_file`,
+  `create_file`, `post_slack_message`, `create_workflow`, … — stamps the entry
+  *before* the call runs. An entry carrying that mark is never replayed,
+  because a half-applied run has already opened the pull request a second pass
+  would duplicate. Recording it after the call would defeat the point: a crash
+  between the write and the record is exactly the case being guarded.
+- **Attempts.** Each resume increments the entry's attempt count. Past the
+  kind's budget (two for all three kinds) the work is abandoned — at that point
+  the restart loop, not the work, is what needs fixing.
+- **Age.** Work is resumable for one hour (`workflow-run`), 30 minutes
+  (`chat-turn`) or 15 minutes (`slack-turn`), counted from when it *first*
+  started rather than from the last attempt. Past that the schedule has come
+  round again or the person has moved on, and a late answer is worse than none.
+- **Volume.** One sweep resumes at most eight entries, so a bucket full of
+  stale entries after a bad day cannot stampede the fleet.
+
+Claiming an entry is a conditional write, like everything else here, so two
+replicas sweeping at once cannot both resume the same work.
+
+A run that was interrupted is also kept out of the auto-disable budget. Without
+that, three rollouts during a long tick would disable a workflow that had
+nothing wrong with it: the process it was running in went away, which is not
+the workflow failing.
+
+## Catching up after downtime
+
+Recovery covers work that had started. A schedule that came due while *nothing
+was scheduling* — the gap between a leader being killed and its replacement
+winning the lease — is a separate case, handled when the runners start:
+
+- **Workflows.** A workflow whose next fire is already in the past, measured
+  from its last run (or from its creation, for one that has never run), fires
+  one catch-up tick through the queue. Only the most recent missed fire is made
+  up: a week of downtime owes one daily report, not seven.
+- **Dashboards.** A dashboard whose stored data is already older than its own
+  sync interval refreshes once on boot instead of serving stale data for a
+  further interval. The catch-ups are staggered over 90 seconds, by a hash of
+  the dashboard, so a restart does not put every upstream under one burst.
+
+## Shutting down
+
+`SIGTERM` stops the HTTP server, hands the scheduling lease straight over
+rather than letting it expire, waits up to 20 seconds for the tasks the queue
+already had running to finish — a handler keeps going after its poll loop is
+cancelled, and killing one that was seconds from done costs an at-most-once
+task outright — and then flushes the buffered usage and performance samples.
+
+The chart sets `terminationGracePeriodSeconds: 120` because that sequence needs
+longer than Kubernetes' 30-second default, which would cut it off partway and
+lose the final flush. Whatever still does not land inside the window is in the
+journal and is picked up after the restart.
 
 ## Lists and detail pages
 

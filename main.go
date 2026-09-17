@@ -37,6 +37,7 @@ import (
 	"github.com/justmike1/arbetern/github"
 	"github.com/justmike1/arbetern/google"
 	"github.com/justmike1/arbetern/internal/httpx"
+	"github.com/justmike1/arbetern/internal/journal"
 	"github.com/justmike1/arbetern/internal/progress"
 	"github.com/justmike1/arbetern/internal/queue"
 	"github.com/justmike1/arbetern/internal/safego"
@@ -257,6 +258,9 @@ const (
 	// vectorIndexRetry is how often a vector index that failed to open at boot
 	// is tried again, so a permission fix takes effect without a restart.
 	vectorIndexRetry = 5 * time.Minute
+	// recoverySweepInterval is how often the leader looks for work that was
+	// left in flight by a replica that went away.
+	recoverySweepInterval = time.Minute
 	// catalogSyncInterval is how often the leader re-embeds changed workflow
 	// and dashboard descriptors for search.
 	catalogSyncInterval = 5 * time.Minute
@@ -2246,10 +2250,16 @@ func main() {
 	// so no leader is involved and the backlog spreads across the fleet.
 	tasks := queue.New(backend)
 
+	// In-flight record: work is written to the bucket while it runs and
+	// removed when it ends, so a restart can tell what never finished from
+	// what simply is not running. Kinds register their own recovery below.
+	inflight := journal.New(backend)
+
 	// Thread sessions live in the bucket so a reply in a thread may be
 	// answered by any replica.
 	sessions := commands.NewSessionStore(backend, cfg.ThreadSessionTTL)
 	sessions.SetSlack(slackClient)
+	sessions.UseJournal(inflight)
 	log.Printf("Thread sessions: %ssessions/ (TTL %s)", backend, cfg.ThreadSessionTTL)
 	var vectorIndex *vectors.Index
 	var vectorErr error
@@ -2311,6 +2321,7 @@ func main() {
 	// below once the routers map is populated.
 	wfRegistry := workflows.New(backend, nil)
 	wfRegistry.UseQueue(tasks)
+	wfRegistry.UseJournal(inflight)
 	if err := wfRegistry.LoadAll(bootCtx); err != nil {
 		log.Fatalf("failed to load workflows: %v", err)
 	}
@@ -2446,6 +2457,7 @@ func main() {
 		router.SetMCP(mcpRegistry)
 		router.SetCatalog(catalogIndex)
 		router.SetPerf(perfStore)
+		router.SetJournal(inflight)
 		routers[agent.ID] = router
 
 		// Sweeps the per-router channel-history cache so inactive channels
@@ -2498,6 +2510,7 @@ func main() {
 		// attribute a created Jira ticket's reporter to the requester.
 		return router.RunChat(ctx, user, msgs, userMessage, tracker)
 	})
+	chatRegistry.UseJournal(inflight)
 	if err := chatRegistry.Load(bootCtx); err != nil {
 		log.Fatalf("failed to load chat transcripts: %v", err)
 	}
@@ -3110,6 +3123,7 @@ func main() {
 	defer cancelQueue()
 	tasks.Start(queueCtx)
 	log.Printf("Deferred work: %squeue/ (topics %v)", backend, tasks.Topics())
+	log.Printf("In-flight journal: %s%s (kinds %v)", backend, journal.Prefix, inflight.Kinds())
 
 	// Every replica keeps its caches in step with the bucket so UI reads and
 	// tool calls see what other replicas wrote.
@@ -3140,6 +3154,7 @@ func main() {
 			if dashSyncer != nil {
 				dashSyncer.Start(held)
 			}
+			inflight.StartRecovery(held, recoverySweepInterval)
 			chatRegistry.StartRetention(held, cfg.ChatRetention, time.Hour)
 			userContextStore.StartGC(held, time.Hour)
 			sessions.StartSweeper(held, time.Minute)
@@ -3207,6 +3222,11 @@ func main() {
 	case <-leaderDone:
 	case <-time.After(10 * time.Second):
 	}
+	// Give the tasks already running a chance to land. Whatever does not is
+	// recorded in the journal and picked up after the restart.
+	drainCtx, cancelDrain := context.WithTimeout(context.Background(), 20*time.Second)
+	tasks.Drain(drainCtx)
+	cancelDrain()
 	// Both final flushes start as soon as their stop channel closes, so they
 	// share one deadline rather than queueing two.
 	close(billingStop)

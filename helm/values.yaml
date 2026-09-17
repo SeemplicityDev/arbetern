@@ -33,6 +33,14 @@ serviceAccount:
 podAnnotations: {}
 podLabels: {}
 
+# Long enough for the whole shutdown sequence: stop serving, hand the
+# scheduling lease over, let the deferred tasks already running finish, then
+# flush the buffered usage and performance samples. Kubernetes defaults to 30s,
+# which cuts that off partway and loses the final flush. Work that still does
+# not finish inside this window is recorded in the state bucket's journal and
+# resumed after the restart.
+terminationGracePeriodSeconds: 120
+
 podSecurityContext:
   # distroless/static:nonroot runs as uid/gid 65532.
   runAsNonRoot: true

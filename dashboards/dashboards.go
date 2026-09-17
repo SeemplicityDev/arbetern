@@ -25,6 +25,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"log"
 	"regexp"
 	"sort"
@@ -259,9 +260,13 @@ func (r *Registry) applyChanges(changes []store.Change[Dashboard]) {
 			}
 		case !active:
 		case c.Old == nil:
-			r.startRunner(c.New, c.New.Source != "gitops")
+			mode := startNow
+			if c.New.Source == "gitops" {
+				mode = startQuiet
+			}
+			r.startRunner(c.New, mode)
 		case c.Old.SyncInterval != c.New.SyncInterval || c.Old.Kind != c.New.Kind:
-			r.startRunner(c.New, false)
+			r.startRunner(c.New, startQuiet)
 		}
 	}
 }
@@ -279,7 +284,7 @@ func (r *Registry) StartAll(ctx context.Context) {
 	r.active = true
 	r.mu.Unlock()
 	r.docs.Range(func(_ string, d *Dashboard) {
-		r.startRunner(d, false)
+		r.startRunner(d, startCatchUp)
 	})
 }
 
@@ -319,7 +324,7 @@ func (r *Registry) Create(ctx context.Context, agent, createdBy string, name, sh
 	if err := r.docs.Create(ctx, store.Key(agent, id), d); err != nil {
 		return nil, err
 	}
-	r.startRunner(d, true)
+	r.startRunner(d, startNow)
 	log.Printf("[dashboards] created %s/%s (%q, every %s)", agent, id, name, d.interval())
 	return d, nil
 }
@@ -489,7 +494,7 @@ func (r *Registry) UpsertFromSpec(ctx context.Context, spec UpsertSpec) (d *Dash
 		}
 		err := r.docs.Create(ctx, k, nd)
 		if err == nil {
-			r.startRunner(nd, false)
+			r.startRunner(nd, startQuiet)
 			log.Printf("[dashboards] upsert created %s/%s (%q, source=%s)", spec.Agent, spec.ID, spec.Name, spec.Source)
 			return nd, true, nil
 		}
@@ -523,7 +528,7 @@ func (r *Registry) UpsertFromSpec(ctx context.Context, spec UpsertSpec) (d *Dash
 		return nil, false, err
 	}
 	if orig.SyncInterval != updated.SyncInterval {
-		r.startRunner(updated, false)
+		r.startRunner(updated, startQuiet)
 	}
 	log.Printf("[dashboards] upsert updated %s/%s (%q, source=%s)", spec.Agent, spec.ID, spec.Name, spec.Source)
 	return updated, true, nil
@@ -580,9 +585,50 @@ func specFromDashboard(d *Dashboard) UpsertSpec {
 	}
 }
 
+// overdue reports a dashboard whose stored data is already older than its own
+// interval. A dashboard that has never synced counts as overdue.
+func overdue(d *Dashboard, interval time.Duration, now time.Time) bool {
+	if d.LastSync == "" {
+		return true
+	}
+	last, err := time.Parse(time.RFC3339, d.LastSync)
+	if err != nil {
+		return true
+	}
+	return now.Sub(last.UTC()) >= interval
+}
+
+// stagger spreads catch-up syncs deterministically by dashboard, so the same
+// dashboard lands in the same slot on every replica and the fleet does not
+// converge on one instant.
+func stagger(key string) time.Duration {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(key))
+	return time.Duration(h.Sum32()%uint32(catchUpStagger/time.Second)) * time.Second
+}
+
+// startMode says what a newly launched runner does before it settles onto its
+// interval.
+type startMode int
+
+const (
+	// startQuiet waits for the next tick.
+	startQuiet startMode = iota
+	// startNow syncs immediately, for a create or an explicit refresh.
+	startNow
+	// startCatchUp syncs once, after a short stagger, when the dashboard's
+	// data is already older than its interval — the state a restart or a
+	// rollout leaves behind.
+	startCatchUp
+)
+
+// catchUpStagger spreads boot catch-up syncs so a restart does not put every
+// dashboard's upstream — Jira, Datadog, GitHub, Chorus — under one burst.
+const catchUpStagger = 90 * time.Second
+
 // startRunner launches the sync goroutine for d. Replaces any existing runner.
 // It does nothing on a replica that does not hold the scheduling lease.
-func (r *Registry) startRunner(d *Dashboard, runInitial bool) {
+func (r *Registry) startRunner(d *Dashboard, mode startMode) {
 	r.mu.Lock()
 	if !r.active {
 		r.mu.Unlock()
@@ -613,11 +659,23 @@ func (r *Registry) startRunner(d *Dashboard, runInitial bool) {
 	go func() {
 		defer close(run.done)
 		defer safego.Recover("dashboards: runner " + agent + "/" + id)
-		// runInitial=true is the create / explicit-refresh path and should
-		// populate the dashboard so the first view has data. runInitial=false
-		// is the server-boot path — we trust whatever is already stored and
-		// wait for the next tick.
-		if runInitial {
+		switch mode {
+		case startNow:
+			sync()
+		case startCatchUp:
+			// Boot with data already past its interval: the tick that would
+			// have refreshed it was missed while nothing was scheduling, so
+			// the dashboard would otherwise serve stale data for a whole
+			// further interval.
+			if !overdue(d, interval, time.Now().UTC()) {
+				break
+			}
+			log.Printf("[dashboards] %s/%s catching up (last_sync=%q, every %s)", agent, id, d.LastSync, interval)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(stagger(agent + "/" + id)):
+			}
 			sync()
 		}
 
@@ -887,8 +945,7 @@ func (r *Registry) RenderInstance(ctx context.Context, agent, templateID string,
 	if err != nil {
 		return nil, err
 	}
-	// runInitial=true renders immediately in the runner goroutine.
-	r.startRunner(inst, true)
+	r.startRunner(inst, startNow)
 	log.Printf("[dashboards] render instance %s/%s of template %s", agent, inst.ID, templateID)
 	cp := *inst
 	return &cp, nil

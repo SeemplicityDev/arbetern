@@ -15,6 +15,10 @@ import (
 // Snapshot is the state of a turn at one moment.
 type Snapshot struct {
 	StartedAt time.Time `json:"started_at"`
+	// Heartbeat is when the turn was last known to be alive. A stored
+	// snapshot whose heartbeat has stopped belongs to a process that went
+	// away, which is what tells a reader the turn will never land.
+	Heartbeat time.Time `json:"heartbeat,omitempty"`
 	ToolCalls int       `json:"tool_calls"`
 	LastTool  string    `json:"last_tool,omitempty"`
 	// Plan is what the model said it was about to do, taken from the text it
@@ -28,6 +32,15 @@ const maxPlanBytes = 600
 
 // Elapsed is how long the turn has been running at now.
 func (s Snapshot) Elapsed(now time.Time) time.Duration { return now.Sub(s.StartedAt) }
+
+// Silent is how long since the turn last showed a sign of life, measured from
+// the start for a snapshot written before heartbeats were recorded.
+func (s Snapshot) Silent(now time.Time) time.Duration {
+	if s.Heartbeat.IsZero() {
+		return now.Sub(s.StartedAt)
+	}
+	return now.Sub(s.Heartbeat)
+}
 
 // Line renders the snapshot as one short status sentence.
 func (s Snapshot) Line(now time.Time) string {

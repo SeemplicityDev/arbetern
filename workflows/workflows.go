@@ -52,6 +52,7 @@ import (
 	"github.com/robfig/cron/v3"
 
 	"github.com/justmike1/arbetern/internal/crud"
+	"github.com/justmike1/arbetern/internal/journal"
 	"github.com/justmike1/arbetern/internal/queue"
 	"github.com/justmike1/arbetern/internal/safego"
 )
@@ -282,6 +283,9 @@ type Registry struct {
 	// tasks, when set, carries out-of-schedule runs so they survive the
 	// replica that accepted them. See UseQueue.
 	tasks *queue.Queue
+	// inflight, when set, records each run while it is in progress so a run
+	// cut short by a restart is found again. See UseJournal.
+	inflight *journal.Journal
 }
 
 // QueueTopic is the deferred-work topic out-of-schedule runs travel through.
@@ -318,6 +322,88 @@ func (r *Registry) runQueued(ctx context.Context, payload []byte) error {
 	}
 	_, err := r.runOnce(ctx, t.Agent, t.ID, t.Trigger)
 	return err
+}
+
+// JournalKind is the journal kind interrupted runs are recorded under.
+const JournalKind = "workflow-run"
+
+// maxRunAttempts bounds how often one run is started across restarts. A tick
+// interrupted twice is left alone: at that point the restart loop, not the
+// workflow, is the thing to fix.
+const maxRunAttempts = 2
+
+// resumeWindow is how long after it first started a run may still be resumed.
+// Past it the tick's own schedule has usually come round again, and a stale
+// report is worth less than the calls it would cost.
+const resumeWindow = time.Hour
+
+// UseJournal records every run while it is in flight, so a run killed by a
+// rollout, an OOM or a node failure is picked up after the restart instead of
+// being silently dropped. A run that already reached a mutating tool is never
+// replayed — it is reported on the workflow as an interrupted tick, because a
+// half-applied tick has opened pull requests and posted to Slack that a second
+// pass would duplicate.
+func (r *Registry) UseJournal(j *journal.Journal) {
+	if r == nil || j == nil {
+		return
+	}
+	r.mu.Lock()
+	r.inflight = j
+	r.mu.Unlock()
+	j.Register(JournalKind, journal.Handler{
+		MaxAttempts: maxRunAttempts,
+		MaxAge:      resumeWindow,
+		Resume: func(ctx context.Context, e journal.Entry) error {
+			agent, id, ok := strings.Cut(e.Target, "/")
+			if !ok {
+				return fmt.Errorf("malformed journal target %q", e.Target)
+			}
+			if w, found := r.docs.Get(store.Key(agent, id)); !found || !w.Enabled {
+				return fmt.Errorf("workflow %s is gone or disabled", e.Target)
+			}
+			return r.Trigger(ctx, agent, id, resumedTrigger(e.Detail))
+		},
+		Abandon: func(ctx context.Context, e journal.Entry, reason string) {
+			agent, id, ok := strings.Cut(e.Target, "/")
+			if !ok {
+				return
+			}
+			r.recordInterrupted(ctx, agent, id, e, reason)
+		},
+	})
+}
+
+// resumedTrigger labels a resumed run with what first fired it, without
+// stacking a prefix every time it is resumed again.
+func resumedTrigger(detail string) string {
+	detail = strings.TrimPrefix(detail, "resumed:")
+	if detail == "" {
+		return "resumed"
+	}
+	return "resumed:" + detail
+}
+
+// recordInterrupted writes an abandoned run into the workflow's history so the
+// tick that never finished is visible next to the ones that did. It does not
+// count towards the auto-disable budget: the workflow did not fail, the
+// process it was running in went away.
+func (r *Registry) recordInterrupted(ctx context.Context, agent, id string, e journal.Entry, reason string) {
+	entry := RunLog{
+		StartedAt:   e.StartedAt.UTC().Format(time.RFC3339),
+		TriggeredBy: e.Detail,
+		Error:       "interrupted before it finished and not resumed: " + reason,
+	}
+	_, err := r.docs.Update(ctx, store.Key(agent, id), func(w *Workflow) error {
+		w.LastError = entry.Error
+		w.Runs = append([]RunLog{entry}, w.Runs...)
+		if len(w.Runs) > MaxRunHistory {
+			w.Runs = w.Runs[:MaxRunHistory]
+		}
+		return nil
+	})
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		log.Printf("[workflows] recording interrupted run of %s/%s: %v", agent, id, err)
+	}
 }
 
 // Trigger schedules a run outside the workflow's cron and returns as soon as it
@@ -414,7 +500,11 @@ func (r *Registry) applyChanges(changes []store.Change[Workflow]) {
 		case !active:
 		case c.Old == nil:
 			if c.New.Enabled {
-				r.startRunner(c.New, c.New.Source != "gitops")
+				mode := startNow
+				if c.New.Source == "gitops" {
+					mode = startQuiet
+				}
+				r.startRunner(c.New, mode)
 			}
 		default:
 			r.reconcileRunner(c.Old, c.New)
@@ -438,7 +528,7 @@ func (r *Registry) reconcileRunner(orig, updated *Workflow) {
 			r.stopRunner(updated.Agent, updated.ID)
 		}
 	case scheduleChanged || enabledChanged:
-		r.startRunner(updated, false)
+		r.startRunner(updated, startQuiet)
 	}
 }
 
@@ -522,7 +612,7 @@ func (r *Registry) Create(ctx context.Context, opts CreateOpts) (*Workflow, erro
 	if err := r.docs.Create(ctx, store.Key(opts.Agent, id), w); err != nil {
 		return nil, err
 	}
-	r.startRunner(w, true)
+	r.startRunner(w, startNow)
 	log.Printf("[workflows] created %s/%s (%q, pattern=%s, cron=%s)", opts.Agent, id, opts.Name, w.Pattern(), w.Cron)
 	return w, nil
 }
@@ -764,7 +854,7 @@ func (r *Registry) Upsert(ctx context.Context, spec UpsertSpec) (w *Workflow, ch
 		err := r.docs.Create(ctx, k, w)
 		if err == nil {
 			if w.Enabled {
-				r.startRunner(w, false)
+				r.startRunner(w, startQuiet)
 			}
 			log.Printf("[workflows] upsert created %s/%s (%q, source=%s)", spec.Agent, spec.ID, spec.Name, spec.Source)
 			return w, true, nil
@@ -934,12 +1024,48 @@ func (r *Registry) StartAllEnabled(ctx context.Context) {
 	r.mu.Unlock()
 	r.docs.Range(func(_ string, w *Workflow) {
 		if w.Enabled {
-			r.startRunner(w, false)
+			r.startRunner(w, startCatchUp)
 		}
 	})
 }
 
-func (r *Registry) startRunner(w *Workflow, runInitial bool) {
+// overdue reports why a workflow should fire a catch-up tick, or "" when it is
+// on schedule. The baseline is the last run, falling back to creation for a
+// workflow that has never completed one, so a workflow whose fire was missed
+// while nothing was scheduling is caught up exactly once rather than on every
+// boot. Only the most recent missed fire is made up: a week of outage owes one
+// daily report, not seven.
+func overdue(w *Workflow, schedule cron.Schedule, now time.Time) string {
+	baseline, label := time.Time{}, ""
+	if w.LastRun != "" {
+		baseline, _ = time.Parse(time.RFC3339, w.LastRun)
+		label = "last_run=" + w.LastRun
+	}
+	if baseline.IsZero() && w.CreatedAt != "" {
+		baseline, _ = time.Parse(time.RFC3339, w.CreatedAt)
+		label = "never ran, created_at=" + w.CreatedAt
+	}
+	if baseline.IsZero() || schedule.Next(baseline.UTC()).After(now) {
+		return ""
+	}
+	return "missed expected fire (" + label + ")"
+}
+
+// startMode says what a newly launched runner does before it settles onto the
+// cron schedule.
+type startMode int
+
+const (
+	// startQuiet waits for the next scheduled fire.
+	startQuiet startMode = iota
+	// startNow fires once immediately, for a freshly created workflow.
+	startNow
+	// startCatchUp fires once when a fire was missed while nothing was
+	// scheduling — a restart, a rollout, or a lease that moved.
+	startCatchUp
+)
+
+func (r *Registry) startRunner(w *Workflow, mode startMode) {
 	r.mu.Lock()
 	if !r.active {
 		r.mu.Unlock()
@@ -988,32 +1114,22 @@ func (r *Registry) startRunner(w *Workflow, runInitial bool) {
 		defer close(run.done)
 		defer safego.Recover("workflows: runner " + agent + "/" + id)
 
-		// Catch-up on fresh create or server boot: if there's no LastRun
-		// (fresh create) OR the most recent expected fire has been missed
-		// since LastRun, fire one tick immediately. Then loop on
-		// schedule.Next.
-		if runInitial {
-			nowUTC := time.Now().UTC()
-			var lastRun time.Time
-			if w.LastRun != "" {
-				lastRun, _ = time.Parse(time.RFC3339, w.LastRun)
-			}
-			shouldCatchup := false
-			reason := ""
-			if lastRun.IsZero() {
-				shouldCatchup = true
-				reason = "fresh create"
-			} else if !schedule.Next(lastRun).After(nowUTC) {
-				shouldCatchup = true
-				reason = fmt.Sprintf("missed expected fire (last_run=%s)", lastRun.UTC().Format(time.RFC3339))
-			}
-			if shouldCatchup {
+		switch mode {
+		case startNow:
+			// Guarded separately from the runner: this call is inline, so a
+			// panic here would abandon the schedule loop below.
+			safego.Run("workflows: first run "+agent+"/"+id, func() {
+				_, _ = r.runOnce(ctx, agent, id, "schedule:first")
+			})
+		case startCatchUp:
+			if reason := overdue(w, schedule, time.Now().UTC()); reason != "" {
 				log.Printf("[workflows] %s/%s cron catchup: %s", agent, id, reason)
-				// Guarded separately from the runner: this call is inline, so a
-				// panic here would abandon the schedule loop below.
-				safego.Run("workflows: catchup "+agent+"/"+id, func() {
-					_, _ = r.runOnce(ctx, agent, id, "schedule:catchup")
-				})
+				// Through the queue rather than inline: a restart makes every
+				// overdue workflow catch up at once, and the queue spreads
+				// them over the fleet instead of starting them all here.
+				if err := r.Trigger(ctx, agent, id, "schedule:catchup"); err != nil {
+					log.Printf("[workflows] %s/%s catchup not started: %v", agent, id, err)
+				}
 			}
 		}
 
@@ -1098,6 +1214,11 @@ func (r *Registry) runOnce(ctx context.Context, agent, id, triggeredBy string) (
 		triggeredBy = w.triggerType()
 	}
 
+	r.mu.RLock()
+	jr := r.inflight
+	r.mu.RUnlock()
+	ctx, inflight := jr.Begin(ctx, JournalKind, agent+"/"+id, triggeredBy)
+
 	start := time.Now()
 	log.Printf("[workflows] run %s/%s (%q, pattern=%s, trigger=%s)", agent, id, w.Name, w.Pattern(), triggeredBy)
 
@@ -1144,13 +1265,30 @@ func (r *Registry) runOnce(ctx context.Context, agent, id, triggeredBy string) (
 		firstError = err
 	}
 
+	// A run that failed with its context already cancelled was cut short by a
+	// shutdown or a lost lease, not by anything wrong with the workflow. Its
+	// journal entry stays behind so the next replica picks the run up, and the
+	// outcome below is recorded without spending the workflow's failure budget
+	// — otherwise three rollouts during a long tick would auto-disable it. A
+	// run that produced a result is finished whatever the context now says, so
+	// cancellation racing the last line of work never replays a completed tick.
+	interrupted := firstError != nil && ctx.Err() != nil
+	if interrupted {
+		inflight.Interrupted()
+	} else {
+		defer inflight.Done()
+	}
+
 	duration := time.Since(start)
 	if len(finalResult) > MaxResultChars {
 		finalResult = finalResult[:MaxResultChars] + "\n…(truncated)"
 	}
 	entry.DurationMS = duration.Milliseconds()
 	entry.Result = finalResult
-	if firstError != nil {
+	if firstError != nil && interrupted {
+		entry.Error = "interrupted after " + duration.Round(time.Second).String() + ": " + firstError.Error()
+		log.Printf("[workflows] run %s/%s interrupted after %s; left for recovery", agent, id, duration.Round(time.Millisecond))
+	} else if firstError != nil {
 		entry.Error = firstError.Error()
 		log.Printf("[workflows] run %s/%s failed after %s: %v", agent, id, duration.Round(time.Millisecond), firstError)
 	} else {
@@ -1169,7 +1307,9 @@ func (r *Registry) runOnce(ctx context.Context, agent, id, triggeredBy string) (
 		w.LastResult = finalResult
 		if firstError != nil {
 			w.LastError = firstError.Error()
-			w.ConsecutiveFailures++
+			if !interrupted {
+				w.ConsecutiveFailures++
+			}
 		} else {
 			w.LastError = ""
 			w.ConsecutiveFailures = 0

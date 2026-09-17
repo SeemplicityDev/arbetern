@@ -22,6 +22,7 @@ import (
 	"github.com/justmike1/arbetern/freshworks"
 	"github.com/justmike1/arbetern/github"
 	"github.com/justmike1/arbetern/google"
+	"github.com/justmike1/arbetern/internal/journal"
 	"github.com/justmike1/arbetern/internal/progress"
 	"github.com/justmike1/arbetern/llm"
 	"github.com/justmike1/arbetern/mcp"
@@ -61,6 +62,7 @@ type Router struct {
 	userContextStore  *UserContextStore
 	billing           UsageRecorder
 	perf              PerfRecorder
+	inflight          *journal.Journal
 }
 
 func NewRouter(slackClient SlackClient, ghClient *github.Client, modelsClient *llm.Client, codeModelsClient *llm.Client, jiraClient *atlassian.Client, nvdClient *nvd.Client, sfClient *salesforce.Client, chorusClient *chorus.Client, datadogClients *datadog.MultiClient, awsClient *aws.Client, azureClient *azure.Client, databricksClient *databricks.Client, clickhouseClient *clickhouse.Client, freshworksClient *freshworks.Client, googleClient *google.Client, document360Client *document360.Client, dashboardRegistry *dashboards.Registry, workflowRegistry *workflows.Registry, pp PromptProvider, agentID, appURL string, sessions *SessionStore, maxToolRounds int, userContextStore *UserContextStore, usage UsageRecorder) *Router {
@@ -114,6 +116,18 @@ func (r *Router) SetPerf(p PerfRecorder) { r.perf = p }
 // dashboards.
 func (r *Router) SetCatalog(c *catalog.Index) { r.catalog = c }
 
+// SetJournal records this agent's Slack turns while they run, so a turn cut
+// short by a restart is answered afterwards instead of leaving the thread on
+// "Processing request" forever.
+func (r *Router) SetJournal(j *journal.Journal) { r.inflight = j }
+
+// ResumeTurn re-runs an interrupted Slack turn. The journal calls it after a
+// restart; the reply lands in the same thread the person is already watching.
+func (r *Router) ResumeTurn(channelID, threadTS, userID, text string) {
+	log.Printf("[agent=%s user=%s channel=%s thread=%s] resuming interrupted turn", r.agentID, userID, channelID, threadTS)
+	r.HandleThreadReply(channelID, threadTS, userID, text)
+}
+
 // ToolDefinitions returns the tool schema this agent's tool loop offers with
 // the clients configured right now, for the integrations catalogue.
 func (r *Router) ToolDefinitions() []llm.Tool {
@@ -162,7 +176,9 @@ func (r *Router) Handle(channelID, userID, text, responseURL string) {
 		_, _ = r.slackClient.PostMessage(channelID, r.prompts.MustGet("intro"))
 		return
 	}
-	r.dispatch(channelID, userID, text, responseURL, auditTS, userContext, sess)
+	ctx, inflight := r.beginTurn(context.Background(), channelID, auditTS, userID, text)
+	defer inflight.Done()
+	r.dispatch(ctx, channelID, userID, text, responseURL, auditTS, userContext, sess)
 
 	// Post a session footer so the user knows they can reply in the thread.
 	if auditTS != "" && r.sessions != nil {
@@ -353,18 +369,34 @@ func (r *Router) HandleThreadReply(channelID, threadTS, userID, text string) {
 		sess = r.sessions.Lookup(channelID, threadTS)
 	}
 
-	r.dispatch(channelID, userID, text, "", threadTS, userContext, sess)
+	ctx, inflight := r.beginTurn(context.Background(), channelID, threadTS, userID, text)
+	defer inflight.Done()
+	r.dispatch(ctx, channelID, userID, text, "", threadTS, userContext, sess)
+}
+
+// SlackJournalKind is the journal kind interrupted Slack turns are recorded
+// under.
+const SlackJournalKind = "slack-turn"
+
+// beginTurn records the turn in the journal. The message text travels with the
+// entry because it is the only thing a resume needs that Slack will not hand
+// back: the thread it belongs to is addressed by channel and timestamp.
+func (r *Router) beginTurn(ctx context.Context, channelID, threadTS, userID, text string) (context.Context, *journal.Handle) {
+	if r.inflight == nil || threadTS == "" {
+		return ctx, nil
+	}
+	return r.inflight.Begin(ctx, SlackJournalKind, channelID+"/"+threadTS, userID+" "+text)
 }
 
 // dispatch runs the request through the debug or general handler.
-func (r *Router) dispatch(channelID, userID, text, responseURL, threadTS, userContext string, sess *ThreadSession) {
+func (r *Router) dispatch(ctx context.Context, channelID, userID, text, responseURL, threadTS, userContext string, sess *ThreadSession) {
 	if isDebugIntent(strings.ToLower(text)) {
 		log.Printf("[user=%s channel=%s thread=%s] routed to: debug", userID, channelID, threadTS)
-		r.newDebugHandler(userContext).Execute(channelID, userID, text, responseURL, threadTS)
+		r.newDebugHandler(userContext).Execute(ctx, channelID, userID, text, responseURL, threadTS)
 		return
 	}
 	log.Printf("[user=%s channel=%s thread=%s] routed to: general handler", userID, channelID, threadTS)
-	r.newGeneralHandler(userContext, sess).Execute(channelID, userID, text, responseURL, threadTS)
+	r.newGeneralHandler(userContext, sess).Execute(ctx, channelID, userID, text, responseURL, threadTS)
 }
 
 // RunWorkflow runs a workflow's prompt through this agent's headless LLM

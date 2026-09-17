@@ -24,8 +24,7 @@ type DebugHandler struct {
 	userContextStore *UserContextStore
 }
 
-func (h *DebugHandler) Execute(channelID, userID, text, responseURL, auditTS string) {
-	ctx := context.Background()
+func (h *DebugHandler) Execute(ctx context.Context, channelID, userID, text, responseURL, auditTS string) {
 	started := time.Now()
 
 	channelContext, err := h.contextProvider.GetFreshChannelContext(channelID)

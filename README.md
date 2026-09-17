@@ -142,7 +142,7 @@ Authentication is one of two schemes, and the target principal/key needs
 <details>
 <summary><b>State</b> — S3 backend, semantic user context</summary>
 
-Every stateful feature (workflows, dashboards, chat, billing, skills, MCP connectors, per-user context) lives in one S3 bucket; pods keep only an in-memory cache. See [docs/STATE.md](docs/STATE.md) for the layout, caching and leases.
+Every stateful feature (workflows, dashboards, chat, billing, skills, MCP connectors, per-user context) lives in one S3 bucket; pods keep only an in-memory cache. Work that was *running* when a pod was killed is recorded there too, so a rollout resumes what it interrupted instead of dropping it. See [docs/STATE.md](docs/STATE.md) for the layout, caching, leases and recovery.
 
 | Variable | Description |
 |---|---|
@@ -950,9 +950,18 @@ capacity, so it survives a pod restart between the request and the run and
 spreads the load instead of pinning it to one pod. Event-triggered
 (`on_success` / `on_failure`) listeners go through the same queue. Poll
 `GET /api/workflows/<agent>/<id>` — the run appears in its history when it
-finishes. Delivery is deliberately at-most-once: a tick opens pull requests and
-posts to Slack, so a run lost to a crash is cheaper than one replayed after it.
-See [docs/STATE.md](docs/STATE.md#deferred-work).
+finishes. Queue delivery is deliberately at-most-once: a tick opens pull
+requests and posts to Slack, so the queue never replays a run on its own.
+
+Whether an interrupted run is started again is decided instead by the in-flight
+journal, which records each run while it happens and knows whether it had
+reached a mutating tool. A run killed by a rollout before it changed anything is
+resumed after the restart; one that had already opened a pull request is
+reported on the workflow rather than replayed. Both are bounded by an attempt
+budget and a resume window, and a run interrupted this way does not count
+towards the workflow's auto-disable budget. The same applies to chat turns and
+Slack threads. See
+[docs/STATE.md](docs/STATE.md#recovering-interrupted-work).
 
 ### Configuration
 
@@ -982,7 +991,10 @@ plain Deployment with no volumes and two replicas by default (with a pod
 disruption budget and node spreading); ticks, syncs and GitOps reconciles run
 on the replica holding the scheduling lease, so a rolling update never
 double-fires a workflow, and Slack thread sessions are shared through the
-bucket so a follow-up may be answered by either replica.
+bucket so a follow-up may be answered by either replica. A rolling update also
+hands the lease over rather than letting it expire, waits for the tasks already
+running to land, catches up any schedule that came due while nothing was
+scheduling, and resumes the work it still interrupted.
 
 ### Cross-agent list command
 

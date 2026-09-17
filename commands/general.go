@@ -289,8 +289,7 @@ func (h *GeneralHandler) recordUsage(model, userID string, u llm.Usage, comp llm
 	})
 }
 
-func (h *GeneralHandler) Execute(channelID, userID, text, responseURL, auditTS string) {
-	ctx := context.Background()
+func (h *GeneralHandler) Execute(ctx context.Context, channelID, userID, text, responseURL, auditTS string) {
 	started := time.Now()
 	reporter := startSlackProgress(h.slackClient, channelID, auditTS)
 	defer reporter.done()

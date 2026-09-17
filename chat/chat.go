@@ -24,6 +24,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/justmike1/arbetern/internal/journal"
 	"github.com/justmike1/arbetern/internal/progress"
 	"github.com/justmike1/arbetern/internal/safego"
 	"github.com/justmike1/arbetern/internal/store"
@@ -46,7 +47,32 @@ const turnTimeout = 30 * time.Minute
 // pendingFlushEvery is how often in-flight progress is written to the transcript.
 const pendingFlushEvery = 5 * time.Second
 
+// pendingHeartbeatEvery bounds how long a turn can go without refreshing its
+// pending record. A turn inside one slow tool call reports no new progress for
+// minutes, and without this its transcript would be indistinguishable from one
+// whose process is gone.
+const pendingHeartbeatEvery = 30 * time.Second
+
+// pendingStaleAfter is how long a pending record may go unrefreshed before the
+// turn behind it counts as lost. Six missed heartbeats.
+const pendingStaleAfter = 3 * time.Minute
+
 const finishTimeout = 30 * time.Second
+
+// JournalKind is the journal kind interrupted chat turns are recorded under.
+const JournalKind = "chat-turn"
+
+// maxTurnAttempts bounds how often one chat turn is started across restarts.
+const maxTurnAttempts = 2
+
+// resumeWindow is how long after it was asked a question may still be answered
+// by a resumed turn. Past it the person has moved on and a late reply landing
+// in the thread is noise.
+const resumeWindow = 30 * time.Minute
+
+// interruptedNotice is what a conversation gets in place of the answer when
+// the turn behind it was lost and cannot be run again.
+const interruptedNotice = "This turn was interrupted before it finished — the process answering it went away (a restart or a rollout). Nothing was lost from the conversation; ask again and I'll pick it up."
 
 // ErrNotFound is returned when a conversation does not exist.
 var ErrNotFound = errors.New("conversation not found")
@@ -109,8 +135,9 @@ type ConversationSummary struct {
 // Registry serves per-agent chat transcripts from the state bucket and tracks
 // which agents have chat enabled. All operations are safe for concurrent use.
 type Registry struct {
-	docs    *store.Documents[transcript]
-	respond Responder
+	docs     *store.Documents[transcript]
+	respond  Responder
+	inflight *journal.Journal
 
 	mu          sync.Mutex
 	enabled     map[string]bool
@@ -270,8 +297,14 @@ func (r *Registry) Conversation(agent, id, owner string) (*transcript, error) {
 	return t, nil
 }
 
+// stalePending reports a pending turn that will never land: either its process
+// stopped refreshing it, or it has run past the budget one turn is given.
 func stalePending(p *progress.Snapshot) bool {
-	return p != nil && time.Since(p.StartedAt) > turnTimeout+time.Minute
+	if p == nil {
+		return false
+	}
+	now := time.Now()
+	return p.Silent(now) > pendingStaleAfter || p.Elapsed(now) > turnTimeout+time.Minute
 }
 
 // DeleteConversation removes a conversation. Deleting a missing conversation is
@@ -427,6 +460,7 @@ func (r *Registry) Start(agent, id, owner, user, message string) error {
 		}
 		t.UpdatedAt = now
 		snap := tracker.Snapshot()
+		snap.Heartbeat = now
 		t.Pending = &snap
 		trimMessages(t)
 		return nil
@@ -438,12 +472,29 @@ func (r *Registry) Start(agent, id, owner, user, message string) error {
 		}
 		return err
 	}
+	r.run(ctx, cancel, agent, id, user, message, contextMsgs, tracker)
+	return nil
+}
+
+// run produces one reply in the background and appends it. The turn is
+// journalled for its whole life, so one cut short by a restart is found and
+// either run again or reported, rather than leaving the conversation waiting
+// on an answer that is never coming.
+func (r *Registry) run(ctx context.Context, cancel context.CancelFunc, agent, id, user, message string, contextMsgs []Message, tracker *progress.Tracker) {
+	key := store.Key(agent, id)
 	safego.Go("chat: turn "+key, func() {
 		defer cancel()
+		ctx, inflight := r.inflight.Begin(ctx, JournalKind, key, user)
 		stop := make(chan struct{})
 		tracker.Watch(stop, pendingFlushEvery, pendingFlushEvery, func(s progress.Snapshot) { r.flushPending(ctx, key, s) })
 		reply, err := r.respond(ctx, agent, user, contextMsgs, message, tracker)
 		close(stop)
+		if ctx.Err() != nil {
+			inflight.Interrupted()
+			log.Printf("chat: turn %s interrupted; left for recovery", key)
+			return
+		}
+		defer inflight.Done()
 		msg := Message{Role: "assistant", Content: reply, Time: time.Now().UTC()}
 		if err != nil {
 			msg.Content, msg.Error = "Error: "+err.Error(), true
@@ -462,12 +513,78 @@ func (r *Registry) Start(agent, id, owner, user, message string) error {
 			log.Printf("chat: failed to store reply for %s: %v", key, err)
 		}
 	})
+}
+
+// UseJournal records chat turns while they run so an interrupted one is either
+// answered after the restart or closed off with a notice. A turn that already
+// reached a mutating tool is not replayed.
+func (r *Registry) UseJournal(j *journal.Journal) {
+	if r == nil || j == nil {
+		return
+	}
+	r.inflight = j
+	j.Register(JournalKind, journal.Handler{
+		MaxAttempts: maxTurnAttempts,
+		MaxAge:      resumeWindow,
+		Resume:      func(_ context.Context, e journal.Entry) error { return r.resume(e) },
+		Abandon: func(ctx context.Context, e journal.Entry, reason string) {
+			r.closeOff(ctx, e.Target, interruptedNotice)
+		},
+	})
+}
+
+// resume re-runs the last question of a conversation whose turn was lost. The
+// transcript is the record of what was asked, so nothing has to be carried
+// through the journal but the identity that asked it.
+func (r *Registry) resume(e journal.Entry) error {
+	agent, id := splitKey(e.Target)
+	t, ok := r.docs.Get(e.Target)
+	if !ok {
+		return ErrNotFound
+	}
+	normalize(t, agent, id)
+	if t.Pending == nil {
+		return nil
+	}
+	last := len(t.Messages) - 1
+	if last < 0 || t.Messages[last].Role != "user" {
+		r.closeOff(context.Background(), e.Target, interruptedNotice)
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), turnTimeout)
+	tracker := progress.NewTracker()
+	r.run(ctx, cancel, agent, id, e.Detail, t.Messages[last].Content, trimContext(t.Messages[:last]), tracker)
 	return nil
 }
 
-func (r *Registry) flushPending(ctx context.Context, key string, s progress.Snapshot) {
+// closeOff replaces a pending turn with a notice, so the conversation stops
+// waiting on a reply that is not coming.
+func (r *Registry) closeOff(ctx context.Context, key, notice string) {
+	agent, id := splitKey(key)
 	_, err := r.docs.Update(ctx, key, func(t *transcript) error {
-		if t.Pending == nil || (t.Pending.ToolCalls == s.ToolCalls && t.Pending.LastTool == s.LastTool) {
+		normalize(t, agent, id)
+		if t.Pending == nil {
+			return errNoChange
+		}
+		t.Pending = nil
+		t.Messages = append(t.Messages, Message{Role: "assistant", Content: notice, Time: time.Now().UTC(), Error: true})
+		t.UpdatedAt = time.Now().UTC()
+		trimMessages(t)
+		return nil
+	})
+	if err != nil && !errors.Is(err, errNoChange) && !errors.Is(err, store.ErrNotFound) {
+		log.Printf("chat: failed to close off %s: %v", key, err)
+	}
+}
+
+func (r *Registry) flushPending(ctx context.Context, key string, s progress.Snapshot) {
+	s.Heartbeat = time.Now().UTC()
+	_, err := r.docs.Update(ctx, key, func(t *transcript) error {
+		if t.Pending == nil {
+			return errNoChange
+		}
+		unchanged := t.Pending.ToolCalls == s.ToolCalls && t.Pending.LastTool == s.LastTool
+		if unchanged && t.Pending.Silent(s.Heartbeat) < pendingHeartbeatEvery {
 			return errNoChange
 		}
 		t.Pending = &s
