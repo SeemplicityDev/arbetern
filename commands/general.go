@@ -1584,8 +1584,8 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 					"type":"object",
 					"properties":{
 						"query":{"type":"string","description":"Datadog log search query (e.g. 'service:my-service status:error', 'pod_name:my-pod', 'env:prod @http.status_code:>499')"},
-						"from":{"type":"string","description":"Start of time range in ISO-8601 (e.g. '2026-03-12T10:00:00Z'). Defaults to 1 hour ago."},
-						"to":{"type":"string","description":"End of time range in ISO-8601. Defaults to now."},
+						"from":{"type":"string","description":"Start of time range: ISO-8601 ('2026-03-12T10:00:00Z'), unix milliseconds, Datadog date math ('now-24h'), or a relative duration ('-24h', '-15m'). Defaults to 1 hour ago."},
+						"to":{"type":"string","description":"End of time range, same formats as 'from'. Defaults to now."},
 						"limit":{"type":"integer","description":"Max log entries to return (default: 20, max: 50)"},
 						"site":{"type":"string","enum":["us","eu"],"description":"Datadog site to query: 'us' (datadoghq.com), 'eu' (datadoghq.eu). Infer from URLs in the user's message. Omit to query all configured sites."}
 					},
@@ -1603,8 +1603,8 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 						"query":{"type":"string","description":"Datadog log search query to aggregate over (e.g. 'service:my-service status:ok'). Append exclusions like '-@some_facet:(test* OR demo*)' to drop unwanted values."},
 						"group_by":{"description":"Facet(s) to group by. Either a single facet string (e.g. '@resource_name') or an array of facets for a composite breakdown (e.g. ['@resource_name','@http.method']). Omit for a single overall bucket (no grouping).","oneOf":[{"type":"string"},{"type":"array","items":{"type":"string"}}]},
 						"measure":{"type":"string","description":"OPTIONAL. Numeric measure facet to compute p50/p95/p99 over (e.g. '@duration', '@network.bytes_written'). Omit for a count-only aggregation (just the event count per bucket). Must be a registered Datadog measure facet when provided."},
-						"from":{"type":"string","description":"Start of time range: ISO-8601, unix-ms, or date-math ('now-14d'). Defaults to 14 days ago."},
-						"to":{"type":"string","description":"End of time range. Defaults to now."},
+						"from":{"type":"string","description":"Start of time range: ISO-8601, unix milliseconds, Datadog date math ('now-14d'), or a relative duration ('-24h', '-15m'). Defaults to 14 days ago."},
+						"to":{"type":"string","description":"End of time range, same formats as 'from'. Defaults to now."},
 						"site":{"type":"string","enum":["us","eu"],"description":"Datadog site to query: 'us' (datadoghq.com), 'eu' (datadoghq.eu). Omit to query all configured sites (recommended for platform-wide baselines)."}
 					},
 					"required":["query"]
@@ -1689,8 +1689,8 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 					"type":"object",
 					"properties":{
 						"query":{"type":"string","description":"Full Datadog metric query expression, e.g. 'avg:kubernetes.cpu.usage.total{cluster_name:prod} by {kube_service}' or 'avg:kubernetes.cpu.usage.total{*} by {kube_service} / avg:kubernetes.cpu.limits{*} by {kube_service} * 100'. Must include an aggregator (avg/sum/min/max), a metric name, a scope filter {...}, and optionally a grouping 'by {tag}'."},
-						"from":{"type":"string","description":"Start of the time window. Accepts ISO-8601 ('2026-04-19T10:00:00Z'), unix seconds, or a relative duration ('-1h', '-15m', '-7d'). Defaults to -1h."},
-						"to":{"type":"string","description":"End of the time window (ISO-8601, unix seconds, or a duration). Defaults to now."},
+						"from":{"type":"string","description":"Start of the time window: ISO-8601 ('2026-04-19T10:00:00Z'), unix seconds, or a relative duration ('-1h', '-15m', '-7d'). Defaults to -1h."},
+						"to":{"type":"string","description":"End of the time window, same formats as 'from'. Defaults to now."},
 						"site":{"type":"string","enum":["us","eu"],"description":"Datadog site to query: 'us' (datadoghq.com), 'eu' (datadoghq.eu). Infer from URLs in the user's message. Omit to query all configured sites."}
 					},
 					"required":["query"]

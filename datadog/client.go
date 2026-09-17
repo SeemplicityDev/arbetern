@@ -89,6 +89,7 @@ func (c *Client) SearchLogs(ctx context.Context, query string, from, to string, 
 	if to == "" {
 		to = time.Now().UTC().Format(time.RFC3339)
 	}
+	from, to = NormalizeLogsTime(from), NormalizeLogsTime(to)
 
 	body := map[string]interface{}{
 		"filter": map[string]interface{}{
@@ -1055,6 +1056,25 @@ func (mc *MultiClient) QueryMetricsRaw(ctx context.Context, site, query, from, t
 		return nil, lastErr
 	}
 	return payload, nil
+}
+
+// NormalizeLogsTime converts a relative Go duration ("-24h", "-15m") into the
+// RFC3339 instant the Logs API expects. Every other accepted form — ISO-8601,
+// unix milliseconds, Datadog date math ("now-14d") — is passed through
+// untouched. The metrics endpoint takes relative durations via parseTimeArg
+// while the logs endpoints reject them with a 400, so a caller that learned
+// "-24h" from a metrics query would otherwise get an opaque validation error
+// the moment it reuses that window on logs.
+func NormalizeLogsTime(v string) string {
+	t := strings.TrimSpace(v)
+	if !strings.HasPrefix(t, "-") && !strings.HasPrefix(t, "+") {
+		return v
+	}
+	d, err := time.ParseDuration(t)
+	if err != nil {
+		return v
+	}
+	return time.Now().Add(d).UTC().Format(time.RFC3339)
 }
 
 // parseTimeArg accepts ISO-8601, unix seconds, or relative shorthand like

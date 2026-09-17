@@ -76,6 +76,7 @@ func (c *Client) LogsAggregate(ctx context.Context, query, from, to string, comp
 	if to == "" {
 		to = time.Now().UTC().Format(time.RFC3339)
 	}
+	from, to = NormalizeLogsTime(from), NormalizeLogsTime(to)
 	body := aggregateRequest{
 		Compute: compute,
 		Filter: map[string]interface{}{
