@@ -485,7 +485,10 @@ func resolveRepoBranch(ctx context.Context, ghClient *github.Client, repo, branc
 //
 // A merged or closed PR is rejected rather than silently reopened: its branch
 // may be gone, and new work on finished review threads belongs in its own PR.
-func resolveWriteBranch(ctx context.Context, ghClient *github.Client, owner, repo, branchName string, prNumber int, prURL string) (branch string, errMsg string) {
+// A PR that neither this session opened nor the request named is rejected too:
+// it is one the run discovered on its own, and its reviewers did not ask for
+// this change (see BranchManager.MayWriteToPR).
+func resolveWriteBranch(ctx context.Context, ghClient *github.Client, bm *BranchManager, owner, repo, branchName string, prNumber int, prURL string) (branch string, errMsg string) {
 	if strings.TrimSpace(prURL) != "" {
 		prOwner, prRepo, prNum, err := github.ParsePRURL(prURL)
 		if err != nil {
@@ -513,6 +516,10 @@ func resolveWriteBranch(ctx context.Context, ghClient *github.Client, owner, rep
 	}
 	if requested := strings.TrimSpace(branchName); requested != "" && requested != pr.HeadRef {
 		return "", preconditionErrf("Error: branch_name %q conflicts with PR #%d, whose head branch is %q. Pass only one of them.", requested, prNumber, pr.HeadRef)
+	}
+	if bm != nil && !bm.MayWriteToPR(owner, repo, pr.HeadRef, prNumber) {
+		return "", preconditionErrf("Error: PR #%d in %s/%s was not opened for this request and the request does not name it, so changes must not be added to it. Drop pr_number/pr_url and branch_name to open a new pull request of your own.",
+			prNumber, owner, repo)
 	}
 	return pr.HeadRef, ""
 }

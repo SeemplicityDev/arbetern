@@ -25,6 +25,8 @@ type BranchManager struct {
 	agentID        string
 	activeBranches map[string]*ActiveBranchInfo
 	session        *ThreadSession
+	requestText    string
+	granted        map[string]bool
 }
 
 // NewBranchManager creates a BranchManager. If a session is provided, it seeds
@@ -36,6 +38,7 @@ func NewBranchManager(ghClient *github.Client, agentID string, session *ThreadSe
 		agentID:        agentID,
 		activeBranches: make(map[string]*ActiveBranchInfo),
 		session:        session,
+		granted:        make(map[string]bool),
 	}
 	if session != nil {
 		session.mu.Lock()
@@ -49,6 +52,90 @@ func NewBranchManager(ghClient *github.Client, agentID string, session *ThreadSe
 	return bm
 }
 
+// Authorize records the request text that drives this run — the user message,
+// the workflow prompt, the chat transcript. Branches and pull requests the
+// agent did not open itself are only written to when one of these texts names
+// them, so an unrelated open pull request is never committed onto.
+func (bm *BranchManager) Authorize(texts ...string) {
+	var b strings.Builder
+	b.WriteString(bm.requestText)
+	for _, t := range texts {
+		b.WriteString("\n")
+		b.WriteString(strings.ToLower(t))
+	}
+	bm.requestText = b.String()
+}
+
+// grant authorizes a branch the platform itself pointed the caller at.
+func (bm *BranchManager) grant(branch string) {
+	if branch = strings.ToLower(strings.TrimSpace(branch)); branch != "" {
+		bm.granted[branch] = true
+	}
+}
+
+// mayAdopt reports whether a branch that this run did not open may still be
+// committed onto: only when the request named it, or when the platform pointed
+// the caller at it. A name made of one plain word ("main", "staging", or any
+// noun the request happens to use) is never taken from the request text — the
+// match would be an accident, and for a long-lived branch a damaging one.
+func (bm *BranchManager) mayAdopt(branch string) bool {
+	branch = strings.ToLower(strings.TrimSpace(branch))
+	if branch == "" {
+		return false
+	}
+	if bm.granted[branch] {
+		return true
+	}
+	return strings.ContainsAny(branch, "/-_0123456789") && namesRef(bm.requestText, branch)
+}
+
+// namesRef reports whether text mentions ref as a whole reference rather than
+// as part of a longer one, so a branch called "fix" is not authorized by the
+// word "fix" appearing anywhere in the request. Boundaries are only required on
+// the sides where ref itself ends in a name character, which lets "#12" and
+// "/pull/12" match mid-word while still rejecting "#123".
+func namesRef(text, ref string) bool {
+	if ref == "" {
+		return false
+	}
+	checkLeft := isRefChar(ref[0])
+	checkRight := isRefChar(ref[len(ref)-1])
+	for i := 0; i+len(ref) <= len(text); i++ {
+		if text[i:i+len(ref)] != ref {
+			continue
+		}
+		if checkLeft && i > 0 && isRefChar(text[i-1]) {
+			continue
+		}
+		if checkRight && i+len(ref) < len(text) && isRefChar(text[i+len(ref)]) {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+func isRefChar(c byte) bool {
+	return c == '_' || c == '-' || c == '.' ||
+		(c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+}
+
+// MayWriteToPR reports whether a file write may land on an existing pull
+// request. A pull request opened earlier in this session qualifies; so does one
+// the request named by number, URL, or head branch. Anything else is a pull
+// request the run merely discovered — for example by listing open PRs — and
+// committing to it would put unrelated work on someone else's review.
+func (bm *BranchManager) MayWriteToPR(owner, repo, headRef string, number int) bool {
+	if active := bm.ActiveBranch(owner, repo); active != nil && active.BranchName == headRef {
+		return true
+	}
+	if bm.mayAdopt(headRef) {
+		return true
+	}
+	return namesRef(bm.requestText, fmt.Sprintf("#%d", number)) ||
+		namesRef(bm.requestText, fmt.Sprintf("/pull/%d", number))
+}
+
 // ActiveBranch returns the existing branch info for a repo, or nil.
 func (bm *BranchManager) ActiveBranch(owner, repo string) *ActiveBranchInfo {
 	return bm.activeBranches[owner+"/"+repo]
@@ -59,7 +146,7 @@ func (bm *BranchManager) ActiveBranch(owner, repo string) *ActiveBranchInfo {
 // is the caller's branch_name argument, so a write that starts its own branch
 // reads from the base rather than from an unrelated PR's branch.
 func (bm *BranchManager) ReadBranch(ctx context.Context, owner, repo, baseBranch, requestedBranch string) string {
-	if active := bm.groupingBranch(ctx, owner, repo, requestedBranch); active != nil {
+	if active := bm.groupingBranch(ctx, owner, repo, baseBranch, requestedBranch); active != nil {
 		return active.BranchName
 	}
 	return baseBranch
@@ -71,15 +158,19 @@ func (bm *BranchManager) ReadBranch(ctx context.Context, owner, repo, baseBranch
 // change wants. Naming a branch other than the active one is an explicit
 // request for a separate PR, so it does not group: a caller fixing several
 // unrelated issues in one repo gives each fix its own branch name and gets one
-// reviewable PR per fix — unless that branch already exists on the remote, in
-// which case the write belongs on it (see adoptRemoteBranch).
-func (bm *BranchManager) groupingBranch(ctx context.Context, owner, repo, requestedBranch string) *ActiveBranchInfo {
+// reviewable PR per fix — unless the request named that branch and it already
+// exists on the remote, in which case the write belongs on it (see
+// adoptRemoteBranch).
+func (bm *BranchManager) groupingBranch(ctx context.Context, owner, repo, baseBranch, requestedBranch string) *ActiveBranchInfo {
 	active := bm.resolveActiveBranch(ctx, owner, repo)
 	requested := strings.TrimSpace(requestedBranch)
 	if active != nil && (requested == "" || requested == active.BranchName) {
 		return active
 	}
 	if requested == "" {
+		return nil
+	}
+	if strings.EqualFold(requested, baseBranch) {
 		return nil
 	}
 	return bm.adoptRemoteBranch(ctx, owner, repo, requested)
@@ -93,11 +184,17 @@ func (bm *BranchManager) groupingBranch(ctx context.Context, owner, repo, reques
 // so asking for a change to a PR from any of those would otherwise cut a second
 // branch and open a second PR for every round of review feedback.
 //
+// Only a branch the request named is adopted (see mayAdopt); a branch the run
+// merely found on the remote gets a fresh branch and its own PR instead.
+//
 // The open PR for that branch, when there is one, is adopted with it: later
 // writes report its URL and add to it. A branch with no open PR (never had one,
 // or its PR was merged or closed) is still adopted, and CommitAndPR opens a PR
 // for the commit that lands on it.
 func (bm *BranchManager) adoptRemoteBranch(ctx context.Context, owner, repo, branch string) *ActiveBranchInfo {
+	if !bm.mayAdopt(branch) {
+		return nil
+	}
 	exists, err := bm.ghClient.BranchExists(ctx, owner, repo, branch)
 	if err != nil {
 		log.Printf("[branch-manager] could not verify requested branch %s, treating it as new: %v", branch, err)
@@ -191,7 +288,7 @@ func (bm *BranchManager) CommitAndPR(
 ) (*CommitResult, error) {
 	repoKey := owner + "/" + repo
 
-	if active := bm.groupingBranch(ctx, owner, repo, branchOverride); active != nil {
+	if active := bm.groupingBranch(ctx, owner, repo, baseBranch, branchOverride); active != nil {
 		result, err := bm.commitToActive(ctx, active, owner, repo, baseBranch, description, prBody, prTitleOverride, changedFiles, commitFn)
 		if err != nil {
 			return nil, err
@@ -214,6 +311,9 @@ func (bm *BranchManager) CommitAndPR(
 
 	branchName := branchOverride
 	if branchName == "" {
+		branchName = github.GenerateBranchName(bm.agentID)
+	} else if taken, err := bm.ghClient.BranchExists(ctx, owner, repo, branchName); err == nil && taken {
+		log.Printf("[branch-manager] requested branch %s already exists and was not opened for this request; using a new branch instead", branchName)
 		branchName = github.GenerateBranchName(bm.agentID)
 	}
 	if err := bm.ghClient.CreateBranch(ctx, owner, repo, baseBranch, branchName); err != nil {
@@ -313,6 +413,7 @@ func (bm *BranchManager) ensureNoDuplicatePR(ctx context.Context, owner, repo, b
 	if existing == nil {
 		return nil
 	}
+	bm.grant(existing.HeadRef)
 	return fmt.Errorf(
 		"%w (%s, title %q). Do not open another one — retry this same write with pr_number=%d (or branch_name=%q) to commit the change onto that pull request",
 		ErrDuplicateOpenPR,

@@ -862,9 +862,21 @@ entry point — a later Slack thread, a web-chat turn, or a scheduled tick — s
 it reads the branch and PR from GitHub rather than from in-process state, which
 only ever covered PRs opened in the same run or live thread session.
 
+**Writing to an existing branch or PR is opt-in.** A run may only commit onto
+one it opened itself (its own active branch, including one carried on a live
+thread session) or one the request names — the Slack message, the chat
+transcript, or the workflow prompt has to mention the branch, the PR number, or
+the PR URL. Anything else is a branch the model merely discovered, typically by
+listing the repo's open pull requests, and adopting it would push unrelated
+commits onto someone else's review. Those writes open a new branch and PR
+instead: `pr_number`/`pr_url` are rejected with that instruction, and a
+`branch_name` that is already taken is replaced by an auto-generated one. So by
+default every new session ships its own PR.
+
 The duplicate guard reinforces this: when a write would open a PR equivalent to
-one already open, it is refused with that PR's number and head branch so the
-model can retry the same write onto it.
+one already open, it is refused with that PR's number and head branch, and that
+branch is authorized for the rest of the run so the model can retry the same
+write onto it.
 
 Every PR opened by these tools also requests **GitHub Copilot as a reviewer**
 best-effort: a REST attempt with the magic `Copilot` login, falling back to

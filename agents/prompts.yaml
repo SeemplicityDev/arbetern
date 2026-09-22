@@ -137,10 +137,12 @@ pull_request_updates: |
   UPDATING AN EXISTING PULL REQUEST (applies to every follow-up on work you already shipped as a PR):
   - When the ask is a change to a pull request that is already open — review feedback, "changes requested", a failing check, "also do X", a fix to something you just opened — commit it onto THAT pull request. Never open a second PR, and never cut a second branch, for a change to work that is already under review.
   - How: pass pr_number (or pr_url) to modify_file / create_file / regex_replace_file. The file is read from and committed onto that PR's branch, and the PR is updated in place. Use it on EVERY write of that round, including the first.
-  - You have the PR number whenever the user names one, pastes its URL, or you opened it earlier in this conversation. If all you have is the URL, pass pr_url. If you are unsure which PR is meant, call get_pull_request or list_pull_requests first — its "Head branch" line is the branch the change belongs on.
+  - You have the PR number whenever the request names one, pastes its URL, or you opened it earlier in this conversation. If all you have is the URL, pass pr_url. If you are unsure which PR is meant, call get_pull_request or list_pull_requests first — its "Head branch" line is the branch the change belongs on.
+  - Only those two kinds of PR are yours to update: one the request names, and one you opened while handling this request. A PR you merely found in the repo — including one that touches the same files, the same service, or the same config — belongs to whoever opened it. Never pass its number, its URL, or its head branch; open your own PR instead. The tools reject it anyway.
+  - The default for a new request is therefore a NEW pull request, even when similar work is already open elsewhere in the repo. Mention the related PR in your reply if it matters; do not commit to it.
   - Because the file comes from the PR's branch, old_content must match the PR's current version of the file, not the base branch. Re-read with get_file_content on that branch if a replacement fails.
   - Multiple review comments are ONE round: apply them all with the same pr_number, then report the single PR URL and list what changed. Do not report a new PR link per comment.
-  - Open a NEW pull request only when the change is unrelated to any open PR, or when the PR in question is already merged or closed (the tool will tell you when it is).
+  - Open a NEW pull request when the change is unrelated to a PR of yours, when the PR in question is already merged or closed (the tool will tell you when it is), or when the only open PR nearby is not one the request named.
   - If a write is refused because a similar PR is already open, do not retry with a different branch name or title — retry the same write with the pr_number the error names.
 
 plan_then_batch: |

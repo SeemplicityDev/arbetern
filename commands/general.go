@@ -297,6 +297,7 @@ func (h *GeneralHandler) Execute(ctx context.Context, channelID, userID, text, r
 	h.currentAuditTS = auditTS
 	h.aggregateCache = nil
 	h.branchMgr = NewBranchManager(h.ghClient, h.agentID, h.session)
+	h.branchMgr.Authorize(text)
 
 	tools := h.buildTools()
 
@@ -406,6 +407,7 @@ func (h *GeneralHandler) ExecuteHeadless(ctx context.Context, userID, prompt str
 	h.aggregateCache = nil
 	h.postedSlackSigs = nil
 	h.branchMgr = NewBranchManager(h.ghClient, h.agentID, nil)
+	h.branchMgr.Authorize(prompt)
 
 	tools := h.buildTools()
 
@@ -527,6 +529,13 @@ func (h *GeneralHandler) ExecuteChat(ctx context.Context, userID string, history
 	h.aggregateCache = nil
 	h.postedSlackSigs = nil
 	h.branchMgr = NewBranchManager(h.ghClient, h.agentID, nil)
+	// The transcript counts as part of the request: a chat turn gets a fresh
+	// BranchManager, so a PR opened earlier in the same chat is only reachable
+	// through the branch or URL named in those earlier messages.
+	for _, m := range history {
+		h.branchMgr.Authorize(m.Content)
+	}
+	h.branchMgr.Authorize(userMessage)
 
 	tools := h.buildTools()
 
@@ -788,9 +797,9 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 						"description":{"type":"string","description":"Short description of what was changed (used as commit message and as the PR title when pr_title is not provided)"},
 						"pr_body":{"type":"string","description":"OPTIONAL full Markdown body for the pull request. Use this to give reviewers real context (Jira/ticket link, summary of the change, testing notes, applicable skills). Only the call that OPENS a PR establishes its body — later calls that group into that same PR ignore pr_body. Pass a fresh pr_body on the first call of each new branch_name. When omitted, a short generic attribution line is used."},
 						"pr_title":{"type":"string","description":"OPTIONAL full PR title. When provided, used VERBATIM as the PR title (no agent-name prefix is added). Only honored on the call that OPENS a PR; later calls that group into that same PR ignore it. Pass a fresh pr_title on the first call of each new branch_name. Leave empty to use the default '<agent-id>: <description>' title."},
-						"pr_number":{"type":"integer","description":"OPTIONAL number of an EXISTING open pull request to commit this change onto (its head branch). Use this for every follow-up round on a PR that is already open — review feedback, requested changes, CI fixes, 'also change X' — so the change lands on that PR instead of opening another one. The file is read from the PR's branch, so old_content must match the PR's current version of the file. Leave empty only when this change should start a NEW pull request."},
-						"pr_url":{"type":"string","description":"OPTIONAL full URL of an existing open pull request (https://github.com/<owner>/<repo>/pull/<n>) — the same targeting as pr_number, for when you have the URL rather than the number. Pass only one of pr_number / pr_url. The PR must belong to the repo being changed and must still be open."},
-						"branch_name":{"type":"string","description":"OPTIONAL custom HEAD branch name for the PR (e.g. 'ENG-1234/fix-timeout'). This argument controls PR grouping. Omit it, or repeat the branch name of the MOST RECENT PR opened for this repo, to add this file to that PR. Pass a NEW distinct name to open a separate branch and PR instead — that is how you ship one PR per independent fix in a single repo. Each new branch is cut from the base branch, so separate fixes never stack on one another. Write all files of one fix consecutively before starting the next fix's branch — you cannot go back and add a file to an earlier PR. Leave empty on every call to use the platform's auto-generated unique branch name. Must be a valid git branch name. Naming a branch that ALREADY exists on the remote commits onto it instead of creating it — that is another way to add a change to an open PR (use pr_number when you have the PR)."},
+						"pr_number":{"type":"integer","description":"OPTIONAL number of an EXISTING open pull request to commit this change onto (its head branch). Use this for every follow-up round on a PR that is already open — review feedback, requested changes, CI fixes, 'also change X' — so the change lands on that PR instead of opening another one. Only for a PR you opened while handling THIS request or that the request itself names: a PR you merely found by listing the repo belongs to someone else's work and is rejected. The file is read from the PR's branch, so old_content must match the PR's current version of the file. Leave empty only when this change should start a NEW pull request."},
+						"pr_url":{"type":"string","description":"OPTIONAL full URL of an existing open pull request (https://github.com/<owner>/<repo>/pull/<n>) — the same targeting as pr_number, for when you have the URL rather than the number. Pass only one of pr_number / pr_url. The PR must belong to the repo being changed, must still be open, and must be one you opened for this request or one the request names."},
+						"branch_name":{"type":"string","description":"OPTIONAL custom HEAD branch name for the PR (e.g. 'ENG-1234/fix-timeout'). This argument controls PR grouping. Omit it, or repeat the branch name of the MOST RECENT PR opened for this repo, to add this file to that PR. Pass a NEW distinct name to open a separate branch and PR instead — that is how you ship one PR per independent fix in a single repo. Each new branch is cut from the base branch, so separate fixes never stack on one another. Write all files of one fix consecutively before starting the next fix's branch — you cannot go back and add a file to an earlier PR. Leave empty on every call to use the platform's auto-generated unique branch name. Must be a valid git branch name. Naming a branch that ALREADY exists on the remote commits onto it only when the request names that branch or its PR (use pr_number when you have the PR); otherwise a fresh branch is used, so unrelated work in the repo never receives your commits."},
 						"branch":{"type":"string","description":"BASE branch the PR should be opened against (typically the repo's default branch — main/master). LEAVE EMPTY in almost all cases; the platform auto-resolves the default branch AND auto-generates a unique head branch per run. Only set this if you specifically need to target a long-lived non-default base like 'develop' or 'release/*'. Never pass a head branch from list_pull_requests or a prior PR — those are auto-generated per-tick and will be ignored."}
 					},
 					"required":["repo","path","old_content","new_content","description"]
@@ -811,9 +820,9 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 						"description":{"type":"string","description":"Short description of what was added (used as commit message and as the PR title when pr_title is not provided)"},
 						"pr_body":{"type":"string","description":"OPTIONAL full Markdown body for the pull request. Use this to give reviewers real context (Jira/ticket link, summary, testing notes). Only the call that OPENS a PR establishes its body; later calls that group into that same PR ignore pr_body. Pass a fresh pr_body on the first call of each new branch_name."},
 						"pr_title":{"type":"string","description":"OPTIONAL full PR title. When provided, used VERBATIM as the PR title (no agent-name prefix is added). Only honored on the call that OPENS a PR; later calls that group into that same PR ignore it. Pass a fresh pr_title on the first call of each new branch_name. Leave empty to use the default '<agent-id>: <description>' title."},
-						"pr_number":{"type":"integer","description":"OPTIONAL number of an EXISTING open pull request to commit this change onto (its head branch). Use this for every follow-up round on a PR that is already open — review feedback, requested changes, CI fixes, 'also change X' — so the change lands on that PR instead of opening another one. The file is committed onto the PR's branch, so it must not already exist there. Leave empty only when this change should start a NEW pull request."},
-						"pr_url":{"type":"string","description":"OPTIONAL full URL of an existing open pull request (https://github.com/<owner>/<repo>/pull/<n>) — the same targeting as pr_number, for when you have the URL rather than the number. Pass only one of pr_number / pr_url. The PR must belong to the repo being changed and must still be open."},
-						"branch_name":{"type":"string","description":"OPTIONAL custom HEAD branch name for the PR. This argument controls PR grouping. Omit it, or repeat the branch name of the MOST RECENT PR opened for this repo, to add this file to that PR. Pass a NEW distinct name to open a separate branch and PR instead — that is how you ship one PR per independent fix in a single repo. Each new branch is cut from the base branch. Write all files of one fix consecutively before starting the next fix's branch — you cannot go back and add a file to an earlier PR. Leave empty on every call to use the platform's auto-generated unique branch name. Must be a valid git branch name. Naming a branch that ALREADY exists on the remote commits onto it instead of creating it — that is another way to add a change to an open PR (use pr_number when you have the PR)."},
+						"pr_number":{"type":"integer","description":"OPTIONAL number of an EXISTING open pull request to commit this change onto (its head branch). Use this for every follow-up round on a PR that is already open — review feedback, requested changes, CI fixes, 'also change X' — so the change lands on that PR instead of opening another one. Only for a PR you opened while handling THIS request or that the request itself names: a PR you merely found by listing the repo belongs to someone else's work and is rejected. The file is committed onto the PR's branch, so it must not already exist there. Leave empty only when this change should start a NEW pull request."},
+						"pr_url":{"type":"string","description":"OPTIONAL full URL of an existing open pull request (https://github.com/<owner>/<repo>/pull/<n>) — the same targeting as pr_number, for when you have the URL rather than the number. Pass only one of pr_number / pr_url. The PR must belong to the repo being changed, must still be open, and must be one you opened for this request or one the request names."},
+						"branch_name":{"type":"string","description":"OPTIONAL custom HEAD branch name for the PR. This argument controls PR grouping. Omit it, or repeat the branch name of the MOST RECENT PR opened for this repo, to add this file to that PR. Pass a NEW distinct name to open a separate branch and PR instead — that is how you ship one PR per independent fix in a single repo. Each new branch is cut from the base branch. Write all files of one fix consecutively before starting the next fix's branch — you cannot go back and add a file to an earlier PR. Leave empty on every call to use the platform's auto-generated unique branch name. Must be a valid git branch name. Naming a branch that ALREADY exists on the remote commits onto it only when the request names that branch or its PR (use pr_number when you have the PR); otherwise a fresh branch is used, so unrelated work in the repo never receives your commits."},
 						"branch":{"type":"string","description":"BASE branch the PR should target. LEAVE EMPTY in almost all cases — the platform resolves the repo default branch and auto-generates the head branch. Do not pass an existing PR head branch here."}
 					},
 					"required":["repo","path","content","description"]
@@ -835,9 +844,9 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 						"description":{"type":"string","description":"Short description of what was changed (used as commit message and as the PR title when pr_title is not provided)"},
 						"pr_body":{"type":"string","description":"OPTIONAL full Markdown body for the pull request. Use this to give reviewers real context. Only the call that OPENS a PR establishes its body; later calls that group into that same PR ignore pr_body. Pass a fresh pr_body on the first call of each new branch_name."},
 						"pr_title":{"type":"string","description":"OPTIONAL full PR title. When provided, used VERBATIM as the PR title (no agent-name prefix is added). Only honored on the call that OPENS a PR; later calls that group into that same PR ignore it. Pass a fresh pr_title on the first call of each new branch_name. Leave empty to use the default '<agent-id>: <description>' title."},
-						"pr_number":{"type":"integer","description":"OPTIONAL number of an EXISTING open pull request to commit this change onto (its head branch). Use this for every follow-up round on a PR that is already open — review feedback, requested changes, CI fixes, 'also change X' — so the change lands on that PR instead of opening another one. The file is read from the PR's branch, so old_content must match the PR's current version of the file. Leave empty only when this change should start a NEW pull request."},
-						"pr_url":{"type":"string","description":"OPTIONAL full URL of an existing open pull request (https://github.com/<owner>/<repo>/pull/<n>) — the same targeting as pr_number, for when you have the URL rather than the number. Pass only one of pr_number / pr_url. The PR must belong to the repo being changed and must still be open."},
-						"branch_name":{"type":"string","description":"OPTIONAL custom HEAD branch name for the PR. This argument controls PR grouping. Omit it, or repeat the branch name of the MOST RECENT PR opened for this repo, to add this file to that PR. Pass a NEW distinct name to open a separate branch and PR instead — that is how you ship one PR per independent fix in a single repo. Each new branch is cut from the base branch. Write all files of one fix consecutively before starting the next fix's branch — you cannot go back and add a file to an earlier PR. Leave empty on every call to use the platform's auto-generated unique branch name. Must be a valid git branch name. Naming a branch that ALREADY exists on the remote commits onto it instead of creating it — that is another way to add a change to an open PR (use pr_number when you have the PR)."},
+						"pr_number":{"type":"integer","description":"OPTIONAL number of an EXISTING open pull request to commit this change onto (its head branch). Use this for every follow-up round on a PR that is already open — review feedback, requested changes, CI fixes, 'also change X' — so the change lands on that PR instead of opening another one. Only for a PR you opened while handling THIS request or that the request itself names: a PR you merely found by listing the repo belongs to someone else's work and is rejected. The file is read from the PR's branch, so old_content must match the PR's current version of the file. Leave empty only when this change should start a NEW pull request."},
+						"pr_url":{"type":"string","description":"OPTIONAL full URL of an existing open pull request (https://github.com/<owner>/<repo>/pull/<n>) — the same targeting as pr_number, for when you have the URL rather than the number. Pass only one of pr_number / pr_url. The PR must belong to the repo being changed, must still be open, and must be one you opened for this request or one the request names."},
+						"branch_name":{"type":"string","description":"OPTIONAL custom HEAD branch name for the PR. This argument controls PR grouping. Omit it, or repeat the branch name of the MOST RECENT PR opened for this repo, to add this file to that PR. Pass a NEW distinct name to open a separate branch and PR instead — that is how you ship one PR per independent fix in a single repo. Each new branch is cut from the base branch. Write all files of one fix consecutively before starting the next fix's branch — you cannot go back and add a file to an earlier PR. Leave empty on every call to use the platform's auto-generated unique branch name. Must be a valid git branch name. Naming a branch that ALREADY exists on the remote commits onto it only when the request names that branch or its PR (use pr_number when you have the PR); otherwise a fresh branch is used, so unrelated work in the repo never receives your commits."},
 						"branch":{"type":"string","description":"BASE branch the PR should target. LEAVE EMPTY in almost all cases — the platform resolves the repo default branch and auto-generates the head branch. Do not pass an existing PR head branch here."}
 					},
 					"required":["repo","path","pattern","replacement","description"]
@@ -2851,7 +2860,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		if errMsg != "" {
 			return errMsg
 		}
-		targetBranch, errMsg := resolveWriteBranch(ctx, h.ghClient, owner, args.Repo, args.BranchName, args.PRNumber, args.PRURL)
+		targetBranch, errMsg := resolveWriteBranch(ctx, h.ghClient, h.branchMgr, owner, args.Repo, args.BranchName, args.PRNumber, args.PRURL)
 		if errMsg != "" {
 			return errMsg
 		}
@@ -2921,7 +2930,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		if errMsg != "" {
 			return errMsg
 		}
-		targetBranch, errMsg := resolveWriteBranch(ctx, h.ghClient, owner, args.Repo, args.BranchName, args.PRNumber, args.PRURL)
+		targetBranch, errMsg := resolveWriteBranch(ctx, h.ghClient, h.branchMgr, owner, args.Repo, args.BranchName, args.PRNumber, args.PRURL)
 		if errMsg != "" {
 			return errMsg
 		}
@@ -2970,7 +2979,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		if errMsg != "" {
 			return errMsg
 		}
-		targetBranch, errMsg := resolveWriteBranch(ctx, h.ghClient, owner, args.Repo, args.BranchName, args.PRNumber, args.PRURL)
+		targetBranch, errMsg := resolveWriteBranch(ctx, h.ghClient, h.branchMgr, owner, args.Repo, args.BranchName, args.PRNumber, args.PRURL)
 		if errMsg != "" {
 			return errMsg
 		}
