@@ -130,7 +130,8 @@ type CostAndUsageOpts struct {
 	// IncludeUsageTypes keeps only USAGE_TYPE values containing one of these
 	// substrings (case-insensitive), resolved to exact values like ExcludeServices.
 	IncludeUsageTypes []string
-	AllGroups         bool // list every group per period in FormatCostAndUsage instead of the top 10 (top 50 with GroupBy2).
+	ExcludeAccounts   []string // LINKED_ACCOUNT ids removed server-side.
+	AllGroups         bool     // list every group per period in FormatCostAndUsage instead of the top 10 (top 50 with GroupBy2).
 }
 
 // CostPeriod is one granule (day, month, etc.) of cost data.
@@ -222,7 +223,7 @@ func (c *Client) GetCostAndUsage(ctx context.Context, opts CostAndUsageOpts) (*C
 			return nil, fmt.Errorf("no USAGE_TYPE in %s → %s contains any of %q, so the included cost is $0.00", start, end, opts.IncludeUsageTypes)
 		}
 	}
-	if filter := buildCostFilter(opts.ServiceFilter, opts.ExcludeChargeTypes, excludeServiceNames, includeUsageTypes); filter != nil {
+	if filter := buildCostFilter(opts.ServiceFilter, opts.ExcludeChargeTypes, excludeServiceNames, includeUsageTypes, opts.ExcludeAccounts); filter != nil {
 		input.Filter = filter
 	}
 
@@ -394,7 +395,7 @@ func (c *Client) GetCostForecast(ctx context.Context, opts ForecastOpts) (*Forec
 		Granularity: cetypes.Granularity(gran),
 		Metric:      forecastMetric,
 	}
-	if filter := buildCostFilter("", opts.ExcludeChargeTypes, excludeServiceNames, nil); filter != nil {
+	if filter := buildCostFilter("", opts.ExcludeChargeTypes, excludeServiceNames, nil, nil); filter != nil {
 		in.Filter = filter
 	}
 	out, err := c.ce.GetCostForecast(ctx, in)
@@ -545,8 +546,9 @@ func parseAmount(s string) float64 {
 // Provider Program Discount are excluded by default). Service exclusion is
 // expressed the same way against the SERVICE dimension using the exact
 // names resolved by resolveServicesContaining. includeUsageTypes, when set,
-// keeps only those exact USAGE_TYPE values.
-func buildCostFilter(serviceFilter string, excludeChargeTypes, excludeServiceNames, includeUsageTypes []string) *cetypes.Expression {
+// keeps only those exact USAGE_TYPE values; excludeAccounts drops those
+// LINKED_ACCOUNT ids.
+func buildCostFilter(serviceFilter string, excludeChargeTypes, excludeServiceNames, includeUsageTypes, excludeAccounts []string) *cetypes.Expression {
 	var parts []cetypes.Expression
 	if sf := strings.TrimSpace(serviceFilter); sf != "" {
 		parts = append(parts, cetypes.Expression{
@@ -582,6 +584,21 @@ func buildCostFilter(serviceFilter string, excludeChargeTypes, excludeServiceNam
 			Dimensions: &cetypes.DimensionValues{
 				Key:    cetypes.DimensionService,
 				Values: svc,
+			},
+		}
+		parts = append(parts, cetypes.Expression{Not: &inner})
+	}
+	accts := make([]string, 0, len(excludeAccounts))
+	for _, v := range excludeAccounts {
+		if t := strings.TrimSpace(v); t != "" {
+			accts = append(accts, t)
+		}
+	}
+	if len(accts) > 0 {
+		inner := cetypes.Expression{
+			Dimensions: &cetypes.DimensionValues{
+				Key:    cetypes.DimensionLinkedAccount,
+				Values: accts,
 			},
 		}
 		parts = append(parts, cetypes.Expression{Not: &inner})
