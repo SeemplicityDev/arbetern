@@ -110,7 +110,8 @@ type CostAndUsageOpts struct {
 	End           string // YYYY-MM-DD, exclusive. Defaults to today.
 	Granularity   string // DAILY (default), MONTHLY, or HOURLY.
 	Metric        string // UnblendedCost (default), BlendedCost, AmortizedCost, NetUnblendedCost, NetAmortizedCost, UsageQuantity.
-	GroupBy       string // "" (no grouping), SERVICE, LINKED_ACCOUNT, REGION, USAGE_TYPE, INSTANCE_TYPE, OPERATION, PURCHASE_TYPE, RECORD_TYPE, AVAILABILITY_ZONE, PLATFORM, TENANCY, DATABASE_ENGINE.
+	GroupBy       string // "" (no grouping), SERVICE, LINKED_ACCOUNT, LEGAL_ENTITY_NAME, REGION, USAGE_TYPE, INSTANCE_TYPE, OPERATION, PURCHASE_TYPE, RECORD_TYPE, AVAILABILITY_ZONE, PLATFORM, TENANCY, DATABASE_ENGINE.
+	GroupBy2      string // Optional second grouping dimension; requires GroupBy. Group keys become "<GroupBy value> | <GroupBy2 value>".
 	ServiceFilter string // Exact AWS service name to filter to (e.g. "Amazon Elastic Compute Cloud - Compute"). Case-sensitive.
 	// ExcludeChargeTypes restricts results to exclude rows whose RECORD_TYPE
 	// matches any of these values. Mirrors the console's default "Charge type"
@@ -126,6 +127,10 @@ type CostAndUsageOpts struct {
 	// "Databricks" Marketplace commitments) from totals, group breakdowns,
 	// and forecasts without post-filtering in the caller.
 	ExcludeServices []string
+	// IncludeUsageTypes keeps only USAGE_TYPE values containing one of these
+	// substrings (case-insensitive), resolved to exact values like ExcludeServices.
+	IncludeUsageTypes []string
+	AllGroups         bool // list every group per period in FormatCostAndUsage instead of the top 10 (top 50 with GroupBy2).
 }
 
 // CostPeriod is one granule (day, month, etc.) of cost data.
@@ -145,6 +150,7 @@ type CostAndUsageResult struct {
 	Start       string       `json:"start"`
 	End         string       `json:"end"`
 	Periods     []CostPeriod `json:"periods"`
+	GroupLimit  int          `json:"-"` // groups shown per period by FormatCostAndUsage; <=0 shows all.
 }
 
 // GetCostAndUsage queries Cost Explorer for per-period cost and returns a
@@ -187,11 +193,17 @@ func (c *Client) GetCostAndUsage(ctx context.Context, opts CostAndUsageOpts) (*C
 		Metrics:     []string{metric},
 	}
 	groupBy := strings.ToUpper(strings.TrimSpace(opts.GroupBy))
-	if groupBy != "" {
-		input.GroupBy = []cetypes.GroupDefinition{{
-			Type: cetypes.GroupDefinitionTypeDimension,
-			Key:  awsv2.String(groupBy),
-		}}
+	groupBy2 := strings.ToUpper(strings.TrimSpace(opts.GroupBy2))
+	if groupBy2 != "" && (groupBy == "" || groupBy2 == groupBy) {
+		return nil, fmt.Errorf("group_by_2 %q needs a different group_by dimension", opts.GroupBy2)
+	}
+	for _, dim := range []string{groupBy, groupBy2} {
+		if dim != "" {
+			input.GroupBy = append(input.GroupBy, cetypes.GroupDefinition{
+				Type: cetypes.GroupDefinitionTypeDimension,
+				Key:  awsv2.String(dim),
+			})
+		}
 	}
 	var excludeServiceNames []string
 	if len(opts.ExcludeServices) > 0 {
@@ -200,13 +212,31 @@ func (c *Client) GetCostAndUsage(ctx context.Context, opts CostAndUsageOpts) (*C
 			return nil, err
 		}
 	}
-	if filter := buildCostFilter(opts.ServiceFilter, opts.ExcludeChargeTypes, excludeServiceNames); filter != nil {
+	var includeUsageTypes []string
+	if len(opts.IncludeUsageTypes) > 0 {
+		includeUsageTypes, err = c.resolveDimensionContaining(ctx, "USAGE_TYPE", opts.IncludeUsageTypes, start, end)
+		if err != nil {
+			return nil, fmt.Errorf("resolve included usage types: %w", err)
+		}
+		if len(includeUsageTypes) == 0 {
+			return nil, fmt.Errorf("no USAGE_TYPE in %s → %s contains any of %q, so the included cost is $0.00", start, end, opts.IncludeUsageTypes)
+		}
+	}
+	if filter := buildCostFilter(opts.ServiceFilter, opts.ExcludeChargeTypes, excludeServiceNames, includeUsageTypes); filter != nil {
 		input.Filter = filter
 	}
 
-	out, err := c.ce.GetCostAndUsage(ctx, input)
-	if err != nil {
-		return nil, fmt.Errorf("GetCostAndUsage: %w", err)
+	var results []cetypes.ResultByTime
+	for {
+		out, err := c.ce.GetCostAndUsage(ctx, input)
+		if err != nil {
+			return nil, fmt.Errorf("GetCostAndUsage: %w", err)
+		}
+		results = append(results, out.ResultsByTime...)
+		if awsv2.ToString(out.NextPageToken) == "" {
+			break
+		}
+		input.NextPageToken = out.NextPageToken
 	}
 
 	result := &CostAndUsageResult{
@@ -215,25 +245,41 @@ func (c *Client) GetCostAndUsage(ctx context.Context, opts CostAndUsageOpts) (*C
 		GroupBy:     groupBy,
 		Start:       start,
 		End:         end,
-		Periods:     make([]CostPeriod, 0, len(out.ResultsByTime)),
+		Periods:     make([]CostPeriod, 0, len(results)),
+		GroupLimit:  10,
 	}
-	for _, r := range out.ResultsByTime {
-		p := CostPeriod{
-			Start: awsv2.ToString(r.TimePeriod.Start),
-			End:   awsv2.ToString(r.TimePeriod.End),
+	if groupBy2 != "" {
+		result.GroupBy = groupBy + ", " + groupBy2
+		result.GroupLimit = 50
+	}
+	if len(includeUsageTypes) > 0 || opts.AllGroups {
+		result.GroupLimit = 0
+	}
+	// Paginated responses repeat a period with the next slice of its groups.
+	byStart := make(map[string]int)
+	for _, r := range results {
+		start := awsv2.ToString(r.TimePeriod.Start)
+		idx, seen := byStart[start]
+		if !seen {
+			idx = len(result.Periods)
+			byStart[start] = idx
+			result.Periods = append(result.Periods, CostPeriod{Start: start, End: awsv2.ToString(r.TimePeriod.End)})
 		}
+		p := &result.Periods[idx]
 		// Period total: prefer Total[metric]; if absent, sum Groups.
-		if mv, ok := r.Total[metric]; ok {
+		if mv, ok := r.Total[metric]; ok && !seen {
 			p.Total = parseAmount(awsv2.ToString(mv.Amount))
 			p.Unit = awsv2.ToString(mv.Unit)
 		}
 		if len(r.Groups) > 0 {
-			p.Groups = make(map[string]float64, len(r.Groups))
+			if p.Groups == nil {
+				p.Groups = make(map[string]float64, len(r.Groups))
+			}
 			for _, g := range r.Groups {
 				if len(g.Keys) == 0 {
 					continue
 				}
-				key := g.Keys[0]
+				key := strings.Join(g.Keys, " | ")
 				if mv, ok := g.Metrics[metric]; ok {
 					amt := parseAmount(awsv2.ToString(mv.Amount))
 					p.Groups[key] += amt
@@ -242,13 +288,15 @@ func (c *Client) GetCostAndUsage(ctx context.Context, opts CostAndUsageOpts) (*C
 					}
 				}
 			}
-			if p.Total == 0 {
-				for _, v := range p.Groups {
-					p.Total += v
-				}
+		}
+	}
+	for i := range result.Periods {
+		p := &result.Periods[i]
+		if p.Total == 0 {
+			for _, v := range p.Groups {
+				p.Total += v
 			}
 		}
-		result.Periods = append(result.Periods, p)
 	}
 	return result, nil
 }
@@ -346,7 +394,7 @@ func (c *Client) GetCostForecast(ctx context.Context, opts ForecastOpts) (*Forec
 		Granularity: cetypes.Granularity(gran),
 		Metric:      forecastMetric,
 	}
-	if filter := buildCostFilter("", opts.ExcludeChargeTypes, excludeServiceNames); filter != nil {
+	if filter := buildCostFilter("", opts.ExcludeChargeTypes, excludeServiceNames, nil); filter != nil {
 		in.Filter = filter
 	}
 	out, err := c.ce.GetCostForecast(ctx, in)
@@ -416,15 +464,21 @@ func (c *Client) GetDimensionValues(ctx context.Context, opts DimensionValuesOpt
 	if s := strings.TrimSpace(opts.Search); s != "" {
 		in.SearchString = awsv2.String(s)
 	}
-	out, err := c.ce.GetDimensionValues(ctx, in)
-	if err != nil {
-		return nil, fmt.Errorf("GetDimensionValues: %w", err)
-	}
-	values := make([]string, 0, len(out.DimensionValues))
-	for _, dv := range out.DimensionValues {
-		if v := awsv2.ToString(dv.Value); v != "" {
-			values = append(values, v)
+	var values []string
+	for {
+		out, err := c.ce.GetDimensionValues(ctx, in)
+		if err != nil {
+			return nil, fmt.Errorf("GetDimensionValues: %w", err)
 		}
+		for _, dv := range out.DimensionValues {
+			if v := awsv2.ToString(dv.Value); v != "" {
+				values = append(values, v)
+			}
+		}
+		if awsv2.ToString(out.NextPageToken) == "" {
+			break
+		}
+		in.NextPageToken = out.NextPageToken
 	}
 	sort.Strings(values)
 	return &DimensionValuesResult{
@@ -490,8 +544,9 @@ func parseAmount(s string) float64 {
 // console's "Charge type" filter where Credit, Refund, Tax, and Solution
 // Provider Program Discount are excluded by default). Service exclusion is
 // expressed the same way against the SERVICE dimension using the exact
-// names resolved by resolveServicesContaining.
-func buildCostFilter(serviceFilter string, excludeChargeTypes, excludeServiceNames []string) *cetypes.Expression {
+// names resolved by resolveServicesContaining. includeUsageTypes, when set,
+// keeps only those exact USAGE_TYPE values.
+func buildCostFilter(serviceFilter string, excludeChargeTypes, excludeServiceNames, includeUsageTypes []string) *cetypes.Expression {
 	var parts []cetypes.Expression
 	if sf := strings.TrimSpace(serviceFilter); sf != "" {
 		parts = append(parts, cetypes.Expression{
@@ -531,6 +586,14 @@ func buildCostFilter(serviceFilter string, excludeChargeTypes, excludeServiceNam
 		}
 		parts = append(parts, cetypes.Expression{Not: &inner})
 	}
+	if len(includeUsageTypes) > 0 {
+		parts = append(parts, cetypes.Expression{
+			Dimensions: &cetypes.DimensionValues{
+				Key:    cetypes.DimensionUsageType,
+				Values: includeUsageTypes,
+			},
+		})
+	}
 	switch len(parts) {
 	case 0:
 		return nil
@@ -548,6 +611,16 @@ func buildCostFilter(serviceFilter string, excludeChargeTypes, excludeServiceNam
 // "Databricks") must be expanded to the concrete service strings first. A
 // nil/empty substrings slice short-circuits without an API call.
 func (c *Client) resolveServicesContaining(ctx context.Context, substrings []string, start, end string) ([]string, error) {
+	matched, err := c.resolveDimensionContaining(ctx, "SERVICE", substrings, start, end)
+	if err != nil {
+		return nil, fmt.Errorf("resolve excluded services: %w", err)
+	}
+	return matched, nil
+}
+
+// resolveDimensionContaining returns the exact values of dimension over
+// [start,end) that contain any of substrings (case-insensitive).
+func (c *Client) resolveDimensionContaining(ctx context.Context, dimension string, substrings []string, start, end string) ([]string, error) {
 	subs := make([]string, 0, len(substrings))
 	for _, s := range substrings {
 		if t := strings.ToLower(strings.TrimSpace(s)); t != "" {
@@ -558,12 +631,12 @@ func (c *Client) resolveServicesContaining(ctx context.Context, substrings []str
 		return nil, nil
 	}
 	dv, err := c.GetDimensionValues(ctx, DimensionValuesOpts{
-		Dimension: "SERVICE",
+		Dimension: dimension,
 		Start:     start,
 		End:       end,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("resolve excluded services: %w", err)
+		return nil, err
 	}
 	var matched []string
 	seen := make(map[string]bool)

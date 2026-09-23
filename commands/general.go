@@ -1717,7 +1717,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 			Type: "function",
 			Function: llm.ToolFunction{
 				Name:        ToolAWSGetCostAndUsage,
-				Description: "Query AWS Cost Explorer for cost and usage data. Use this for daily/weekly/monthly cost reports, cost-by-service breakdowns, cost-by-account (for payer / linked accounts), week-over-week trend analysis, and anomaly spotting. 'start' and 'end' are YYYY-MM-DD and 'end' is EXCLUSIVE (Cost Explorer convention: to report through 2026-04-21 inclusive, pass end=2026-04-22). Default window is the last 8 days at DAILY granularity with AmortizedCost — AmortizedCost is used by default so Reserved Instance and Savings Plan up-front charges are spread evenly across their commitment term (required for accurate daily trend analysis on accounts that use RIs/SPs). Set group_by to break down by SERVICE (e.g. 'Amazon Elastic Compute Cloud - Compute', 'Amazon Relational Database Service', 'AWS Lambda'), LINKED_ACCOUNT, REGION, USAGE_TYPE, INSTANCE_TYPE, OPERATION, PURCHASE_TYPE, RECORD_TYPE. Use service_filter to restrict to one exact service name (find the exact string via aws_list_dimension_values with dimension=SERVICE). Use exclude_charge_types to drop RECORD_TYPE rows that aren't real spend — pass [\"Credit\",\"Refund\",\"Tax\",\"Solution Provider Program Discount\"] to mirror the AWS console's default Charge-type filter so reported totals match the console. Use exclude_services to drop whole services whose name CONTAINS a substring (case-insensitive, e.g. [\"Databricks\"]) from the total, every group, and downstream math — the tool resolves the matching exact service names automatically, so you never need a separate grouped call just to post-filter them out. WARNING: each Cost Explorer API call costs $0.01 — avoid looping over services; prefer one grouped call over N filtered calls.",
+				Description: "Query AWS Cost Explorer for cost and usage data. Use this for daily/weekly/monthly cost reports, cost-by-service breakdowns, cost-by-account (for payer / linked accounts), week-over-week trend analysis, and anomaly spotting. 'start' and 'end' are YYYY-MM-DD and 'end' is EXCLUSIVE (Cost Explorer convention: to report through 2026-04-21 inclusive, pass end=2026-04-22). Default window is the last 8 days at DAILY granularity with AmortizedCost — AmortizedCost is used by default so Reserved Instance and Savings Plan up-front charges are spread evenly across their commitment term (required for accurate daily trend analysis on accounts that use RIs/SPs). Set group_by to break down by SERVICE (e.g. 'Amazon Elastic Compute Cloud - Compute', 'Amazon Relational Database Service', 'AWS Lambda'), LINKED_ACCOUNT, LEGAL_ENTITY_NAME, REGION, USAGE_TYPE, INSTANCE_TYPE, OPERATION, PURCHASE_TYPE, RECORD_TYPE; add group_by_2 for a second dimension (group keys become '<group_by value> | <group_by_2 value>', e.g. '123456789012 | EUC1-DataTransfer-Regional-Bytes'). Use include_usage_types to keep only usage types whose name CONTAINS a substring (e.g. [\"DataTransfer\"] for data transfer); all matching groups are listed, not just the top 10. Set all_groups=true to list every group instead of the top 10 (top 50 with group_by_2). Use service_filter to restrict to one exact service name (find the exact string via aws_list_dimension_values with dimension=SERVICE). Use exclude_charge_types to drop RECORD_TYPE rows that aren't real spend — pass [\"Credit\",\"Refund\",\"Tax\",\"Solution Provider Program Discount\"] to mirror the AWS console's default Charge-type filter so reported totals match the console. Use exclude_services to drop whole services whose name CONTAINS a substring (case-insensitive, e.g. [\"Databricks\"]) from the total, every group, and downstream math — the tool resolves the matching exact service names automatically, so you never need a separate grouped call just to post-filter them out. WARNING: each Cost Explorer API call costs $0.01 — avoid looping over services; prefer one grouped call over N filtered calls.",
 				Parameters: json.RawMessage(`{
 					"type":"object",
 					"properties":{
@@ -1725,10 +1725,13 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 						"end":{"type":"string","description":"End date YYYY-MM-DD, EXCLUSIVE. Defaults to today."},
 						"granularity":{"type":"string","enum":["DAILY","MONTHLY","HOURLY"],"description":"Granularity. Default DAILY."},
 						"metric":{"type":"string","enum":["UnblendedCost","BlendedCost","AmortizedCost","NetAmortizedCost","NetUnblendedCost","UsageQuantity"],"description":"Cost metric. Default AmortizedCost (spreads RI/SP up-front charges across their commitment term). Use UnblendedCost to match the console's default view."},
-						"group_by":{"type":"string","enum":["SERVICE","LINKED_ACCOUNT","REGION","USAGE_TYPE","INSTANCE_TYPE","OPERATION","PURCHASE_TYPE","RECORD_TYPE","AVAILABILITY_ZONE","PLATFORM","TENANCY","DATABASE_ENGINE"],"description":"Optional grouping dimension. Omit for a single total per period."},
+						"group_by":{"type":"string","enum":["SERVICE","LINKED_ACCOUNT","LEGAL_ENTITY_NAME","REGION","USAGE_TYPE","INSTANCE_TYPE","OPERATION","PURCHASE_TYPE","RECORD_TYPE","AVAILABILITY_ZONE","PLATFORM","TENANCY","DATABASE_ENGINE"],"description":"Optional grouping dimension. Omit for a single total per period."},
+						"group_by_2":{"type":"string","enum":["SERVICE","LINKED_ACCOUNT","LEGAL_ENTITY_NAME","REGION","USAGE_TYPE","INSTANCE_TYPE","OPERATION","PURCHASE_TYPE","RECORD_TYPE","AVAILABILITY_ZONE","PLATFORM","TENANCY","DATABASE_ENGINE"],"description":"Optional second grouping dimension, different from group_by (which is then required). Group keys become '<group_by value> | <group_by_2 value>'."},
 						"service_filter":{"type":"string","description":"Exact AWS service name to restrict to (case-sensitive, e.g. 'Amazon Elastic Compute Cloud - Compute'). Use aws_list_dimension_values with dimension=SERVICE to discover exact strings."},
 						"exclude_charge_types":{"type":"array","items":{"type":"string"},"description":"Optional RECORD_TYPE values to exclude (case-sensitive). Pass [\"Credit\",\"Refund\",\"Tax\",\"Solution Provider Program Discount\"] to match the console's default Charge-type filter."},
-						"exclude_services":{"type":"array","items":{"type":"string"},"description":"Optional SERVICE-name substrings to exclude (case-insensitive, e.g. [\"Databricks\"]). Any service whose name contains one of these is dropped from the total and every group; the tool resolves the exact service names for you. Applies whether or not group_by=SERVICE."}
+						"exclude_services":{"type":"array","items":{"type":"string"},"description":"Optional SERVICE-name substrings to exclude (case-insensitive, e.g. [\"Databricks\"]). Any service whose name contains one of these is dropped from the total and every group; the tool resolves the exact service names for you. Applies whether or not group_by=SERVICE."},
+						"include_usage_types":{"type":"array","items":{"type":"string"},"description":"Optional USAGE_TYPE substrings to keep (case-insensitive, e.g. [\"DataTransfer\",\"-AWS-Out-Bytes\"]). Only usage types containing one of these are counted; the tool resolves the exact names for you. Errors if nothing in the window matches."},
+						"all_groups":{"type":"boolean","description":"List every group per period instead of the top 10 (top 50 with group_by_2), so nothing is folded into '(other)'. Default false."}
 					}
 				}`),
 			},
@@ -4926,9 +4929,12 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 			Granularity        string   `json:"granularity"`
 			Metric             string   `json:"metric"`
 			GroupBy            string   `json:"group_by"`
+			GroupBy2           string   `json:"group_by_2"`
 			ServiceFilter      string   `json:"service_filter"`
 			ExcludeChargeTypes []string `json:"exclude_charge_types"`
 			ExcludeServices    []string `json:"exclude_services"`
+			IncludeUsageTypes  []string `json:"include_usage_types"`
+			AllGroups          bool     `json:"all_groups"`
 		}](argsJSON)
 		if errMsg != "" {
 			return errMsg
@@ -4939,9 +4945,12 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 			Granularity:        args.Granularity,
 			Metric:             args.Metric,
 			GroupBy:            args.GroupBy,
+			GroupBy2:           args.GroupBy2,
 			ServiceFilter:      args.ServiceFilter,
 			ExcludeChargeTypes: args.ExcludeChargeTypes,
 			ExcludeServices:    args.ExcludeServices,
+			IncludeUsageTypes:  args.IncludeUsageTypes,
+			AllGroups:          args.AllGroups,
 		})
 		if err != nil {
 			return fmt.Sprintf("Error fetching AWS cost and usage: %v", err)

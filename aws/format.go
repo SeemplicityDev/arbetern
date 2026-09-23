@@ -45,12 +45,16 @@ func FormatCostAndUsage(r *CostAndUsageResult) string {
 			}
 			sort.Slice(sorted, func(i, j int) bool { return sorted[i].v > sorted[j].v })
 			fmt.Fprintf(&sb, "\n*%s breakdown by %s:*\n```\n", p.Start, r.GroupBy)
-			limit := 10
-			if len(sorted) < limit {
+			limit := r.GroupLimit
+			if limit <= 0 || len(sorted) < limit {
 				limit = len(sorted)
 			}
+			keyWidth := 50
+			if strings.Contains(r.GroupBy, ",") {
+				keyWidth = 90
+			}
 			for _, kv := range sorted[:limit] {
-				fmt.Fprintf(&sb, "%-50s %12s\n", text.Truncate(kv.k, 50), money(kv.v, p.Unit))
+				fmt.Fprintf(&sb, "%-*s %12s\n", keyWidth, text.Truncate(kv.k, keyWidth), money(kv.v, p.Unit))
 			}
 			if len(sorted) > limit {
 				var rest float64
