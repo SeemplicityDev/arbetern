@@ -191,6 +191,8 @@ type Workflow struct {
 	// (empty when the user manually toggled enabled=false). The UI surfaces
 	// this to explain why a workflow stopped ticking.
 	DisabledReason string `json:"disabled_reason,omitempty"`
+	// Paused marks a manual pause; GitOps reconciles keep it until a manual resume.
+	Paused bool `json:"paused,omitempty"`
 	// Source identifies how the workflow was created. "" / "ui" =
 	// interactive; "gitops" = managed by the GitOps poller.
 	Source string `json:"source,omitempty"`
@@ -775,6 +777,7 @@ func applyUpdate(updated *Workflow, opts UpdateOpts) error {
 	}
 	if opts.Enabled != nil {
 		updated.Enabled = *opts.Enabled
+		updated.Paused = !*opts.Enabled
 		// Manually re-enabling a workflow clears the auto-disable state so
 		// the runner gets a fresh failure budget and the UI banner goes away.
 		if *opts.Enabled {
@@ -887,12 +890,12 @@ func (r *Registry) Upsert(ctx context.Context, spec UpsertSpec) (w *Workflow, ch
 		}
 	}
 
-	// Distinguish no-op from actual change before writing.
-	specHash := upsertFingerprint(spec, cronExpr, shortName, trig)
 	var orig Workflow
 	updated, err := r.docs.Update(ctx, k, func(w *Workflow) error {
 		orig = *w
-		if upsertFingerprint(specFromWorkflow(w), w.Cron, w.ShortName, w.Trigger) == specHash {
+		spec := spec
+		spec.Enabled = spec.Enabled && !w.Paused
+		if upsertFingerprint(specFromWorkflow(w), w.Cron, w.ShortName, w.Trigger) == upsertFingerprint(spec, cronExpr, shortName, trig) {
 			return errUnchanged
 		}
 		w.Name = spec.Name
