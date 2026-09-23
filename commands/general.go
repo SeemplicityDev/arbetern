@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/justmike1/arbetern/atlassian"
 	"github.com/justmike1/arbetern/aws"
@@ -32,6 +33,7 @@ import (
 	"github.com/justmike1/arbetern/mcp"
 	"github.com/justmike1/arbetern/nvd"
 	"github.com/justmike1/arbetern/salesforce"
+	"github.com/justmike1/arbetern/slack"
 	"github.com/justmike1/arbetern/workflows"
 )
 
@@ -1027,7 +1029,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 			Type: "function",
 			Function: llm.ToolFunction{
 				Name:        ToolPostSlackMessage,
-				Description: "Post a message to a specific Slack channel by channel ID. Use this when the user gives you an explicit channel ID (e.g. 'C0123456789') and asks you to send a message there, OR inside a scheduled workflow tick where no interactive thread is available. If 'thread_ts' is set, the message is posted as a threaded reply under that parent message (use this to keep multi-part reports on the same thread — capture the ts returned by the first call and pass it as thread_ts on subsequent calls). Supports Slack markdown. Returns the posted message ts on success.",
+				Description: "Post a message to a specific Slack channel by channel ID. Use this when the user gives you an explicit channel ID (e.g. 'C0123456789') and asks you to send a message there, OR inside a scheduled workflow tick where no interactive thread is available. If 'thread_ts' is set, the message is posted as a threaded reply under that parent message (use this to keep multi-part reports on the same thread — capture the ts returned by the first call and pass it as thread_ts on subsequent calls). Supports Slack markdown. For a table, write a fenced block opened with ```table and one row per line with cells separated by '|' (header row first); the tool pads the columns (first left-aligned, the rest right-aligned) and renders a normal code block, so never pad columns yourself. Messages longer than Slack's limit are split at line breaks into consecutive posts, closing and reopening code blocks at the cut. Returns the posted message ts on success (the first part's ts when split).",
 				Parameters: json.RawMessage(`{
 					"type":"object",
 					"properties":{
@@ -3403,7 +3405,8 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 				return fmt.Sprintf("Already posted this exact message to channel %s (ts=%s). Did not post a duplicate — use ts=%s as the thread parent for any follow-up reply.", args.ChannelID, prevTS, prevTS)
 			}
 		}
-		ts, err := h.slackClient.PostMessageInThread(args.ChannelID, args.ThreadTS, args.Text)
+		pieces := slack.SplitForSlack(slack.RenderPipeTables(args.Text), slack.MaxMessageRunes)
+		ts, err := h.slackClient.PostMessageInThread(args.ChannelID, args.ThreadTS, pieces[0])
 		if err != nil {
 			return fmt.Sprintf("Error posting to channel %s: %v", args.ChannelID, err)
 		}
@@ -3412,6 +3415,14 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 				h.postedSlackSigs = make(map[string]string)
 			}
 			h.postedSlackSigs[sig] = ts
+		}
+		for i, piece := range pieces[1:] {
+			if _, err := h.slackClient.PostMessageInThread(args.ChannelID, args.ThreadTS, piece); err != nil {
+				return fmt.Sprintf("Error posting part %d/%d to channel %s (part 1 posted, ts=%s; do not re-post the message): %v", i+2, len(pieces), args.ChannelID, ts, err)
+			}
+		}
+		if len(pieces) > 1 {
+			log.Printf("[user=%s channel=%s] post_slack_message split a %d-rune message into %d parts", userID, channelID, utf8.RuneCountInString(args.Text), len(pieces))
 		}
 		if strings.TrimSpace(args.ThreadTS) != "" {
 			log.Printf("[user=%s channel=%s] posted threaded reply to %s (thread_ts=%s, ts=%s)", userID, channelID, args.ChannelID, args.ThreadTS, ts)
