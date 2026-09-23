@@ -18,7 +18,7 @@ func RenderPipeTables(text string) string {
 	if !strings.Contains(text, fence+"table") {
 		return text
 	}
-	lines := strings.Split(text, "\n")
+	lines := splitGluedFences(strings.Split(text, "\n"))
 	out := make([]string, 0, len(lines))
 	for i := 0; i < len(lines); i++ {
 		if strings.TrimSpace(lines[i]) != fence+"table" {
@@ -39,6 +39,33 @@ func RenderPipeTables(text string) string {
 		i = end
 	}
 	return strings.Join(out, "\n")
+}
+
+// splitGluedFences moves a ```table opener written at the end of a text line,
+// and a closing fence written at the end of a table row, onto their own lines.
+func splitGluedFences(lines []string) []string {
+	out := make([]string, 0, len(lines))
+	inTable := false
+	for _, l := range lines {
+		t := strings.TrimRight(l, " \t")
+		switch {
+		case !inTable && strings.HasSuffix(t, fence+"table"):
+			if head := strings.TrimSuffix(t, fence+"table"); strings.TrimSpace(head) != "" {
+				out = append(out, head)
+			}
+			out = append(out, fence+"table")
+			inTable = true
+		case inTable && strings.HasSuffix(t, fence):
+			if head := strings.TrimSuffix(t, fence); strings.TrimSpace(head) != "" {
+				out = append(out, head)
+			}
+			out = append(out, fence)
+			inTable = false
+		default:
+			out = append(out, l)
+		}
+	}
+	return out
 }
 
 func alignRows(lines []string) []string {
