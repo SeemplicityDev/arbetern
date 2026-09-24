@@ -27,6 +27,8 @@ const (
 	ToolListDirectory        = "list_directory"
 	ToolModifyFile           = "modify_file"
 	ToolCreateFile           = "create_file"
+	ToolDeleteFile           = "delete_file"
+	ToolMoveFile             = "move_file"
 	ToolRegexReplaceFile     = "regex_replace_file"
 	ToolGetPullRequest       = "get_pull_request"
 	ToolListPullRequests     = "list_pull_requests"
@@ -184,6 +186,8 @@ var toolIntegration = map[string]string{
 	ToolListDirectory:        integrationGitHub,
 	ToolModifyFile:           integrationGitHub,
 	ToolCreateFile:           integrationGitHub,
+	ToolDeleteFile:           integrationGitHub,
+	ToolMoveFile:             integrationGitHub,
 	ToolRegexReplaceFile:     integrationGitHub,
 	ToolGetPullRequest:       integrationGitHub,
 	ToolListPullRequests:     integrationGitHub,

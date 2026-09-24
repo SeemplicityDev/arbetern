@@ -41,7 +41,7 @@ const (
 
 // codeModelTools are the tools whose first use switches the turn to the code model.
 var codeModelTools = map[string]bool{
-	"modify_file": true, "create_file": true, "regex_replace_file": true,
+	"modify_file": true, "create_file": true, "delete_file": true, "move_file": true, "regex_replace_file": true,
 	"get_file_content": true,
 	"search_code":      true, "search_code_org": true, "search_files": true,
 	"list_directory": true, "get_pull_request": true,
@@ -53,6 +53,8 @@ var codeModelTools = map[string]bool{
 var mutatingTools = map[string]bool{
 	"modify_file":        true,
 	"create_file":        true,
+	"delete_file":        true,
+	"move_file":          true,
 	"regex_replace_file": true,
 	"post_slack_message": true,
 	"create_dashboard":   true,

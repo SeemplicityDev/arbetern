@@ -212,6 +212,97 @@ func (c *Client) CreateFile(ctx context.Context, owner, repo, path, branch, mess
 	return nil
 }
 
+func (c *Client) DeleteFile(ctx context.Context, owner, repo, path, branch, message, sha string) error {
+	opts := &gh.RepositoryContentFileOptions{
+		Message: new(message),
+		Branch:  new(branch),
+		SHA:     new(sha),
+	}
+
+	_, _, err := c.api.Repositories.DeleteFile(ctx, owner, repo, path, opts)
+	if err != nil {
+		return fmt.Errorf("failed to delete file %s: %w", path, err)
+	}
+	return nil
+}
+
+// MoveFile renames a file in a single commit that reuses its blob, so git records a rename rather than an add plus a delete.
+func (c *Client) MoveFile(ctx context.Context, owner, repo, branch, fromPath, toPath, message string) error {
+	ref, _, err := c.api.Git.GetRef(ctx, owner, repo, "refs/heads/"+branch)
+	if err != nil {
+		return fmt.Errorf("failed to get ref for %s: %w", branch, err)
+	}
+	headSHA := ref.GetObject().GetSHA()
+	head, _, err := c.api.Git.GetCommit(ctx, owner, repo, headSHA)
+	if err != nil {
+		return fmt.Errorf("failed to get commit %s: %w", headSHA, err)
+	}
+	baseTree := head.GetTree().GetSHA()
+
+	src, err := c.lookupTreeEntry(ctx, owner, repo, baseTree, fromPath)
+	if err != nil {
+		return err
+	}
+	if src == nil || src.GetType() != "blob" {
+		return fmt.Errorf("%s is not a file on branch %s", fromPath, branch)
+	}
+	dst, err := c.lookupTreeEntry(ctx, owner, repo, baseTree, toPath)
+	if err != nil {
+		return err
+	}
+	if dst != nil {
+		return fmt.Errorf("%s already exists on branch %s", toPath, branch)
+	}
+
+	tree, _, err := c.api.Git.CreateTree(ctx, owner, repo, baseTree, []*gh.TreeEntry{
+		{Path: new(toPath), Mode: src.Mode, Type: new("blob"), SHA: src.SHA},
+		{Path: new(fromPath), Mode: src.Mode, Type: new("blob")},
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create tree moving %s to %s: %w", fromPath, toPath, err)
+	}
+	commit, _, err := c.api.Git.CreateCommit(ctx, owner, repo, gh.Commit{
+		Message: new(message),
+		Tree:    &gh.Tree{SHA: tree.SHA},
+		Parents: []*gh.Commit{{SHA: new(headSHA)}},
+	}, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create commit moving %s to %s: %w", fromPath, toPath, err)
+	}
+	if _, _, err := c.api.Git.UpdateRef(ctx, owner, repo, "refs/heads/"+branch, gh.UpdateRef{SHA: commit.GetSHA()}); err != nil {
+		return fmt.Errorf("failed to update branch %s: %w", branch, err)
+	}
+	return nil
+}
+
+func (c *Client) lookupTreeEntry(ctx context.Context, owner, repo, treeSHA, path string) (*gh.TreeEntry, error) {
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	for i, part := range parts {
+		tree, _, err := c.api.Git.GetTree(ctx, owner, repo, treeSHA, false)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read tree for %s: %w", path, err)
+		}
+		var found *gh.TreeEntry
+		for _, e := range tree.Entries {
+			if e.GetPath() == part {
+				found = e
+				break
+			}
+		}
+		if found == nil {
+			return nil, nil
+		}
+		if i == len(parts)-1 {
+			return found, nil
+		}
+		if found.GetType() != "tree" {
+			return nil, nil
+		}
+		treeSHA = found.GetSHA()
+	}
+	return nil, nil
+}
+
 func (c *Client) CreatePullRequest(ctx context.Context, owner, repo, baseBranch, headBranch, title, body string) (string, error) {
 	pr := gh.CreatePullRequest{
 		Title: new(title),

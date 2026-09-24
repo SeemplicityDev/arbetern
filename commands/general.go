@@ -813,7 +813,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 			Type: "function",
 			Function: llm.ToolFunction{
 				Name:        ToolCreateFile,
-				Description: "Create a NEW file in a GitHub repository. Use this when you need to add a file that does not yet exist (e.g. a new YAML config, a new workflow, a new script). The tool commits the new file and opens a PR for it; pass pr_number or pr_url to add the file to a pull request that is already open instead of opening another one. Multiple create_file and modify_file calls for the SAME repository are grouped into a SINGLE pull request as long as they omit branch_name; pass a distinct branch_name to open a separate PR per independent fix (see branch_name). Do NOT use this for files that already exist — use modify_file instead.",
+				Description: "Create a NEW file in a GitHub repository. Use this when you need to add a file that does not yet exist (e.g. a new YAML config, a new workflow, a new script). The tool commits the new file and opens a PR for it; pass pr_number or pr_url to add the file to a pull request that is already open instead of opening another one. Multiple create_file and modify_file calls for the SAME repository are grouped into a SINGLE pull request as long as they omit branch_name; pass a distinct branch_name to open a separate PR per independent fix (see branch_name). Do NOT use this for files that already exist — use modify_file instead. Do NOT use this with delete_file to rename or move a file — use move_file so the PR shows a rename.",
 				Parameters: json.RawMessage(`{
 					"type":"object",
 					"properties":{
@@ -829,6 +829,51 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 						"branch":{"type":"string","description":"BASE branch the PR should target. LEAVE EMPTY in almost all cases — the platform resolves the repo default branch and auto-generates the head branch. Do not pass an existing PR head branch here."}
 					},
 					"required":["repo","path","content","description"]
+				}`),
+			},
+		},
+		{
+			Type: "function",
+			Function: llm.ToolFunction{
+				Name:        ToolDeleteFile,
+				Description: "Delete an EXISTING file from a GitHub repository. Use this when a file should be removed entirely (e.g. its content was merged into another file, or it is obsolete) — never empty a file with modify_file as a substitute for deleting it. The tool commits the deletion and opens a PR for it; pass pr_number or pr_url to delete the file on a pull request that is already open instead of opening another one. Multiple delete_file, create_file and modify_file calls for the SAME repository are grouped into a SINGLE pull request as long as they omit branch_name; pass a distinct branch_name to open a separate PR per independent fix (see branch_name). Only files can be deleted, not directories. To rename or move a file, use move_file instead of create_file + delete_file.",
+				Parameters: json.RawMessage(`{
+					"type":"object",
+					"properties":{
+						"repo":{"type":"string","description":"Repository name (without owner)"},
+						"path":{"type":"string","description":"Path of the file to delete within the repository"},
+						"description":{"type":"string","description":"Short description of why the file is removed (used as commit message and as the PR title when pr_title is not provided)"},
+						"pr_body":{"type":"string","description":"OPTIONAL full Markdown body for the pull request. Only the call that OPENS a PR establishes its body; later calls that group into that same PR ignore pr_body. Pass a fresh pr_body on the first call of each new branch_name."},
+						"pr_title":{"type":"string","description":"OPTIONAL full PR title. When provided, used VERBATIM as the PR title (no agent-name prefix is added). Only honored on the call that OPENS a PR; later calls that group into that same PR ignore it. Leave empty to use the default '<agent-id>: <description>' title."},
+						"pr_number":{"type":"integer","description":"OPTIONAL number of an EXISTING open pull request to commit this deletion onto (its head branch). Use this for every follow-up round on a PR that is already open. Only for a PR you opened while handling THIS request or that the request itself names: a PR you merely found by listing the repo belongs to someone else's work and is rejected. The file must exist on the PR's branch. Leave empty only when this change should start a NEW pull request."},
+						"pr_url":{"type":"string","description":"OPTIONAL full URL of an existing open pull request (https://github.com/<owner>/<repo>/pull/<n>) — the same targeting as pr_number, for when you have the URL rather than the number. Pass only one of pr_number / pr_url. The PR must belong to the repo being changed, must still be open, and must be one you opened for this request or one the request names."},
+						"branch_name":{"type":"string","description":"OPTIONAL custom HEAD branch name for the PR. This argument controls PR grouping. Omit it, or repeat the branch name of the MOST RECENT PR opened for this repo, to add this deletion to that PR. Pass a NEW distinct name to open a separate branch and PR instead. Each new branch is cut from the base branch. Leave empty on every call to use the platform's auto-generated unique branch name. Must be a valid git branch name. Naming a branch that ALREADY exists on the remote commits onto it only when the request names that branch or its PR (use pr_number when you have the PR); otherwise a fresh branch is used."},
+						"branch":{"type":"string","description":"BASE branch the PR should target. LEAVE EMPTY in almost all cases — the platform resolves the repo default branch and auto-generates the head branch. Do not pass an existing PR head branch here."}
+					},
+					"required":["repo","path","description"]
+				}`),
+			},
+		},
+		{
+			Type: "function",
+			Function: llm.ToolFunction{
+				Name:        ToolMoveFile,
+				Description: "Rename or move an EXISTING file in a GitHub repository, like `git mv`. The file keeps its content and history and the PR shows it as renamed — ALWAYS use this for renames and moves instead of create_file + delete_file. To also change the content, call move_file first, then modify_file on the new path in the same PR. The tool commits the move and opens a PR for it; pass pr_number or pr_url to move the file on a pull request that is already open instead of opening another one. Multiple write calls for the SAME repository are grouped into a SINGLE pull request as long as they omit branch_name; pass a distinct branch_name to open a separate PR per independent fix (see branch_name). Only files can be moved, not directories, and new_path must not already exist.",
+				Parameters: json.RawMessage(`{
+					"type":"object",
+					"properties":{
+						"repo":{"type":"string","description":"Repository name (without owner)"},
+						"path":{"type":"string","description":"Current path of the file within the repository"},
+						"new_path":{"type":"string","description":"New path for the file within the repository"},
+						"description":{"type":"string","description":"Short description of the rename (used as commit message and as the PR title when pr_title is not provided)"},
+						"pr_body":{"type":"string","description":"OPTIONAL full Markdown body for the pull request. Only the call that OPENS a PR establishes its body; later calls that group into that same PR ignore pr_body. Pass a fresh pr_body on the first call of each new branch_name."},
+						"pr_title":{"type":"string","description":"OPTIONAL full PR title. When provided, used VERBATIM as the PR title (no agent-name prefix is added). Only honored on the call that OPENS a PR; later calls that group into that same PR ignore it. Leave empty to use the default '<agent-id>: <description>' title."},
+						"pr_number":{"type":"integer","description":"OPTIONAL number of an EXISTING open pull request to commit this move onto (its head branch). Use this for every follow-up round on a PR that is already open. Only for a PR you opened while handling THIS request or that the request itself names: a PR you merely found by listing the repo belongs to someone else's work and is rejected. The file must exist at path on the PR's branch. Leave empty only when this change should start a NEW pull request."},
+						"pr_url":{"type":"string","description":"OPTIONAL full URL of an existing open pull request (https://github.com/<owner>/<repo>/pull/<n>) — the same targeting as pr_number, for when you have the URL rather than the number. Pass only one of pr_number / pr_url. The PR must belong to the repo being changed, must still be open, and must be one you opened for this request or one the request names."},
+						"branch_name":{"type":"string","description":"OPTIONAL custom HEAD branch name for the PR. This argument controls PR grouping. Omit it, or repeat the branch name of the MOST RECENT PR opened for this repo, to add this move to that PR. Pass a NEW distinct name to open a separate branch and PR instead. Each new branch is cut from the base branch. Leave empty on every call to use the platform's auto-generated unique branch name. Must be a valid git branch name. Naming a branch that ALREADY exists on the remote commits onto it only when the request names that branch or its PR (use pr_number when you have the PR); otherwise a fresh branch is used."},
+						"branch":{"type":"string","description":"BASE branch the PR should target. LEAVE EMPTY in almost all cases — the platform resolves the repo default branch and auto-generates the head branch. Do not pass an existing PR head branch here."}
+					},
+					"required":["repo","path","new_path","description"]
 				}`),
 			},
 		},
@@ -2957,6 +3002,115 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 			return fmt.Sprintf("File created and pull request opened: %s", result.PrURL)
 		}
 		return fmt.Sprintf("File created and committed to existing PR: %s", result.PrURL)
+
+	case ToolDeleteFile:
+		args, errMsg := parseToolArgs[struct {
+			Repo        string `json:"repo"`
+			Path        string `json:"path"`
+			Description string `json:"description"`
+			PRBody      string `json:"pr_body"`
+			PRTitle     string `json:"pr_title"`
+			BranchName  string `json:"branch_name"`
+			PRNumber    int    `json:"pr_number"`
+			PRURL       string `json:"pr_url"`
+			Branch      string `json:"branch"`
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
+		}
+		if errMsg := requireDescription(args.Description); errMsg != "" {
+			return errMsg
+		}
+		owner, baseBranch, errMsg := resolveRepoBranch(ctx, h.ghClient, args.Repo, args.Branch)
+		if errMsg != "" {
+			return errMsg
+		}
+		targetBranch, errMsg := resolveWriteBranch(ctx, h.ghClient, h.branchMgr, owner, args.Repo, args.BranchName, args.PRNumber, args.PRURL)
+		if errMsg != "" {
+			return errMsg
+		}
+
+		readBranch := h.branchMgr.ReadBranch(ctx, owner, args.Repo, baseBranch, targetBranch)
+		_, fileSHA, err := h.ghClient.GetFileContent(ctx, owner, args.Repo, args.Path, readBranch)
+		if err != nil {
+			return preconditionErrf("Error reading file to delete: %v", err)
+		}
+
+		userName := h.slackUserName(userID)
+		prBody := h.buildPRBody(userID, userName, args.PRBody, fmt.Sprintf("Automated file deletion requested via %s by %s.\n\nChange: %s\nDeleted file: `%s`", h.prOrigin(), slackAttribution(userID, userName), args.Description, args.Path))
+		result, err := h.branchMgr.CommitAndPR(ctx, owner, args.Repo, baseBranch, userID, args.Description, prBody, targetBranch, args.PRTitle, []string{args.Path},
+			func(branch string) error {
+				commitMsg := fmt.Sprintf("%s: %s", h.agentID, args.Description)
+				return h.ghClient.DeleteFile(ctx, owner, args.Repo, args.Path, branch, commitMsg, fileSHA)
+			})
+		if err != nil {
+			return commitErrResult(err)
+		}
+		log.Printf("[user=%s channel=%s] delete_file: PR %s (new=%t)", userID, channelID, result.PrURL, result.IsNew)
+		if result.IsNew {
+			return fmt.Sprintf("File deleted and pull request opened: %s", result.PrURL)
+		}
+		return fmt.Sprintf("File deleted and committed to existing PR: %s", result.PrURL)
+
+	case ToolMoveFile:
+		args, errMsg := parseToolArgs[struct {
+			Repo        string `json:"repo"`
+			Path        string `json:"path"`
+			NewPath     string `json:"new_path"`
+			Description string `json:"description"`
+			PRBody      string `json:"pr_body"`
+			PRTitle     string `json:"pr_title"`
+			BranchName  string `json:"branch_name"`
+			PRNumber    int    `json:"pr_number"`
+			PRURL       string `json:"pr_url"`
+			Branch      string `json:"branch"`
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
+		}
+		if errMsg := requireDescription(args.Description); errMsg != "" {
+			return errMsg
+		}
+		fromPath := strings.Trim(args.Path, "/")
+		toPath := strings.Trim(args.NewPath, "/")
+		if fromPath == "" || toPath == "" {
+			return preconditionErrf("Error: path and new_path are both required.")
+		}
+		if fromPath == toPath {
+			return preconditionErrf("Error: new_path is the same as path; nothing to move.")
+		}
+		owner, baseBranch, errMsg := resolveRepoBranch(ctx, h.ghClient, args.Repo, args.Branch)
+		if errMsg != "" {
+			return errMsg
+		}
+		targetBranch, errMsg := resolveWriteBranch(ctx, h.ghClient, h.branchMgr, owner, args.Repo, args.BranchName, args.PRNumber, args.PRURL)
+		if errMsg != "" {
+			return errMsg
+		}
+
+		readBranch := h.branchMgr.ReadBranch(ctx, owner, args.Repo, baseBranch, targetBranch)
+		if _, _, err := h.ghClient.GetFileContent(ctx, owner, args.Repo, fromPath, readBranch); err != nil {
+			return preconditionErrf("Error reading file to move: %v", err)
+		}
+		if _, _, err := h.ghClient.GetFileContent(ctx, owner, args.Repo, toPath, readBranch); err == nil {
+			return preconditionErrf("Error: %s already exists; move_file will not overwrite it.", toPath)
+		}
+
+		userName := h.slackUserName(userID)
+		prBody := h.buildPRBody(userID, userName, args.PRBody, fmt.Sprintf("Automated file rename requested via %s by %s.\n\nChange: %s\nRenamed: `%s` → `%s`", h.prOrigin(), slackAttribution(userID, userName), args.Description, fromPath, toPath))
+		result, err := h.branchMgr.CommitAndPR(ctx, owner, args.Repo, baseBranch, userID, args.Description, prBody, targetBranch, args.PRTitle, []string{fromPath, toPath},
+			func(branch string) error {
+				commitMsg := fmt.Sprintf("%s: %s", h.agentID, args.Description)
+				return h.ghClient.MoveFile(ctx, owner, args.Repo, branch, fromPath, toPath, commitMsg)
+			})
+		if err != nil {
+			return commitErrResult(err)
+		}
+		log.Printf("[user=%s channel=%s] move_file: PR %s (new=%t)", userID, channelID, result.PrURL, result.IsNew)
+		if result.IsNew {
+			return fmt.Sprintf("File moved to %s and pull request opened: %s", toPath, result.PrURL)
+		}
+		return fmt.Sprintf("File moved to %s and committed to existing PR: %s", toPath, result.PrURL)
 
 	case ToolRegexReplaceFile:
 		args, errMsg := parseToolArgs[struct {

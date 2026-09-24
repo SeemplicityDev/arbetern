@@ -811,7 +811,7 @@ training cutoff.
 
 ### PR-writing tools
 
-The `modify_file`, `create_file`, and `regex_replace_file` tools all accept
+The `modify_file`, `create_file`, `delete_file`, `move_file`, and `regex_replace_file` tools all accept
 an optional `pr_body` argument. When supplied, the LLM-authored Markdown is
 used verbatim as the PR description (with a single-line `_Automated via
 Slack by Real Name (<@user>)_` attribution footer appended); when omitted, a

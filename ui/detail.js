@@ -388,7 +388,7 @@ const FLOW_INTEGRATIONS = [
   { id: 'confluence', name: 'Confluence', kind: 'source', keys: ['confluence', 'cql', 'search_confluence_pages', 'get_confluence_page', 'list_confluence_spaces', 'create_confluence_page'] },
   { id: 'github', name: 'GitHub', kind: 'both', keys: ['github', 'gh', 'repo', 'repository', 'pull request', 'pr ', 'pull-request', 'branch', 'commit', '.github'],
     readKeys: ['get_file_content', 'get_files_bulk', 'list_pull_requests', 'search_pull_requests', 'get_pull_request', 'list_commits', 'search_code', 'search_code_org', 'search_files', 'list_directory', 'list_org_repos', 'list_user_repos', 'list_repo_teams', 'resolve_owner', 'get_repo_default_branch', 'get_authenticated_user', 'get_workflow_run'],
-    writeKeys: ['modify_file', 'create_file', 'regex_replace_file', 'rerun_failed_jobs', 'rerun_workflow'] },
+    writeKeys: ['modify_file', 'create_file', 'delete_file', 'move_file', 'regex_replace_file', 'rerun_failed_jobs', 'rerun_workflow'] },
   { id: 'slack', name: 'Slack', kind: 'output', keys: ['slack', 'channel', 'c0', 'u0', 'post_slack', 'dm '] },
   { id: 'datadog', name: 'Datadog', kind: 'source', keys: ['datadog', 'datadog_search_logs', 'datadog_list_monitors', 'datadog_get_monitor', 'datadog_list_hosts', 'datadog_get_dashboard', 'datadog_list_dashboards', 'datadog_query_metrics', 'dd_', 'env:prod'] },
   { id: 'aws', name: 'AWS', kind: 'both', keys: ['aws_get_cost_and_usage', 'aws_get_cost_forecast', 'aws_list_dimension_values', 'aws_s3_put_object', 'aws_s3_get_object', 'aws_s3_list_objects', 'aws_athena_query', 'aws_athena_schema', 'aws_athena_catalogs', 'cost explorer', 'athena', 'amortizedcost', 'unblendedcost', 's3://'],

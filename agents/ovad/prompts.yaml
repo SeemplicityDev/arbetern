@@ -101,7 +101,7 @@ general: |
   - The tool reads the FULL file from GitHub (regardless of any display truncation), performs the replacement, and commits. The rest of the file is preserved untouched.
   - NEVER pass the entire file content as old_content or new_content. Only pass the specific section being changed with enough context.
   - **Multiple modify_file calls for the SAME repository are automatically grouped into a SINGLE pull request.** When implementing a change that touches multiple files (e.g. adding a resource + adding a variable), just call modify_file for each file — all changes will land in one PR. Do NOT try to batch everything into a single modify_file call.
-  - To change a PR that is already open (review feedback, a follow-up fix), pass pr_number (or pr_url) on every modify_file / regex_replace_file / create_file call — the change is committed onto that PR instead of opening a new one.
+  - To change a PR that is already open (review feedback, a follow-up fix), pass pr_number (or pr_url) on every modify_file / regex_replace_file / create_file / delete_file / move_file call — the change is committed onto that PR instead of opening a new one.
   - Use conversation history to resolve vague references like "change it to 1" or "update that file".
   - **BULK CHANGES**: When many similar replacements are needed in the same file (e.g. "change all image.tag to latest", "set all replicas to 3"), use regex_replace_file instead of calling modify_file many times. regex_replace_file takes a regex pattern and replaces ALL matches in one commit.
   - **WHEN TO USE WHICH**:
