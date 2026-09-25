@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -148,8 +149,6 @@ func describeIntegrations(list []integration) []integrationView {
 	}
 	return out
 }
-
-func boolPtr(v bool) *bool { return &v }
 
 // integrationToolNames returns the sorted tool names exposed by the integration
 // with the given UI id, for the home page "Tools" tab. Every connector's list
@@ -1288,10 +1287,8 @@ func hasScope(granted []string, scope string) bool {
 		"checks:write":  true,
 	}
 	if repoImplied[scope] {
-		for _, g := range granted {
-			if g == "repo" {
-				return true
-			}
+		if slices.Contains(granted, "repo") {
+			return true
 		}
 	}
 
@@ -1346,7 +1343,7 @@ func refreshIntegrations(
 					known[slackPerms[i].Scope] = true
 					continue
 				}
-				slackPerms[i].Granted = boolPtr(hasScope(scopes, slackPerms[i].Scope))
+				slackPerms[i].Granted = new(hasScope(scopes, slackPerms[i].Scope))
 				known[slackPerms[i].Scope] = true
 			}
 			// Append extra scopes the token has that arbetern doesn't need.
@@ -1354,7 +1351,7 @@ func refreshIntegrations(
 				if !known[s] {
 					slackPerms = append(slackPerms, permission{
 						Scope:   s,
-						Granted: boolPtr(true),
+						Granted: new(true),
 						Extra:   true,
 					})
 				}
@@ -1378,7 +1375,7 @@ func refreshIntegrations(
 			if scopes, err := ghClient.GetGrantedScopes(context.Background()); err == nil && scopes != nil {
 				known := make(map[string]bool, len(ghPerms))
 				for i := range ghPerms {
-					ghPerms[i].Granted = boolPtr(hasScope(scopes, ghPerms[i].Scope))
+					ghPerms[i].Granted = new(hasScope(scopes, ghPerms[i].Scope))
 					known[ghPerms[i].Scope] = true
 				}
 				// Append extra scopes the token has that arbetern doesn't need.
@@ -1386,7 +1383,7 @@ func refreshIntegrations(
 					if !known[s] {
 						ghPerms = append(ghPerms, permission{
 							Scope:   s,
-							Granted: boolPtr(true),
+							Granted: new(true),
 							Extra:   true,
 						})
 					}
@@ -1428,9 +1425,9 @@ func refreshIntegrations(
 		}
 		if cfg.AtlassianUseOAuth() {
 			jiraPerms = append(jiraPerms,
-				permission{Scope: "read:jira-work", Description: "OAuth scope: read issues, projects, and boards", Required: true, Granted: boolPtr(jiraConnected)},
-				permission{Scope: "write:jira-work", Description: "OAuth scope: create and update issues", Required: true, Granted: boolPtr(jiraConnected)},
-				permission{Scope: "read:jira-user", Description: "OAuth scope: read user profiles for assignee resolution", Required: true, Granted: boolPtr(jiraConnected)},
+				permission{Scope: "read:jira-work", Description: "OAuth scope: read issues, projects, and boards", Required: true, Granted: new(jiraConnected)},
+				permission{Scope: "write:jira-work", Description: "OAuth scope: create and update issues", Required: true, Granted: new(jiraConnected)},
+				permission{Scope: "read:jira-user", Description: "OAuth scope: read user profiles for assignee resolution", Required: true, Granted: new(jiraConnected)},
 			)
 		}
 
@@ -1445,7 +1442,7 @@ func refreshIntegrations(
 				known := make(map[string]bool, len(jiraPerms))
 				for i := range jiraPerms {
 					if g, ok := grants[jiraPerms[i].Scope]; ok {
-						jiraPerms[i].Granted = boolPtr(g)
+						jiraPerms[i].Granted = new(g)
 					}
 					known[jiraPerms[i].Scope] = true
 				}
@@ -1454,7 +1451,7 @@ func refreshIntegrations(
 					if !known[scope] && granted {
 						jiraPerms = append(jiraPerms, permission{
 							Scope:   scope,
-							Granted: boolPtr(true),
+							Granted: new(true),
 							Extra:   true,
 						})
 					}
@@ -1477,12 +1474,12 @@ func refreshIntegrations(
 		}
 		if cfg.AtlassianUseOAuth() {
 			for i := range confluencePerms {
-				confluencePerms[i].Granted = boolPtr(jiraConnected)
+				confluencePerms[i].Granted = new(jiraConnected)
 			}
 		} else {
 			// Basic Auth inherits all permissions of the account.
 			for i := range confluencePerms {
-				confluencePerms[i].Granted = boolPtr(jiraConnected)
+				confluencePerms[i].Granted = new(jiraConnected)
 			}
 		}
 		result = append(result, integration{
@@ -1523,16 +1520,16 @@ func refreshIntegrations(
 			authMode = "API Key"
 		}
 		nvdPerms := []permission{
-			{Scope: "cves/2.0", Description: "Look up CVEs by ID (lookup_cve)", Required: true, Granted: boolPtr(true)},
-			{Scope: "cves/2.0?keywordSearch", Description: "Search CVEs by keyword (search_cve)", Required: true, Granted: boolPtr(true)},
+			{Scope: "cves/2.0", Description: "Look up CVEs by ID (lookup_cve)", Required: true, Granted: new(true)},
+			{Scope: "cves/2.0?keywordSearch", Description: "Search CVEs by keyword (search_cve)", Required: true, Granted: new(true)},
 		}
 		if nvdConfigured {
 			nvdPerms = append(nvdPerms, permission{
-				Scope: "apiKey", Description: "API key grants ~50 requests per 30s rolling window", Required: false, Granted: boolPtr(true),
+				Scope: "apiKey", Description: "API key grants ~50 requests per 30s rolling window", Required: false, Granted: new(true),
 			})
 		} else {
 			nvdPerms = append(nvdPerms, permission{
-				Scope: "apiKey", Description: "Without API key, limited to ~5 requests per 30s", Required: false, Granted: boolPtr(false),
+				Scope: "apiKey", Description: "Without API key, limited to ~5 requests per 30s", Required: false, Granted: new(false),
 			})
 		}
 		result = append(result, integration{
@@ -1548,8 +1545,8 @@ func refreshIntegrations(
 	if cfg.SalesforceConfigured() {
 		sfConnected := sfClient != nil && sfClient.Ready()
 		sfPerms := []permission{
-			{Scope: "query", Description: "Execute SOQL queries (accounts, opportunities, contacts)", Required: true, Granted: boolPtr(sfConnected)},
-			{Scope: "describe", Description: "Describe SObject metadata (fields, types)", Required: true, Granted: boolPtr(sfConnected)},
+			{Scope: "query", Description: "Execute SOQL queries (accounts, opportunities, contacts)", Required: true, Granted: new(sfConnected)},
+			{Scope: "describe", Description: "Describe SObject metadata (fields, types)", Required: true, Granted: new(sfConnected)},
 		}
 		// Verify connectivity by checking identity.
 		if sfConnected {
@@ -1558,7 +1555,7 @@ func refreshIntegrations(
 					Scope:       "identity",
 					Description: fmt.Sprintf("Authenticated as %s (%s)", info.DisplayName, info.Username),
 					Required:    false,
-					Granted:     boolPtr(true),
+					Granted:     new(true),
 				})
 			}
 		}
@@ -1585,10 +1582,10 @@ func refreshIntegrations(
 	if cfg.ChorusConfigured() {
 		chorusConnected := chorusClient != nil && chorusClient.Ready()
 		chorusPerms := []permission{
-			{Scope: "engagements", Description: "List and search Chorus conversations, meetings, and calls via v3 API", Required: true, Granted: boolPtr(chorusConnected)},
-			{Scope: "conversations/:id", Description: "Fetch detailed conversation analytics (summary, trackers, action items, deal)", Required: true, Granted: boolPtr(chorusConnected)},
-			{Scope: "sales-qualifications", Description: "Extract and retrieve Sales Qualification Framework (MEDDIC) analysis from call transcripts", Required: false, Granted: boolPtr(chorusConnected)},
-			{Scope: "sales-qualifications/writeback-crm", Description: "Write back qualification-derived field updates to CRM", Required: false, Granted: boolPtr(chorusConnected)},
+			{Scope: "engagements", Description: "List and search Chorus conversations, meetings, and calls via v3 API", Required: true, Granted: new(chorusConnected)},
+			{Scope: "conversations/:id", Description: "Fetch detailed conversation analytics (summary, trackers, action items, deal)", Required: true, Granted: new(chorusConnected)},
+			{Scope: "sales-qualifications", Description: "Extract and retrieve Sales Qualification Framework (MEDDIC) analysis from call transcripts", Required: false, Granted: new(chorusConnected)},
+			{Scope: "sales-qualifications/writeback-crm", Description: "Write back qualification-derived field updates to CRM", Required: false, Granted: new(chorusConnected)},
 		}
 		result = append(result, integration{
 			ID:          "chorus",
@@ -1615,10 +1612,10 @@ func refreshIntegrations(
 	if cfg.DatadogConfigured() {
 		ddConnected := datadogClients != nil
 		ddPerms := []permission{
-			{Scope: "logs_read_data", Description: "Search and read log entries via Log Search API", Required: true, Granted: boolPtr(ddConnected)},
-			{Scope: "monitors_read", Description: "List and get monitor details, status, and configuration", Required: true, Granted: boolPtr(ddConnected)},
-			{Scope: "hosts_read", Description: "List infrastructure hosts and their metadata", Required: true, Granted: boolPtr(ddConnected)},
-			{Scope: "dashboards_read", Description: "List and read dashboard definitions and widgets", Required: true, Granted: boolPtr(ddConnected)},
+			{Scope: "logs_read_data", Description: "Search and read log entries via Log Search API", Required: true, Granted: new(ddConnected)},
+			{Scope: "monitors_read", Description: "List and get monitor details, status, and configuration", Required: true, Granted: new(ddConnected)},
+			{Scope: "hosts_read", Description: "List infrastructure hosts and their metadata", Required: true, Granted: new(ddConnected)},
+			{Scope: "dashboards_read", Description: "List and read dashboard definitions and widgets", Required: true, Granted: new(ddConnected)},
 		}
 		activeSites := make(map[string]string)
 		if datadogClients != nil {
@@ -1658,21 +1655,21 @@ func refreshIntegrations(
 		awsPerms := []permission{}
 		if bedrockConnected {
 			awsPerms = append(awsPerms, permission{
-				Scope: "bedrock:InvokeModel", Description: "Invoke the configured Claude model / inference profile via the Bedrock runtime", Required: true, Granted: boolPtr(true),
+				Scope: "bedrock:InvokeModel", Description: "Invoke the configured Claude model / inference profile via the Bedrock runtime", Required: true, Granted: new(true),
 			})
 		}
 		awsPerms = append(awsPerms,
-			permission{Scope: "ce:GetCostAndUsage", Description: "Query daily / monthly cost and usage aggregates with optional group-by (SERVICE, LINKED_ACCOUNT, …)", Required: true, Granted: boolPtr(awsConnected)},
-			permission{Scope: "ce:GetCostForecast", Description: "Forecast upcoming cost (tomorrow through +30 days by default)", Required: true, Granted: boolPtr(awsConnected)},
-			permission{Scope: "ce:GetDimensionValues", Description: "Enumerate valid dimension values (service names, accounts, usage types) for filtering", Required: false, Granted: boolPtr(awsConnected)},
-			permission{Scope: "athena:StartQueryExecution", Description: "Run read-only SQL in a workgroup the role is allowed to use (Cost and Usage Report queries)", Required: false, Granted: boolPtr(awsConnected)},
-			permission{Scope: "athena:GetQueryExecution / GetQueryResults", Description: "Poll a running query and fetch its rows", Required: false, Granted: boolPtr(awsConnected)},
-			permission{Scope: "athena:StopQueryExecution", Description: "Cancel a query that exceeds the 3-minute cap so a runaway scan stops accruing cost", Required: false, Granted: boolPtr(awsConnected)},
-			permission{Scope: "athena:ListWorkGroups / ListDataCatalogs", Description: "Discover which workgroups and data catalogs this role may query", Required: false, Granted: boolPtr(awsConnected)},
-			permission{Scope: "athena:ListDatabases / ListTableMetadata / GetTableMetadata", Description: "Browse the Glue catalog: databases, tables, columns and partition keys", Required: false, Granted: boolPtr(awsConnected)},
-			permission{Scope: "glue:GetDatabase* / GetTable* / GetPartition*", Description: "Read the Glue catalog entries backing the queried tables", Required: false, Granted: boolPtr(awsConnected)},
-			permission{Scope: "s3:GetObject / ListBucket (query source data)", Description: "Read the objects Athena scans, e.g. the Cost and Usage Report", Required: false, Granted: boolPtr(awsConnected)},
-			permission{Scope: "s3:PutObject (query results)", Description: "Write query results under the workgroup's result prefix", Required: false, Granted: boolPtr(awsConnected)},
+			permission{Scope: "ce:GetCostAndUsage", Description: "Query daily / monthly cost and usage aggregates with optional group-by (SERVICE, LINKED_ACCOUNT, …)", Required: true, Granted: new(awsConnected)},
+			permission{Scope: "ce:GetCostForecast", Description: "Forecast upcoming cost (tomorrow through +30 days by default)", Required: true, Granted: new(awsConnected)},
+			permission{Scope: "ce:GetDimensionValues", Description: "Enumerate valid dimension values (service names, accounts, usage types) for filtering", Required: false, Granted: new(awsConnected)},
+			permission{Scope: "athena:StartQueryExecution", Description: "Run read-only SQL in a workgroup the role is allowed to use (Cost and Usage Report queries)", Required: false, Granted: new(awsConnected)},
+			permission{Scope: "athena:GetQueryExecution / GetQueryResults", Description: "Poll a running query and fetch its rows", Required: false, Granted: new(awsConnected)},
+			permission{Scope: "athena:StopQueryExecution", Description: "Cancel a query that exceeds the 3-minute cap so a runaway scan stops accruing cost", Required: false, Granted: new(awsConnected)},
+			permission{Scope: "athena:ListWorkGroups / ListDataCatalogs", Description: "Discover which workgroups and data catalogs this role may query", Required: false, Granted: new(awsConnected)},
+			permission{Scope: "athena:ListDatabases / ListTableMetadata / GetTableMetadata", Description: "Browse the Glue catalog: databases, tables, columns and partition keys", Required: false, Granted: new(awsConnected)},
+			permission{Scope: "glue:GetDatabase* / GetTable* / GetPartition*", Description: "Read the Glue catalog entries backing the queried tables", Required: false, Granted: new(awsConnected)},
+			permission{Scope: "s3:GetObject / ListBucket (query source data)", Description: "Read the objects Athena scans, e.g. the Cost and Usage Report", Required: false, Granted: new(awsConnected)},
+			permission{Scope: "s3:PutObject (query results)", Description: "Write query results under the workgroup's result prefix", Required: false, Granted: new(awsConnected)},
 		)
 
 		active := map[string]string{}
@@ -1719,7 +1716,7 @@ func refreshIntegrations(
 		// OpenAI deployments
 		if openaiConnected {
 			azurePerms = append(azurePerms, permission{
-				Scope: "Cognitive Services OpenAI User", Description: "Azure RBAC role for chat completions inference", Required: true, Granted: boolPtr(true),
+				Scope: "Cognitive Services OpenAI User", Description: "Azure RBAC role for chat completions inference", Required: true, Granted: new(true),
 			})
 
 			generalModel := modelsClient.Model()
@@ -1735,9 +1732,9 @@ func refreshIntegrations(
 
 		// Cost Management
 		azurePerms = append(azurePerms,
-			permission{Scope: "Microsoft.CostManagement/query/action", Description: "Query daily / monthly cost aggregates with optional group-by (ServiceName, ResourceGroupName, ResourceLocation, …)", Required: true, Granted: boolPtr(costConnected)},
-			permission{Scope: "Microsoft.CostManagement/forecast/action", Description: "Forecast upcoming cost (today through +30 days by default)", Required: true, Granted: boolPtr(costConnected)},
-			permission{Scope: "Microsoft.CostManagement/dimensions/read", Description: "Enumerate dimension values (service names, resource groups, regions) for filtering", Required: false, Granted: boolPtr(costConnected)},
+			permission{Scope: "Microsoft.CostManagement/query/action", Description: "Query daily / monthly cost aggregates with optional group-by (ServiceName, ResourceGroupName, ResourceLocation, …)", Required: true, Granted: new(costConnected)},
+			permission{Scope: "Microsoft.CostManagement/forecast/action", Description: "Forecast upcoming cost (today through +30 days by default)", Required: true, Granted: new(costConnected)},
+			permission{Scope: "Microsoft.CostManagement/dimensions/read", Description: "Enumerate dimension values (service names, resource groups, regions) for filtering", Required: false, Granted: new(costConnected)},
 		)
 		if costConnected {
 			if ba := azureClient.BillingAccountID(); ba != "" {
@@ -1771,8 +1768,8 @@ func refreshIntegrations(
 	{
 		dbConnected := databricksClient != nil && databricksClient.Ready()
 		dbPerms := []permission{
-			{Scope: "sql.statement-execution", Description: "Run read-only SQL statements against a SQL warehouse (POST /api/2.0/sql/statements)", Required: true, Granted: boolPtr(dbConnected)},
-			{Scope: "sql.warehouse.canuse", Description: "CAN USE on the target SQL warehouse that executes statements", Required: true, Granted: boolPtr(dbConnected)},
+			{Scope: "sql.statement-execution", Description: "Run read-only SQL statements against a SQL warehouse (POST /api/2.0/sql/statements)", Required: true, Granted: new(dbConnected)},
+			{Scope: "sql.warehouse.canuse", Description: "CAN USE on the target SQL warehouse that executes statements", Required: true, Granted: new(dbConnected)},
 		}
 		activeDB := map[string]string{}
 		if databricksClient != nil {
@@ -1793,11 +1790,11 @@ func refreshIntegrations(
 	{
 		chConnected := clickhouseClient != nil && clickhouseClient.Ready()
 		chPerms := []permission{
-			{Scope: "billing.usageCost.read", Description: "Read organization usage-cost reports (GET /v1/organizations/{org}/usageCost)", Required: true, Granted: boolPtr(chConnected)},
+			{Scope: "billing.usageCost.read", Description: "Read organization usage-cost reports (GET /v1/organizations/{org}/usageCost)", Required: true, Granted: new(chConnected)},
 		}
 		if cfg.ClickHouseQueryConfigured() {
 			chQueryConnected := clickhouseClient != nil && clickhouseClient.QueryReady()
-			chPerms = append(chPerms, permission{Scope: "sql.read", Description: "Run read-only SQL against the service endpoint (SELECT / SHOW / DESCRIBE / EXISTS)", Required: false, Granted: boolPtr(chQueryConnected)})
+			chPerms = append(chPerms, permission{Scope: "sql.read", Description: "Run read-only SQL against the service endpoint (SELECT / SHOW / DESCRIBE / EXISTS)", Required: false, Granted: new(chQueryConnected)})
 		}
 		activeCH := map[string]string{}
 		if clickhouseClient != nil {
@@ -1821,10 +1818,10 @@ func refreshIntegrations(
 	// --- Freshworks (Freshdesk / Freshchat / CRM) ---
 	{
 		fwPerms := []permission{
-			{Scope: "freshdesk.tickets.read", Description: "Read Freshdesk tickets and conversations", Required: false, Granted: boolPtr(cfg.FreshdeskConfigured())},
-			{Scope: "freshdesk.tickets.write", Description: "Add private (internal) notes and tags to Freshdesk tickets", Required: false, Granted: boolPtr(cfg.FreshdeskConfigured())},
-			{Scope: "freshchat.conversations.read", Description: "Read Freshchat conversations and messages", Required: false, Granted: boolPtr(cfg.FreshchatConfigured())},
-			{Scope: "crm.records.read", Description: "Read Freshworks CRM contacts, deals and search", Required: false, Granted: boolPtr(cfg.FreshworksCRMConfigured())},
+			{Scope: "freshdesk.tickets.read", Description: "Read Freshdesk tickets and conversations", Required: false, Granted: new(cfg.FreshdeskConfigured())},
+			{Scope: "freshdesk.tickets.write", Description: "Add private (internal) notes and tags to Freshdesk tickets", Required: false, Granted: new(cfg.FreshdeskConfigured())},
+			{Scope: "freshchat.conversations.read", Description: "Read Freshchat conversations and messages", Required: false, Granted: new(cfg.FreshchatConfigured())},
+			{Scope: "crm.records.read", Description: "Read Freshworks CRM contacts, deals and search", Required: false, Granted: new(cfg.FreshworksCRMConfigured())},
 		}
 		activeFW := map[string]string{}
 		if freshworksClient != nil {
@@ -1846,9 +1843,9 @@ func refreshIntegrations(
 	{
 		d360Connected := document360Client != nil && document360Client.Ready()
 		d360Perms := []permission{
-			{Scope: "projects.read", Description: "Resolve the project and list its workspaces (GET /v3/projects, /workspaces)", Required: true, Granted: boolPtr(d360Connected)},
-			{Scope: "articles.read", Description: "List categories and articles, and read published article content", Required: true, Granted: boolPtr(d360Connected)},
-			{Scope: "search.read", Description: "Keyword search over published, visible articles in a workspace", Required: true, Granted: boolPtr(d360Connected)},
+			{Scope: "projects.read", Description: "Resolve the project and list its workspaces (GET /v3/projects, /workspaces)", Required: true, Granted: new(d360Connected)},
+			{Scope: "articles.read", Description: "List categories and articles, and read published article content", Required: true, Granted: new(d360Connected)},
+			{Scope: "search.read", Description: "Keyword search over published, visible articles in a workspace", Required: true, Granted: new(d360Connected)},
 		}
 		activeD360 := map[string]string{}
 		if document360Client != nil {
@@ -1869,10 +1866,10 @@ func refreshIntegrations(
 	{
 		gConnected := googleClient != nil && googleClient.Ready()
 		gPerms := []permission{
-			{Scope: "drive.readonly (shared folders)", Description: "Discover and search the Drive folders shared with the service account", Required: true, Granted: boolPtr(gConnected)},
-			{Scope: "drive.files.download", Description: "Stream and read file contents (CSV/text raw, Docs and Sheets exported to text)", Required: true, Granted: boolPtr(gConnected)},
-			{Scope: "spreadsheets.read", Description: "Read cell ranges from a spreadsheet in a shared folder", Required: true, Granted: boolPtr(gConnected)},
-			{Scope: "spreadsheets.write", Description: "Append rows to a tab of a spreadsheet in a shared folder (batched)", Required: true, Granted: boolPtr(gConnected)},
+			{Scope: "drive.readonly (shared folders)", Description: "Discover and search the Drive folders shared with the service account", Required: true, Granted: new(gConnected)},
+			{Scope: "drive.files.download", Description: "Stream and read file contents (CSV/text raw, Docs and Sheets exported to text)", Required: true, Granted: new(gConnected)},
+			{Scope: "spreadsheets.read", Description: "Read cell ranges from a spreadsheet in a shared folder", Required: true, Granted: new(gConnected)},
+			{Scope: "spreadsheets.write", Description: "Append rows to a tab of a spreadsheet in a shared folder (batched)", Required: true, Granted: new(gConnected)},
 		}
 		activeG := map[string]string{}
 		if googleClient != nil {
@@ -2885,7 +2882,7 @@ func main() {
 	apiMux.HandleFunc("/api/sessions", func(w http.ResponseWriter, r *http.Request) {
 		active, opened, expired, explicit := sessions.Stats(r.Context())
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"active":        active,
 			"total_opened":  opened,
 			"total_expired": expired,
@@ -3098,7 +3095,6 @@ func main() {
 	// Search by meaning over the catalogued descriptors; exact paths, so they
 	// win over the crud prefix handlers.
 	for _, kind := range []string{catalog.KindWorkflow, catalog.KindDashboard} {
-		kind := kind
 		apiMux.HandleFunc("/api/"+kind+"s/_search", func(w http.ResponseWriter, r *http.Request) {
 			q := strings.TrimSpace(r.URL.Query().Get("q"))
 			if q == "" {

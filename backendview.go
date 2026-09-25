@@ -179,7 +179,7 @@ func (v *backendView) handleObject(w http.ResponseWriter, r *http.Request) {
 		backendObject
 		Kind    string `json:"kind"`
 		Content string `json:"content,omitempty"`
-	}{backendObject: backendObject{Key: meta.Key, Size: meta.Size, LastModified: meta.LastModified}}
+	}{Key: meta.Key, Size: meta.Size, LastModified: meta.LastModified}
 	if meta.Size > backendMaxObjectBytes {
 		out.Kind = "large"
 		v.writeJSON(w, out)

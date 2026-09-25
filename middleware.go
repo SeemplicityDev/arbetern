@@ -4,6 +4,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"slices"
 	"strings"
 )
 
@@ -12,7 +13,7 @@ func parseCIDRs(raw string) []*net.IPNet {
 		return nil
 	}
 	var nets []*net.IPNet
-	for _, s := range strings.Split(raw, ",") {
+	for s := range strings.SplitSeq(raw, ",") {
 		s = strings.TrimSpace(s)
 		if s == "" {
 			continue
@@ -92,8 +93,8 @@ func clientIP(r *http.Request) string {
 		if xff == "" {
 			return peer
 		}
-		if i := strings.Index(xff, ","); i != -1 {
-			return strings.TrimSpace(xff[:i])
+		if before, _, ok := strings.Cut(xff, ","); ok {
+			return strings.TrimSpace(before)
 		}
 		return xff
 	}
@@ -101,8 +102,8 @@ func clientIP(r *http.Request) string {
 		return peer
 	}
 	hops := strings.Split(r.Header.Get("X-Forwarded-For"), ",")
-	for i := len(hops) - 1; i >= 0; i-- {
-		h := strings.TrimSpace(hops[i])
+	for _, hop := range slices.Backward(hops) {
+		h := strings.TrimSpace(hop)
 		if h == "" {
 			continue
 		}
