@@ -117,6 +117,7 @@ func (e *Embedder) Embed(ctx context.Context, texts []string) ([][]float32, erro
 		return nil, err
 	}
 	if err != nil {
+		br.abandon()
 		return nil, err
 	}
 	br.ok()

@@ -168,8 +168,8 @@ Fails the render on projects values that arbetern or the runners would reject at
 {{- fail "projects.runners.environmentKey (with createSecret: true) or projects.runners.existingEnvironmentSecret is required when projects.enabled is true" }}
 {{- end }}
 {{- $port := int $p.gateway.port }}
-{{- if or (eq $port (int .Values.containerPort)) (eq $port (int (index (.Values.env | default dict) "PORT"))) (and .Values.headroom.enabled (eq $port (int .Values.headroom.port))) }}
-{{- fail "projects.gateway.port must differ from containerPort, env.PORT and headroom.port" }}
+{{- if or (eq $port (int .Values.containerPort)) (eq $port (int (index (.Values.env | default dict) "PORT"))) (and .Values.headroom.enabled (eq $port (int .Values.headroom.port))) (and .Values.modelRouter.enabled (eq $port (int .Values.modelRouter.port))) }}
+{{- fail "projects.gateway.port must differ from containerPort, env.PORT, headroom.port and modelRouter.port" }}
 {{- end }}
 {{- if and (eq (include "arbetern.projects.namespace" .) .Release.Namespace) (not (and $p.runners.admissionPolicy.enabled (.Capabilities.APIVersions.Has "admissionregistration.k8s.io/v1/ValidatingAdmissionPolicy"))) }}
 {{- fail "runners in the release namespace need projects.runners.admissionPolicy.enabled and a cluster serving admissionregistration.k8s.io/v1 ValidatingAdmissionPolicy (helm template: pass --api-versions admissionregistration.k8s.io/v1/ValidatingAdmissionPolicy)" }}
@@ -180,6 +180,24 @@ Fails the render on projects values that arbetern or the runners would reject at
 {{- end }}
 {{- if and $.Values.createSecret (not (index ($.Values.secretValues | default dict) (printf "project-trigger-%s" .))) }}
 {{- fail (printf "secretValues.project-trigger-%s is required for projects.triggers entry %q when createSecret is true" . .) }}
+{{- end }}
+{{- end }}
+{{- end }}
+
+{{/*
+Fails the render on model router values that would collide with another container in the pod.
+*/}}
+{{- define "arbetern.modelRouter.validate" -}}
+{{- $port := int .Values.modelRouter.port }}
+{{- if or (eq $port (int .Values.containerPort)) (eq $port (int (index (.Values.env | default dict) "PORT"))) (and .Values.headroom.enabled (eq $port (int .Values.headroom.port))) }}
+{{- fail "modelRouter.port must differ from containerPort, env.PORT and headroom.port" }}
+{{- end }}
+{{- with .Values.modelRouter.model.docker }}
+{{- if and .digest (not (regexMatch "^sha256:[a-f0-9]{64}$" (toString .digest))) }}
+{{- fail "modelRouter.model.docker.digest must be sha256:<64 hex characters>" }}
+{{- end }}
+{{- if and .digest (not (regexMatch "^[a-z0-9]+([._-][a-z0-9]+)*/[a-z0-9]+([._-][a-z0-9]+)*$" (toString .repository))) }}
+{{- fail "modelRouter.model.docker.repository must be a Docker Hub <namespace>/<name>, e.g. ai/qwen3" }}
 {{- end }}
 {{- end }}
 {{- end }}

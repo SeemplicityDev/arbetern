@@ -107,6 +107,10 @@ type GeneralHandler struct {
 	// modelOverride, when set, replaces the default CODE_MODEL for a headless
 	// workflow tick with a specific backend deployment (workflow.Model).
 	modelOverride string
+	tiers         ModelTiers
+	// followUp marks a message that continues a conversation: a Slack thread
+	// reply, or a chat turn with history.
+	followUp bool
 	// aggregateCache holds the structured results of datadog_logs_aggregate
 	// calls made during this run, keyed by the short ID returned to the LLM
 	// (agg_1, agg_2, …). It lets upload_aggregate_csv assemble a CSV file
@@ -300,6 +304,10 @@ func (h *GeneralHandler) Execute(ctx context.Context, channelID, userID, text, r
 	h.aggregateCache = nil
 	h.branchMgr = NewBranchManager(h.ghClient, h.agentID, h.session)
 	h.branchMgr.Authorize(text)
+	logPrefix := fmt.Sprintf("[user=%s channel=%s]", userID, channelID)
+	thanksOnly := onlyThanks(text)
+	ackable := h.followUp && h.tiers.SkipAcks && thanksOnly
+	route := h.startRouting(ctx, text, ackable)
 
 	tools := h.buildTools()
 
@@ -308,19 +316,10 @@ func (h *GeneralHandler) Execute(ctx context.Context, channelID, userID, text, r
 		channelContext = cc
 	}
 
-	// Choose the active LLM client: use the code model when the request
-	// involves code changes (PRs, file modifications, etc.).
-	activeClient := h.modelsClient
-	if h.codeModelsClient != nil && isCodeIntent(strings.ToLower(text)) {
-		activeClient = h.codeModelsClient
-		log.Printf("[user=%s channel=%s] using code model (%s) for code-related request",
-			userID, channelID, h.codeModelsClient.Model())
+	if ackable && route().is(llm.TierThanks) && !h.botAskedInThread(channelID, auditTS) {
+		log.Printf("%s thread reply only thanks the bot; no model turn", logPrefix)
+		return
 	}
-
-	systemMsg := h.systemPrompt()
-	systemMsg = strings.Replace(systemMsg, "{{MODEL}}", activeClient.Model(), 1)
-	systemMsg = strings.Replace(systemMsg, "{{USER_ID}}", userID, 1)
-	systemMsg = strings.Replace(systemMsg, "{{USER_CONTEXT}}", h.userContext, 1)
 
 	// Everything below changes from one turn to the next, so it is kept out of
 	// the cached system block and sent after the prompt-cache breakpoint.
@@ -335,6 +334,16 @@ func (h *GeneralHandler) Execute(ctx context.Context, channelID, userID, text, r
 		fmt.Fprintf(&turnCtx, "\n\nGitHub Actions workflow run details and logs (auto-fetched from URLs found in your message):\n\n%s", workflowLogs)
 	}
 
+	codeIntent := isCodeIntent(strings.ToLower(text))
+	start := h.chooseStart(route(), codeIntent, thanksOnly)
+	logTurnStart(logPrefix, route(), start, codeIntent)
+	activeClient := start.client
+
+	systemMsg := h.systemPrompt()
+	systemMsg = strings.Replace(systemMsg, "{{MODEL}}", activeClient.Model(), 1)
+	systemMsg = strings.Replace(systemMsg, "{{USER_ID}}", userID, 1)
+	systemMsg = strings.Replace(systemMsg, "{{USER_CONTEXT}}", h.userContext, 1)
+
 	messages := []llm.ChatMessage{
 		llm.NewChatMessage("system", systemMsg),
 		llm.NewVolatileSystemMessage(turnCtx.String()),
@@ -343,14 +352,14 @@ func (h *GeneralHandler) Execute(ctx context.Context, channelID, userID, text, r
 
 	repliedInThread := false
 	res, err := h.runToolLoop(ctx, toolLoop{
-		logPrefix:         fmt.Sprintf("[user=%s channel=%s]", userID, channelID),
+		logPrefix:         logPrefix,
 		client:            activeClient,
-		codeClient:        h.codeModelsClient,
+		codeClient:        start.codeClient,
 		tools:             tools,
 		messages:          messages,
 		rounds:            h.maxToolRounds,
 		emptyRetries:      2,
-		guardPreActionAck: isCodeIntent(strings.ToLower(text)),
+		guardPreActionAck: codeIntent || route().is(llm.TierCode),
 		channelID:         channelID,
 		userID:            userID,
 		auditTS:           auditTS,
@@ -523,9 +532,10 @@ func (h *GeneralHandler) ExecuteHeadless(ctx context.Context, userID, prompt str
 // returned to the caller (the chat registry) to persist and display rather
 // than posted to Slack.
 //
-// It uses the general (conversational) model, upgrading to the code model only
-// after a code-related tool is invoked — mirroring the interactive Execute
-// path. Returns the reply text or the first tool-loop error.
+// It starts on the model the model router picks (the general model without
+// one), upgrading to the code model after a code-related tool is invoked —
+// mirroring the interactive Execute path. Returns the reply text or the first
+// tool-loop error.
 func (h *GeneralHandler) ExecuteChat(ctx context.Context, userID string, history []llm.ChatMessage, userMessage string, tracker *progress.Tracker) (string, error) {
 	h.currentChannelID = ""
 	h.currentAuditTS = ""
@@ -540,22 +550,29 @@ func (h *GeneralHandler) ExecuteChat(ctx context.Context, userID string, history
 	}
 	h.branchMgr.Authorize(userMessage)
 
-	tools := h.buildTools()
-
-	activeClient := h.modelsClient
-	if activeClient == nil {
+	if h.modelsClient == nil {
 		return "", fmt.Errorf("LLM client is not configured")
 	}
+	h.followUp = len(history) > 0
+	route := h.startRouting(ctx, userMessage, false)
 
-	systemMsg := h.systemPrompt()
-	systemMsg = strings.Replace(systemMsg, "{{MODEL}}", activeClient.Model(), 1)
-	systemMsg = strings.Replace(systemMsg, "{{USER_ID}}", userID, 1)
-	systemMsg = strings.Replace(systemMsg, "{{USER_CONTEXT}}", h.userContext, 1)
+	tools := h.buildTools()
+
 	memoryUser := h.requesterEmail
 	turnCtx := ""
 	if memoryUser != "" {
 		turnCtx = userContextPrompt(h.readPersistentUserContext(ctx, memoryUser, "", userMessage))
 	}
+
+	logPrefix := fmt.Sprintf("[chat user=%s agent=%s]", userID, h.agentID)
+	start := h.chooseStart(route(), false, onlyThanks(userMessage))
+	logTurnStart(logPrefix, route(), start, false)
+	activeClient := start.client
+
+	systemMsg := h.systemPrompt()
+	systemMsg = strings.Replace(systemMsg, "{{MODEL}}", activeClient.Model(), 1)
+	systemMsg = strings.Replace(systemMsg, "{{USER_ID}}", userID, 1)
+	systemMsg = strings.Replace(systemMsg, "{{USER_CONTEXT}}", h.userContext, 1)
 
 	messages := make([]llm.ChatMessage, 0, len(history)+3)
 	messages = append(messages, llm.NewChatMessage("system", systemMsg))
@@ -565,11 +582,10 @@ func (h *GeneralHandler) ExecuteChat(ctx context.Context, userID string, history
 	messages = append(messages, history...)
 	messages = append(messages, llm.NewChatMessage("user", userMessage))
 
-	logPrefix := fmt.Sprintf("[chat user=%s agent=%s]", userID, h.agentID)
 	res, err := h.runToolLoop(ctx, toolLoop{
 		logPrefix:    logPrefix,
 		client:       activeClient,
-		codeClient:   h.codeModelsClient,
+		codeClient:   start.codeClient,
 		tools:        tools,
 		messages:     messages,
 		rounds:       h.maxToolRounds,

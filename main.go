@@ -1681,6 +1681,7 @@ func refreshIntegrations(
 			if cfg.CodeModelExplicit && codeModelsClient != nil {
 				active["Code model"] = codeModelsClient.Model()
 			}
+			addTierModels(active, cfg)
 		}
 		if awsConnected {
 			active["Signing region"] = awsClient.Region()
@@ -1730,6 +1731,7 @@ func refreshIntegrations(
 			if cfg.CodeModelExplicit {
 				activeScope["Code model"] = codeModel
 			}
+			addTierModels(activeScope, cfg)
 		}
 
 		// Cost Management
@@ -1961,6 +1963,61 @@ func startIntegrationsRefresher(
 	})
 }
 
+func addTierModels(active map[string]string, cfg *config.Config) {
+	if cfg.ModelRouterURL == "" {
+		return
+	}
+	if cfg.LightModel != "" {
+		active["Light model"] = cfg.LightModel
+	}
+	if cfg.HeavyModel != "" {
+		active["Heavy model"] = cfg.HeavyModel
+	}
+}
+
+func buildModelTiers(cfg *config.Config, general *llm.Client) commands.ModelTiers {
+	tierClient := func(env, model string) *llm.Client {
+		if model == "" {
+			return nil
+		}
+		c := general.WithModel(model)
+		if model != cfg.GeneralModel && model != cfg.CodeModel {
+			if err := c.ValidateModel(context.Background()); err != nil {
+				log.Fatalf("%s validation failed: %v", env, err)
+			}
+			log.Printf("%s validated: %s", env, model)
+		}
+		return c
+	}
+	tiers := commands.ModelTiers{
+		Light:    tierClient("LIGHT_MODEL", cfg.LightModel),
+		Heavy:    tierClient("HEAVY_MODEL", cfg.HeavyModel),
+		SkipAcks: cfg.ModelRouterSkipAcks,
+	}
+	if cfg.ModelRouterURL == "" {
+		if tiers.Light != nil || tiers.Heavy != nil {
+			log.Printf("Warning: LIGHT_MODEL / HEAVY_MODEL are set but MODEL_ROUTER_URL is not, so no turn will start on them")
+		}
+		return tiers
+	}
+	router := llm.NewModelRouter(llm.RouterAPI(cfg.ModelRouterAPI), cfg.ModelRouterURL, cfg.ModelRouterModel, cfg.ModelRouterAPIKey, cfg.ModelRouterTimeout)
+	tiers.Router = router
+	safego.Go("model router: warm", func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+		defer cancel()
+		router.Warm(ctx, cfg.ModelRouterSlots)
+	})
+	orGeneral := func(c *llm.Client) string {
+		if c == nil {
+			return "general model"
+		}
+		return c.Model()
+	}
+	log.Printf("Model router enabled via %s (%s, %s; timeout %s; light: %s, heavy: %s; thread acknowledgements skipped: %t)",
+		cfg.ModelRouterURL, cfg.ModelRouterAPI, router.Model(), router.Timeout(), orGeneral(tiers.Light), orGeneral(tiers.Heavy), tiers.SkipAcks)
+	return tiers
+}
+
 func main() {
 	cfg, err := config.Load()
 	if err != nil {
@@ -2033,6 +2090,7 @@ func main() {
 		}
 		log.Printf("CODE_MODEL validated: %s", cfg.CodeModel)
 	}
+	modelTiers := buildModelTiers(cfg, modelsClient)
 
 	if cfg.AtlassianConfigured() {
 		if cfg.AtlassianUseOAuth() {
@@ -2460,6 +2518,7 @@ func main() {
 		router.SetCatalog(catalogIndex)
 		router.SetPerf(perfStore)
 		router.SetJournal(inflight)
+		router.SetModelTiers(modelTiers)
 		routers[agent.ID] = router
 
 		// Sweeps the per-router channel-history cache so inactive channels

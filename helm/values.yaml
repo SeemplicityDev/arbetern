@@ -56,6 +56,8 @@ env:
   PORT: "8080"
   GENERAL_MODEL: "openai/gpt-4o" # options: openai/gpt-4o, meta/llama-3.1-405b-instruct, etc.
   # CODE_MODEL: "openai/gpt-4o"  # Separate model for code-generation tasks (PRs, file edits). Defaults to GENERAL_MODEL.
+  # LIGHT_MODEL: ""  # Cheaper model for quick lookups and greetings. Used only when modelRouter picks the light tier; unset = GENERAL_MODEL.
+  # HEAVY_MODEL: ""  # Stronger model for investigations across several systems. Used only when modelRouter picks the heavy tier; unset = GENERAL_MODEL.
   # BEDROCK_REGION: "us-east-1"  # Selects AWS Bedrock as the LLM backend (takes precedence over Azure/GitHub). Set GENERAL_MODEL to a Bedrock model/inference-profile ID, e.g. "us.anthropic.claude-opus-5". Credentials resolve via the standard AWS chain (IRSA / env / profile).
   APP_URL: ""  # Public base URL of this app (e.g. "https://ai.dev.example.io"). Used for UI link in Jira stamps.
   # UI_ALLOWED_CIDRS: "10.0.0.0/8,203.0.113.10/32"  # Comma-separated CIDRs; empty = no restriction.
@@ -136,6 +138,89 @@ headroom:
   livenessProbe: {}
   readinessProbe: {}
   # Must satisfy the pod-level runAsNonRoot policy (uid 65532).
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop:
+        - ALL
+
+# Model router: a "model-router" sidecar running a small local model
+# (Qwen3-4B-Instruct-2507 on llama.cpp) that reads each interactive request —
+# Slack command, thread reply, console chat — and picks the model it starts on:
+# env.LIGHT_MODEL for quick lookups, GENERAL_MODEL, CODE_MODEL, or
+# env.HEAVY_MODEL for investigations across several systems. A Slack thread
+# reply that only says thanks ends without a model call. Workflow ticks and
+# dashboard renders are never routed. Routing fails open: while the sidecar is
+# loading, slow or down, turns are routed by keyword exactly as without it.
+# See docs/MODEL_ROUTER.md.
+modelRouter:
+  enabled: false
+  image:
+    repository: ghcr.io/ggml-org/llama.cpp
+    # The build these args were verified against. llama-server renames and
+    # drops flags between builds (b11312 rejects --no-mmap), so move it on
+    # deliberately rather than tracking the moving "server" tag.
+    tag: server-b11312
+    pullPolicy: IfNotPresent
+  # The sidecar listens on 127.0.0.1:<port>, so nothing outside the pod can reach it.
+  port: 8788
+  model:
+    # Where the GGUF comes from; the first one set wins: path, docker, hfRepo.
+    # Docker Hub model artifact, fetched at container start by the digest of its
+    # weights layer and checked against it. The default is
+    # ai/qwen3:4b-instruct-2507-q4_K_M, the file the routing prompt was evaluated
+    # with (byte-identical to the hfRepo quant below).
+    docker:
+      repository: ai/qwen3
+      digest: sha256:3605803b982cb64aead44f6c1b2ae36e3acdb41d8e46c8a94c6533bc4c67e597
+    # Hugging Face <repo>[:<quant>] that llama-server downloads itself; used only
+    # when docker.digest is empty.
+    hfRepo: unsloth/Qwen3-4B-Instruct-2507-GGUF:Q4_K_M
+    # Path of a GGUF baked into a custom image. Skips the download entirely.
+    path: ""
+    # Name the model is served and reported under (Performance page, logs).
+    alias: qwen3-4b
+  # Total KV cache across slots. Keep it set: llama-server otherwise sizes it to
+  # the model's 256k native context, about 36 GiB.
+  contextSize: 4096
+  # Classifications served at once; each slot keeps the routing prompt cached,
+  # and the app warms every slot at startup (MODEL_ROUTER_SLOTS).
+  parallel: 2
+  # CPU threads. Match resources.limits.cpu: threads beyond the quota only add throttling.
+  threads: 2
+  # Deadline of one classification (MODEL_ROUTER_TIMEOUT). Empty uses the app default (5s).
+  timeout: ""
+  # Let a Slack thread reply that only thanks the bot end without a model turn
+  # (MODEL_ROUTER_SKIP_ACKS). A strict word list decides, the router can only
+  # veto, and a thank-you right after the bot asked a question is answered.
+  skipAcknowledgements: true
+  # Size limit of the emptyDir the model is downloaded into (Q4_K_M is 2.5 GB).
+  cacheSizeLimit: 4Gi
+  # Extra args appended to llama-server.
+  extraArgs: []
+  # Extra environment variables for the sidecar.
+  env: {}
+  # Inference is CPU-bound and latency scales with cores. The router's row on
+  # the Performance page (Model calls, named after model.alias) shows its p95;
+  # raise cpu and threads together if it nears the timeout. Resident memory is
+  # about 3.3 GiB with the chart's args: 2.3 GiB of weights repacked for the
+  # CPU, 0.3 GiB of other tensors, 0.6 GiB of KV cache for contextSize 4096.
+  # The limit leaves room for the page cache of the model file while it loads.
+  resources:
+    requests:
+      cpu: "2"
+      memory: 4Gi
+    limits:
+      cpu: "2"
+      memory: 5Gi
+  # Off for the same reasons as headroom: a readiness probe on any container
+  # gates the whole pod, and the model download alone can outlast a liveness
+  # budget. A missing router costs model choice, never correctness.
+  livenessProbe: {}
+  readinessProbe: {}
   securityContext:
     runAsNonRoot: true
     runAsUser: 65532
@@ -332,6 +417,10 @@ secretValues:
   # instead of resolving SigV4 credentials. Leave empty to use the SigV4 chain
   # (static keys / IRSA). Exported to the pod as AWS_BEARER_TOKEN_BEDROCK.
   # bedrock-api-key: ""
+  # Bearer key for a hosted model router instead of the modelRouter sidecar, e.g.
+  # TypeSafe Jev with env MODEL_ROUTER_URL=https://api.typesafe.ai and
+  # MODEL_ROUTER_API=systemone. Exported as MODEL_ROUTER_API_KEY. See docs/MODEL_ROUTER.md.
+  # model-router-api-key: ""
   # Atlassian integration (optional — enables Jira tickets + Confluence page reading)
   atlassian-url: ""           # e.g. "https://yourorg.atlassian.net"
   atlassian-email: ""         # Atlassian account email (Basic Auth)

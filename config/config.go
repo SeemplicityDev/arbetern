@@ -3,6 +3,7 @@ package config
 import (
 	_ "embed"
 	"fmt"
+	"net/url"
 	"os"
 	"regexp"
 	"strconv"
@@ -35,6 +36,7 @@ const (
 	defaultMaxToolRounds = 200
 
 	defaultProjectsGatewayPort = "8081"
+	defaultModelRouterSlots    = 2
 )
 
 var (
@@ -163,6 +165,8 @@ type Config struct {
 	// fall-back to GeneralModel is applied), so callers can surface a distinct
 	// code model only when the operator actually configured one.
 	CodeModelExplicit bool
+	LightModel        string // Optional cheaper model for simple interactive requests, used only when the model router picks it.
+	HeavyModel        string // Optional stronger model for multi-system investigations, used only when the model router picks it.
 	Port              string
 	UIAllowedCIDRs    string
 	// TrustedProxyCIDRs lists the peers whose X-Forwarded-For and
@@ -181,6 +185,15 @@ type Config struct {
 	// gives up and sends the conversation uncompressed (fail-open). Set from
 	// HEADROOM_COMPRESS_TIMEOUT; zero uses the llm package default.
 	HeadroomTimeout time.Duration
+
+	// ModelRouterURL is the base URL of an OpenAI-compatible server whose small model picks each interactive turn's tier; empty disables routing.
+	ModelRouterURL      string
+	ModelRouterAPI      string // "openai" for the sidecar and other chat-completions servers, "systemone" for TypeSafe Jev.
+	ModelRouterAPIKey   string
+	ModelRouterModel    string
+	ModelRouterTimeout  time.Duration
+	ModelRouterSkipAcks bool
+	ModelRouterSlots    int
 
 	// AWSRegion controls where Cost Explorer SigV4 calls are signed. Empty
 	// falls back to the aws package default (us-east-1, where the CE
@@ -499,6 +512,13 @@ func Load() (*Config, error) {
 
 		GeneralModel:        os.Getenv("GENERAL_MODEL"),
 		CodeModel:           os.Getenv("CODE_MODEL"),
+		LightModel:          strings.TrimSpace(os.Getenv("LIGHT_MODEL")),
+		HeavyModel:          strings.TrimSpace(os.Getenv("HEAVY_MODEL")),
+		ModelRouterURL:      strings.TrimRight(strings.TrimSpace(os.Getenv("MODEL_ROUTER_URL")), "/"),
+		ModelRouterAPI:      strings.ToLower(strings.TrimSpace(os.Getenv("MODEL_ROUTER_API"))),
+		ModelRouterAPIKey:   strings.TrimSpace(os.Getenv("MODEL_ROUTER_API_KEY")),
+		ModelRouterModel:    strings.TrimSpace(os.Getenv("MODEL_ROUTER_MODEL")),
+		ModelRouterSkipAcks: !strings.EqualFold(strings.TrimSpace(os.Getenv("MODEL_ROUTER_SKIP_ACKS")), "false"),
 		Port:                os.Getenv("PORT"),
 		UIAllowedCIDRs:      os.Getenv("UI_ALLOWED_CIDRS"),
 		TrustedProxyCIDRs:   os.Getenv("TRUSTED_PROXY_CIDRS"),
@@ -624,6 +644,34 @@ func Load() (*Config, error) {
 		}
 	} else {
 		cfg.ThreadSessionTTL = defaultThreadSessionTTL
+	}
+
+	if cfg.ModelRouterURL != "" {
+		if u, err := url.Parse(cfg.ModelRouterURL); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			return nil, fmt.Errorf("invalid MODEL_ROUTER_URL %q: must be an http(s) URL such as http://127.0.0.1:8788", cfg.ModelRouterURL)
+		}
+	}
+	switch cfg.ModelRouterAPI {
+	case "":
+		cfg.ModelRouterAPI = "openai"
+	case "openai", "systemone":
+	default:
+		return nil, fmt.Errorf("invalid MODEL_ROUTER_API %q: must be openai or systemone", cfg.ModelRouterAPI)
+	}
+	if s := strings.TrimSpace(os.Getenv("MODEL_ROUTER_TIMEOUT")); s != "" {
+		d, err := time.ParseDuration(s)
+		if err != nil || d <= 0 {
+			return nil, fmt.Errorf("invalid MODEL_ROUTER_TIMEOUT %q: must be a positive Go duration (e.g. 5s, 1500ms)", s)
+		}
+		cfg.ModelRouterTimeout = d
+	}
+	cfg.ModelRouterSlots = defaultModelRouterSlots
+	if s := strings.TrimSpace(os.Getenv("MODEL_ROUTER_SLOTS")); s != "" {
+		n, err := strconv.Atoi(s)
+		if err != nil || n <= 0 {
+			return nil, fmt.Errorf("invalid MODEL_ROUTER_SLOTS %q: must be a positive integer", s)
+		}
+		cfg.ModelRouterSlots = n
 	}
 
 	if hcStr := os.Getenv("HEADROOM_COMPRESS_TIMEOUT"); hcStr != "" {

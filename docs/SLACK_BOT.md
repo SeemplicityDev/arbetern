@@ -197,6 +197,7 @@ env:
 - Any user reply in that thread is automatically routed through the same agent — no `/command` prefix needed
 - While the bot is working on a request the session cannot expire; the TTL restarts when the reply is posted
 - A request that runs longer than about a minute gets one `Still working` reply in the thread, edited in place with the elapsed time and tool activity and removed when the answer lands
+- With the [model router](MODEL_ROUTER.md#thread-acknowledgements) enabled, a reply that only thanks the bot ("thanks!", "perfect, ty") gets no answer and costs no model call; questions, approvals ("yes, thanks", "👍"), anything with a link, and a thank-you right after the bot asked a question are answered as usual
 - After the TTL expires with no activity, the session closes and new thread replies are ignored
 
 ### Troubleshooting

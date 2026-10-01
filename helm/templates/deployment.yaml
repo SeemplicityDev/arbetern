@@ -63,6 +63,22 @@ spec:
               value: {{ . | quote }}
             {{- end }}
             {{- end }}
+            {{- if .Values.modelRouter.enabled }}
+            - name: MODEL_ROUTER_URL
+              value: "http://127.0.0.1:{{ .Values.modelRouter.port }}"
+            - name: MODEL_ROUTER_MODEL
+              value: {{ .Values.modelRouter.model.alias | quote }}
+            - name: MODEL_ROUTER_SLOTS
+              value: {{ .Values.modelRouter.parallel | quote }}
+            {{- with .Values.modelRouter.timeout }}
+            - name: MODEL_ROUTER_TIMEOUT
+              value: {{ . | quote }}
+            {{- end }}
+            {{- if not .Values.modelRouter.skipAcknowledgements }}
+            - name: MODEL_ROUTER_SKIP_ACKS
+              value: "false"
+            {{- end }}
+            {{- end }}
             - name: SLACK_BOT_TOKEN
               valueFrom:
                 secretKeyRef:
@@ -96,6 +112,13 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.secretName }}
                   key: bedrock-api-key
+            {{- end }}
+            {{- if index .Values.secretValues "model-router-api-key" }}
+            - name: MODEL_ROUTER_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: model-router-api-key
             {{- end }}
             {{- if index .Values.secretValues "atlassian-url" }}
             - name: ATLASSIAN_URL
@@ -596,6 +619,97 @@ spec:
             {{- toYaml . | nindent 12 }}
           {{- end }}
         {{- end }}
+        {{- if .Values.modelRouter.enabled }}
+        {{- include "arbetern.modelRouter.validate" . }}
+        {{- $model := .Values.modelRouter.model }}
+        {{- $fromDocker := and (not $model.path) $model.docker $model.docker.digest }}
+        - name: model-router
+          image: "{{ .Values.modelRouter.image.repository }}:{{ .Values.modelRouter.image.tag }}"
+          imagePullPolicy: {{ .Values.modelRouter.image.pullPolicy }}
+          {{- if $fromDocker }}
+          # Docker Hub ships the model as a ModelPack artifact, which neither
+          # llama-server's --docker-repo nor a containerd image volume can read,
+          # so the weights layer is fetched by digest before llama-server starts.
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              f="/models/${MODEL_DIGEST#sha256:}.gguf"
+              if [ ! -s "$f" ]; then
+                echo "fetching $MODEL_REPOSITORY@$MODEL_DIGEST from Docker Hub"
+                token=$(curl -fsS --retry 3 "https://auth.docker.io/token?service=registry.docker.io&scope=repository:$MODEL_REPOSITORY:pull" | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
+                [ -n "$token" ] || { echo "no pull token from auth.docker.io" >&2; exit 1; }
+                rm -f "$f.part"
+                curl -fsSL --retry 5 -H "Authorization: Bearer $token" -o "$f.part" "https://registry-1.docker.io/v2/$MODEL_REPOSITORY/blobs/$MODEL_DIGEST"
+                echo "${MODEL_DIGEST#sha256:}  $f.part" | sha256sum -c - || { rm -f "$f.part"; exit 1; }
+                mv "$f.part" "$f"
+              fi
+              exec /app/llama-server --model "$f" "$@"
+            - llama-server
+          {{- end }}
+          args:
+            - "--host"
+            - "127.0.0.1"
+            - "--port"
+            - {{ .Values.modelRouter.port | quote }}
+            {{- if $model.path }}
+            - "--model"
+            - {{ $model.path | quote }}
+            {{- else if not $fromDocker }}
+            - "--hf-repo"
+            - {{ required "modelRouter.model.docker.digest, hfRepo or path is required when modelRouter.enabled" $model.hfRepo | quote }}
+            {{- end }}
+            - "--alias"
+            - {{ .Values.modelRouter.model.alias | quote }}
+            - "--ctx-size"
+            - {{ .Values.modelRouter.contextSize | quote }}
+            - "--parallel"
+            - {{ .Values.modelRouter.parallel | quote }}
+            - "--threads"
+            - {{ .Values.modelRouter.threads | quote }}
+            - "--jinja"
+            - "--load-mode"
+            - "none"
+            - "--cache-ram"
+            - "0"
+            {{- with .Values.modelRouter.extraArgs }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          env:
+            - name: HOME
+              value: /tmp
+            - name: LLAMA_CACHE
+              value: /models
+            {{- if $fromDocker }}
+            - name: MODEL_REPOSITORY
+              value: {{ $model.docker.repository | quote }}
+            - name: MODEL_DIGEST
+              value: {{ $model.docker.digest | quote }}
+            {{- end }}
+            {{- range $key, $value := .Values.modelRouter.env }}
+            - name: {{ $key }}
+              value: {{ $value | quote }}
+            {{- end }}
+          volumeMounts:
+            - name: model-router-cache
+              mountPath: /models
+          {{- with .Values.modelRouter.livenessProbe }}
+          livenessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.modelRouter.readinessProbe }}
+          readinessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.modelRouter.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.modelRouter.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+        {{- end }}
       {{- with .Values.volumes }}
       volumes:
         {{- toYaml . | nindent 8 }}
@@ -620,6 +734,14 @@ spec:
             optional: true
       {{- end }}
       {{- end }}
+      {{- end }}
+      {{- if .Values.modelRouter.enabled }}
+      {{- if and (not .Values.volumes) (not .Values.customConfigs) (not .Values.customCredentials) }}
+      volumes:
+      {{- end }}
+        - name: model-router-cache
+          emptyDir:
+            sizeLimit: {{ .Values.modelRouter.cacheSizeLimit }}
       {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:

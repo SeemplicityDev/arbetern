@@ -39,6 +39,10 @@ and picks a class without influencing the next:
    of the LLM's function list at request time.
 4. **Model switch.** Detecting a code-related tool call dynamically swaps the
    general model for `CODE_MODEL` mid-inference, without restarting the loop.
+   With the optional [model router](docs/MODEL_ROUTER.md) sidecar, a local
+   Qwen3-4B picks the model an interactive turn starts on (`LIGHT_MODEL`,
+   `GENERAL_MODEL`, `CODE_MODEL` or `HEAVY_MODEL`) in place of the keyword
+   lists, and a thread reply that only says thanks gets no model call.
 5. **Thread sessions (temporal memory).** After the first reply a session is
    registered on the Slack thread and stored in the state bucket, so a
    follow-up may be answered by any replica; it re-enters the same router
@@ -82,6 +86,7 @@ The core variables you'll set on day one:
 | `GITHUB_TOKEN` | yes\* | GitHub PAT (\*or use Azure OpenAI / AWS Bedrock for inference) |
 | `GENERAL_MODEL` | yes | Model ID for the active backend — e.g. `openai/gpt-4o` (GitHub), a deployment name (Azure), or a Bedrock model / inference-profile ID. **Required; there is no default** |
 | `CODE_MODEL` | no | Separate model for code-related tasks. Optional — falls back to `GENERAL_MODEL` when unset |
+| `LIGHT_MODEL` / `HEAVY_MODEL` | no | Cheaper and stronger models an interactive turn may start on when the [model router](docs/MODEL_ROUTER.md) picks the light or heavy tier. Each falls back to `GENERAL_MODEL` when unset |
 | `AZURE_OPEN_AI_ENDPOINT` / `AZURE_API_KEY` | no | Azure OpenAI credentials (alternative to GitHub Models) |
 | `BEDROCK_REGION` | no | Selects **AWS Bedrock** as the LLM backend, e.g. `us-east-1` (see [LLM backends](#llm-backends)) |
 | `APP_URL` | no | Public app URL (used for Jira ticket stamps and Slack links) |
@@ -136,6 +141,13 @@ Authentication is one of two schemes, and the target principal/key needs
 | `UI_HEADER` | Custom header text for the web UI (default `arbetern`) |
 | `HEADROOM_PROXY_URL` | Base URL of a [Headroom](docs/HEADROOM.md) compression sidecar (e.g. `http://localhost:8787`). When set, each conversation is compressed via its `/v1/compress` endpoint before every LLM call — cutting tokens across **all** backends (GitHub Models, Azure OpenAI, Azure Foundry/Claude, AWS Bedrock). Set automatically by Helm when `headroom.enabled: true` |
 | `HEADROOM_COMPRESS_TIMEOUT` | Go duration bounding a single `/v1/compress` round-trip before the app falls back to sending the conversation uncompressed (fail-open). Default `90s`; raise for very large contexts. Set via Helm `headroom.compressTimeout` |
+| `MODEL_ROUTER_URL` | Base URL of an OpenAI-compatible server hosting the [model router](docs/MODEL_ROUTER.md) (e.g. `http://127.0.0.1:8788`). When set, a small local model picks the tier each Slack and chat turn starts on; empty disables routing. Set automatically by Helm when `modelRouter.enabled: true` |
+| `MODEL_ROUTER_MODEL` | `model` field sent to the router server. llama.cpp ignores it; Ollama and vLLM need it. Set by Helm from `modelRouter.model.alias` |
+| `MODEL_ROUTER_API` | `openai` (default) for the sidecar and other chat-completions servers, or `systemone` to route with TypeSafe's hosted Jev decision model instead of a sidecar (see [docs/MODEL_ROUTER.md](docs/MODEL_ROUTER.md#hosted-alternative-typesafe-jev)) |
+| `MODEL_ROUTER_API_KEY` | Bearer key for a hosted router such as Jev. Chart secret `model-router-api-key` |
+| `MODEL_ROUTER_TIMEOUT` | Go duration bounding one classification before the turn falls back to keyword routing (fail-open). Default `5s`. Set via Helm `modelRouter.timeout` |
+| `MODEL_ROUTER_SLOTS` | Router server slots warmed at startup, so no turn pays for loading the routing prompt into a cold slot. Default `2`. Set by Helm from `modelRouter.parallel` |
+| `MODEL_ROUTER_SKIP_ACKS` | Drop Slack thread replies that only thank the bot instead of starting a model turn: every word must be gratitude or filler, the router must agree, and the bot must not have just asked a question (see [docs/MODEL_ROUTER.md](docs/MODEL_ROUTER.md#thread-acknowledgements)). Default `true`; set `false` to answer them on `LIGHT_MODEL`. Set via Helm `modelRouter.skipAcknowledgements` |
 
 </details>
 
@@ -288,14 +300,14 @@ background via `users.info` (needs the `users:read` scope); until a name is
 cached the raw ID is shown. Chat turns are keyed by the proxy-verified email.
 
 Optional services that sit alongside a turn — the Headroom compression sidecar,
-the embeddings backend — are guarded by a breaker: each runs before the model on
-every round, so one that accepts connections but never answers would otherwise
-cost its full timeout per round and spend a whole turn's budget on a step whose
-result is optional. One timeout takes it out of the path (the timeout has
-already been paid); a couple of cheap failures are tolerated first. It is probed
-once per cooldown, starting at 30s and doubling to 10 minutes, and the current
-state is on the Performance page under *Optional services*. See
-[docs/HEADROOM.md](docs/HEADROOM.md).
+the model router sidecar, the embeddings backend — are guarded by a breaker:
+each runs before the model, so one that accepts connections but never answers
+would otherwise cost its full timeout every time and spend a whole turn's budget
+on a step whose result is optional. One timeout takes it out of the path (the
+timeout has already been paid); a couple of cheap failures are tolerated first.
+It is probed once per cooldown, starting at 30s and doubling to 10 minutes, and
+the current state is on the Performance page under *Optional services*. See
+[docs/HEADROOM.md](docs/HEADROOM.md) and [docs/MODEL_ROUTER.md](docs/MODEL_ROUTER.md).
 
 The Performance page reads a separate series (`/api/metrics/summary`) that
 records **no identity at all** — a sample is keyed by agent, entry path, model,
@@ -1083,7 +1095,7 @@ internal/store/      # S3 state backend: cached documents, conditional writes, l
 internal/queue/      # durable work queue in the same bucket (claims by conditional write)
 internal/vectors/    # S3 Vectors index client (semantic user context)
 github/              # GitHub REST API client (repos, PRs, files, workflows)
-llm/                 # LLM inference client + tool types (GitHub Models, Azure OpenAI, AWS Bedrock)
+llm/                 # LLM inference client + tool types (GitHub Models, Azure OpenAI, AWS Bedrock), model router client
 atlassian/           # Atlassian Cloud REST API client (Jira + Confluence)
 nvd/                 # NVD (National Vulnerability Database) CVE API client
 salesforce/          # Salesforce REST API client (SOQL queries, OAuth 2.0)
@@ -1194,6 +1206,7 @@ transport, limits and roadmap.
 | Document360 | [docs/DOCUMENT360.md](docs/DOCUMENT360.md) | pulse only |
 | Google Drive / Sheets | [docs/GOOGLE.md](docs/GOOGLE.md) | pulse only |
 | Headroom (LLM compression) | [docs/HEADROOM.md](docs/HEADROOM.md) | Optional infra — all backends |
+| Model router (Qwen3-4B on llama.cpp) | [docs/MODEL_ROUTER.md](docs/MODEL_ROUTER.md) | Optional infra — all backends |
 | Claude Code self-hosted runners + routines | [docs/PROJECTS.md](docs/PROJECTS.md) | Projects (agents that may use Datadog) |
 
 ## Contributing

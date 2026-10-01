@@ -85,6 +85,12 @@ func (b *breaker) ok() {
 	}
 }
 
+func (b *breaker) abandon() {
+	b.mu.Lock()
+	b.probing = false
+	b.mu.Unlock()
+}
+
 // fail records a failed call and opens the breaker once the endpoint has cost
 // enough. A deadline hit opens it on its own.
 func (b *breaker) fail(err error) {

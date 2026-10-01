@@ -63,6 +63,7 @@ type Router struct {
 	billing           UsageRecorder
 	perf              PerfRecorder
 	inflight          *journal.Journal
+	tiers             ModelTiers
 }
 
 func NewRouter(slackClient SlackClient, ghClient *github.Client, modelsClient *llm.Client, codeModelsClient *llm.Client, jiraClient *atlassian.Client, nvdClient *nvd.Client, sfClient *salesforce.Client, chorusClient *chorus.Client, datadogClients *datadog.MultiClient, awsClient *aws.Client, azureClient *azure.Client, databricksClient *databricks.Client, clickhouseClient *clickhouse.Client, freshworksClient *freshworks.Client, googleClient *google.Client, document360Client *document360.Client, dashboardRegistry *dashboards.Registry, workflowRegistry *workflows.Registry, pp PromptProvider, agentID, appURL string, sessions *SessionStore, maxToolRounds int, userContextStore *UserContextStore, usage UsageRecorder) *Router {
@@ -121,6 +122,9 @@ func (r *Router) SetCatalog(c *catalog.Index) { r.catalog = c }
 // "Processing request" forever.
 func (r *Router) SetJournal(j *journal.Journal) { r.inflight = j }
 
+// SetModelTiers lets interactive turns start on the model the model router picks.
+func (r *Router) SetModelTiers(t ModelTiers) { r.tiers = t }
+
 // ResumeTurn re-runs an interrupted Slack turn. The journal calls it after a
 // restart; the reply lands in the same thread the person is already watching.
 func (r *Router) ResumeTurn(channelID, threadTS, userID, text string) {
@@ -178,7 +182,7 @@ func (r *Router) Handle(channelID, userID, text, responseURL string) {
 	}
 	ctx, inflight := r.beginTurn(context.Background(), channelID, auditTS, userID, text)
 	defer inflight.Done()
-	r.dispatch(ctx, channelID, userID, text, responseURL, auditTS, userContext, sess)
+	r.dispatch(ctx, channelID, userID, text, responseURL, auditTS, userContext, sess, false)
 
 	// Post a session footer so the user knows they can reply in the thread.
 	if auditTS != "" && r.sessions != nil {
@@ -303,6 +307,7 @@ func (r *Router) newGeneralHandler(userContext string, session *ThreadSession) *
 		billing:           r.billing,
 		billingSource:     billing.SourceSlack,
 		perf:              r.perf,
+		tiers:             r.tiers,
 	}
 }
 
@@ -371,7 +376,7 @@ func (r *Router) HandleThreadReply(channelID, threadTS, userID, text string) {
 
 	ctx, inflight := r.beginTurn(context.Background(), channelID, threadTS, userID, text)
 	defer inflight.Done()
-	r.dispatch(ctx, channelID, userID, text, "", threadTS, userContext, sess)
+	r.dispatch(ctx, channelID, userID, text, "", threadTS, userContext, sess, true)
 }
 
 // SlackJournalKind is the journal kind interrupted Slack turns are recorded
@@ -389,14 +394,16 @@ func (r *Router) beginTurn(ctx context.Context, channelID, threadTS, userID, tex
 }
 
 // dispatch runs the request through the debug or general handler.
-func (r *Router) dispatch(ctx context.Context, channelID, userID, text, responseURL, threadTS, userContext string, sess *ThreadSession) {
+func (r *Router) dispatch(ctx context.Context, channelID, userID, text, responseURL, threadTS, userContext string, sess *ThreadSession, followUp bool) {
 	if isDebugIntent(strings.ToLower(text)) {
 		log.Printf("[user=%s channel=%s thread=%s] routed to: debug", userID, channelID, threadTS)
 		r.newDebugHandler(userContext).Execute(ctx, channelID, userID, text, responseURL, threadTS)
 		return
 	}
 	log.Printf("[user=%s channel=%s thread=%s] routed to: general handler", userID, channelID, threadTS)
-	r.newGeneralHandler(userContext, sess).Execute(ctx, channelID, userID, text, responseURL, threadTS)
+	h := r.newGeneralHandler(userContext, sess)
+	h.followUp = followUp
+	h.Execute(ctx, channelID, userID, text, responseURL, threadTS)
 }
 
 // RunWorkflow runs a workflow's prompt through this agent's headless LLM
