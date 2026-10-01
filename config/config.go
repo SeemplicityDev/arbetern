@@ -4,6 +4,7 @@ import (
 	_ "embed"
 	"fmt"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -32,6 +33,13 @@ const (
 	// 200 leaves headroom for the worst observed legitimate flow without
 	// becoming a license to loop forever.
 	defaultMaxToolRounds = 200
+
+	defaultProjectsGatewayPort = "8081"
+)
+
+var (
+	projectsEnvironmentRe = regexp.MustCompile(`^ccpool_[A-Za-z0-9]{1,64}$`)
+	projectsAccountRe     = regexp.MustCompile(`^user_[A-Za-z0-9]{1,64}$`)
 )
 
 // Credentials holds every value that ships to the app as a Kubernetes
@@ -249,6 +257,14 @@ type Config struct {
 	DashboardsGitOpsBasePath string
 	DashboardsGitOpsInterval time.Duration
 	DashboardsGitOpsPrune    bool
+
+	// Projects: agents fixing Datadog error groups through self-hosted Claude Code sessions.
+	ProjectsEnabled         bool
+	ProjectsEnvironmentID   string // ccpool_… id, the audience every session token must carry
+	ProjectsRunnerAccountID string // optional user_… id every session token must carry
+	ProjectsGatewayPort     string
+	ProjectsAdminTeams      []string
+	ProjectsAdminEmails     []string // with ProjectsAdminTeams also empty, nobody may change projects
 }
 
 // UseAzure returns true when Azure OpenAI credentials are configured.
@@ -512,6 +528,13 @@ func Load() (*Config, error) {
 		DashboardsGitOpsBranch:   os.Getenv("DASHBOARDS_GITOPS_BRANCH"),
 		DashboardsGitOpsBasePath: os.Getenv("DASHBOARDS_GITOPS_BASE_PATH"),
 		DashboardsGitOpsPrune:    strings.EqualFold(strings.TrimSpace(os.Getenv("DASHBOARDS_GITOPS_PRUNE")), "true"),
+
+		ProjectsEnabled:         strings.EqualFold(strings.TrimSpace(os.Getenv("PROJECTS_ENABLED")), "true"),
+		ProjectsEnvironmentID:   strings.TrimSpace(os.Getenv("PROJECTS_ENVIRONMENT_ID")),
+		ProjectsRunnerAccountID: strings.TrimSpace(os.Getenv("PROJECTS_RUNNER_ACCOUNT_ID")),
+		ProjectsGatewayPort:     strings.TrimSpace(os.Getenv("PROJECTS_GATEWAY_PORT")),
+		ProjectsAdminTeams:      splitList(os.Getenv("PROJECTS_ADMIN_TEAMS")),
+		ProjectsAdminEmails:     splitList(os.Getenv("PROJECTS_ADMIN_EMAILS")),
 	}
 	if s := strings.TrimSpace(os.Getenv("WORKFLOWS_GITOPS_INTERVAL")); s != "" {
 		if d, err := time.ParseDuration(s); err == nil {
@@ -567,6 +590,14 @@ func Load() (*Config, error) {
 	if cfg.Port == "" {
 		cfg.Port = defaultPort
 	}
+	if cfg.ProjectsGatewayPort == "" {
+		cfg.ProjectsGatewayPort = defaultProjectsGatewayPort
+	}
+	if cfg.ProjectsEnabled {
+		if err := cfg.validateProjects(); err != nil {
+			return nil, err
+		}
+	}
 
 	// CODE_MODEL is optional and falls back to the general model when unset.
 	// Record whether it was set explicitly before applying the fall-back.
@@ -614,6 +645,27 @@ func Load() (*Config, error) {
 	}
 
 	return cfg, nil
+}
+
+func (c *Config) validateProjects() error {
+	switch {
+	case c.ProjectsEnvironmentID == "":
+		return fmt.Errorf("PROJECTS_ENVIRONMENT_ID is required when PROJECTS_ENABLED is true")
+	case !projectsEnvironmentRe.MatchString(c.ProjectsEnvironmentID):
+		return fmt.Errorf("invalid PROJECTS_ENVIRONMENT_ID: must be a self-hosted environment id (ccpool_ followed by 1-64 letters or digits)")
+	case c.ProjectsRunnerAccountID != "" && !projectsAccountRe.MatchString(c.ProjectsRunnerAccountID):
+		return fmt.Errorf("invalid PROJECTS_RUNNER_ACCOUNT_ID: must be an account id (user_ followed by 1-64 letters or digits)")
+	}
+	port, err := strconv.Atoi(c.ProjectsGatewayPort)
+	if err != nil || port < 1 || port > 65535 {
+		return fmt.Errorf("invalid PROJECTS_GATEWAY_PORT %q: must be a port number from 1 to 65535", c.ProjectsGatewayPort)
+	}
+	mainPort := strings.TrimSpace(c.Port)
+	if n, err := strconv.Atoi(mainPort); (err == nil && n == port) || mainPort == c.ProjectsGatewayPort {
+		return fmt.Errorf("PROJECTS_GATEWAY_PORT %d must differ from PORT", port)
+	}
+	c.ProjectsGatewayPort = strconv.Itoa(port)
+	return nil
 }
 
 // splitList splits a comma-separated value into its trimmed, non-empty items.

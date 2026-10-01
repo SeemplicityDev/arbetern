@@ -1,0 +1,29 @@
+#!/bin/sh
+# Runner post-session hook: tells arbetern how the session ended and which branches it left. Never fails.
+set -u
+
+# The session could have planted config in its checkout; pin the settings that run programs.
+pinned_git() {
+	git -c core.fsmonitor=false -c core.hooksPath=/dev/null "$@"
+}
+
+branches='[]'
+set -f
+IFS=:
+for ws in ${CLAUDE_RUNNER_WORKSPACE_PATHS:-}; do
+	[ -d "$ws" ] || continue
+	ref=$(pinned_git -C "$ws" symbolic-ref -q HEAD 2>/dev/null) || ref=
+	head=$(pinned_git -C "$ws" rev-parse -q --verify HEAD 2>/dev/null) || head=
+	[ -n "$ref$head" ] || continue
+	next=$(jq -nc --argjson branches "$branches" --arg name "${ref#refs/heads/}" --arg head "$head" \
+		'$branches + [{name: $name, head: $head}]') && branches=$next
+done
+unset IFS
+
+[ -n "${ARBETERN_GATEWAY_URL:-}" ] && [ -n "${CLAUDE_CODE_SESSION_ACCESS_TOKEN:-}" ] || exit 0
+body=$(jq -nc --arg reason "${CLAUDE_RUNNER_EXIT_REASON:-}" --argjson branches "$branches" \
+	'{exit_reason: $reason, branches: $branches}') || exit 0
+printf 'Authorization: Bearer %s\n' "$CLAUDE_CODE_SESSION_ACCESS_TOKEN" |
+	curl -q -fsS --noproxy '*' --max-time 20 -o /dev/null -H @- -H 'Content-Type: application/json' \
+		--data-raw "$body" "${ARBETERN_GATEWAY_URL%/}/v1/session/ended" || true
+exit 0

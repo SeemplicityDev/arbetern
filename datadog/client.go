@@ -650,6 +650,20 @@ func (mc *MultiClient) Sites() string {
 	return strings.Join(s, ", ")
 }
 
+// ForSite returns the client for "us" or "eu" (case-insensitive), or nil for any other site, a nil mc or an unconfigured site.
+func (mc *MultiClient) ForSite(site string) *Client {
+	if mc == nil {
+		return nil
+	}
+	switch strings.ToLower(strings.TrimSpace(site)) {
+	case "us":
+		return mc.US
+	case "eu":
+		return mc.EU
+	}
+	return nil
+}
+
 // InferSite examines text for Datadog site hints (URLs or domain references)
 // and returns "us", "eu", or "" (unknown — query both).
 func InferSite(text string) string {

@@ -45,6 +45,11 @@ spec:
             - name: http
               containerPort: {{ .Values.containerPort }}
               protocol: TCP
+            {{- if and .Values.projects .Values.projects.enabled }}
+            - name: gateway
+              containerPort: {{ .Values.projects.gateway.port }}
+              protocol: TCP
+            {{- end }}
           env:
             {{- range $key, $value := .Values.env }}
             - name: {{ $key }}
@@ -475,6 +480,34 @@ spec:
             {{- end }}
             - name: WORKFLOWS_GITOPS_PRUNE
               value: {{ .Values.workflows.gitops.prune | default true | quote }}
+            {{- end }}
+            {{- if and .Values.projects .Values.projects.enabled }}
+            {{- include "arbetern.projects.validate" . }}
+            - name: PROJECTS_ENABLED
+              value: "true"
+            - name: PROJECTS_ENVIRONMENT_ID
+              value: {{ .Values.projects.environmentId | quote }}
+            - name: PROJECTS_GATEWAY_PORT
+              value: {{ .Values.projects.gateway.port | int | quote }}
+            {{- with .Values.projects.runnerAccountId }}
+            - name: PROJECTS_RUNNER_ACCOUNT_ID
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.projects.adminTeams }}
+            - name: PROJECTS_ADMIN_TEAMS
+              value: {{ join "," . | quote }}
+            {{- end }}
+            {{- with .Values.projects.adminEmails }}
+            - name: PROJECTS_ADMIN_EMAILS
+              value: {{ join "," . | quote }}
+            {{- end }}
+            {{- range .Values.projects.triggers | default list | uniq }}
+            - name: {{ printf "PROJECT_TRIGGER_%s" (replace "-" "_" .) | upper }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $.Values.secretName }}
+                  key: project-trigger-{{ . }}
+            {{- end }}
             {{- end }}
           {{- with .Values.livenessProbe }}
           livenessProbe:

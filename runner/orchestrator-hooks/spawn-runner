@@ -1,0 +1,2 @@
+#!/bin/sh
+exec /opt/arbetern/bin/runner-spawn

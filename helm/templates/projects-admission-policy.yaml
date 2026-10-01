@@ -1,0 +1,128 @@
+{{- if and .Values.projects .Values.projects.enabled .Values.projects.runners.admissionPolicy.enabled (.Capabilities.APIVersions.Has "admissionregistration.k8s.io/v1/ValidatingAdmissionPolicy") }}
+{{- $ns := include "arbetern.projects.namespace" . }}
+{{- $orchestrator := printf "system:serviceaccount:%s:%s" $ns (include "arbetern.projects.orchestratorName" .) }}
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: {{ $ns }}-spawn-jobs
+  labels:
+    {{- include "arbetern.projects.labels" . | nindent 4 }}
+    app.kubernetes.io/component: orchestrator
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: {{ $ns }}
+    resourceRules:
+      - apiGroups: ["batch"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["jobs"]
+  matchConditions:
+    - name: orchestrator
+      expression: >-
+        request.userInfo.username == {{ $orchestrator | quote }}
+  variables:
+    - name: pod
+      expression: object.spec.template.spec
+  validations:
+    - expression: >-
+        has(object.metadata.name) && object.metadata.name.startsWith("claude-runner-")
+      message: "runner Jobs must be named claude-runner-<order>"
+    - expression: >-
+        has(variables.pod.serviceAccountName) &&
+        variables.pod.serviceAccountName == {{ include "arbetern.projects.sessionRunnerName" . | quote }}
+      message: "runner Jobs must use the session-runner ServiceAccount"
+    - expression: >-
+        has(variables.pod.automountServiceAccountToken) &&
+        variables.pod.automountServiceAccountToken == false
+      message: "runner Jobs must set automountServiceAccountToken: false"
+    - expression: >-
+        !(has(variables.pod.hostNetwork) && variables.pod.hostNetwork) &&
+        !(has(variables.pod.hostPID) && variables.pod.hostPID) &&
+        !(has(variables.pod.hostIPC) && variables.pod.hostIPC)
+      message: "runner Jobs must not use host namespaces"
+    - expression: >-
+        (!has(variables.pod.initContainers) || size(variables.pod.initContainers) == 0) &&
+        (!has(variables.pod.ephemeralContainers) || size(variables.pod.ephemeralContainers) == 0)
+      message: "runner Jobs must not have init or ephemeral containers"
+    - expression: >-
+        variables.pod.containers.all(c, has(c.image) &&
+        (c.image.startsWith({{ printf "%s:" (include "arbetern.projects.imageRepository" .) | quote }}) ||
+        c.image.startsWith({{ printf "%s@" (include "arbetern.projects.imageRepository" .) | quote }})))
+      message: "runner Jobs must run an image from the configured runner repository"
+    - expression: >-
+        variables.pod.containers.all(c, has(c.securityContext) &&
+        has(c.securityContext.allowPrivilegeEscalation) && c.securityContext.allowPrivilegeEscalation == false &&
+        !(has(c.securityContext.privileged) && c.securityContext.privileged))
+      message: "runner containers must set allowPrivilegeEscalation: false and must not be privileged"
+    - expression: >-
+        !has(variables.pod.volumes) || variables.pod.volumes.all(v, has(v.emptyDir) ||
+        (has(v.configMap) && has(v.configMap.name) && v.configMap.name == {{ include "arbetern.projects.hostConfigName" . | quote }}) ||
+        (has(v.secret) && has(v.secret.secretName) && v.secret.secretName == object.metadata.name))
+      message: "runner Jobs may mount only emptyDir, the host config and the Secret named after the Job"
+    - expression: >-
+        variables.pod.containers.all(c,
+        (!has(c.envFrom) || c.envFrom.all(f, !has(f.secretRef))) &&
+        (!has(c.env) || c.env.all(e, !has(e.valueFrom) || !has(e.valueFrom.secretKeyRef))))
+      message: "runner containers must not read Secrets through env or envFrom"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: {{ $ns }}-spawn-jobs
+  labels:
+    {{- include "arbetern.projects.labels" . | nindent 4 }}
+    app.kubernetes.io/component: orchestrator
+spec:
+  policyName: {{ $ns }}-spawn-jobs
+  validationActions:
+    - Deny
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: {{ $ns }}-spawn-secrets
+  labels:
+    {{- include "arbetern.projects.labels" . | nindent 4 }}
+    app.kubernetes.io/component: orchestrator
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: {{ $ns }}
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["secrets"]
+  matchConditions:
+    - name: orchestrator
+      expression: >-
+        request.userInfo.username == {{ $orchestrator | quote }}
+  validations:
+    - expression: >-
+        has(object.metadata.name) && object.metadata.name.startsWith("claude-runner-")
+      message: "runner Secrets must be named claude-runner-<order>"
+    - expression: >-
+        has(object.metadata.ownerReferences) &&
+        object.metadata.ownerReferences.exists(o, o.apiVersion == "batch/v1" && o.kind == "Job" && o.name == object.metadata.name)
+      message: "runner Secrets must be owned by the Job of the same name"
+    - expression: >-
+        has(object.type) && object.type == "Opaque"
+      message: "runner Secrets must be of type Opaque"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: {{ $ns }}-spawn-secrets
+  labels:
+    {{- include "arbetern.projects.labels" . | nindent 4 }}
+    app.kubernetes.io/component: orchestrator
+spec:
+  policyName: {{ $ns }}-spawn-secrets
+  validationActions:
+    - Deny
+{{- end }}

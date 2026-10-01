@@ -1,0 +1,18 @@
+{{- if and .Values.projects .Values.projects.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "arbetern.projects.gatewayName" . }}
+  labels:
+    {{- include "arbetern.labels" . | nindent 4 }}
+    app.kubernetes.io/component: projects-gateway
+spec:
+  type: ClusterIP
+  ports:
+    - port: {{ .Values.projects.gateway.port }}
+      targetPort: {{ .Values.projects.gateway.port }}
+      protocol: TCP
+      name: gateway
+  selector:
+    {{- include "arbetern.selectorLabels" . | nindent 4 }}
+{{- end }}

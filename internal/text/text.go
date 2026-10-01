@@ -34,6 +34,20 @@ func TruncatePlain(s string, max int) string {
 	return trimToRune(s, max)
 }
 
+// TruncateStart shortens s to at most max bytes by cutting its start on a rune boundary, prefixing Ellipsis when it cuts.
+func TruncateStart(s string, max int) string {
+	if max <= 0 {
+		return ""
+	}
+	if len(s) <= max {
+		return s
+	}
+	if max <= len(Ellipsis) {
+		return tailFromRune(s, max)
+	}
+	return Ellipsis + tailFromRune(s, max-len(Ellipsis))
+}
+
 func trimToRune(s string, n int) string {
 	if n >= len(s) {
 		return s
@@ -42,4 +56,15 @@ func trimToRune(s string, n int) string {
 		n--
 	}
 	return s[:n]
+}
+
+func tailFromRune(s string, n int) string {
+	if n >= len(s) {
+		return s
+	}
+	i := len(s) - n
+	for i < len(s) && !utf8.RuneStart(s[i]) {
+		i++
+	}
+	return s[i:]
 }

@@ -69,6 +69,10 @@
           <span>Skills</span>
         </a>
         <div class="nav-sep"></div>
+        <a class="nav-item" href="/ui/projects" data-page="projects" title="Projects" id="nav-projects" hidden>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.5"/><circle cx="12" cy="12" r="4.5"/><circle cx="12" cy="12" r="1" fill="currentColor" stroke="none"/></svg>
+          <span>Projects</span>
+        </a>
         <a class="nav-item" href="/ui/workflows" data-page="workflows" title="Workflows">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.9-6.6"/><path d="M21 3v5.5h-5.5"/><path d="M12 7.5V12l3 2"/></svg>
           <span>Workflows</span>
@@ -206,6 +210,23 @@
         </div>
       </section>
 
+      <section class="page" data-page="projects" hidden>
+        <div class="page-head">
+          <div>
+            <h1 class="page-title">Projects</h1>
+            <p class="page-desc">Standing goals an agent pursues on one repository: it follows the errors a Datadog query finds, sends a Claude Code session to fix each one, and tracks the pull requests that come back.</p>
+          </div>
+          <div class="page-actions">
+            <div class="pills" id="proj-filter"></div>
+            <input class="search-input" id="proj-search" type="search" placeholder="Filter by name, repository or query…" autocomplete="off" aria-label="Filter projects">
+            <button class="btn-mini primary" id="proj-new-btn" type="button" hidden>New project</button>
+          </div>
+        </div>
+        <div class="chip-row" id="proj-summary"></div>
+        <p class="search-note" id="proj-note" hidden></p>
+        <div class="list-panel list-scroll" id="proj-list"><div class="empty tall">Loading projects…</div></div>
+      </section>
+
       <section class="page" data-page="workflows" hidden>
         <div class="page-head">
           <div>
@@ -301,6 +322,7 @@
 
       <section class="page" data-page="workflow" hidden><div id="wf-detail"></div></section>
       <section class="page" data-page="dashboard" hidden><div id="dash-detail"></div></section>
+      <section class="page" data-page="project" hidden><div id="proj-detail"></div></section>
 
       <section class="page" data-page="mcp" hidden>
         <div class="page-head">

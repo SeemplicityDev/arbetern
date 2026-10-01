@@ -33,6 +33,12 @@ type LogSearchResponse struct {
 		Page struct {
 			After string `json:"after"`
 		} `json:"page"`
+		Status   string `json:"status"`
+		Warnings []struct {
+			Code   string `json:"code"`
+			Detail string `json:"detail"`
+			Title  string `json:"title"`
+		} `json:"warnings"`
 	} `json:"meta"`
 }
 

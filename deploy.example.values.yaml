@@ -158,6 +158,10 @@ secretValues:
   # https://www.googleapis.com/auth/drive also enables drive_copy_file, which provisions a
   # sheet by copying a template — without it that tool is not offered to the agent at all.
   # google-scopes: ""
+  # Projects (optional — see the projects block at the end). One routine API trigger token per
+  # name listed in projects.triggers, keyed project-trigger-<name>; arbetern reads it as
+  # PROJECT_TRIGGER_<NAME>. The token is shown once when you generate it on the routine.
+  # project-trigger-default: "sk-ant-oat01-REPLACE_ME"
 
 # ingress:
 #   enabled: true
@@ -282,4 +286,30 @@ state:
 #     basePath: "arbetern/workflows"
 #     interval: "5m"
 #     prune: false               # set true to delete workflows removed from git
+
+# Projects (optional — an agent pursues a standing goal on one GitHub repository
+# through Claude Code sessions on self-hosted runners in their own namespace).
+# Needs a Team or Enterprise plan with self-hosted environments turned on, an
+# automation account, one routine per repository and the runner image built from
+# runner/Dockerfile. Nothing here renders unless enabled. See docs/PROJECTS.md.
+# projects:
+#   enabled: true
+#   environmentId: "ccpool_0123456789abcdef"        # the self-hosted environment
+#   runnerAccountId: "user_0123456789abcdef"        # optional: run only this account's sessions
+#   adminTeams: ["S0123456789"]                     # who may create, change, run or delete projects;
+#   adminEmails: ["ops@example.com", "example.com"] # both empty = nobody
+#   triggers: ["default"]                           # each needs secretValues.project-trigger-<name>
+#   runners:
+#     # namespace:
+#     #   name: "arbetern-claude-runners"           # default: the release namespace; name one for separate, Pod Security restricted runners
+#     # image:                                    # default: image.repository with the tag "runner"
+#     #   tag: "runner-2.1.280"                     # or pin one tag per Claude Code version
+#     environmentKey: "REPLACE_ME"                  # the environment key; needs createSecret: true
+#     # existingEnvironmentSecret: ""               # or a Secret in the runner namespace with key environment-key
+#     orchestrator:
+#       apiServerCIDRs: ["10.0.0.1/32"]             # your kube-apiserver endpoints
+#     # nodeSelector: { workload: claude-runners }
+#     # tolerations: [{ key: dedicated, operator: Equal, value: claude-runners, effect: NoSchedule }]
+#     # egress:
+#     #   extraCIDRs: ["10.0.0.10/32"]              # e.g. an internal package mirror, TCP 443
 

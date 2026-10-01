@@ -1,0 +1,17 @@
+#!/bin/sh
+# MCP headersHelper for the arbetern server: prints the session token as an Authorization header.
+set -eu
+
+# The ingress file follows token refreshes; the variable keeps the value from spawn time.
+token=
+if [ -n "${CLAUDE_SESSION_INGRESS_TOKEN_FILE:-}" ] && [ -r "$CLAUDE_SESSION_INGRESS_TOKEN_FILE" ]; then
+	token=$(tr -d '[:space:]' <"$CLAUDE_SESSION_INGRESS_TOKEN_FILE")
+fi
+if [ -z "$token" ]; then
+	token=$(printf '%s' "${CLAUDE_CODE_SESSION_ACCESS_TOKEN:-}" | tr -d '[:space:]')
+fi
+if [ -z "$token" ]; then
+	echo "session-auth-header: no session token is available" >&2
+	exit 1
+fi
+printf '%s' "$token" | jq -Rc '{Authorization: ("Bearer " + .)}'

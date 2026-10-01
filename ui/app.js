@@ -85,10 +85,10 @@ const INTEGRATION_LOGOS = {
 
 const SOURCE_LABELS = { slack: 'Slack commands', chat: 'Web chat', workflow: 'Scheduled workflows', dashboard: 'Dashboard renders', profile: 'Profile summaries' };
 const SLACK_ID_RE = /^[UW][A-Z0-9]{6,}$/;
-const PAGES = ['overview', 'integrations', 'mcp', 'agents', 'chats', 'skills', 'workflows', 'dashboards', 'pulls', 'tickets', 'changelog', 'performance', 'billing', 'backend', 'context'];
+const PAGES = ['overview', 'integrations', 'mcp', 'agents', 'chats', 'skills', 'projects', 'workflows', 'dashboards', 'pulls', 'tickets', 'changelog', 'performance', 'billing', 'backend', 'context'];
 const PAGE_TITLES = {
   overview: 'Overview', integrations: 'Integrations', mcp: 'MCP & Connectors', agents: 'Agents', chats: 'Chats',
-  skills: 'Skills', workflows: 'Workflows', dashboards: 'Dashboards', pulls: 'Pull requests', tickets: 'Tickets',
+  skills: 'Skills', projects: 'Projects', workflows: 'Workflows', dashboards: 'Dashboards', pulls: 'Pull requests', tickets: 'Tickets',
   changelog: 'Changelog', performance: 'Performance', billing: 'Usage & Billing', backend: 'Backend',
   context: 'Your context',
 };
@@ -139,6 +139,10 @@ let prQuery = '';
 let ticketsState = { list: null, error: null };
 let ticketFilter = 'all';
 let ticketQuery = '';
+let projectsState = { list: null, error: null };
+let projectsEnabled = null;
+let projFilter = 'all';
+let projQuery = '';
 let backendState = { summary: null, objects: null, truncated: false, error: null, tab: 'state', path: '', query: '', file: null, vectors: null };
 let contextState = { profile: null, error: null, agent: 'all', query: '', open: new Set(), tab: 'summary' };
 
@@ -317,7 +321,7 @@ function getAgentProfession(agent) {
 }
 
 /* Shell: theme, side rail, routing */
-const DETAIL_PARENT = { workflow: 'workflows', dashboard: 'dashboards' };
+const DETAIL_PARENT = { workflow: 'workflows', dashboard: 'dashboards', project: 'projects' };
 
 function setThemeLabel(theme) {
   const btn = document.getElementById('theme-toggle');
@@ -426,7 +430,7 @@ function applyRoute() {
     if (!agentsData.length) { if (!currentPage) showPage('agents'); return; }
   }
   if (chatFull) hideFullChat();
-  m = path.match(/^\/ui\/([^/]+)\/(workflow|dashboard)\/([^/]+)\/?$/);
+  m = path.match(/^\/ui\/([^/]+)\/(workflow|dashboard|project)\/([^/]+)\/?$/);
   if (m) {
     const agent = safeId(decodeURIComponent(m[1]));
     const id = safeId(decodeURIComponent(m[3]));
@@ -450,7 +454,7 @@ function renderViews() {
   const painters = [
     renderOverview,
     () => { if (integrationsData) renderIntegrations(integrationsData); },
-    renderWorkflowsPage, renderDashboardsPage, renderPullsPage, renderSkillsPage, renderMCPPage, renderChatsPage, renderChanges,
+    renderProjectsPage, renderWorkflowsPage, renderDashboardsPage, renderPullsPage, renderSkillsPage, renderMCPPage, renderChatsPage, renderChanges,
     () => { if (billingSummary) renderBilling(billingSummary); },
     renderPerformance,
     () => { if (contextState.profile) renderContextPage(); },
@@ -464,12 +468,15 @@ function loadPage(page) {
   switch (page) {
     case 'overview':
       renderOverview();
-      return Promise.all([loadBilling(), loadMetrics(), loadSessions(), loadIntegrations(), loadWorkflows(), loadDashboards(), loadPulls(), loadChanges(), loadMCP()]);
+      return Promise.all([loadBilling(), loadMetrics(), loadSessions(), loadIntegrations(), loadWorkflows(), loadDashboards(), loadPulls(), loadChanges(), loadMCP(), projectsEnabled ? loadProjects() : null]);
     case 'integrations':
       if (integrationsData) renderIntegrations(integrationsData);
       return loadIntegrations();
     case 'agents':
       return Promise.all([loadDashboards(), loadWorkflows()]);
+    case 'projects':
+      renderProjectsPage();
+      return loadProjects();
     case 'workflows':
       renderWorkflowsPage();
       return Promise.all([loadWorkflows(), loadGitops('workflows')]);
@@ -606,6 +613,18 @@ async function loadPulls() {
     pullsState = { list: null, error: err };
   }
   renderPullsPage();
+  renderFleet();
+}
+
+async function loadProjects() {
+  if (recentlyFetched('projects')) return;
+  try {
+    projectsState = { list: await fetchJSON('/api/projects'), error: null };
+  } catch (err) {
+    if (err.status !== 503) console.warn('Failed to load projects:', err);
+    projectsState = { list: null, error: err };
+  }
+  renderProjectsPage();
   renderFleet();
 }
 
@@ -957,6 +976,15 @@ function renderFleet() {
   } else {
     rows.push(fleetRow('/ui/dashboards', 'dashboards', 'Dashboards', 'loading', '—', 'off'));
   }
+  if (projectsEnabled && projectsState.list) {
+    const list = projectsState.list;
+    const enabled = list.filter(p => p.enabled).length;
+    const failing = list.filter(p => p.last_error || (!p.enabled && p.disabled_reason)).length;
+    const working = list.filter(p => p.stats && p.stats.active_sessions > 0).length;
+    const open = list.reduce((n, p) => n + ((p.stats && p.stats.prs_open) || 0), 0);
+    const sub = [working ? `${working} working` : '', open ? plural(open, 'open PR') : '', failing ? `${failing} failing` : ''].filter(Boolean).join(' · ') || 'all quiet';
+    rows.push(fleetRow('/ui/projects', 'projects', 'Projects', list.length ? sub : 'none yet', `${enabled} / ${list.length}`, failing ? 'bad' : list.length - enabled ? 'warn' : list.length ? '' : 'off'));
+  }
   if (pullsState.list) {
     const prs = pullsState.list;
     const drafts = prs.filter(p => p.draft).length;
@@ -1303,6 +1331,115 @@ async function deleteDashboard(agentId, id) {
   } catch (err) {
     await uiError('Failed to delete dashboard', err);
   }
+}
+
+/* Projects page */
+document.getElementById('proj-filter').addEventListener('click', e => {
+  const b = e.target.closest('.pill');
+  if (!b) return;
+  projFilter = b.dataset.agent;
+  renderProjectsPage();
+});
+
+(() => {
+  const input = document.getElementById('proj-search');
+  input.addEventListener('input', () => { projQuery = input.value.trim().toLowerCase(); renderProjectsPage(); });
+  input.addEventListener('keydown', e => {
+    if (e.key === 'Escape') { input.value = ''; projQuery = ''; renderProjectsPage(); }
+  });
+})();
+
+document.getElementById('proj-new-btn').addEventListener('click', () => projectForm(null));
+
+function projStatus(p) {
+  const active = (p.stats && p.stats.active_sessions) || 0;
+  if (!p.enabled) return p.disabled_reason ? ['auto', 'auto-paused', p.disabled_reason] : ['paused', 'paused', ''];
+  if (active > 0) return ['running', 'working', `${plural(active, 'session')} in progress`];
+  if (p.last_error) return ['failed', 'failing', p.last_error];
+  if (p.last_tick) return ['ok', 'active', ''];
+  return ['paused', 'waiting', 'No tick has run yet'];
+}
+
+const projRate = (rate, decided) => (decided ? pct((rate || 0) * 100) : '—');
+
+function fmtHours(h) {
+  if (!h) return '—';
+  if (h < 1) return Math.max(1, Math.round(h * 60)) + 'm';
+  if (h < 48) return (h < 10 ? h.toFixed(1) : Math.round(h)) + 'h';
+  return (h / 24).toFixed(1) + 'd';
+}
+
+function projSummaryHtml(list) {
+  if (!list.length) return '';
+  const total = k => list.reduce((n, p) => n + ((p.stats && p.stats[k]) || 0), 0);
+  return [
+    `<span class="chip"><b>${fmtInt(list.length)}</b> ${list.length === 1 ? 'project' : 'projects'}</span>`,
+    `<span class="chip">sessions running <b>${fmtInt(total('active_sessions'))}</b></span>`,
+    `<span class="chip">open pull requests <b>${fmtInt(total('prs_open'))}</b></span>`,
+    `<span class="chip">merged <b>${fmtInt(total('prs_merged'))}</b></span>`,
+    `<span class="chip">errors resolved <b>${fmtInt(total('resolved'))}</b></span>`,
+    `<span class="chip">in backlog <b>${fmtInt(total('backlog'))}</b></span>`,
+  ].join('');
+}
+
+function projRowHtml(p) {
+  const aid = safeId(p.agent), pid = safeId(p.id);
+  if (!aid || !pid) return '';
+  const [cls, label, title] = projStatus(p);
+  const s = p.stats || {};
+  const r = p.repo || {};
+  const url = detailPath('project', aid, pid);
+  const sub = [r.owner && r.name ? `${r.owner}/${r.name}` : '', p.description || ''].filter(Boolean).join(' · ');
+  return `<tr>
+      <td><a href="${url}" data-link>${escapeHtml(p.name || p.id)}</a>
+        <span class="sub" title="${escapeHtml(sub)}">${escapeHtml(sub)}</span></td>
+      <td>${agentChip(aid)}</td>
+      <td><span class="status-pill ${cls}" title="${escapeHtml(title)}">${label}</span></td>
+      <td class="n">${fmtInt(s.prs_open)}</td>
+      <td class="n">${fmtInt(s.prs_merged)}</td>
+      <td class="n">${projRate(s.merge_rate, (s.prs_merged || 0) + (s.prs_closed || 0))}</td>
+      <td class="n">${fmtInt(s.resolved)}</td>
+      <td class="muted" title="${p.last_tick ? escapeHtml(new Date(p.last_tick).toLocaleString()) : ''}">${p.last_tick ? timeAgo(p.last_tick) : '—'}</td>
+      <td><div class="actions"><a class="btn-mini" href="${url}" data-link>Open</a></div></td>
+    </tr>`;
+}
+
+function renderProjectsPage() {
+  const el = document.getElementById('proj-list');
+  const note = document.getElementById('proj-note');
+  const summary = document.getElementById('proj-summary');
+  const off = projectsEnabled === false || !!(projectsState.error && projectsState.error.status === 503);
+  document.getElementById('proj-new-btn').hidden = off || !canCreateProject();
+  document.getElementById('proj-search').hidden = off;
+  if (projectsState.error) {
+    note.hidden = true;
+    summary.innerHTML = '';
+    el.innerHTML = emptyHtml(projectsState.error.status === 503 ? 'Projects are not enabled in this deployment.' : 'Projects are unavailable right now.', true);
+    return;
+  }
+  const list = projectsState.list;
+  if (!list) return;
+  if (projFilter !== 'all' && !list.some(p => p.agent === projFilter)) projFilter = 'all';
+  filterPills(document.getElementById('proj-filter'), list, projFilter, 'data-agent');
+  const scoped = list.filter(p => projFilter === 'all' || p.agent === projFilter);
+  summary.innerHTML = projSummaryHtml(scoped);
+  const words = projQuery.split(/\s+/).filter(Boolean);
+  const rows = scoped.filter(p => {
+    if (!words.length) return true;
+    const r = p.repo || {};
+    const hay = [p.name, p.id, p.description, `${r.owner}/${r.name}`, (p.signal || {}).query, agentLabel(p.agent)].join('\n').toLowerCase();
+    return words.every(w => hay.includes(w));
+  }).sort((a, b) => agentLabel(a.agent).localeCompare(agentLabel(b.agent)) || (a.name || '').localeCompare(b.name || ''));
+  note.hidden = !words.length;
+  if (words.length) note.textContent = `${fmtInt(rows.length)} ${rows.length === 1 ? 'match' : 'matches'} for “${projQuery}”`;
+  if (!rows.length) {
+    const none = canCreateProject() ? 'No projects yet. Create one to have an agent fix the errors a Datadog query finds in a repository.' : 'No projects yet.';
+    el.innerHTML = emptyHtml(words.length ? 'No project matches this filter.' : list.length ? 'No projects for this agent.' : none, true);
+    return;
+  }
+  el.innerHTML = `<table class="data-table"><thead><tr>
+      <th>Project</th><th>Agent</th><th>Status</th><th class="n">Open PRs</th><th class="n">Merged</th><th class="n">Merge rate</th><th class="n">Resolved</th><th>Last tick</th><th></th>
+    </tr></thead><tbody>${rows.map(projRowHtml).join('')}</tbody></table>`;
 }
 
 /* Changelog */
@@ -2800,7 +2937,8 @@ async function apiSend(url, method, body) {
   }
   const r = await fetch(url, init);
   if (!r.ok) {
-    const text = (await r.text()).trim();
+    let text = (await r.text()).trim();
+    try { const j = JSON.parse(text); if (j && typeof j.error === 'string') text = j.error; } catch (_) {}
     throw new Error(text || ('HTTP ' + r.status));
   }
   return r.status === 204 ? null : r.json();
@@ -2951,6 +3089,19 @@ function canManageSkill(s) {
   if (!allowed) return true;
   const targets = s.agents && s.agents.length ? s.agents : agentsData.map(a => a.id);
   return targets.every(id => allowed.has(id));
+}
+
+function canManageAgentUI(agentId) {
+  const allowed = skillAgentsAllowed();
+  return !allowed || allowed.has(agentId);
+}
+
+// Like canManageMCP: optimistic until the identity says otherwise; the API decides.
+function isProjectAdmin() { return !(identityData && identityData.project_admin === false); }
+function canManageProject(agentId) { return isProjectAdmin() && canManageAgentUI(agentId); }
+function canCreateProject() {
+  const allowed = skillAgentsAllowed();
+  return isProjectAdmin() && !(allowed && allowed.size === 0);
 }
 
 function skillCard(s) {
@@ -3537,6 +3688,8 @@ async function loadIdentity() {
   renderMCPPage();
   renderSkillsPage();
   renderBackendNav();
+  renderProjectsPage();
+  refreshDetailIf('project');
   if (currentPage === 'backend') { renderBackendPage(); loadBackend(); }
 }
 
@@ -3560,6 +3713,10 @@ async function loadIdentity() {
       document.getElementById('header-title').textContent = data.header;
       refreshTitle();
     }
+    projectsEnabled = data.projects === true;
+    document.getElementById('nav-projects').hidden = !projectsEnabled;
+    renderProjectsPage();
+    renderFleet();
   } catch (e) {}
 })();
 
@@ -3568,7 +3725,7 @@ async function loadIdentity() {
 function prefetchAll() {
   return Promise.allSettled([
     loadIntegrations(), loadWorkflows(), loadDashboards(), loadPulls(), loadTickets(), loadChanges(), loadSessions(),
-    loadBilling(), loadMetrics(), loadSkills(), loadMCP(), loadGitops('workflows'), loadGitops('dashboards'),
+    loadBilling(), loadMetrics(), loadSkills(), loadMCP(), loadGitops('workflows'), loadGitops('dashboards'), loadProjects(),
   ]);
 }
 
@@ -3576,7 +3733,7 @@ applyRoute();
 loadIdentity();
 loadAgents().then(loadChats);
 prefetchAll();
-const LIVE_PAGES = new Set(['overview', 'billing', 'performance', 'workflows', 'dashboards', 'pulls', 'tickets']);
+const LIVE_PAGES = new Set(['overview', 'billing', 'performance', 'projects', 'workflows', 'dashboards', 'pulls', 'tickets']);
 setInterval(() => {
   if (document.visibilityState !== 'visible' || chatFull) return;
   if (LIVE_PAGES.has(currentPage)) loadPage(currentPage);

@@ -25,6 +25,10 @@ IAM policy.
 |---|---|
 | `workflows/<agent>/<id>.json` | Workflow descriptors including run history |
 | `dashboards/<agent>/<id>.json` | Dashboard descriptors including the latest data / markdown |
+| `projects/<agent>/<id>.json` | [Project](PROJECTS.md) descriptors: goal, repository, Datadog signal, routine, limits, status and the latest statistics. They name the routine trigger token but never hold it |
+| `project-state/<agent>/<id>/ledger.json` | A project's work record: scan cursor, tasks with their sessions and pull requests, candidate error groups with redacted log samples, per-error history, totals and daily counters. Changed only by conditional read-modify-write, one transition at a time |
+| `project-state/<agent>/<id>/memory.json` | Project memory: notes from admins, sessions and pull request reviews that go into every work order |
+| `project-sessions/<session>.json` | Binds one dispatched Claude Code session to its project task; the runner gateway admits a session only while this object exists. Created with `If-None-Match` right after the routine fires, deleted by the tick after the task finishes |
 | `chat/<agent>/<id>.json` | UI chat transcripts. Each carries an `owner` field — the signed-in email that created it — and every read and write is scoped to it, so one viewer never sees another's threads. An empty `owner` means the conversation was created with no identity source (no auth proxy) and is reachable only by an equally unidentified caller |
 | `skills/<id>.json` | Custom skills |
 | `mcp/<id>.json` | MCP connectors |
@@ -37,7 +41,7 @@ IAM policy.
 | `sessions/<channel>/<thread>.json`, `sessions/_stats.json` | Slack thread sessions and their counters |
 | `gitops/<kind>.json` | Status of the last GitOps reconcile, shared with every replica |
 | `catalog/manifest.json` | What the catalog search index currently holds |
-| `locks/scheduler`, `locks/workflows/…`, `locks/dashboards/…`, `locks/sessions/…` | Leases (see below) |
+| `locks/scheduler`, `locks/workflows/…`, `locks/dashboards/…`, `locks/projects/…`, `locks/sessions/…` | Leases (see below) |
 
 ## Browsing the state
 
@@ -175,12 +179,14 @@ Scheduled work must run exactly once, so it is gated by a lease object held
 with conditional writes:
 
 - `locks/scheduler` — one replica at a time runs workflow tickers, dashboard
-  sync tickers, GitOps reconciles and retention sweeps. It renews the lease
-  every 10 seconds; if it stops renewing for 30 seconds another replica takes
-  over, and a graceful shutdown releases the lease immediately.
+  sync tickers, project ticks, GitOps reconciles and retention sweeps. It renews
+  the lease every 10 seconds; if it stops renewing for 30 seconds another
+  replica takes over, and a graceful shutdown releases the lease immediately.
 - `locks/workflows/<agent>/<id>` and `locks/dashboards/<agent>/<id>` — taken
   for the duration of one run or sync, so a manual "Run now" handled by one
   replica cannot overlap a scheduled tick on the leader. They expire five
+  minutes after a crash.
+- `locks/projects/<agent>/<id>` — the same for one project tick. It expires ten
   minutes after a crash.
 - `locks/sessions/<channel>/<thread>` — held while a replica answers a message
   in a Slack thread, so a second reply arriving on another replica is ignored
@@ -234,6 +240,7 @@ Each topic chooses its delivery mode:
 |---|---|---|
 | `user-context` | at-least-once, 4 attempts | Writing a finished turn into the user's rolling context, indexing its vector, and folding it into that person's aggregated profile. Retries are safe: the entry ID travels with the task, so a redelivered task recognises the write it already made instead of appending the turn twice. A failed profile update is logged rather than retried — the hourly rebuild repairs it |
 | `workflow-run` | at-most-once | Manual "Run now", event-triggered (`on_success` / `on_failure`), catch-up and resumed runs. The task is dropped the moment it is claimed: a tick opens pull requests and posts to Slack, so a run lost to a crash is far cheaper than one replayed blindly after it. What decides whether to replay is the journal, which knows whether the run had reached a mutating tool; the queue itself never retries this topic. The per-workflow lease still prevents two replicas running the same workflow at once |
+| `project-tick` | at-most-once | A project's manual "Run now". A tick fires routines, and a replayed fire would start a second Claude Code session because the routine API has no idempotency key, so a lost tick is simply left to the next scheduled one. The per-project lease prevents two replicas ticking the same project at once |
 
 A failed at-least-once task is rescheduled with exponential backoff (30s
 doubling to 15 minutes) and dropped once its attempt budget is spent. A task
@@ -296,6 +303,14 @@ that, three rollouts during a long tick would disable a workflow that had
 nothing wrong with it: the process it was running in went away, which is not
 the workflow failing.
 
+Projects have no journal kind: their ledger already is the record of work in
+flight. A task is written as `dispatching` before its routine is fired, and the
+next tick reconciles whatever an interrupted one left behind: a task whose fire
+never recorded a session fails after 15 minutes. A session that is already
+running keeps reporting to the gateway, which every replica serves. An
+interrupted project tick is likewise kept out of the project's auto-disable
+budget.
+
 ## Catching up after downtime
 
 Recovery covers work that had started. A schedule that came due while *nothing
@@ -326,10 +341,11 @@ journal and is picked up after the restart.
 
 ## Lists and detail pages
 
-The list endpoints (`/api/workflows`, `/api/dashboards`) return descriptors
-without run histories, fetched data and rendered reports; the page of one
-workflow or dashboard fetches the full object. Only that page polls, and it
-does so adaptively.
+The list endpoints (`/api/workflows`, `/api/dashboards`, `/api/projects`)
+return descriptors without run histories, fetched data, rendered reports or
+daily series; the page of one workflow, dashboard or project fetches the full
+object, and a project's page also reads its ledger and memory. Only that page
+polls, and it does so adaptively.
 
 ## Semantic user context (S3 Vectors)
 

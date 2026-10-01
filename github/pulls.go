@@ -25,9 +25,13 @@ var (
 
 // PRMarker renders the body marker; empty attributes are left out.
 func PRMarker(agent, source, user string) string {
+	return renderPRMarker([][2]string{{"agent", agent}, {"source", source}, {"user", user}})
+}
+
+func renderPRMarker(attrs [][2]string) string {
 	var b strings.Builder
 	b.WriteString(prMarkerPrefix)
-	for _, kv := range [][2]string{{"agent", agent}, {"source", source}, {"user", user}} {
+	for _, kv := range attrs {
 		if v := strings.TrimSpace(kv[1]); v != "" {
 			b.WriteString(" " + kv[0] + "=" + v)
 		}
@@ -98,7 +102,10 @@ func (c *Client) ListOpenAutomatedPullRequests(ctx context.Context) ([]Automated
 				continue
 			}
 			attrs := parsePRMarker(body)
-			name, id := parsePRRequester(body)
+			var name, id string
+			if attrs["source"] != projectPRSource {
+				name, id = parsePRRequester(body)
+			}
 			if attrs["user"] != "" {
 				id = attrs["user"]
 			}

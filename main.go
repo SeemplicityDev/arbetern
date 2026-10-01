@@ -42,6 +42,7 @@ import (
 	"github.com/justmike1/arbetern/internal/progress"
 	"github.com/justmike1/arbetern/internal/queue"
 	"github.com/justmike1/arbetern/internal/safego"
+	"github.com/justmike1/arbetern/internal/sessiontoken"
 	"github.com/justmike1/arbetern/internal/store"
 	"github.com/justmike1/arbetern/internal/ttlcache"
 	"github.com/justmike1/arbetern/internal/vectors"
@@ -49,6 +50,7 @@ import (
 	"github.com/justmike1/arbetern/mcp"
 	"github.com/justmike1/arbetern/metrics"
 	"github.com/justmike1/arbetern/nvd"
+	"github.com/justmike1/arbetern/projects"
 	"github.com/justmike1/arbetern/prompts"
 	"github.com/justmike1/arbetern/salesforce"
 	"github.com/justmike1/arbetern/skills"
@@ -2421,6 +2423,7 @@ func main() {
 		log.Printf("RBAC: MCP connector changes restricted to emails %v / teams %v", cfg.MCPAdminEmails, cfg.MCPAdminTeams)
 	}
 
+	agentDatadog := make(map[string]*datadog.MultiClient, len(agents))
 	for _, agent := range agents {
 		ap, err := prompts.LoadAgent(agent.ID)
 		if err != nil {
@@ -2450,6 +2453,7 @@ func main() {
 			google:      googleClient,
 			document360: document360Client,
 		})
+		agentDatadog[agentID] = agentClients.datadog
 
 		router := commands.NewRouter(slackClient, ghClient, modelsClient, codeModelsClient, agentClients.jira, agentClients.nvd, agentClients.sf, agentClients.chorus, agentClients.datadog, agentClients.aws, agentClients.azure, agentClients.databricks, agentClients.clickhouse, agentClients.freshworks, agentClients.google, agentClients.document360, dashRegistry, wfRegistry, ap, agent.ID, cfg.AppURL, sessions, cfg.MaxToolRounds, userContextStore, billingStore)
 		router.SetMCP(mcpRegistry)
@@ -2591,6 +2595,21 @@ func main() {
 		}
 		return true
 	}
+	// Projects open pull requests unattended, so unlike MCP an empty admin list admits nobody.
+	canManageProjects := func(r *http.Request) bool {
+		if len(cfg.ProjectsAdminTeams) == 0 && len(cfg.ProjectsAdminEmails) == 0 {
+			return false
+		}
+		return uiRBACAllowed(r, cfg.ProjectsAdminEmails, cfg.ProjectsAdminTeams, slackClient, emailUserCache, rbacCache)
+	}
+	authorizeProject := func(r *http.Request, agentID string) bool {
+		if !canManageProjects(r) {
+			log.Printf("[rbac] DENIED email=%q scope=projects/%s (admin_emails=%v admin_teams=%v)",
+				redactEmail(clientEmail(r)), agentID, cfg.ProjectsAdminEmails, cfg.ProjectsAdminTeams)
+			return false
+		}
+		return canManageAgent(r, agentID)
+	}
 
 	// Attribute chat messages to the OAuth-proxy-verified sender. When a proxy is
 	// in front, clientEmail returns the authenticated email; with no proxy (local
@@ -2600,6 +2619,35 @@ func main() {
 	knownAgents := make(map[string]bool, len(agents))
 	for _, a := range agents {
 		knownAgents[a.ID] = true
+	}
+
+	var projRegistry *projects.Registry
+	if cfg.ProjectsEnabled {
+		projRegistry = projects.New(projects.Deps{
+			Backend: backend,
+			GitHub:  ghClient,
+			Datadog: func(agent string) *datadog.MultiClient { return agentDatadog[agent] },
+			Skills:  skillRegistry.Instructions,
+			AgentAllowed: func(agent string) bool {
+				return commands.AgentCanUseIntegration(agent, commands.IntegrationDatadog)
+			},
+			KnownAgents: knownAgents,
+		})
+		projRegistry.UseQueue(tasks)
+		if err := projRegistry.Load(bootCtx); err != nil {
+			log.Fatalf("projects: %v", err)
+		}
+		defer projRegistry.StopAll()
+		uiPages["projects"] = true
+		log.Printf("Projects: %s%s (%d project(s), gateway :%s)", backend, projects.Prefix, projRegistry.Count(), cfg.ProjectsGatewayPort)
+		if len(cfg.ProjectsAdminTeams) == 0 && len(cfg.ProjectsAdminEmails) == 0 {
+			log.Printf("WARNING: PROJECTS_ADMIN_TEAMS and PROJECTS_ADMIN_EMAILS are empty, so nobody may create, change, run or delete projects")
+		} else {
+			log.Printf("RBAC: project changes restricted to emails %v / teams %v", cfg.ProjectsAdminEmails, cfg.ProjectsAdminTeams)
+		}
+		if ghClient == nil {
+			log.Printf("warn: PROJECTS_ENABLED is set but GITHUB_TOKEN is not — projects cannot be created or open pull requests")
+		}
 	}
 
 	// Deep-link route for the full-screen chat: /ui/<agent>/chat. Serves the
@@ -2625,8 +2673,8 @@ func main() {
 			}
 			serveShell(w)
 		})
-		// Detail pages of one workflow or dashboard: the shell renders them
-		// from /api/<kind>s/<agent>/<id>, which answers 404 for unknown ids.
+		// Detail pages of one workflow, dashboard or project: the shell renders
+		// them from /api/<kind>s/<agent>/<id>, which answers 404 for unknown ids.
 		detailPage := func(w http.ResponseWriter, r *http.Request) {
 			if !knownAgents[r.PathValue("agent")] || !store.IDRe.MatchString(r.PathValue("id")) {
 				http.NotFound(w, r)
@@ -2636,6 +2684,9 @@ func main() {
 		}
 		http.HandleFunc("/ui/{agent}/workflow/{id}", detailPage)
 		http.HandleFunc("/ui/{agent}/dashboard/{id}", detailPage)
+		if projRegistry != nil {
+			http.HandleFunc("/ui/{agent}/project/{id}", detailPage)
+		}
 		// Client-routed pages of the management UI share the SPA shell; any
 		// other single-segment path under /ui/ is a static asset.
 		http.HandleFunc("/ui/{page}", func(w http.ResponseWriter, r *http.Request) {
@@ -2758,7 +2809,8 @@ func main() {
 	identityHeadersOpen = len(trusted) == 0
 	if identityHeadersOpen {
 		guarded := len(cfg.MCPAdminTeams) > 0 || len(cfg.MCPAdminEmails) > 0 ||
-			len(cfg.BackendViewTeams) > 0 || len(cfg.BackendViewEmails) > 0
+			len(cfg.BackendViewTeams) > 0 || len(cfg.BackendViewEmails) > 0 ||
+			(cfg.ProjectsEnabled && (len(cfg.ProjectsAdminTeams) > 0 || len(cfg.ProjectsAdminEmails) > 0))
 		for _, a := range agents {
 			guarded = guarded || len(a.AllowedEmails) > 0 || len(a.AllowedTeams) > 0
 		}
@@ -2827,8 +2879,9 @@ func main() {
 			identity
 			MCPAdmin     bool     `json:"mcp_admin"`
 			BackendAdmin bool     `json:"backend_admin"`
+			ProjectAdmin bool     `json:"project_admin"`
 			SkillAgents  []string `json:"skill_agents"`
-		}{identities.lookup(clientEmail(r), slackClient, jiraClient, cfg.AtlassianURL), canManageMCP(r), canViewBackend(r), skillAgentsFor(r)})
+		}{identities.lookup(clientEmail(r), slackClient, jiraClient, cfg.AtlassianURL), canManageMCP(r), canViewBackend(r), cfg.ProjectsEnabled && canManageProjects(r), skillAgentsFor(r)})
 	})
 
 	// API: the signed-in person's own stored context, aggregated across every
@@ -2866,7 +2919,7 @@ func main() {
 			headerTitle = "arbetern"
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]string{"header": headerTitle})
+		_ = json.NewEncoder(w).Encode(map[string]any{"header": headerTitle, "projects": cfg.ProjectsEnabled})
 	})
 
 	// API: integrations — serves cached integration permissions (refreshed hourly).
@@ -3012,6 +3065,11 @@ func main() {
 	perfStore.RegisterRoutes(apiMux)
 	skillRegistry.RegisterRoutes(apiMux, clientEmail)
 	mcpRegistry.RegisterRoutes(apiMux, clientEmail)
+	if projRegistry != nil {
+		projRegistry.RegisterRoutes(http.DefaultServeMux, apiMux, knownAgents, authorizeProject, clientEmail)
+	} else {
+		projects.RegisterDisabledRoutes(apiMux)
+	}
 
 	// Wire the workflow executor now that routers are built. Tick goroutines
 	// start when this replica acquires the scheduling lease below.
@@ -3128,11 +3186,15 @@ func main() {
 
 	// Every replica keeps its caches in step with the bucket so UI reads and
 	// tool calls see what other replicas wrote.
-	for _, start := range []func(context.Context, time.Duration){
+	refreshers := []func(context.Context, time.Duration){
 		wfRegistry.StartRefresh, dashRegistry.StartRefresh, chatRegistry.StartRefresh,
 		skillRegistry.StartRefresh, mcpRegistry.StartRefresh,
 		billingStore.StartRefresh, perfStore.StartRefresh,
-	} {
+	}
+	if projRegistry != nil {
+		refreshers = append(refreshers, projRegistry.StartRefresh)
+	}
+	for _, start := range refreshers {
 		start(context.Background(), stateRefreshInterval)
 	}
 
@@ -3149,6 +3211,9 @@ func main() {
 			log.Printf("[lease] %s is scheduling", store.InstanceID())
 			wfRegistry.StartAllEnabled(held)
 			dashRegistry.StartAll(held)
+			if projRegistry != nil {
+				projRegistry.StartAll(held)
+			}
 			if wfSyncer != nil {
 				wfSyncer.Start(held)
 			}
@@ -3168,6 +3233,9 @@ func main() {
 			<-held.Done()
 			wfRegistry.StopAll()
 			dashRegistry.StopAll()
+			if projRegistry != nil {
+				projRegistry.StopAll()
+			}
 			log.Printf("[lease] %s stopped scheduling", store.InstanceID())
 		})
 	})
@@ -3197,6 +3265,20 @@ func main() {
 		IdleTimeout:       120 * time.Second,
 	}
 
+	// The runner gateway trusts session tokens only: its own listener, never DefaultServeMux or globalIPGate.
+	var gatewaySrv *http.Server
+	if projRegistry != nil {
+		gatewaySrv = &http.Server{
+			Addr:              ":" + cfg.ProjectsGatewayPort,
+			Handler:           projects.NewGateway(projRegistry, sessiontoken.NewVerifier(cfg.ProjectsEnvironmentID, nil), cfg.ProjectsRunnerAccountID),
+			ReadHeaderTimeout: 5 * time.Second,
+			ReadTimeout:       15 * time.Second,
+			WriteTimeout:      60 * time.Second,
+			IdleTimeout:       60 * time.Second,
+			MaxHeaderBytes:    16 << 10,
+		}
+	}
+
 	// Graceful shutdown on SIGTERM/SIGINT (Kubernetes pod termination).
 	shutdown := make(chan os.Signal, 1)
 	signal.Notify(shutdown, syscall.SIGTERM, syscall.SIGINT)
@@ -3206,15 +3288,34 @@ func main() {
 			log.Fatalf("server failed: %v", err)
 		}
 	}()
+	if gatewaySrv != nil {
+		safego.Go("projects: gateway", func() {
+			if err := gatewaySrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				log.Fatalf("projects gateway failed: %v", err)
+			}
+		})
+	}
 
 	sig := <-shutdown
 	log.Printf("received %s — shutting down gracefully (30s deadline)...", sig)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
+	gatewayStopped := make(chan struct{})
+	if gatewaySrv != nil {
+		safego.Go("projects: gateway shutdown", func() {
+			defer close(gatewayStopped)
+			if err := gatewaySrv.Shutdown(ctx); err != nil {
+				log.Printf("[projects] gateway shutdown: %v", err)
+			}
+		})
+	} else {
+		close(gatewayStopped)
+	}
 	if err := srv.Shutdown(ctx); err != nil {
 		log.Fatalf("graceful shutdown failed: %v", err)
 	}
+	<-gatewayStopped
 	// Hand the scheduling lease over right away rather than letting it expire,
 	// then merge the last buffered usage into the bucket.
 	cancelLeader()

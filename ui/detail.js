@@ -1,4 +1,4 @@
-/* Detail pages rendered inside the console shell: one workflow, one dashboard.
+/* Detail pages rendered inside the console shell: one workflow, dashboard or project.
    Loaded before app.js, which owns routing and the shared helpers. */
 
 let detailRoute = null;
@@ -6,7 +6,7 @@ let detailEntity = null;
 let detailTimer = null;
 let detailToken = 0;
 
-function detailRootFor(kind) { return document.getElementById(kind === 'workflow' ? 'wf-detail' : 'dash-detail'); }
+function detailRootFor(kind) { return document.getElementById({ workflow: 'wf-detail', dashboard: 'dash-detail', project: 'proj-detail' }[kind]); }
 function detailPath(kind, agent, id) { return `/ui/${encodeURIComponent(agent)}/${kind}/${encodeURIComponent(id)}`; }
 function detailApi(kind, agent, id) { return `/api/${kind}s/${encodeURIComponent(agent)}/${encodeURIComponent(id)}`; }
 
@@ -53,6 +53,7 @@ function scheduleDetailPoll(ms) {
 
 function detailPollMs(kind, e) {
   if (kind === 'workflow') return e.running ? 3000 : 30000;
+  if (kind === 'project') return e.stats && e.stats.active_sessions > 0 ? 10000 : 30000;
   if (e.kind === 'prompt' && !dashIsTemplate(e) && !(e.markdown && e.markdown.trim()) && !e.last_error) return 5000;
   return 15000;
 }
@@ -72,10 +73,11 @@ async function loadDetail() {
   } catch (err) {
     if (token !== detailToken) return;
     const gone = err && err.status === 404;
+    const off = route.kind === 'project' && err && err.status === 503;
     const parent = DETAIL_PARENT[route.kind];
     root.innerHTML = `<div class="empty-state">
         <div class="empty-state-icon">${gone ? '&#x1f50d;' : '&#x26a0;&#xfe0f;'}</div>
-        <p>${gone ? `This ${route.kind} no longer exists.` : `The ${route.kind} could not be loaded (${escapeHtml(err && err.message ? err.message : String(err))}).`}</p>
+        <p>${gone ? `This ${route.kind} no longer exists.` : off ? 'Projects are not enabled in this deployment.' : `The ${route.kind} could not be loaded (${escapeHtml(err && err.message ? err.message : String(err))}).`}</p>
         <p><a href="/ui/${parent}" data-page="${parent}">Back to ${PAGE_TITLES[parent].toLowerCase()}</a></p>
       </div>`;
     if (!gone) scheduleDetailPoll(30000);
@@ -84,6 +86,7 @@ async function loadDetail() {
 
 function renderDetail(root, route, entity) {
   if (route.kind === 'workflow') renderWorkflowDetail(root, entity);
+  else if (route.kind === 'project') renderProjectDetail(root, entity);
   else renderDashboardDetail(root, entity);
 }
 
@@ -632,6 +635,463 @@ async function ddDelete() {
   }
   delete lastFetched.dashboards;
   navigate('dashboards');
+}
+
+/* Project */
+const PJD_TASK_STATUS = {
+  dispatching: ['running', 'dispatching'],
+  running: ['running', 'running'],
+  pr_open: ['open', 'PR open'],
+  closed: ['failed', 'closed'],
+  failed: ['failed', 'failed'],
+};
+const PJD_OUTCOMES = { fixed: 'fixed', not_reproducible: 'not reproducible', cannot_fix: 'cannot fix', already_fixed: 'already fixed' };
+const PJD_NOTE_SOURCES = ['admin', 'session', 'review'];
+const PJD_LIMITS = [
+  ['max_open_prs', 'Open pull requests', 1, 20, 3, 'Counts running sessions too'],
+  ['max_active_sessions', 'Sessions at once', 1, 5, 1],
+  ['max_sessions_per_day', 'Sessions per day', 1, 48, 6, 'UTC day'],
+  ['max_attempts', 'Attempts per error', 1, 5, 2],
+  ['cooldown_hours', 'Cooldown, hours', 1, 720, 72, 'After a closed PR or no fix'],
+  ['session_timeout_minutes', 'Session timeout, minutes', 30, 600, 240],
+  ['recurrence_grace_hours', 'Recurrence grace, hours', 0, 168, 24, 'Deploy lag after a merge'],
+  ['recurrence_window_hours', 'Recurrence window, hours', 24, 720, 168, 'Quiet this long counts as resolved'],
+];
+const pjdExpanded = new Set();
+
+function pjdTaskStatus(t) {
+  const o = t.outcome || {};
+  if (t.status === 'merged') {
+    if (t.recurrence === 'resolved') return ['ok', 'resolved', 'Merged, and the error stayed quiet through the recurrence window'];
+    if (t.recurrence === 'recurred') return ['failed', 'recurred', 'Merged, but the error came back after the grace period'];
+    return ['ok', 'merged', 'Merged; watching whether the error comes back'];
+  }
+  if (t.status === 'no_fix') return ['paused', PJD_OUTCOMES[o.status] || 'no fix', o.summary || ''];
+  const [cls, label] = PJD_TASK_STATUS[t.status] || ['paused', t.status || 'unknown'];
+  return [cls, label, t.error || o.summary || ''];
+}
+
+function pjdChips(facts) {
+  const shown = facts.filter(f => f[1]);
+  return shown.length ? `<div class="chip-row">${shown.map(([k, v]) => `<span class="chip">${escapeHtml(k)} <b class="key">${escapeHtml(v)}</b></span>`).join('')}</div>` : '';
+}
+
+function pjdGroupCell(g, key) {
+  return `<button type="button" class="proj-toggle" data-key="${escapeHtml(key)}" aria-expanded="${pjdExpanded.has(key)}">${escapeHtml(g.kind || 'error')}</button>${g.service ? ` <span class="tag">${escapeHtml(g.service)}</span>` : ''}
+        <span class="sub" title="${escapeHtml(g.pattern || '')}">${escapeHtml(g.pattern || g.fingerprint || '')}</span>`;
+}
+
+function pjdGroupDetailHtml(g) {
+  const samples = (g.samples || []).map(s => `<div class="proj-label">Sample${s.at ? ' · ' + escapeHtml(fmtDateTime(s.at)) : ''}</div>
+      <pre class="run-result">${escapeHtml([s.message, s.stack].filter(Boolean).join('\n\n'))}</pre>`).join('');
+  return pjdChips([
+    ['fingerprint', g.fingerprint], ['service', g.service], ['kind', g.kind], ['frame', g.frame],
+    ['first seen', g.first_seen && fmtDateTime(g.first_seen)], ['last seen', g.last_seen && fmtDateTime(g.last_seen)],
+  ]) + (g.pattern ? `<div class="proj-label">Message pattern</div><div class="run-result">${escapeHtml(g.pattern)}</div>` : '') + samples;
+}
+
+function pjdTaskDetailHtml(t) {
+  const o = t.outcome;
+  const pr = t.pr || {};
+  let html = pjdChips([
+    ['task', t.id], ['branch', t.branch || (o && o.branch)], ['session', t.session_id], ['exit', t.exit_reason],
+    ['dispatched', t.dispatched_at && fmtDateTime(t.dispatched_at)], ['finished', t.finished_at && fmtDateTime(t.finished_at)],
+    ['lines', t.pr && (pr.additions || pr.deletions) ? `+${fmtInt(pr.additions)} −${fmtInt(pr.deletions)}` : ''],
+    ['learnings', t.learnings ? fmtInt(t.learnings) : ''],
+  ]);
+  if (t.error) html += `<div class="run-error">${escapeHtml(t.error)}</div>`;
+  if (o && o.summary) {
+    const head = [PJD_OUTCOMES[o.status] || o.status, o.reported_at && fmtDateTime(o.reported_at)].filter(Boolean).map(escapeHtml).join(' · ');
+    html += `<div class="proj-label">Session report${head ? ' · ' + head : ''}</div>${o.title ? `<div class="proj-title">${escapeHtml(o.title)}</div>` : ''}<div class="run-result">${escapeHtml(o.summary)}</div>`;
+  }
+  if (o && o.testing) html += `<div class="proj-label">Testing</div><div class="run-result">${escapeHtml(o.testing)}</div>`;
+  return html + `<div class="proj-label">Error group</div>${pjdGroupDetailHtml(t.group || {})}`;
+}
+
+function pjdTaskRowsHtml(p, t) {
+  const key = 't:' + (t.id || '');
+  const [cls, label, title] = pjdTaskStatus(t);
+  const g = t.group || {};
+  const session = safeExternalUrl(t.session_url);
+  const maxAttempts = (p.limits || {}).max_attempts;
+  let prCell = '<span class="muted">—</span>';
+  if (t.pr) {
+    const n = Number(t.pr.number) || 0;
+    const url = safeExternalUrl(t.pr.url);
+    const text = n ? '#' + n : 'PR';
+    prCell = `${url ? `<a href="${escapeHtml(url)}" target="_blank" rel="noopener" title="${escapeHtml(t.pr.title || '')}">${text}</a>` : text} <span class="tag">${escapeHtml(t.pr.state || '')}</span>`;
+  }
+  return `<tr>
+      <td><span class="status-pill ${cls}" title="${escapeHtml(title)}">${escapeHtml(label)}</span></td>
+      <td>${pjdGroupCell(g, key)}</td>
+      <td class="n">${fmtInt(g.count)}</td>
+      <td class="n">${fmtInt(t.attempt)}${maxAttempts ? ' / ' + fmtInt(maxAttempts) : ''}</td>
+      <td>${session ? `<a href="${escapeHtml(session)}" target="_blank" rel="noopener">Open</a>` : '<span class="muted">—</span>'}</td>
+      <td>${prCell}</td>
+      <td class="muted" title="${escapeHtml(t.updated_at ? fmtDateTime(t.updated_at) : '')}">${t.updated_at ? timeAgo(t.updated_at) : '—'}</td>
+    </tr>
+    <tr class="proj-more"${pjdExpanded.has(key) ? '' : ' hidden'}><td colspan="7">${pjdTaskDetailHtml(t)}</td></tr>`;
+}
+
+function pjdBacklogRowsHtml(c) {
+  const g = (c && c.group) || {};
+  const key = 'g:' + (g.fingerprint || '');
+  const when = iso => `<td class="muted" title="${escapeHtml(iso ? fmtDateTime(iso) : '')}">${iso ? timeAgo(iso) : '—'}</td>`;
+  return `<tr>
+      <td>${pjdGroupCell(g, key)}</td>
+      <td class="n">${fmtInt(g.count)}</td>
+      ${when(g.first_seen)}
+      ${when(g.last_seen)}
+    </tr>
+    <tr class="proj-more"${pjdExpanded.has(key) ? '' : ' hidden'}><td colspan="4">${pjdGroupDetailHtml(g)}</td></tr>`;
+}
+
+function pjdStatsHtml(s) {
+  const decided = (s.prs_merged || 0) + (s.prs_closed || 0);
+  const settled = (s.resolved || 0) + (s.recurred || 0);
+  const sessions = [
+    s.active_sessions ? `${fmtInt(s.active_sessions)} running` : '',
+    s.failed_sessions ? `${fmtInt(s.failed_sessions)} failed` : '',
+    s.no_fix ? `${fmtInt(s.no_fix)} no fix` : '',
+  ].filter(Boolean).join(' · ');
+  const tiles = [
+    ['Sessions', fmtInt(s.sessions), sessions],
+    ['PRs opened', fmtInt(s.prs_opened), s.prs_open ? `${fmtInt(s.prs_open)} open now` : ''],
+    ['Merged', fmtInt(s.prs_merged), s.lines_changed ? `${fmtInt(s.lines_changed)} lines changed` : ''],
+    ['Closed unmerged', fmtInt(s.prs_closed), ''],
+    ['Merge rate', projRate(s.merge_rate, decided), decided ? `of ${plural(decided, 'decided PR')}` : 'no PR decided yet'],
+    ['Median time to merge', fmtHours(s.median_merge_hours), s.median_session_minutes ? `median session ${fmtHours(s.median_session_minutes / 60)}` : ''],
+    ['Resolved', fmtInt(s.resolved), 'error stayed quiet'],
+    ['Recurred', fmtInt(s.recurred), 'error came back'],
+    ['Resolution rate', projRate(s.resolution_rate, settled), settled ? `of ${fmtInt(settled)} settled` : 'no fix settled yet'],
+    ['Backlog', fmtInt(s.backlog), s.error_groups ? `${plural(s.error_groups, 'error group')} tracked` : ''],
+  ];
+  return `<div class="stats proj-stats">${tiles.map(([k, v, note]) => `<div class="stat"><div class="k">${escapeHtml(k)}</div><div class="v">${escapeHtml(v)}</div>${note ? `<div class="proj-stat-note">${escapeHtml(note)}</div>` : ''}</div>`).join('')}</div>`;
+}
+
+function pjdChartHtml(s) {
+  const days = fillDays((s.daily || []).map(d => ({ ...d, key: d.date })), 30, key => ({ key, opened: 0, merged: 0 }));
+  const max = Math.max(1, ...days.map(d => Math.max(d.opened || 0, d.merged || 0)));
+  const height = v => (v ? Math.max(4, v / max * 100).toFixed(1) : 0);
+  const total = k => days.reduce((n, d) => n + (d[k] || 0), 0);
+  if (!total('opened') && !total('merged')) {
+    return `<section class="panel proj-chart-panel"><h2>Pull requests by day <small>last 30 days</small></h2>${emptyHtml('No pull request was opened or merged in the last 30 days.')}</section>`;
+  }
+  const cols = days.map(d => `<div class="proj-day"><i class="proj-o" style="height:${height(d.opened)}%"></i><i class="proj-m" style="height:${height(d.merged)}%"></i><span>${escapeHtml(d.key)} · ${fmtInt(d.opened)} opened · ${fmtInt(d.merged)} merged</span></div>`).join('');
+  return `<section class="panel proj-chart-panel">
+      <h2>Pull requests by day <small>last 30 days · ${fmtInt(total('opened'))} opened · ${fmtInt(total('merged'))} merged</small>
+        <span class="proj-legend"><span><i class="proj-o"></i>Opened</span><span><i class="proj-m"></i>Merged</span></span></h2>
+      <div class="proj-bars">${cols}</div>
+      <div class="axis"><span>${escapeHtml(days[0].key)}</span><span>${escapeHtml(days[days.length - 1].key)}</span></div>
+    </section>`;
+}
+
+function pjdMetaHtml(p) {
+  const r = p.repo || {}, sig = p.signal || {}, d = p.dispatch || {}, l = p.limits || {};
+  const repoUrl = r.owner && r.name ? safeExternalUrl(`https://github.com/${encodeURIComponent(r.owner)}/${encodeURIComponent(r.name)}`) : '';
+  const nextDispatch = p.next_dispatch_after && new Date(p.next_dispatch_after).getTime() > Date.now() ? fmtDateTime(p.next_dispatch_after) : '—';
+  const wide = (label, html) => `<div class="meta-item proj-wide"><div class="label">${escapeHtml(label)}</div><div class="value">${html}</div></div>`;
+  return `<div class="meta-grid proj-meta">
+      ${metaItemHtml('Agent', agentLabel(p.agent))}
+      <div class="meta-item"><div class="label">Repository</div><div class="value">${repoUrl ? `<a href="${escapeHtml(repoUrl)}" target="_blank" rel="noopener">${escapeHtml(r.owner + '/' + r.name)}</a>` : '—'}</div></div>
+      ${metaItemHtml('Base branch', r.base_branch || '—')}
+      ${metaItemHtml('Datadog site', sig.site ? sig.site.toUpperCase() : '—')}
+      ${metaItemHtml('Interval', p.interval ? 'every ' + p.interval : '—')}
+      ${metaItemHtml('First scan', 'last ' + (sig.lookback || '24h'))}
+      ${metaItemHtml('Routine', d.routine_id || '—')}
+      ${metaItemHtml('Trigger token', d.token ? d.token + (d.token_configured === false ? ' (missing)' : '') : '—')}
+      ${metaItemHtml('Created by', p.created_by || '—')}
+      ${metaItemHtml('Created', fmtDateTime(p.created_at))}
+      ${metaItemHtml('Last tick', p.last_tick ? fmtDateTime(p.last_tick) : '—')}
+      ${metaItemHtml('Next dispatch after', nextDispatch)}
+      ${wide('Datadog query', `<code>${escapeHtml(sig.query || '—')}</code>`)}
+      ${sig.pattern ? wide('Pattern', `<code>${escapeHtml(sig.pattern)}</code>`) : metaItemHtml('Pattern', 'none')}
+      ${wide('Limits', `<div class="chip-row">${PJD_LIMITS.map(([k, label]) => `<span class="chip">${escapeHtml(label)} <b>${fmtInt(l[k])}</b></span>`).join('')}</div>`)}
+    </div>`;
+}
+
+function pjdNoteHtml(n, manage) {
+  const src = PJD_NOTE_SOURCES.includes(n.source) ? n.source : 'session';
+  const meta = [n.by, n.task ? 'task ' + n.task : '', n.at ? timeAgo(n.at) : ''].filter(Boolean).map(escapeHtml).join(' · ');
+  return `<div class="proj-note">
+      <span class="tag proj-src-${src}">${escapeHtml(n.source || src)}</span>
+      <div><div class="proj-note-text">${escapeHtml(n.text)}</div>${meta ? `<div class="proj-note-meta" title="${escapeHtml(n.at ? fmtDateTime(n.at) : '')}">${meta}</div>` : ''}</div>
+      ${manage && n.id ? `<button class="btn-mini danger" type="button" data-pjd="delete-note" data-note="${escapeHtml(n.id)}">Delete</button>` : ''}
+    </div>`;
+}
+
+function pjdMemoryHtml(p, manage) {
+  const notes = p.memory || [];
+  const add = manage ? '<button class="btn-mini h2-btn" type="button" data-pjd="add-note">Add note</button>' : '';
+  const body = notes.length
+    ? `<div class="proj-notes">${notes.map(n => pjdNoteHtml(n, manage)).join('')}</div>`
+    : emptyHtml(p.state_error ? 'Project memory could not be loaded.' : 'No notes yet. Admin notes, lessons sessions record and feedback from closed pull requests collect here and go into every work order.');
+  return `<section class="panel"><h2>Project memory <small>${notes.length ? plural(notes.length, 'note') : ''}</small>${add}</h2>${body}</section>`;
+}
+
+function renderProjectDetail(root, p) {
+  const key = p.agent + '/' + p.id;
+  if (root.dataset.rendered !== key) pjdExpanded.clear();
+  root.dataset.rendered = key;
+  const s = p.stats || {};
+  const r = p.repo || {};
+  const d = p.dispatch || {};
+  const [cls, label, title] = projStatus(p);
+  const tasks = p.tasks || [];
+  const backlog = p.backlog || [];
+  const inFlight = tasks.filter(t => t.status === 'dispatching' || t.status === 'running').length;
+  const manage = canManageProject(p.agent);
+  document.title = `${appTitle} — ${p.name || p.id}`;
+
+  const tags = `<span class="status-pill ${cls}" title="${escapeHtml(title)}">${label}</span>
+    ${r.owner && r.name ? `<span class="tag" title="repository and base branch">${escapeHtml(r.owner + '/' + r.name)}${r.base_branch ? '@' + escapeHtml(r.base_branch) : ''}</span>` : ''}
+    ${p.interval ? `<span class="tag" title="tick interval">every ${escapeHtml(p.interval)}</span>` : ''}
+    <span class="tag" title="project id">${escapeHtml(p.id)}</span>`;
+  const actions = (manage ? `
+    <button class="btn-mini primary" type="button" onclick="pjdRun(this)"${p.enabled ? '' : ' disabled'} title="${p.enabled ? 'Scan, sync pull requests and dispatch now, outside the interval.' : 'Resume the project before running it.'}">Run now</button>
+    <button class="btn-mini" type="button" onclick="pjdToggle(this)" title="${p.enabled ? 'Stop ticking; running sessions finish on their own.' : 'Start ticking again.'}">${p.enabled ? 'Pause' : 'Resume'}</button>
+    <button class="btn-mini" type="button" onclick="pjdEdit()">Edit</button>
+    <button class="btn-mini danger" type="button" onclick="pjdDelete()">Delete</button>` : '')
+    + `<a class="btn-mini" href="${detailApi('project', p.agent, p.id)}" target="_blank" rel="noopener">JSON</a>`;
+
+  let banners = '';
+  if (!p.enabled && p.disabled_reason) {
+    const reason = p.disabled_reason.replace(/^auto-disabled\s+/i, '');
+    banners += `<div class="detail-banner danger"><strong>Auto-disabled${reason === p.disabled_reason ? '.' : ''}</strong> ${escapeHtml(reason)}<br>Resume the project once the cause is fixed.</div>`;
+  }
+  if (d.token_configured === false) banners += `<div class="detail-banner warn"><strong>Trigger token missing.</strong> This deployment holds no token named “${escapeHtml(d.token || '')}”, so no sessions are dispatched until it is added.</div>`;
+  if (p.state_error) banners += `<div class="detail-banner danger"><strong>Project state could not be loaded.</strong> Tasks, backlog and memory are missing from this view: ${escapeHtml(p.state_error)}</div>`;
+  if (p.last_error && !(p.disabled_reason && p.disabled_reason.includes(p.last_error))) {
+    banners += `<div class="detail-banner danger"><strong>Last tick failed</strong>${p.last_tick ? ' (' + escapeHtml(fmtDateTime(p.last_tick)) + ')' : ''}: ${escapeHtml(p.last_error)}</div>`;
+  }
+
+  const tasksBody = tasks.length
+    ? `<div class="list-scroll" data-scroll="tasks"><table class="data-table"><thead><tr>
+        <th>Status</th><th>Error group</th><th class="n">Count</th><th class="n">Attempt</th><th>Session</th><th>Pull request</th><th>Updated</th>
+      </tr></thead><tbody>${tasks.map(t => pjdTaskRowsHtml(p, t)).join('')}</tbody></table></div>`
+    : emptyHtml(p.state_error ? 'Tasks could not be loaded.' : 'No sessions dispatched yet. When the query finds an error group and the limits allow, its task shows up here.');
+  const backlogBody = backlog.length
+    ? `<div class="list-scroll" data-scroll="backlog"><table class="data-table"><thead><tr>
+        <th>Error group</th><th class="n">Count</th><th>First seen</th><th>Last seen</th>
+      </tr></thead><tbody>${backlog.map(pjdBacklogRowsHtml).join('')}</tbody></table></div>`
+    : emptyHtml(p.state_error ? 'The backlog could not be loaded.' : 'No error group is waiting for a session.');
+  const waiting = backlog.length
+    ? `${s.backlog > backlog.length ? `top ${fmtInt(backlog.length)} of ${fmtInt(s.backlog)}` : fmtInt(backlog.length)} waiting for capacity`
+    : '';
+  const goal = `<section class="panel"><h2>Goal</h2><div class="report proj-doc">${renderMarkdownDoc(p.goal || '')}</div>
+      ${p.instructions ? `<h2 class="proj-subhead">Instructions</h2><div class="report proj-doc">${renderMarkdownDoc(p.instructions)}</div>` : ''}</section>`;
+
+  // Polling repaints the whole page; keep scroll positions and keyboard focus where the reader left them.
+  const scrolls = [...root.querySelectorAll('[data-scroll]')].map(el => [el.dataset.scroll, el.scrollTop, el.scrollLeft]);
+  const focused = root.contains(document.activeElement) ? document.activeElement : null;
+  const focusSel = focused && ['data-key', 'data-note', 'data-pjd', 'onclick']
+    .filter(a => focused.hasAttribute(a)).map(a => `[${a}="${CSS.escape(focused.getAttribute(a))}"]`)[0];
+  root.innerHTML = detailHeadHtml({ parent: 'projects', agent: p.agent, name: p.name || p.id, description: p.description, tags, actions })
+    + banners
+    + pjdStatsHtml(s)
+    + pjdChartHtml(s)
+    + pjdMetaHtml(p)
+    + `<div class="detail-stack">
+      <section class="panel"><h2>Tasks <small>${tasks.length ? plural(tasks.length, 'task') : ''}${inFlight ? ` · ${fmtInt(inFlight)} in flight` : ''}</small></h2>${tasksBody}</section>
+      <section class="panel"><h2>Backlog <small>${waiting}</small></h2>${backlogBody}</section>
+      ${pjdMemoryHtml(p, manage)}
+      ${goal}
+    </div>
+    <div class="detail-foot">Refreshed ${escapeHtml(new Date().toLocaleTimeString())} · updates every ${s.active_sessions > 0 ? '10' : '30'} seconds</div>`;
+  scrolls.forEach(([k, top, left]) => {
+    const el = root.querySelector(`[data-scroll="${k}"]`);
+    if (el) { el.scrollTop = top; el.scrollLeft = left; }
+  });
+  const refocus = focusSel && root.querySelector(focusSel);
+  if (refocus) refocus.focus({ preventScroll: true });
+}
+
+function pjdToggleRow(btn) {
+  const more = btn.closest('tr').nextElementSibling;
+  if (!more || !more.classList.contains('proj-more')) return;
+  more.hidden = !more.hidden;
+  btn.setAttribute('aria-expanded', String(!more.hidden));
+  if (more.hidden) pjdExpanded.delete(btn.dataset.key); else pjdExpanded.add(btn.dataset.key);
+}
+
+document.getElementById('proj-detail').addEventListener('click', e => {
+  const toggle = e.target.closest('.proj-toggle');
+  if (toggle) { pjdToggleRow(toggle); return; }
+  const act = e.target.closest('[data-pjd]');
+  if (!act) return;
+  if (act.dataset.pjd === 'add-note') pjdAddNote();
+  else if (act.dataset.pjd === 'delete-note') pjdDeleteNote(act.dataset.note, act);
+});
+
+async function pjdRun(btn) {
+  const p = detailEntity;
+  if (!p) return;
+  if (!(await uiConfirm('It scans Datadog, syncs the project’s pull requests and dispatches sessions if the limits allow. Sessions count toward the organization’s Claude Code usage.', { title: 'Run this project now?', okLabel: 'Run now' }))) return;
+  btn.disabled = true;
+  btn.textContent = 'Queued…';
+  try {
+    await apiSend(`${detailApi('project', p.agent, p.id)}/run`, 'POST', {});
+  } catch (err) {
+    await uiError('Failed to start a run', err);
+  }
+  delete lastFetched.projects;
+  loadProjects();
+  scheduleDetailPoll(3000);
+}
+
+async function pjdToggle(btn) {
+  const p = detailEntity;
+  if (!p) return;
+  btn.disabled = true;
+  try {
+    await apiSend(detailApi('project', p.agent, p.id), 'PATCH', { enabled: !p.enabled });
+  } catch (err) {
+    await uiError('Failed to update project', err);
+  }
+  delete lastFetched.projects;
+  loadProjects();
+  await loadDetail();
+}
+
+async function pjdDelete() {
+  const p = detailEntity;
+  if (!p) return;
+  if (!(await uiConfirm('This stops the project and removes its tasks, memory and statistics. Sessions still running can no longer report back; pull requests it opened stay on GitHub.', { title: 'Delete this project?', tone: 'danger', okLabel: 'Delete' }))) return;
+  try {
+    await apiSend(detailApi('project', p.agent, p.id), 'DELETE');
+  } catch (err) {
+    await uiError('Failed to delete project', err);
+    return;
+  }
+  delete lastFetched.projects;
+  navigate('projects');
+}
+
+function pjdEdit() {
+  if (detailEntity) projectForm(detailEntity);
+}
+
+function pjdAddNote() {
+  const p = detailEntity;
+  if (!p) return;
+  openForm({
+    title: 'Add a note',
+    subtitle: p.name || p.id,
+    saveLabel: 'Add note',
+    html: formField('Note', '<textarea class="form-textarea proj-textarea" id="pjn-text" maxlength="500" placeholder="The HTTP client already retries timeouts; do not wrap it in another retry loop."></textarea>',
+      'Up to 500 characters. Admin notes go into every work order, ahead of what sessions have learned.'),
+    onSave: async () => {
+      const text = formValue('pjn-text');
+      if (!text) throw new Error('Write the note first.');
+      await apiSend(`${detailApi('project', p.agent, p.id)}/memory`, 'POST', { text });
+      await loadDetail();
+    },
+  });
+}
+
+async function pjdDeleteNote(noteId, btn) {
+  const p = detailEntity;
+  if (!p || !noteId) return;
+  if (!(await uiConfirm('Work orders stop including it.', { title: 'Delete this note?', tone: 'danger', okLabel: 'Delete' }))) return;
+  btn.disabled = true;
+  try {
+    await apiSend(`${detailApi('project', p.agent, p.id)}/memory/${encodeURIComponent(noteId)}`, 'DELETE');
+  } catch (err) {
+    await uiError('Failed to delete note', err);
+  }
+  await loadDetail();
+}
+
+/* Project editor, shared by New project and Edit */
+function projectForm(p) {
+  const isNew = !p;
+  const agents = agentsData.filter(a => canManageProject(a.id));
+  if (isNew && !agents.length) {
+    uiAlert('Creating a project needs access to at least one agent.', { title: 'No agent available', tone: 'warn' });
+    return;
+  }
+  const r = (p && p.repo) || {}, sig = (p && p.signal) || {}, d = (p && p.dispatch) || {}, l = (p && p.limits) || {};
+  const input = (id, value, attrs) => `<input class="form-input" id="${id}" value="${escapeHtml(value == null ? '' : value)}"${attrs || ''}>`;
+  const code = ' autocapitalize="off" spellcheck="false"';
+  const site = sig.site === 'eu' ? 'eu' : 'us';
+  const limits = PJD_LIMITS.map(([k, label, min, max, def, hint]) => formField(escapeHtml(label),
+    `<input class="form-input" id="pjf-l-${k}" type="number" min="${min}" max="${max}" step="1" inputmode="numeric" value="${l[k] ? escapeHtml(l[k]) : ''}" placeholder="${def}">`,
+    `${min}–${max}, default ${def}${hint ? '. ' + escapeHtml(hint) : ''}`)).join('');
+  openForm({
+    title: isNew ? 'New project' : 'Edit project',
+    subtitle: isNew ? 'An agent keeps fixing the errors a Datadog query finds in one repository' : (p.name || p.id),
+    saveLabel: isNew ? 'Create project' : 'Save changes',
+    html: formField('Name', input('pjf-name', p && p.name, ' maxlength="80" placeholder="Fix production errors"'))
+      + (isNew ? formField('Agent', `<select class="form-input" id="pjf-agent">${agents.map(a => `<option value="${escapeHtml(a.id)}">${escapeHtml(a.name)}</option>`).join('')}</select>`, 'Its skills go into every work order. It needs Datadog access.') : '')
+      + formField('Description', input('pjf-desc', p && p.description, ' maxlength="240" placeholder="One line on what this project covers"'))
+      + formField('Goal', `<textarea class="form-textarea proj-textarea" id="pjf-goal" maxlength="4000" placeholder="Fix the root cause of each production error with the smallest change that makes it stop.">${escapeHtml((p && p.goal) || '')}</textarea>`, 'Every work order starts with it.')
+      + formField('Instructions', `<textarea class="form-textarea proj-textarea" id="pjf-instructions" maxlength="8000" placeholder="Optional. Conventions the sessions should follow in this repository.">${escapeHtml((p && p.instructions) || '')}</textarea>`)
+      + '<div class="form-section">Repository</div>'
+      + `<div class="form-grid3">${formField('Owner', input('pjf-owner', r.owner, ' placeholder="owner"' + code))}${formField('Name', input('pjf-repo', r.name, ' placeholder="repo"' + code))}${formField('Base branch', input('pjf-base', r.base_branch, ' placeholder="main"' + code), isNew ? 'Empty uses the default branch.' : '')}</div>`
+      + '<div class="form-section">Datadog</div>'
+      + `<div class="form-grid2">${formField('Site', `<select class="form-input" id="pjf-site"><option value="us"${site === 'us' ? ' selected' : ''}>US</option><option value="eu"${site === 'eu' ? ' selected' : ''}>EU</option></select>`)}${formField('First scan', input('pjf-lookback', sig.lookback, ' placeholder="24h"' + code), 'How far back the first scan looks, 1h to 168h.')}</div>`
+      + formField('Query', input('pjf-query', sig.query, ' maxlength="1000" placeholder="service:example status:error"' + code), 'Log search query. Matching errors are grouped by service, error kind, message and top stack frame.')
+      + formField('Pattern', input('pjf-pattern', sig.pattern, ' maxlength="500" placeholder="(?i)timeout|KeyError"' + code), 'Optional regular expression. A group is kept when it matches the error kind, the message or a sample.')
+      + '<div class="form-section">Dispatch</div>'
+      + `<div class="form-grid3">${formField('Routine id', input('pjf-routine', d.routine_id, ' placeholder="trig_0123456789abcdef"' + code))}${formField('Trigger token', input('pjf-token', d.token, ' maxlength="32" placeholder="default"' + code), 'A token name this deployment holds, never the token.')}${formField('Check every', input('pjf-interval', p && p.interval, ' placeholder="15m"' + code), '5m to 24h.')}</div>`
+      + `<details class="form-more"><summary>Limits</summary><div class="form-grid2">${limits}</div></details>`
+      + `<label class="check-row"><input type="checkbox" id="pjf-enabled"${!p || p.enabled ? ' checked' : ''}> Enabled</label>`,
+    onSave: async () => {
+      const body = pjfBody(isNew);
+      if (isNew) {
+        const res = await apiSend('/api/projects', 'POST', body);
+        delete lastFetched.projects;
+        await loadProjects();
+        const aid = safeId(res && res.agent), pid = safeId(res && res.id);
+        if (aid && pid) routeTo(detailPath('project', aid, pid));
+        return;
+      }
+      const changes = pjfChanges(p, body);
+      if (!Object.keys(changes).length) return;
+      await apiSend(detailApi('project', p.agent, p.id), 'PATCH', changes);
+      delete lastFetched.projects;
+      loadProjects();
+      await loadDetail();
+    },
+  });
+}
+
+function pjfBody(isNew) {
+  const body = {
+    name: formValue('pjf-name'),
+    description: formValue('pjf-desc'),
+    goal: formValue('pjf-goal'),
+    instructions: formValue('pjf-instructions'),
+    repo: { owner: formValue('pjf-owner'), name: formValue('pjf-repo'), base_branch: formValue('pjf-base') },
+    signal: { type: 'datadog', site: formValue('pjf-site'), query: formValue('pjf-query'), pattern: formValue('pjf-pattern'), lookback: formValue('pjf-lookback') },
+    dispatch: { routine_id: formValue('pjf-routine'), token: formValue('pjf-token') },
+    limits: Object.fromEntries(PJD_LIMITS.map(([k]) => [k, parseInt(formValue('pjf-l-' + k), 10) || 0])),
+    interval: formValue('pjf-interval'),
+    enabled: document.getElementById('pjf-enabled').checked,
+  };
+  if (!body.name) throw new Error('Name is required.');
+  if (!body.goal) throw new Error('Goal is required.');
+  if (!body.repo.owner || !body.repo.name) throw new Error('Repository owner and name are required.');
+  if (!isNew && !body.repo.base_branch) throw new Error('Base branch is required.');
+  if (!body.signal.query) throw new Error('A Datadog query is required.');
+  if (!body.dispatch.routine_id || !body.dispatch.token) throw new Error('Routine id and trigger token name are required.');
+  return isNew ? { agent: formValue('pjf-agent'), ...body } : body;
+}
+
+function pjfChanges(p, body) {
+  const r = p.repo || {}, sig = p.signal || {}, d = p.dispatch || {}, l = p.limits || {};
+  const before = {
+    name: p.name || '', description: p.description || '', goal: p.goal || '', instructions: p.instructions || '',
+    repo: { owner: r.owner || '', name: r.name || '', base_branch: r.base_branch || '' },
+    signal: { type: 'datadog', site: sig.site || '', query: sig.query || '', pattern: sig.pattern || '', lookback: sig.lookback || '' },
+    dispatch: { routine_id: d.routine_id || '', token: d.token || '' },
+    limits: Object.fromEntries(PJD_LIMITS.map(([k]) => [k, l[k] || 0])),
+    interval: p.interval || '',
+    enabled: !!p.enabled,
+  };
+  const out = {};
+  for (const k of Object.keys(body)) if (JSON.stringify(body[k]) !== JSON.stringify(before[k])) out[k] = body[k];
+  return out;
 }
 
 /* Content renderers */

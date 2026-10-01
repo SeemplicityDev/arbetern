@@ -1,0 +1,14 @@
+{{- if and .Values.projects .Values.projects.enabled .Values.projects.runners.namespace.create (ne (include "arbetern.projects.namespace" .) .Release.Namespace) }}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ include "arbetern.projects.namespace" . }}
+  labels:
+    {{- include "arbetern.projects.labels" . | nindent 4 }}
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest
+{{- end }}

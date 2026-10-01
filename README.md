@@ -142,7 +142,7 @@ Authentication is one of two schemes, and the target principal/key needs
 <details>
 <summary><b>State</b> — S3 backend, semantic user context</summary>
 
-Every stateful feature (workflows, dashboards, chat, billing, skills, MCP connectors, per-user context) lives in one S3 bucket; pods keep only an in-memory cache. Work that was *running* when a pod was killed is recorded there too, so a rollout resumes what it interrupted instead of dropping it. See [docs/STATE.md](docs/STATE.md) for the layout, caching, leases and recovery.
+Every stateful feature (workflows, dashboards, projects, chat, billing, skills, MCP connectors, per-user context) lives in one S3 bucket; pods keep only an in-memory cache. Work that was *running* when a pod was killed is recorded there too, so a rollout resumes what it interrupted instead of dropping it. See [docs/STATE.md](docs/STATE.md) for the layout, caching, leases and recovery.
 
 | Variable | Description |
 |---|---|
@@ -215,6 +215,22 @@ See [docs/GITOPS.md](docs/GITOPS.md). All variables reuse `GITHUB_TOKEN`.
 
 </details>
 
+<details>
+<summary><b>Projects</b> — Claude Code sessions on self-hosted runners that fix Datadog errors</summary>
+
+See [docs/PROJECTS.md](docs/PROJECTS.md). The chart sets all of these from its `projects` block.
+
+| Variable | Description |
+|---|---|
+| `PROJECTS_ENABLED` | `true` turns on the projects registry, their console API and the runner gateway (default `false`) |
+| `PROJECTS_ENVIRONMENT_ID` | **Required when enabled.** `ccpool_…` ID of the self-hosted environment; session tokens must carry it as their audience |
+| `PROJECTS_RUNNER_ACCOUNT_ID` | Optional `user_…` ID of the automation account that owns the routines. Session tokens of any other account are refused |
+| `PROJECTS_GATEWAY_PORT` | Port of the runner-facing listener (default `8081`); must differ from `PORT` |
+| `PROJECTS_ADMIN_TEAMS` / `PROJECTS_ADMIN_EMAILS` | Who may create, change, run or delete projects: Slack user group IDs, and emails or domains matched like `MCP_ADMIN_EMAILS`. **Both empty means nobody**; reads stay open to console users |
+| `PROJECT_TRIGGER_<NAME>` | Routine trigger token (`sk-ant-oat01-…`) for the token name in a project's `dispatch.token`. `<NAME>` is that name upper-cased with `-` turned into `_`. Set by the chart from `secretValues.project-trigger-<name>` for each entry of `projects.triggers` |
+
+</details>
+
 ### Run Locally
 
 ```bash
@@ -253,9 +269,10 @@ URL:
 | Agents | `/ui/agents` | The roster — open a card for its prompts (read-only), or chat where `chat_enabled` |
 | Chats | `/ui/chats` | Conversations of every chat-enabled agent: open, start, rename or delete them (same access rules as the chat itself) |
 | Skills | `/ui/skills` | Instruction blocks the agents follow: the built-in ones from the prompt files (read-only) plus custom skills written here and appended to the system prompts of the agents they target |
+| Projects | `/ui/projects` | Standing goals an agent pursues on one repository, with status, open and merged PRs, merge rate and resolved errors, filterable by agent; each opens at `/ui/<agent>/project/<id>` with its statistics, 30-day chart, tasks, backlog, project memory and editor. Shown only when projects are enabled, and only project admins who may use the agent can change one — see [docs/PROJECTS.md](docs/PROJECTS.md) |
 | Workflows | `/ui/workflows` | Every workflow across agents with schedule, status, last run, run / delete actions and GitOps sync state; each opens at `/ui/<agent>/workflow/<id>` with its flow diagram, prompt or tasks, run history and editor. "Run now" and "Sync now" both return immediately and report through the shared state the page polls, so neither holds a browser request open for the minutes they take |
 | Dashboards | `/ui/dashboards` | Every dashboard across agents (source dashboards, prompt templates, rendered reports) with sync state; each opens at `/ui/<agent>/dashboard/<id>` |
-| Pull requests | `/ui/pulls` | Open pull requests the agents authored, found by the marker every arbetern-written PR body carries: agent, requester, entry source (Slack / chat / workflow) and age, filterable by agent; ready-for-review PRs are listed first, drafts last with a draft label |
+| Pull requests | `/ui/pulls` | Open pull requests the agents authored, found by the marker every arbetern-written PR body carries: agent, requester, entry source (Slack / chat / workflow / project) and age, filterable by agent; ready-for-review PRs are listed first, drafts last with a draft label |
 | Tickets | `/ui/tickets` | Unresolved Jira issues assigned to the account behind the Atlassian integration: type, status, priority, reporter, labels and age, filterable by project |
 | Backend | `/ui/backend` | Read-only browser of the state bucket laid out as folders, with an object viewer that masks secret-looking values, plus a sample of the vector index; visible only to the Slack user groups or emails in `backendView` (closed when none are set) |
 | Your context | `/ui/context` | A profile of the signed-in person written from their own turns: what they work on, the channels and repositories they keep touching, how they use each agent, and counted metrics — with the turns it was written from behind a History tab. Aggregated across every agent and every identity they are recorded under (Slack ID, email) by the background pass, prose and all, so the page is one object read. Reached from the user button, not the rail, and open to anyone signed in: it reads only what is keyed to the identities the request authenticated as, so it needs no allow-list. See [docs/STATE.md](docs/STATE.md#aggregated-per-person-context) |
@@ -827,7 +844,8 @@ Every body, supplied or fallback, also ends with an invisible HTML comment —
 with unknown attributes left out. It marks the PR as arbetern-written whatever
 entry path opened it, and is how the console's Pull requests page finds the
 agents' open PRs; bodies written before it existed are recognised by the
-attribution phrases above.
+attribution phrases above. A pull request opened for a [project](#projects)
+carries `source=project project=<id> task=<task>` in place of `user=`.
 
 Only the write call that opens a PR establishes its body — later calls
 grouped into that same PR ignore their `pr_body` argument.
@@ -1015,6 +1033,25 @@ every active workflow across every agent, with clickable view links and
 per-workflow pattern labels. This reads directly from the registry — no agent
 round-trip, no LLM call.
 
+## Projects
+
+A **project** gives an agent a standing goal on one GitHub repository, pursued
+by Claude Code sessions instead of the agent's own tool loop. It follows the
+error log groups a Datadog query finds and, for each group, fires a Claude Code
+routine whose session runs on self-hosted runners the chart deploys as
+locked-down, single-use Jobs (in arbetern's namespace by default). The session
+fixes the error on a `claude/…` branch and reports back through an MCP server
+arbetern serves only to its own sessions; arbetern checks the branch, opens the
+pull request with its own token, and then follows the pull request and the
+error to measure merge rate, time to merge and whether each fix held.
+
+Projects are off by default, and every runner resource exists only when
+`projects.enabled` is on. They need a Team or Enterprise plan with self-hosted
+environments turned on, a dedicated automation account, one routine per
+repository, and a runner image built from `runner/Dockerfile`. See
+[docs/PROJECTS.md](docs/PROJECTS.md) for setup, configuration, the statistics
+and the security model.
+
 ## Project Structure
 
 ```
@@ -1057,6 +1094,9 @@ slack/               # Slack webhook handler + response helpers
 prompts/             # YAML prompt loader + agent discovery
 dashboards/          # dashboard registry, sync runner, executor + CRUD API
 workflows/           # workflow engine (monoflow / subflows / event-triggered) + CRUD API
+projects/            # projects: Datadog error groups fixed by Claude Code sessions, runner gateway + MCP server, CRUD API
+cmd/runner-spawn/    # spawn-runner hook: one Kubernetes Job and work-order Secret per session (stdlib only)
+runner/              # self-hosted runner image: Dockerfile, session wrapper, auth header helper, hooks
 billing/             # usage & billing ledger (per agent / model / source / user / workflow) + summary API
 metrics/             # performance series (turn / model-call / tool latency, outcomes) + summary API
 skills/              # custom skill registry (instruction blocks appended to agent prompts) + API
@@ -1154,6 +1194,7 @@ transport, limits and roadmap.
 | Document360 | [docs/DOCUMENT360.md](docs/DOCUMENT360.md) | pulse only |
 | Google Drive / Sheets | [docs/GOOGLE.md](docs/GOOGLE.md) | pulse only |
 | Headroom (LLM compression) | [docs/HEADROOM.md](docs/HEADROOM.md) | Optional infra — all backends |
+| Claude Code self-hosted runners + routines | [docs/PROJECTS.md](docs/PROJECTS.md) | Projects (agents that may use Datadog) |
 
 ## Contributing
 

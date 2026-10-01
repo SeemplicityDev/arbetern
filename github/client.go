@@ -165,6 +165,15 @@ func IsMissingBranchError(err error) bool {
 	return strings.Contains(msg, "branch") && strings.Contains(msg, "not found")
 }
 
+// IsNotFound reports whether err is a GitHub 404 or 410 response.
+func IsNotFound(err error) bool {
+	var ghErr *gh.ErrorResponse
+	if !errors.As(err, &ghErr) || ghErr.Response == nil {
+		return false
+	}
+	return ghErr.Response.StatusCode == http.StatusNotFound || ghErr.Response.StatusCode == http.StatusGone
+}
+
 func (c *Client) CreateBranch(ctx context.Context, owner, repo, baseBranch, newBranch string) error {
 	ref, _, err := c.api.Git.GetRef(ctx, owner, repo, "refs/heads/"+baseBranch)
 	if err != nil {

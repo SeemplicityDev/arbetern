@@ -1,0 +1,31 @@
+#!/bin/sh
+# Runner --exec-path wrapper: starts Claude Code only for sessions an arbetern project dispatched.
+set -eu
+
+fail() {
+	echo "session-wrapper: $*" >&2
+	exit 1
+}
+
+[ -n "${CLAUDE_RUNNER_CLAUDE_BIN:-}" ] || fail "CLAUDE_RUNNER_CLAUDE_BIN is not set"
+[ -n "${ARBETERN_GATEWAY_URL:-}" ] || fail "ARBETERN_GATEWAY_URL is not set"
+[ -n "${CLAUDE_CODE_SESSION_ACCESS_TOKEN:-}" ] || fail "CLAUDE_CODE_SESSION_ACCESS_TOKEN is not set"
+
+# Nothing before the exec may read stdin: it carries Claude Code's token rotations.
+# curl -q ignores ~/.curlrc, and the header comes through a pipe so the token stays out of argv.
+retries=0
+while :; do
+	code=$(printf 'Authorization: Bearer %s\n' "$CLAUDE_CODE_SESSION_ACCESS_TOKEN" |
+		curl -q -sS --noproxy '*' --max-time 10 -o /dev/null -w '%{http_code}' -H @- \
+			"${ARBETERN_GATEWAY_URL%/}/v1/session") || true
+	case $code in
+	200) break ;;
+	401 | 403) fail "this session was not dispatched by an arbetern project (HTTP $code)" ;;
+	esac
+	[ "$retries" -lt 3 ] || fail "arbetern gateway check failed (HTTP ${code:-000}) after $((retries + 1)) attempts"
+	retries=$((retries + 1))
+	sleep 5
+done
+
+# Flags go after "$@": the last --permission-mode wins and --allowed-tools accumulates.
+exec "$CLAUDE_RUNNER_CLAUDE_BIN" "$@" --permission-mode "${ARBETERN_PERMISSION_MODE:-auto}" --allowed-tools 'mcp__arbetern__*'

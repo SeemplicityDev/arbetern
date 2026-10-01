@@ -1,0 +1,21 @@
+#!/bin/sh
+# Claude Code Stop hook: sends Claude back to push and report before it stops. Exits 0 on every error.
+
+[ "$(jq -r '.stop_hook_active // false' 2>/dev/null)" = false ] || exit 0
+[ -n "${ARBETERN_GATEWAY_URL:-}" ] || exit 0
+
+token=
+if [ -n "${CLAUDE_SESSION_INGRESS_TOKEN_FILE:-}" ] && [ -r "$CLAUDE_SESSION_INGRESS_TOKEN_FILE" ]; then
+	token=$(tr -d '[:space:]' 2>/dev/null <"$CLAUDE_SESSION_INGRESS_TOKEN_FILE")
+fi
+[ -n "$token" ] || token=$(printf '%s' "${CLAUDE_CODE_SESSION_ACCESS_TOKEN:-}" | tr -d '[:space:]')
+[ -n "$token" ] || exit 0
+
+reported=$(printf 'Authorization: Bearer %s\n' "$token" |
+	curl -q -fs --noproxy '*' --max-time 10 -H @- "${ARBETERN_GATEWAY_URL%/}/v1/session" |
+	jq -r '.reported' 2>/dev/null)
+[ "$reported" = false ] || exit 0
+
+jq -nc --arg reason 'Commit and push your work on the current claude/ branch, then call report_outcome on the arbetern MCP server before stopping.' \
+	'{decision: "block", reason: $reason}'
+exit 0

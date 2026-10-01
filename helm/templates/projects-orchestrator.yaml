@@ -1,0 +1,185 @@
+{{- if and .Values.projects .Values.projects.enabled }}
+{{- $ns := include "arbetern.projects.namespace" . }}
+{{- $name := include "arbetern.projects.orchestratorName" . }}
+{{- $r := .Values.projects.runners }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $name }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "arbetern.projects.labels" . | nindent 4 }}
+    app.kubernetes.io/component: orchestrator
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $name }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "arbetern.projects.labels" . | nindent 4 }}
+    app.kubernetes.io/component: orchestrator
+rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "list", "delete"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $name }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "arbetern.projects.labels" . | nindent 4 }}
+    app.kubernetes.io/component: orchestrator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $name }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $name }}
+    namespace: {{ $ns }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "arbetern.projects.labels" . | nindent 4 }}
+    app.kubernetes.io/component: orchestrator
+spec:
+  replicas: {{ $r.orchestrator.replicas }}
+  selector:
+    matchLabels:
+      {{- include "arbetern.projects.orchestratorSelectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "arbetern.projects.labels" . | nindent 8 }}
+        app.kubernetes.io/component: orchestrator
+      annotations:
+        checksum/runner-job: {{ include "arbetern.projects.runnerJob" . | sha256sum }}
+        {{- if and .Values.createSecret $r.environmentKey (not $r.existingEnvironmentSecret) }}
+        checksum/environment-key: {{ $r.environmentKey | sha256sum }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ $name }}
+      automountServiceAccountToken: true
+      {{- with $r.orchestrator.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $r.orchestrator.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $r.orchestrator.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $r.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- include "arbetern.projects.podSecurityContext" . | nindent 8 }}
+      containers:
+        - name: orchestrator
+          image: {{ include "arbetern.projects.image" . | quote }}
+          imagePullPolicy: {{ $r.image.pullPolicy }}
+          args:
+            - self-hosted-runner
+            - orchestrator
+            - --environment-secret-file
+            - /etc/claude/environment/environment-key
+            - --hooks-dir
+            - /opt/arbetern/orchestrator-hooks
+            - --expected-spawn-seconds
+            - {{ $r.orchestrator.expectedSpawnSeconds | int | quote }}
+            - --hook-timeout
+            - {{ $r.orchestrator.hookTimeoutSeconds | int | quote }}
+            - --hook-concurrency
+            - {{ $r.orchestrator.hookConcurrency | int | quote }}
+            - --min-idle
+            - "0"
+          env:
+            - name: RUNNER_JOB_TEMPLATE
+              value: /etc/arbetern/runner-job/job.json
+            - name: RUNNER_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            {{- with .Values.projects.runnerAccountId }}
+            - name: RUNNER_ACCOUNT_ID
+              value: {{ . | quote }}
+            {{- end }}
+            - name: HOME
+              value: /home/runner
+            - name: TMPDIR
+              value: /tmp
+            - name: DISABLE_AUTOUPDATER
+              value: "1"
+            {{- with $r.egress.httpsProxy }}
+            - name: HTTPS_PROXY
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with $r.egress.noProxy }}
+            - name: NO_PROXY
+              value: {{ . | quote }}
+            {{- end }}
+          ports:
+            - name: health
+              containerPort: 8080
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 5
+          {{- with $r.orchestrator.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          securityContext:
+            {{- include "arbetern.projects.containerSecurityContext" . | nindent 12 }}
+          volumeMounts:
+            - name: environment
+              mountPath: /etc/claude/environment
+              readOnly: true
+            - name: job-template
+              mountPath: /etc/arbetern/runner-job
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+            - name: home
+              mountPath: /home/runner
+      volumes:
+        - name: environment
+          secret:
+            secretName: {{ include "arbetern.projects.environmentSecretName" . }}
+            defaultMode: 0440
+            items:
+              - key: environment-key
+                path: environment-key
+        - name: job-template
+          configMap:
+            name: {{ include "arbetern.projects.jobTemplateName" . }}
+        - name: tmp
+          emptyDir: {}
+        - name: home
+          emptyDir: {}
+{{- end }}
