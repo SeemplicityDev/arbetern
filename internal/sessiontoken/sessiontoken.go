@@ -157,7 +157,7 @@ func parseHeader(b []byte) (string, error) {
 	}
 	var alg, kid string
 	if json.Unmarshal(h["alg"], &alg) != nil || alg != "ES256" {
-		return "", invalid("algorithm %.20q is not ES256", alg)
+		return "", invalid("algorithm is not ES256")
 	}
 	if json.Unmarshal(h["kid"], &kid) != nil || kid == "" {
 		return "", invalid("missing key id")
@@ -207,11 +207,11 @@ func (v *Verifier) claims(payload []byte, now time.Time) (*Claims, error) {
 	leeway := clockLeeway.Seconds()
 	switch {
 	case c.Iss != issuer:
-		return nil, invalid("issuer %.40q is not %s", c.Iss, issuer)
+		return nil, invalid("issuer is not %s", issuer)
 	case !slices.Contains(c.Aud, v.audience):
 		return nil, invalid("audience does not include the environment")
 	case c.Role != sessionRole:
-		return nil, invalid("role %.40q is not %s", c.Role, sessionRole)
+		return nil, invalid("role is not %s", sessionRole)
 	case c.PoolID != v.audience:
 		return nil, invalid("pool id does not match the environment")
 	case c.Exp == nil:

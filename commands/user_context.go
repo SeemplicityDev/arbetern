@@ -824,8 +824,9 @@ func (s *UserContextStore) cachedProfile(ctx context.Context, ids []string) (*Us
 }
 
 // repoRe finds the repositories a person's turns point at. Only full GitHub
-// URLs count: a bare "owner/name" in prose is as often a path or a ratio.
-var repoRe = regexp.MustCompile(`github\.com/([A-Za-z0-9_.\-]{1,64})/([A-Za-z0-9_.\-]{1,64})`)
+// URLs count: a bare "owner/name" in prose is as often a path or a ratio. The
+// host must be github.com itself, not gist.github.com or evilgithub.com.
+var repoRe = regexp.MustCompile(`(?:^|[^\w.-])(?:www\.)?github\.com/([A-Za-z0-9_.\-]{1,64})/([A-Za-z0-9_.\-]{1,64})`)
 
 // countTop turns a tally into the most frequent entries, highest first.
 func countTop(tally map[string]int, labels map[string]string, n int) []UserContextCount {

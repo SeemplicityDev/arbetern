@@ -51,7 +51,7 @@ func (v *Verifier) key(ctx context.Context, kid string) (*ecdsa.PublicKey, error
 			return k, nil
 		}
 	}
-	return nil, invalid("unknown key id %.40q", kid)
+	return nil, invalid("unknown key id")
 }
 
 // keySet falls back to lastGood because Invalidate drops the cached set even when the refetch that follows fails.

@@ -517,12 +517,11 @@ func clientEmail(r *http.Request) string {
 	if !identityHeadersTrusted(r) {
 		return ""
 	}
-	for _, h := range []string{"X-Auth-Request-Email", "X-Forwarded-Email"} {
-		if v := strings.TrimSpace(r.Header.Get(h)); v != "" {
-			return strings.ToLower(v)
-		}
+	v := strings.TrimSpace(r.Header.Get("X-Auth-Request-Email"))
+	if v == "" {
+		v = strings.TrimSpace(r.Header.Get("X-Forwarded-Email"))
 	}
-	return ""
+	return strings.ToLower(v)
 }
 
 // identityHeadersOpen mirrors the legacy behaviour of believing identity
