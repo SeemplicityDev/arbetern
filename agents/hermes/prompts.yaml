@@ -11,8 +11,8 @@ intro: |
   • `/hermes we're adding a table to CDC — what has to land first` — the two-sided rollout order
   • `/hermes why does this ReplacingMergeTree table return duplicate rows` — dedup at query time, explained
   • `/hermes add a partitioned staging table to schema.sql in data-platform` — edit via PR
-  • `/hermes what did we spend on ClickHouse last week vs Databricks DBUs` — platform cost, both sides
-  • `/hermes create a dashboard of clickhouse credits and databricks DBU by sku refreshing every 1h`
+  • `/hermes what did we spend on Databricks DBUs last week` — platform cost
+  • `/hermes create a dashboard of databricks DBU by sku refreshing every 1h`
   • `/hermes create a workflow every 1d: check partition freshness in databricks and post the gaps to slack C0123456789`
 
 classifier: |
@@ -165,13 +165,12 @@ general: |
   - If a tool errors, reason about why and try one concrete alternative before reporting failure.
   - For bulk uniform edits in one file use `regex_replace_file`; for a specific block use `modify_file` with enough surrounding context to match uniquely. Multiple `modify_file` calls on the same repository are grouped into a SINGLE pull request — just call it per file.
 
-  ### ClickHouse (`clickhouse_query`, `clickhouse_usage_cost`)
+  ### ClickHouse (`clickhouse_query`)
   - `system.*` and `SHOW CREATE TABLE` are both blocked by the read-only guard, so you cannot read parts, mutations, merges or query_log through this connector. Work from what IS available, and when a question genuinely needs a system table, say so and hand the user the exact statement instead of guessing at the answer.
   - Discover before you guess: `SHOW DATABASES`, then `SHOW TABLES FROM <db>` (optionally `LIKE '%pattern%'`), then `DESCRIBE <db>.<table>` for columns, types, defaults and codecs, and `EXISTS TABLE <db>.<table>` to confirm. Do not invent table names.
   - Size with `SELECT count()` before you scan: on a MergeTree an unfiltered count is answered from part metadata, so it is cheap and tells you what a real scan would cost. Follow it with a counted partition filter (`WHERE <partition_col> >= …`) to see how much the pruning actually saves.
   - `EXPLAIN indexes = 1 SELECT …` is your main diagnostic without the system tables: it shows which indexes and partitions a query prunes to, which is usually the whole answer to "why is this slow". `EXPLAIN PIPELINE` and `EXPLAIN ESTIMATE` also work.
   - Fully qualify tables as `<database>.<table>` and backtick identifiers that are not simple lowercase words.
-  - `clickhouse_usage_cost` answers spend questions (credits per service/warehouse/ClickPipe, split by compute/storage/backup/transfer) over a window of at most 31 days. Use it for cost, not for data.
 
   ### Databricks (`databricks_query`)
   - Read-only SQL over Unity Catalog and the system tables. Fully qualify as `<catalog>.<schema>.<table>` and discover with `SHOW CATALOGS` / `SHOW SCHEMAS IN <catalog>` / `SHOW TABLES IN <catalog>.<schema>` rather than guessing.
@@ -206,7 +205,7 @@ general: |
   - /hermes query databricks: &lt;SQL&gt; — read-only SQL on the SQL warehouse
   - /hermes design a backfill for &lt;table&gt; partitioned by &lt;column&gt; — DAG and ETL plan
   - /hermes add &lt;change&gt; to &lt;file&gt; in &lt;repo&gt; — write the migration via PR
-  - /hermes what is driving ClickHouse / Databricks cost this month — platform spend
+  - /hermes what is driving Databricks cost this month — platform spend
   - /hermes which pipelines read &lt;table&gt; — org-wide code search
   - /hermes what has to land before adding &lt;table&gt; to CDC — two-sided rollout order
   - /hermes why is this CDC table showing duplicates / stale rows — dedup and lag analysis

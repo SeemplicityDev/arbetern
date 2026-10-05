@@ -163,15 +163,12 @@ func buildAgentScopedClients(
 		}
 	}
 
-	if agentCfg.ClickHouseKeyID != globalCfg.ClickHouseKeyID ||
-		agentCfg.ClickHouseKeySecret != globalCfg.ClickHouseKeySecret ||
-		agentCfg.ClickHouseOrganizationID != globalCfg.ClickHouseOrganizationID ||
-		agentCfg.ClickHouseQueryEndpoint != globalCfg.ClickHouseQueryEndpoint ||
+	if agentCfg.ClickHouseQueryEndpoint != globalCfg.ClickHouseQueryEndpoint ||
 		agentCfg.ClickHouseQueryUser != globalCfg.ClickHouseQueryUser ||
 		agentCfg.ClickHouseQueryPassword != globalCfg.ClickHouseQueryPassword {
-		if agentCfg.ClickHouseConfigured() || agentCfg.ClickHouseQueryConfigured() {
-			out.clickhouse = clickhouse.NewClient(agentCfg.ClickHouseKeyID, agentCfg.ClickHouseKeySecret, agentCfg.ClickHouseOrganizationID, agentCfg.ClickHouseQueryEndpoint, agentCfg.ClickHouseQueryUser, agentCfg.ClickHouseQueryPassword)
-			log.Printf("ClickHouse override for agent %q (organization: %s, query endpoint: %s)", agentID, out.clickhouse.OrganizationID(), out.clickhouse.QueryEndpoint())
+		if agentCfg.ClickHouseQueryConfigured() {
+			out.clickhouse = clickhouse.NewClient(agentCfg.ClickHouseQueryEndpoint, agentCfg.ClickHouseQueryUser, agentCfg.ClickHouseQueryPassword)
+			log.Printf("ClickHouse override for agent %q (query endpoint: %s)", agentID, out.clickhouse.QueryEndpoint())
 		} else {
 			out.clickhouse = nil
 		}

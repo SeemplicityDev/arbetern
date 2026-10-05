@@ -120,16 +120,10 @@ secretValues:
   # Optional — extra workspaces a single query may target via databricks_query's host/warehouse_id
   # arguments (comma-separated). Needed only for reports that span several regional workspaces.
   # databricks-allowed-hosts: "https://dbc-eu-1234.cloud.databricks.com,https://dbc-us-5678.cloud.databricks.com"
-  # ClickHouse Cloud (optional — enables the read-only clickhouse_usage_cost tool for the ovad and hermes agents).
-  # HTTP Basic auth: create an API key (key ID + secret) in the ClickHouse Cloud console and note your
-  # organization ID. All three keys are required. See docs/CLICKHOUSE.md.
-  # Tip: prefer mounting these under customCredentials.<agent> below so only those agents get them.
-  # clickhouse-key-id: "your-clickhouse-key-id"
-  # clickhouse-key-secret: "your-clickhouse-key-secret"
-  # clickhouse-organization-id: "00000000-0000-0000-0000-000000000000"
   # ClickHouse SQL query interface (optional — enables the read-only clickhouse_query tool for ovad and hermes).
-  # Point at a service's HTTPS endpoint and authenticate with a database user that has ONLY SELECT/SHOW.
-  # clickhouse-query-endpoint: "https://abc123.us-east-1.aws.clickhouse.cloud:8443"
+  # Point at a service's HTTP(S) endpoint and authenticate with a database user that has ONLY SELECT/SHOW.
+  # Tip: prefer mounting these under customCredentials.<agent> below so only those agents get them.
+  # clickhouse-query-endpoint: "http://clickhouse.internal:8123"
   # clickhouse-query-user: "readonly"
   # clickhouse-query-password: "REPLACE_ME"
   # Freshworks suite (optional — enables Freshdesk / Freshchat / CRM tools for the pulse and seihin agents).
@@ -249,10 +243,7 @@ secretValues:
 #     databricks-allowed-hosts: "https://dbc-eu-1234.cloud.databricks.com,https://dbc-us-5678.cloud.databricks.com"
 #     # ClickHouse is also gated to ovad/hermes in code; mounting it here keeps
 #     # the credentials off every other agent. See docs/CLICKHOUSE.md.
-#     clickhouse-key-id: "REPLACE_ME"
-#     clickhouse-key-secret: "REPLACE_ME"
-#     clickhouse-organization-id: "00000000-0000-0000-0000-000000000000"
-#     clickhouse-query-endpoint: "https://abc123.us-east-1.aws.clickhouse.cloud:8443"
+#     clickhouse-query-endpoint: "http://clickhouse.internal:8123"
 #     clickhouse-query-user: "readonly"
 #     clickhouse-query-password: "REPLACE_ME"
 #   pulse:

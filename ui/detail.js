@@ -399,7 +399,7 @@ const FLOW_INTEGRATIONS = [
     writeKeys: ['aws_s3_put_object'] },
   { id: 'azure', name: 'Azure', kind: 'source', keys: ['azure_get_cost_and_usage', 'azure_get_cost_forecast', 'azure_list_dimension_values', 'cost management', 'actualcost', 'servicename', 'resourcegroup'] },
   { id: 'databricks', name: 'Databricks', kind: 'source', keys: ['databricks_query', 'databricks', 'system.billing', 'account_prices', 'usage_quantity', 'sku_name', 'dbu'] },
-  { id: 'clickhouse', name: 'ClickHouse', kind: 'source', keys: ['clickhouse_usage_cost', 'clickhouse_query', 'clickhouse', 'usagecost', 'clickpipe'] },
+  { id: 'clickhouse', name: 'ClickHouse', kind: 'source', keys: ['clickhouse_query', 'clickhouse'] },
   { id: 'salesforce', name: 'Salesforce', kind: 'source', keys: ['salesforce', 'sfdc', 'soql', 'salesforce_query', 'sf_query'] },
   { id: 'chorus', name: 'Chorus', kind: 'source', keys: ['chorus', 'call intelligence', 'zoominfo'] },
   { id: 'freshworks', name: 'Freshworks', kind: 'source', keys: ['freshdesk_list_tickets', 'freshdesk_get_ticket', 'freshdesk_search_tickets', 'freshdesk_find_agent', 'freshchat_get_conversation', 'freshchat_get_conversation_messages', 'freshworks_crm_search', 'freshworks_crm_get_contact', 'freshworks_crm_get_deal', 'freshdesk', 'freshchat', 'freshworks', 'freshsales'] },

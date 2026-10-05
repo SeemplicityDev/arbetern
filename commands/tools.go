@@ -119,8 +119,7 @@ const (
 	ToolDatabricksQuery = "databricks_query"
 
 	// ClickHouse.
-	ToolClickHouseUsageCost = "clickhouse_usage_cost"
-	ToolClickHouseQuery     = "clickhouse_query"
+	ToolClickHouseQuery = "clickhouse_query"
 
 	// Freshworks (Freshdesk / Freshchat / CRM).
 	ToolFreshdeskListTickets             = "freshdesk_list_tickets"
@@ -277,9 +276,8 @@ var toolIntegration = map[string]string{
 	// Databricks.
 	ToolDatabricksQuery: integrationDatabricks,
 
-	// ClickHouse Cloud billing.
-	ToolClickHouseUsageCost: integrationClickHouse,
-	ToolClickHouseQuery:     integrationClickHouse,
+	// ClickHouse.
+	ToolClickHouseQuery: integrationClickHouse,
 
 	// Freshworks (Freshdesk / Freshchat / CRM).
 	ToolFreshdeskListTickets:             integrationFreshworks,

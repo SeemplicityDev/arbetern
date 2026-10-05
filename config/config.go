@@ -104,18 +104,10 @@ type Credentials struct {
 	// query to DatabricksHost.
 	DatabricksAllowedHosts string `cred:"databricks-allowed-hosts"`
 
-	// ClickHouse Cloud billing — HTTP Basic auth against the Cloud API
-	// (https://api.clickhouse.cloud). The key ID/secret are generated in the
-	// ClickHouse Cloud console; the organization ID selects which org the
-	// usage-cost report covers.
-	ClickHouseKeyID          string `cred:"clickhouse-key-id"`          // Cloud API key ID (HTTP Basic username).
-	ClickHouseKeySecret      string `cred:"clickhouse-key-secret"`      // Cloud API key secret (HTTP Basic password).
-	ClickHouseOrganizationID string `cred:"clickhouse-organization-id"` // Organization ID the report covers.
-
 	// ClickHouse SQL query interface — HTTP Basic auth against a service's
-	// HTTPS endpoint. A separate surface from the billing API above: it runs
-	// read-only SQL against the databases/tables. Use a SELECT/SHOW-only user.
-	ClickHouseQueryEndpoint string `cred:"clickhouse-query-endpoint"` // Service HTTPS endpoint, e.g. "https://abc123.us-east-1.aws.clickhouse.cloud:8443".
+	// HTTP(S) endpoint. It runs read-only SQL against the databases/tables.
+	// Use a SELECT/SHOW-only user.
+	ClickHouseQueryEndpoint string `cred:"clickhouse-query-endpoint"` // Service HTTP(S) endpoint, e.g. "http://clickhouse.internal:8123".
 	ClickHouseQueryUser     string `cred:"clickhouse-query-user"`     // Read-only database username (HTTP Basic username).
 	ClickHouseQueryPassword string `cred:"clickhouse-query-password"` // Database password (HTTP Basic password).
 
@@ -389,14 +381,6 @@ func (c *Config) DatabricksAllowedHostList() []string {
 	return out
 }
 
-// ClickHouseConfigured returns true when the ClickHouse Cloud API key ID, key
-// secret and organization ID are all present. The first real request is the
-// authoritative health check.
-func (c *Config) ClickHouseConfigured() bool {
-	return c.ClickHouseKeyID != "" && c.ClickHouseKeySecret != "" &&
-		c.ClickHouseOrganizationID != ""
-}
-
 // ClickHouseQueryConfigured returns true when the ClickHouse SQL query
 // endpoint and database username are present (the password may be empty for a
 // passwordless user). The first real query is the authoritative health check.
@@ -489,10 +473,6 @@ func Load() (*Config, error) {
 			DatabricksClientSecret:  os.Getenv("DATABRICKS_CLIENT_SECRET"),
 			DatabricksWarehouseID:   os.Getenv("DATABRICKS_WAREHOUSE_ID"),
 			DatabricksAllowedHosts:  os.Getenv("DATABRICKS_ALLOWED_HOSTS"),
-
-			ClickHouseKeyID:          os.Getenv("CLICKHOUSE_KEY_ID"),
-			ClickHouseKeySecret:      os.Getenv("CLICKHOUSE_KEY_SECRET"),
-			ClickHouseOrganizationID: os.Getenv("CLICKHOUSE_ORGANIZATION_ID"),
 
 			FreshdeskDomain:     os.Getenv("FRESHDESK_DOMAIN"),
 			FreshdeskAPIKey:     os.Getenv("FRESHDESK_API_KEY"),

@@ -1790,30 +1790,21 @@ func refreshIntegrations(
 		})
 	}
 
-	// --- ClickHouse Cloud (Billing usage cost) ---
+	// --- ClickHouse (read-only SQL) ---
 	{
-		chConnected := clickhouseClient != nil && clickhouseClient.Ready()
+		chQueryConnected := clickhouseClient != nil && clickhouseClient.QueryReady()
 		chPerms := []permission{
-			{Scope: "billing.usageCost.read", Description: "Read organization usage-cost reports (GET /v1/organizations/{org}/usageCost)", Required: true, Granted: new(chConnected)},
-		}
-		if cfg.ClickHouseQueryConfigured() {
-			chQueryConnected := clickhouseClient != nil && clickhouseClient.QueryReady()
-			chPerms = append(chPerms, permission{Scope: "sql.read", Description: "Run read-only SQL against the service endpoint (SELECT / SHOW / DESCRIBE / EXISTS)", Required: false, Granted: new(chQueryConnected)})
+			{Scope: "sql.read", Description: "Run read-only SQL against the service endpoint (SELECT / SHOW / DESCRIBE / EXISTS)", Required: true, Granted: new(chQueryConnected)},
 		}
 		activeCH := map[string]string{}
-		if clickhouseClient != nil {
-			if clickhouseClient.OrganizationID() != "" {
-				activeCH["Organization"] = clickhouseClient.OrganizationID()
-			}
-			if clickhouseClient.QueryEndpoint() != "" {
-				activeCH["Query endpoint"] = clickhouseClient.QueryEndpoint()
-			}
+		if clickhouseClient != nil && clickhouseClient.QueryEndpoint() != "" {
+			activeCH["Query endpoint"] = clickhouseClient.QueryEndpoint()
 		}
 		result = append(result, integration{
 			ID:           "clickhouse",
-			Name:         "ClickHouse Cloud",
-			Configured:   cfg.ClickHouseConfigured() || cfg.ClickHouseQueryConfigured(),
-			AuthMode:     "API key (HTTP Basic)",
+			Name:         "ClickHouse",
+			Configured:   cfg.ClickHouseQueryConfigured(),
+			AuthMode:     "Database user (HTTP Basic)",
 			Permissions:  chPerms,
 			ActiveModels: activeCH,
 		})
@@ -2194,21 +2185,14 @@ func main() {
 		log.Printf("Databricks integration enabled (host: %s, warehouse: %s)", databricksClient.Host(), databricksClient.WarehouseID())
 	}
 
-	// ClickHouse Cloud client — the billing usage-cost API (HTTP Basic key
-	// ID + secret against the Cloud API) and/or the read-only SQL query
-	// interface (HTTP Basic user + password against a service's HTTPS
-	// endpoint). NewClient probes each configured surface in the background and
-	// retries, so each tool becomes available once its first call succeeds.
-	// Built when EITHER surface is configured.
+	// ClickHouse client — the read-only SQL query interface (HTTP Basic user +
+	// password against a service's HTTP(S) endpoint). NewClient probes it in the
+	// background and retries, so the tool becomes available once its first call
+	// succeeds.
 	var clickhouseClient *clickhouse.Client
-	if cfg.ClickHouseConfigured() || cfg.ClickHouseQueryConfigured() {
-		clickhouseClient = clickhouse.NewClient(cfg.ClickHouseKeyID, cfg.ClickHouseKeySecret, cfg.ClickHouseOrganizationID, cfg.ClickHouseQueryEndpoint, cfg.ClickHouseQueryUser, cfg.ClickHouseQueryPassword)
-		if cfg.ClickHouseConfigured() {
-			log.Printf("ClickHouse integration enabled (organization: %s)", clickhouseClient.OrganizationID())
-		}
-		if cfg.ClickHouseQueryConfigured() {
-			log.Printf("ClickHouse SQL query interface enabled (endpoint: %s)", clickhouseClient.QueryEndpoint())
-		}
+	if cfg.ClickHouseQueryConfigured() {
+		clickhouseClient = clickhouse.NewClient(cfg.ClickHouseQueryEndpoint, cfg.ClickHouseQueryUser, cfg.ClickHouseQueryPassword)
+		log.Printf("ClickHouse SQL query interface enabled (endpoint: %s)", clickhouseClient.QueryEndpoint())
 	}
 
 	// Freshworks suite (read-only) — Freshdesk (tickets), Freshchat

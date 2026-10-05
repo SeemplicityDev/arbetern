@@ -479,16 +479,10 @@ secretValues:
   # workspaces the SAME service principal belongs to. Leave unset to pin every query to
   # databricks-host. Only https URLs on a Databricks domain are accepted.
   # databricks-allowed-hosts: ""    # e.g. "https://dbc-eu.cloud.databricks.com,https://dbc-us.cloud.databricks.com"
-  # ClickHouse Cloud (optional — enables the read-only clickhouse_usage_cost tool for the ovad and hermes agents).
-  # Auth is HTTP Basic: create an API key (key ID + secret) in the ClickHouse Cloud console and note your
-  # organization ID. All three keys are required to enable the integration. See docs/CLICKHOUSE.md.
-  # clickhouse-key-id: ""             # Cloud API key ID (HTTP Basic username)
-  # clickhouse-key-secret: ""         # Cloud API key secret (HTTP Basic password)
-  # clickhouse-organization-id: ""    # Organization ID the usage-cost report covers
   # ClickHouse SQL query interface (optional — enables the read-only clickhouse_query tool for the ovad and hermes agents).
-  # Points at a service's own HTTPS endpoint and authenticates with a database user that has ONLY SELECT/SHOW
+  # Points at a service's own HTTP(S) endpoint and authenticates with a database user that has ONLY SELECT/SHOW
   # privileges. The connector also refuses any non-read-only statement in code. See docs/CLICKHOUSE.md.
-  # clickhouse-query-endpoint: ""     # Service HTTPS endpoint, e.g. https://abc123.us-east-1.aws.clickhouse.cloud:8443
+  # clickhouse-query-endpoint: ""     # Service HTTP(S) endpoint, e.g. http://clickhouse.internal:8123
   # clickhouse-query-user: ""         # Read-only database username (HTTP Basic username)
   # clickhouse-query-password: ""     # Database password (HTTP Basic password)
   # Freshworks suite (optional — enables Freshdesk / Freshchat / CRM tools for the pulse and seihin agents).

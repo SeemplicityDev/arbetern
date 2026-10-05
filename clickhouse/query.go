@@ -1,10 +1,10 @@
 package clickhouse
 
 // Read-only SQL over the ClickHouse HTTP interface
-// (https://clickhouse.com/docs/en/interfaces/http). Separate from the Cloud
-// billing API in client.go: it POSTs SELECT / SHOW / DESCRIBE / EXISTS to a
-// service's HTTPS endpoint. The tool is deliberately generic — any mapping of
-// a name to a database or table lives in the agent's prompt, not here.
+// (https://clickhouse.com/docs/en/interfaces/http). It POSTs SELECT / SHOW /
+// DESCRIBE / EXISTS to a service's HTTP(S) endpoint. The tool is deliberately
+// generic — any mapping of a name to a database or table lives in the agent's
+// prompt, not here.
 //
 // Read-only is enforced two ways: a SELECT-only database user (recommended in
 // the docs) and readOnlyCH, which rejects any non-read-only statement

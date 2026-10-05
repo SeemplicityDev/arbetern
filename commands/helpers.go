@@ -249,7 +249,7 @@ var restrictedIntegrations = map[string][]string{
 	// Databricks SQL: DevOps/SRE for platform analytics, customer-success for
 	// per-account reporting, data platform for lakehouse schema and pipeline work.
 	integrationDatabricks: {"ovad", "pulse", "hermes"},
-	// ClickHouse (usage cost + read-only SQL): DevOps/SRE and the data platform
+	// ClickHouse (read-only SQL): DevOps/SRE and the data platform
 	// agent, which reviews schemas and query plans against live tables.
 	integrationClickHouse: {"ovad", "hermes"},
 	// Freshworks (Freshdesk tickets, Freshchat conversations, CRM) is exposed
