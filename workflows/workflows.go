@@ -173,8 +173,9 @@ type Workflow struct {
 	Prompt string `json:"prompt,omitempty"`
 	Tasks  []Task `json:"tasks,omitempty"`
 	// Model overrides the agent's default CODE_MODEL for this workflow's ticks.
-	// It is a backend deployment/model name (e.g. a cheaper model for simple
-	// reporting workflows). Empty == use the configured code model.
+	// It is a model label (opus, sonnet, haiku, fable) or a backend model ID
+	// (e.g. a cheaper model for simple reporting workflows). Empty == use the
+	// configured code model.
 	Model      string  `json:"model,omitempty"`
 	Trigger    Trigger `json:"trigger,omitempty"`
 	CreatedBy  string  `json:"created_by,omitempty"`

@@ -106,6 +106,13 @@ spec:
                   name: {{ .Values.secretName }}
                   key: azure-api-key
             {{- end }}
+            {{- if index .Values.secretValues "anthropic-api-key" }}
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: anthropic-api-key
+            {{- end }}
             {{- if index .Values.secretValues "bedrock-api-key" }}
             - name: AWS_BEARER_TOKEN_BEDROCK
               valueFrom:

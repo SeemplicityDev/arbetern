@@ -15,7 +15,8 @@ env:
   # CODE_MODEL: "gpt-4o"  # Separate model for code tasks (search, file edits, PRs). Defaults to GENERAL_MODEL.
   # LIGHT_MODEL: ""  # Cheaper model for quick lookups; used only when modelRouter picks the light tier. Defaults to GENERAL_MODEL.
   # HEAVY_MODEL: ""  # Stronger model for multi-system investigations; used only when modelRouter picks the heavy tier. Defaults to GENERAL_MODEL.
-  # BEDROCK_REGION: "us-east-1"  # Selects AWS Bedrock as the LLM backend (takes precedence over Azure/GitHub). With it set, GENERAL_MODEL is a Bedrock model/inference-profile ID, e.g. "us.anthropic.claude-opus-5". Credentials resolve via the AWS chain (IRSA / env / profile).
+  # With secretValues.anthropic-api-key, Bedrock or Azure Foundry, the model settings above can be labels: GENERAL_MODEL "sonnet", LIGHT_MODEL "haiku", HEAVY_MODEL "opus" (also "fable").
+  # BEDROCK_REGION: "us-east-1"  # Selects AWS Bedrock as the LLM backend (takes precedence over Azure/GitHub; an Anthropic API key takes precedence over it). With it set, GENERAL_MODEL is a label or a Bedrock model/inference-profile ID, e.g. "us.anthropic.claude-opus-5". Credentials resolve via the AWS chain (IRSA / env / profile).
   # UI_ALLOWED_CIDRS: "0.0.0.0/0"
   # TRUSTED_PROXY_CIDRS: "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"  # Peers whose X-Auth-Request-Email and X-Forwarded-For headers are believed. REQUIRED when an auth proxy is in front: without it any caller that reaches the pod can claim any identity and pass every allow-list. Set it to the address range the proxy connects from (in-cluster proxies use the pod network).
   # MCP_ALLOWED_ENV: "SOME_TOKEN,OTHER_TOKEN"  # Extra env vars an MCP connector header may expand via ${NAME}. MCP_* is always allowed; nothing else is, so a connector cannot exfiltrate platform credentials.
@@ -63,6 +64,8 @@ secretValues:
   github-token: "ghp_your_github_token"
   slack-bot-token: "xoxb-your-slack-bot-token"
   slack-signing-secret: "your-slack-signing-secret"
+  # Anthropic API (optional — takes precedence over Bedrock, Azure OpenAI and GitHub Models)
+  # anthropic-api-key: "your-anthropic-api-key"
   # Azure OpenAI (optional — omit to use GitHub Models)
   # azure-openai-endpoint: "https://your-endpoint.openai.azure.com/"
   # azure-api-key: "your-azure-api-key"

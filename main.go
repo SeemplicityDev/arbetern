@@ -1644,6 +1644,28 @@ func refreshIntegrations(
 		})
 	}
 
+	if cfg.UseAnthropic() {
+		anthropicConnected := modelsClient != nil
+		active := map[string]string{}
+		if anthropicConnected {
+			active["General model"] = modelsClient.Model()
+			if cfg.CodeModelExplicit && codeModelsClient != nil {
+				active["Code model"] = codeModelsClient.Model()
+			}
+			addTierModels(active, cfg, modelsClient)
+		}
+		result = append(result, integration{
+			ID:         "anthropic",
+			Name:       "Anthropic",
+			Configured: anthropicConnected,
+			AuthMode:   "API key",
+			Permissions: []permission{
+				{Scope: "messages", Description: "Create messages with the configured Claude models (POST /v1/messages)", Required: true, Granted: new(anthropicConnected)},
+			},
+			ActiveModels: active,
+		})
+	}
+
 	// --- AWS (Bedrock LLM + Cost Explorer + Athena) ---
 	// One cloud-provider entry covering every AWS service, mirroring the Azure
 	// entry (Azure OpenAI + Cost Management). Bedrock is the LLM backend;
@@ -1680,7 +1702,7 @@ func refreshIntegrations(
 			if cfg.CodeModelExplicit && codeModelsClient != nil {
 				active["Code model"] = codeModelsClient.Model()
 			}
-			addTierModels(active, cfg)
+			addTierModels(active, cfg, modelsClient)
 		}
 		if awsConnected {
 			active["Signing region"] = awsClient.Region()
@@ -1730,7 +1752,7 @@ func refreshIntegrations(
 			if cfg.CodeModelExplicit {
 				activeScope["Code model"] = codeModel
 			}
-			addTierModels(activeScope, cfg)
+			addTierModels(activeScope, cfg, modelsClient)
 		}
 
 		// Cost Management
@@ -1962,15 +1984,15 @@ func startIntegrationsRefresher(
 	})
 }
 
-func addTierModels(active map[string]string, cfg *config.Config) {
+func addTierModels(active map[string]string, cfg *config.Config, general *llm.Client) {
 	if cfg.ModelRouterURL == "" {
 		return
 	}
 	if cfg.LightModel != "" {
-		active["Light model"] = cfg.LightModel
+		active["Light model"] = general.WithModel(cfg.LightModel).Model()
 	}
 	if cfg.HeavyModel != "" {
-		active["Heavy model"] = cfg.HeavyModel
+		active["Heavy model"] = general.WithModel(cfg.HeavyModel).Model()
 	}
 }
 
@@ -1980,11 +2002,11 @@ func buildModelTiers(cfg *config.Config, general *llm.Client) commands.ModelTier
 			return nil
 		}
 		c := general.WithModel(model)
-		if model != cfg.GeneralModel && model != cfg.CodeModel {
+		if c.Model() != general.Model() && c.Model() != general.WithModel(cfg.CodeModel).Model() {
 			if err := c.ValidateModel(context.Background()); err != nil {
 				log.Fatalf("%s validation failed: %v", env, err)
 			}
-			log.Printf("%s validated: %s", env, model)
+			log.Printf("%s validated: %s", env, c.Model())
 		}
 		return c
 	}
@@ -2033,6 +2055,13 @@ func main() {
 	var modelsClient *llm.Client
 	var codeModelsClient *llm.Client
 	switch {
+	case cfg.UseAnthropic():
+		modelsClient = llm.NewAnthropicClient(cfg.AnthropicAPIKey, cfg.GeneralModel)
+		log.Printf("Using Anthropic API backend (general: %s)", modelsClient.Model())
+		codeModelsClient = modelsClient.WithModel(cfg.CodeModel)
+		if cfg.CodeModelExplicit {
+			log.Printf("Code model (Anthropic): %s", codeModelsClient.Model())
+		}
 	case cfg.UseBedrock():
 		modelsClient, err = llm.NewBedrockClient(context.Background(), cfg.BedrockRegion, cfg.GeneralModel, cfg.BedrockAPIKey)
 		if err != nil {
@@ -2042,19 +2071,19 @@ func main() {
 		if cfg.BedrockAPIKey != "" {
 			bedrockAuth = "API key"
 		}
-		log.Printf("Using AWS Bedrock backend: region %s, auth %s (general: %s)", cfg.BedrockRegion, bedrockAuth, cfg.GeneralModel)
+		log.Printf("Using AWS Bedrock backend: region %s, auth %s (general: %s)", cfg.BedrockRegion, bedrockAuth, modelsClient.Model())
 		// The code client reuses the same credentials, signer, and connection
 		// pool via WithModel — no second AWS config load or credential probe.
 		codeModelsClient = modelsClient.WithModel(cfg.CodeModel)
 		if cfg.CodeModelExplicit {
-			log.Printf("Code model (Bedrock): %s", cfg.CodeModel)
+			log.Printf("Code model (Bedrock): %s", codeModelsClient.Model())
 		}
 	case cfg.UseAzure():
 		modelsClient = llm.NewAzureClient(cfg.AzureEndpoint, cfg.AzureAPIKey, cfg.GeneralModel)
-		log.Printf("Using Azure OpenAI backend: %s (general: %s)", cfg.AzureEndpoint, cfg.GeneralModel)
+		log.Printf("Using Azure OpenAI backend: %s (general: %s)", cfg.AzureEndpoint, modelsClient.Model())
 		codeModelsClient = llm.NewAzureClient(cfg.AzureEndpoint, cfg.AzureAPIKey, cfg.CodeModel)
 		if cfg.CodeModelExplicit {
-			log.Printf("Code model (Azure): %s", cfg.CodeModel)
+			log.Printf("Code model (Azure): %s", codeModelsClient.Model())
 		}
 	default:
 		modelsClient = llm.NewClient(cfg.GitHubToken, cfg.GeneralModel)
@@ -2082,12 +2111,12 @@ func main() {
 	if err := modelsClient.ValidateModel(context.Background()); err != nil {
 		log.Fatalf("GENERAL_MODEL validation failed: %v", err)
 	}
-	log.Printf("GENERAL_MODEL validated: %s", cfg.GeneralModel)
-	if cfg.CodeModel != cfg.GeneralModel {
+	log.Printf("GENERAL_MODEL validated: %s", modelsClient.Model())
+	if codeModelsClient.Model() != modelsClient.Model() {
 		if err := codeModelsClient.ValidateModel(context.Background()); err != nil {
 			log.Fatalf("CODE_MODEL validation failed: %v", err)
 		}
-		log.Printf("CODE_MODEL validated: %s", cfg.CodeModel)
+		log.Printf("CODE_MODEL validated: %s", codeModelsClient.Model())
 	}
 	modelTiers := buildModelTiers(cfg, modelsClient)
 

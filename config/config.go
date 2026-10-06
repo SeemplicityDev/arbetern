@@ -60,6 +60,7 @@ type Credentials struct {
 	GitHubToken        string `cred:"github-token"`
 	AzureEndpoint      string `cred:"azure-openai-endpoint"`
 	AzureAPIKey        string `cred:"azure-api-key"`
+	AnthropicAPIKey    string `cred:"anthropic-api-key"`
 	// BedrockAPIKey is an AWS Bedrock API key (bearer token). When set, the
 	// Bedrock backend authenticates with it instead of resolving SigV4
 	// credentials. Sourced from AWS_BEARER_TOKEN_BEDROCK. Requires
@@ -285,11 +286,16 @@ func (c *Config) UseAzure() bool {
 	return c.AzureEndpoint != "" && c.AzureAPIKey != ""
 }
 
+// UseAnthropic returns true when an Anthropic API key is set; it outranks every other LLM backend.
+func (c *Config) UseAnthropic() bool {
+	return c.AnthropicAPIKey != ""
+}
+
 // UseBedrock returns true when Amazon Bedrock is selected as the LLM backend
-// (BEDROCK_REGION is set). Bedrock takes precedence over Azure OpenAI and
-// GitHub Models when more than one is configured.
+// (BEDROCK_REGION is set and no Anthropic API key is). Bedrock takes precedence
+// over Azure OpenAI and GitHub Models when more than one is configured.
 func (c *Config) UseBedrock() bool {
-	return c.BedrockRegion != ""
+	return c.BedrockRegion != "" && !c.UseAnthropic()
 }
 
 // AtlassianConfigured returns true when Atlassian credentials are present.
@@ -458,6 +464,7 @@ func Load() (*Config, error) {
 			GitHubToken:            os.Getenv("GITHUB_TOKEN"),
 			AzureEndpoint:          os.Getenv("AZURE_OPEN_AI_ENDPOINT"),
 			AzureAPIKey:            os.Getenv("AZURE_API_KEY"),
+			AnthropicAPIKey:        strings.TrimSpace(os.Getenv("ANTHROPIC_API_KEY")),
 			BedrockAPIKey:          os.Getenv("AWS_BEARER_TOKEN_BEDROCK"),
 			AtlassianURL:           os.Getenv("ATLASSIAN_URL"),
 			AtlassianEmail:         os.Getenv("ATLASSIAN_EMAIL"),
@@ -596,10 +603,10 @@ func Load() (*Config, error) {
 		cfg.EmbeddingDimensions = n
 	}
 
-	// A GitHub token, Azure credentials, or a Bedrock region is required for
-	// LLM access.
-	if cfg.GitHubToken == "" && !cfg.UseAzure() && !cfg.UseBedrock() {
-		return nil, fmt.Errorf("GITHUB_TOKEN is required (or set AZURE_OPEN_AI_ENDPOINT and AZURE_API_KEY, or BEDROCK_REGION)")
+	// A GitHub token, an Anthropic API key, Azure credentials, or a Bedrock
+	// region is required for LLM access.
+	if cfg.GitHubToken == "" && !cfg.UseAnthropic() && !cfg.UseAzure() && !cfg.UseBedrock() {
+		return nil, fmt.Errorf("GITHUB_TOKEN is required (or set ANTHROPIC_API_KEY, AZURE_OPEN_AI_ENDPOINT and AZURE_API_KEY, or BEDROCK_REGION)")
 	}
 
 	// GENERAL_MODEL is required for every backend — there is no default model,

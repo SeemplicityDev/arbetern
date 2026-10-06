@@ -97,7 +97,7 @@ usual. Set `modelRouter.skipAcknowledgements: false`
  arbetern
      │  3. tool loop on the tier's model; code tools can still move it to CODE_MODEL
      ▼
- model provider  (Bedrock · Azure OpenAI · Azure Foundry · GitHub Models)
+ model provider  (Anthropic API · Bedrock · Azure OpenAI · Azure Foundry · GitHub Models)
 ```
 
 - The classification starts with the turn and runs while arbetern gathers the
@@ -142,19 +142,19 @@ could get anyway by asking a hard question.
 | `MODEL_ROUTER_TIMEOUT` | `5s` | Deadline of one classification. A turn waits at most this long before falling back to keyword routing. |
 | `MODEL_ROUTER_SLOTS` | `2` | Server slots warmed at startup. Set by Helm from `modelRouter.parallel`. |
 | `MODEL_ROUTER_SKIP_ACKS` | `true` | Drop Slack thread replies that only thank the bot, under the rules above. |
-| `LIGHT_MODEL` | `GENERAL_MODEL` | Model for the `light` tier, in the active backend's ID form. Validated at startup like `CODE_MODEL`. |
+| `LIGHT_MODEL` | `GENERAL_MODEL` | Model for the `light` tier: a [label](../README.md#model-labels) or the active backend's model ID. Validated at startup like `CODE_MODEL`. |
 | `HEAVY_MODEL` | `GENERAL_MODEL` | Model for the `heavy` tier. Validated at startup like `CODE_MODEL`. |
 
 `LIGHT_MODEL` and `HEAVY_MODEL` do nothing without `MODEL_ROUTER_URL`; startup
-logs a warning when they are set alone. On AWS Bedrock they take an inference
-profile ID. Check the model card's *Programmatic Access* table for the profiles
-your region offers. For example, Claude Haiku 4.5 for `light` and Claude Opus
-5.5 for `heavy` both have EU and global profiles:
+logs a warning when they are set alone. A label resolves to the active
+backend's ID; on AWS Bedrock that is the global inference profile, so pin a
+regional one such as `eu.anthropic.claude-opus-5-5` by its full ID (check the
+model card's *Programmatic Access* table for the profiles your region offers):
 
 ```yaml
 env:
-  LIGHT_MODEL: "eu.anthropic.claude-haiku-4-5-20251001-v1:0"   # or global.anthropic.claude-haiku-4-5-20251001-v1:0
-  HEAVY_MODEL: "eu.anthropic.claude-opus-5-5"                   # or global.anthropic.claude-opus-5-5
+  LIGHT_MODEL: "haiku"   # claude-haiku-4-5 on the Anthropic API
+  HEAVY_MODEL: "opus"    # claude-opus-5-5 on the Anthropic API
 ```
 
 The console's **Integrations** page lists the light and heavy models next to
@@ -348,14 +348,14 @@ model and left on the hosted one:
 Startup logs the configuration and, once the sidecar answers, the warm-up:
 
 ```
-Model router enabled via http://127.0.0.1:8788 (timeout 5s; light: eu.anthropic.claude-haiku-4-5-20251001-v1:0, heavy: general model; thread acknowledgements skipped: true)
+Model router enabled via http://127.0.0.1:8788 (timeout 5s; light: claude-haiku-4-5, heavy: general model; thread acknowledgements skipped: true)
 [llm] model router warmed 2 slot(s) in 1m12s
 ```
 
 Each routed turn logs its decision, and a dropped thank-you says so:
 
 ```
-[user=U0123456789 channel=C0123456789] model router: light request, starting on eu.anthropic.claude-haiku-4-5-20251001-v1:0 (routed in 1.4s)
+[user=U0123456789 channel=C0123456789] model router: light request, starting on claude-haiku-4-5 (routed in 1.4s)
 [user=U0123456789 channel=C0123456789] thread reply only thanks the bot; no model turn
 ```
 

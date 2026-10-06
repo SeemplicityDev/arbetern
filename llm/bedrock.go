@@ -71,7 +71,7 @@ func NewBedrockClient(ctx context.Context, region, model, apiKey string) (*Clien
 		return nil, err
 	}
 	return &Client{
-		model:      model,
+		model:      resolveModel(providerBedrock, model),
 		httpClient: &http.Client{Timeout: llmRequestTimeout},
 		bedrock:    bc,
 	}, nil

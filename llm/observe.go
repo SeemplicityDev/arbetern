@@ -88,6 +88,8 @@ func (a *attempts) read() (int, bool) {
 // backendName labels which provider path a completion took.
 func (c *Client) backendName() string {
 	switch {
+	case c.useAnthropic():
+		return "anthropic"
 	case c.useBedrock():
 		return "bedrock"
 	case c.isResponsesModel():

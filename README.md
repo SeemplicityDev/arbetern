@@ -73,7 +73,7 @@ Bayes.
 - Go 1.26.8+ (the container image builds with Go 1.27)
 - A Slack app with a slash command pointing to `/<agent>/webhook` (see [docs/SLACK_BOT.md](docs/SLACK_BOT.md))
 - A GitHub PAT with repo access (see [docs/GITHUB_PAT.md](docs/GITHUB_PAT.md))
-- (Optional) Azure OpenAI credentials or an AWS Bedrock region for LLM inference
+- (Optional) An Anthropic API key, Azure OpenAI credentials or an AWS Bedrock region for LLM inference
 
 ### Environment Variables
 
@@ -83,10 +83,11 @@ The core variables you'll set on day one:
 |---|---|---|
 | `SLACK_BOT_TOKEN` | yes | Slack bot OAuth token (`xoxb-...`) |
 | `SLACK_SIGNING_SECRET` | yes | Slack app signing secret |
-| `GITHUB_TOKEN` | yes\* | GitHub PAT (\*or use Azure OpenAI / AWS Bedrock for inference) |
-| `GENERAL_MODEL` | yes | Model ID for the active backend — e.g. `openai/gpt-4o` (GitHub), a deployment name (Azure), or a Bedrock model / inference-profile ID. **Required; there is no default** |
+| `GITHUB_TOKEN` | yes\* | GitHub PAT (\*or use the Anthropic API / Azure OpenAI / AWS Bedrock for inference) |
+| `GENERAL_MODEL` | yes | A [model label](#model-labels) such as `sonnet`, or the model ID for the active backend — e.g. `openai/gpt-4o` (GitHub), a deployment name (Azure), or a Bedrock model / inference-profile ID. **Required; there is no default** |
 | `CODE_MODEL` | no | Separate model for code-related tasks. Optional — falls back to `GENERAL_MODEL` when unset |
 | `LIGHT_MODEL` / `HEAVY_MODEL` | no | Cheaper and stronger models an interactive turn may start on when the [model router](docs/MODEL_ROUTER.md) picks the light or heavy tier. Each falls back to `GENERAL_MODEL` when unset |
+| `ANTHROPIC_API_KEY` | no | Selects the **Anthropic API** as the LLM backend (see [LLM backends](#llm-backends)) |
 | `AZURE_OPEN_AI_ENDPOINT` / `AZURE_API_KEY` | no | Azure OpenAI credentials (alternative to GitHub Models) |
 | `BEDROCK_REGION` | no | Selects **AWS Bedrock** as the LLM backend, e.g. `us-east-1` (see [LLM backends](#llm-backends)) |
 | `APP_URL` | no | Public app URL (used for Jira ticket stamps and Slack links) |
@@ -95,14 +96,15 @@ The core variables you'll set on day one:
 ### LLM backends
 
 Arbetern speaks to one LLM backend at a time, selected by which credentials are
-present. When more than one is configured, precedence is **Bedrock → Azure OpenAI
-→ GitHub Models**:
+present. When more than one is configured, precedence is **Anthropic API →
+Bedrock → Azure OpenAI → GitHub Models**:
 
 | Backend | Selected by | Model ID form (`GENERAL_MODEL` / `CODE_MODEL`) |
 |---|---|---|
 | **GitHub Models** (default) | `GITHUB_TOKEN` | `openai/gpt-4o`, `meta/llama-3.1-405b-instruct`, … |
+| **Anthropic API** | `ANTHROPIC_API_KEY` (chart secret `anthropic-api-key`) | a [label](#model-labels) or a Claude model ID, e.g. `claude-sonnet-5-5` |
 | **Azure OpenAI** | `AZURE_OPEN_AI_ENDPOINT` + `AZURE_API_KEY` | your deployment name (`gpt-4o`, `gpt-5.x`, `claude-*` for Foundry) |
-| **AWS Bedrock** | `BEDROCK_REGION` | Bedrock model / inference-profile ID, e.g. `anthropic.claude-opus-5` or the cross-region profile `us.anthropic.claude-opus-5` |
+| **AWS Bedrock** | `BEDROCK_REGION` | a [label](#model-labels) or a Bedrock model / inference-profile ID, e.g. `anthropic.claude-opus-5` or the cross-region profile `us.anthropic.claude-opus-5` |
 
 **AWS Bedrock** serves Claude models through the same Anthropic Messages
 protocol the app already uses for Azure Foundry, so prompt caching
@@ -119,6 +121,34 @@ Authentication is one of two schemes, and the target principal/key needs
 |---|---|
 | **Bedrock API key** (bearer token, `ABSK…`) | Set `AWS_BEARER_TOKEN_BEDROCK` (chart secret `bedrock-api-key`). No AWS credential chain is consulted. |
 | **SigV4** (default) | Leave the API key unset; credentials resolve through the standard AWS SDK chain — static keys (`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`), `AWS_PROFILE`, or EKS IRSA (`AWS_WEB_IDENTITY_TOKEN_FILE` + `AWS_ROLE_ARN`) — the same chain the AWS cost tools use. |
+
+The **Anthropic API** speaks the same Messages protocol, so prompt caching,
+usage/billing and Headroom compression work unchanged. Requests to Claude Opus
+5.5, Sonnet 5.5 and Fable 5.1 opt into server-side refusal fallback
+(`fallbacks: "default"`): a request a safety classifier declines is re-run on
+the model Anthropic recommends for that refusal category instead of coming back
+empty. The default Titan embeddings for the vector index still go through
+Bedrock, so keep `bedrock-api-key` (or the AWS chain) when you use
+`S3_VECTORS_INDEX_ARN`.
+
+#### Model labels
+
+`GENERAL_MODEL`, `CODE_MODEL`, `LIGHT_MODEL`, `HEAVY_MODEL` and a workflow's
+`model` accept a provider-neutral label, resolved to the active backend's ID
+(see [llm/models.go](llm/models.go)):
+
+| Label | Anthropic API / Azure Foundry | AWS Bedrock |
+|---|---|---|
+| `fable` | `claude-fable-5-1` | — |
+| `opus` | `claude-opus-5-5` | `global.anthropic.claude-opus-5-5` |
+| `sonnet` | `claude-sonnet-5-5` | `global.anthropic.claude-sonnet-5-5` |
+| `haiku` | `claude-haiku-4-5` | `global.anthropic.claude-haiku-4-5-20251001-v1:0` |
+
+Full model IDs keep working. A Claude ID written for another backend is
+translated as well, so a workflow saved with `global.anthropic.claude-sonnet-5-5`
+runs as `claude-sonnet-5-5` on the Anthropic API. An ID already in the active
+backend's form, such as an `eu.` Bedrock profile, is used as is. Foundry
+deployments must be named after the model for a label to find them.
 
 <details>
 <summary><b>Runtime tuning</b> — sessions, tool rounds, UI access</summary>
@@ -139,7 +169,7 @@ Authentication is one of two schemes, and the target principal/key needs
 | `AZURE_BILLING_ACCOUNT_ID` | Azure billing account scope for cost queries; falls back to the subscription scope when unset |
 | `WORKFLOW_RUN_HISTORY` | How many past runs each workflow keeps in its history |
 | `UI_HEADER` | Custom header text for the web UI (default `arbetern`) |
-| `HEADROOM_PROXY_URL` | Base URL of a [Headroom](docs/HEADROOM.md) compression sidecar (e.g. `http://localhost:8787`). When set, each conversation is compressed via its `/v1/compress` endpoint before every LLM call — cutting tokens across **all** backends (GitHub Models, Azure OpenAI, Azure Foundry/Claude, AWS Bedrock). Set automatically by Helm when `headroom.enabled: true` |
+| `HEADROOM_PROXY_URL` | Base URL of a [Headroom](docs/HEADROOM.md) compression sidecar (e.g. `http://localhost:8787`). When set, each conversation is compressed via its `/v1/compress` endpoint before every LLM call — cutting tokens across **all** backends (Anthropic API, GitHub Models, Azure OpenAI, Azure Foundry/Claude, AWS Bedrock). Set automatically by Helm when `headroom.enabled: true` |
 | `HEADROOM_COMPRESS_TIMEOUT` | Go duration bounding a single `/v1/compress` round-trip before the app falls back to sending the conversation uncompressed (fail-open). Default `90s`; raise for very large contexts. Set via Helm `headroom.compressTimeout` |
 | `MODEL_ROUTER_URL` | Base URL of an OpenAI-compatible server hosting the [model router](docs/MODEL_ROUTER.md) (e.g. `http://127.0.0.1:8788`). When set, a small local model picks the tier each Slack and chat turn starts on; empty disables routing. Set automatically by Helm when `modelRouter.enabled: true` |
 | `MODEL_ROUTER_MODEL` | `model` field sent to the router server. llama.cpp ignores it; Ollama and vLLM need it. Set by Helm from `modelRouter.model.alias` |
@@ -1095,7 +1125,7 @@ internal/store/      # S3 state backend: cached documents, conditional writes, l
 internal/queue/      # durable work queue in the same bucket (claims by conditional write)
 internal/vectors/    # S3 Vectors index client (semantic user context)
 github/              # GitHub REST API client (repos, PRs, files, workflows)
-llm/                 # LLM inference client + tool types (GitHub Models, Azure OpenAI, AWS Bedrock), model router client
+llm/                 # LLM inference client + tool types (Anthropic API, AWS Bedrock, Azure OpenAI, GitHub Models), model labels, model router client
 atlassian/           # Atlassian Cloud REST API client (Jira + Confluence)
 nvd/                 # NVD (National Vulnerability Database) CVE API client
 salesforce/          # Salesforce REST API client (SOQL queries, OAuth 2.0)

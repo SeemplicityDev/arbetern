@@ -32,12 +32,13 @@ import (
 	"strings"
 )
 
-// anthropicRequest is the wire body for the Anthropic Messages API. Two
-// backends speak it with slightly different envelopes: Azure Foundry carries the
-// model here (Model) and the version in a header, while AWS Bedrock omits Model
-// (it lives in the URL) and carries the version in the body (AnthropicVersion).
-// The omitempty tags let a single struct serve both — each transport sets only
-// the fields it needs (see messagesTransport.stampEnvelope).
+// anthropicRequest is the wire body for the Anthropic Messages API. The
+// backends speak it with slightly different envelopes: the Anthropic API and
+// Azure Foundry carry the model here (Model) and the version in a header, while
+// AWS Bedrock omits Model (it lives in the URL) and carries the version in the
+// body (AnthropicVersion). The omitempty tags let a single struct serve all of
+// them — each transport sets only the fields it needs (see
+// messagesTransport.stampEnvelope).
 type anthropicRequest struct {
 	Model            string             `json:"model,omitempty"`
 	AnthropicVersion string             `json:"anthropic_version,omitempty"`
@@ -45,6 +46,7 @@ type anthropicRequest struct {
 	System           interface{}        `json:"system,omitempty"`
 	Messages         []anthropicMessage `json:"messages"`
 	Tools            []anthropicTool    `json:"tools,omitempty"`
+	Fallbacks        string             `json:"fallbacks,omitempty"`
 }
 
 // anthropicMessage is a single turn. Content may be string or block array.
@@ -278,12 +280,12 @@ func anthropicResponseToChat(r *anthropicResponse) *ChatResponse {
 	return resp
 }
 
-// messagesTransport captures the wire-level differences between the two backends
+// messagesTransport captures the wire-level differences between the backends
 // that speak the Anthropic Messages API. The protocol itself — translating the
 // unified ChatMessage/Tool types, applying prompt-cache markers, and parsing the
 // reply — is shared (see buildAnthropicRequest / parseAnthropicResponse); a
 // transport contributes only the endpoint, the request-envelope fields, and the
-// authentication that Azure Foundry and AWS Bedrock differ on.
+// authentication that the Anthropic API, Azure Foundry and AWS Bedrock differ on.
 type messagesTransport interface {
 	// name labels the backend in logs and error messages.
 	name() string
@@ -408,7 +410,7 @@ func (t foundryTransport) authorize(_ context.Context, r *http.Request, _ []byte
 	return nil
 }
 
-// doAnthropic calls Foundry's Anthropic Messages API for Claude deployments.
-func (c *Client) doAnthropic(ctx context.Context, messages []ChatMessage, tools []Tool) (*ChatResponse, error) {
+// doFoundry calls Foundry's Anthropic Messages API for Claude deployments.
+func (c *Client) doFoundry(ctx context.Context, messages []ChatMessage, tools []Tool) (*ChatResponse, error) {
 	return c.callMessages(ctx, foundryTransport{c}, messages, tools)
 }

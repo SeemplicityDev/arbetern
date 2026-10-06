@@ -22,8 +22,8 @@ const azureAPIVersion = "2024-10-21"
 // azureResponsesAPIVersion is the API version for the Responses API (codex models).
 const azureResponsesAPIVersion = "2025-04-01-preview"
 
-// anthropicAPIVersion is the Anthropic Messages API version header value sent
-// to Foundry's /anthropic/v1/messages endpoint for Claude deployments.
+// anthropicAPIVersion is the anthropic-version header value sent to the
+// Anthropic API and to Foundry's /anthropic/v1/messages endpoint.
 const anthropicAPIVersion = "2023-06-01"
 
 // anthropicMaxTokens bounds the completion length for Anthropic Messages API
@@ -119,10 +119,10 @@ func retryDelay(retryAfter string, attempt int) time.Duration {
 	return d/2 + time.Duration(rand.Int64N(int64(d/2)+1))
 }
 
-// Client provides LLM inference through GitHub Models, Azure OpenAI, or AWS
-// Bedrock. The backend is selected at construction time; the rest of the
-// codebase uses the same Complete / CompleteWithTools interface regardless of
-// backend.
+// Client provides LLM inference through the Anthropic API, AWS Bedrock, Azure
+// OpenAI, or GitHub Models. The backend is selected at construction time; the
+// rest of the codebase uses the same Complete / CompleteWithTools interface
+// regardless of backend.
 type Client struct {
 	token      string
 	model      string
@@ -144,6 +144,8 @@ type Client struct {
 	// bedrock holds AWS Bedrock transport state; non-nil selects the Bedrock
 	// backend (which also speaks the Anthropic Messages API). See bedrock.go.
 	bedrock *bedrockConfig
+
+	anthropicKey string
 }
 
 type chatRequest struct {
@@ -182,7 +184,7 @@ func (c *Client) SetCompressionTimeout(d time.Duration) {
 func NewAzureClient(endpoint, apiKey, deployment string) *Client {
 	endpoint = strings.TrimRight(endpoint, "/")
 	return &Client{
-		model:         deployment,
+		model:         resolveModel(providerAzure, deployment),
 		httpClient:    &http.Client{Timeout: llmRequestTimeout},
 		azureEndpoint: endpoint,
 		azureAPIKey:   apiKey,
@@ -194,13 +196,29 @@ func NewAzureClient(endpoint, apiKey, deployment string) *Client {
 // compression proxy. Used for per-workflow model overrides. Returns the
 // receiver unchanged when model is empty or already the active one.
 func (c *Client) WithModel(model string) *Client {
-	model = strings.TrimSpace(model)
-	if c == nil || model == "" || model == c.model {
+	if c == nil {
+		return c
+	}
+	model = resolveModel(c.provider(), model)
+	if model == "" || model == c.model {
 		return c
 	}
 	clone := *c
 	clone.model = model
 	return &clone
+}
+
+func (c *Client) provider() provider {
+	switch {
+	case c.useAnthropic():
+		return providerAnthropic
+	case c.useBedrock():
+		return providerBedrock
+	case c.useAzure():
+		return providerAzure
+	default:
+		return providerGitHub
+	}
 }
 
 // useAzure returns true when the client is configured for Azure OpenAI.
@@ -237,6 +255,17 @@ func (c *Client) Complete(ctx context.Context, systemPrompt, userPrompt string) 
 		{Role: "user", Content: userPrompt},
 	}
 
+	if c.useAnthropic() {
+		resp, err := c.doAnthropic(ctx, messages, nil)
+		if err != nil {
+			return "", nil, err
+		}
+		if len(resp.Choices) == 0 {
+			return "", nil, fmt.Errorf("anthropic API returned no output")
+		}
+		return resp.Choices[0].Message.Content, resp.Usage, nil
+	}
+
 	if c.useBedrock() {
 		resp, err := c.doBedrock(ctx, messages, nil)
 		if err != nil {
@@ -260,7 +289,7 @@ func (c *Client) Complete(ctx context.Context, systemPrompt, userPrompt string) 
 	}
 
 	if c.useAzure() && isAnthropicModel(c.model) {
-		resp, err := c.doAnthropic(ctx, messages, nil)
+		resp, err := c.doFoundry(ctx, messages, nil)
 		if err != nil {
 			return "", nil, err
 		}
@@ -296,12 +325,14 @@ func (c *Client) CompleteWithTools(ctx context.Context, messages []ChatMessage, 
 	}
 	started := time.Now()
 	switch {
+	case c.useAnthropic():
+		resp, err = c.doAnthropic(ctx, messages, tools)
 	case c.useBedrock():
 		resp, err = c.doBedrock(ctx, messages, tools)
 	case c.isResponsesModel():
 		resp, err = c.doResponses(ctx, messages, tools)
 	case c.useAzure() && isAnthropicModel(c.model):
-		resp, err = c.doAnthropic(ctx, messages, tools)
+		resp, err = c.doFoundry(ctx, messages, tools)
 	default:
 		resp, err = c.doChat(ctx, messages, tools)
 	}

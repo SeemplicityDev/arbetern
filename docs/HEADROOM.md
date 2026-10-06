@@ -24,7 +24,7 @@ change to endpoints or auth.
  arbetern app
      │  3. calls the model provider as normal, with the smaller messages
      ▼
- model provider  (GitHub Models  ·  Azure OpenAI  ·  Azure Foundry / Claude)
+ model provider  (Anthropic API  ·  AWS Bedrock  ·  GitHub Models  ·  Azure OpenAI  ·  Azure Foundry / Claude)
 ```
 
 The app POSTs its OpenAI-format messages to the sidecar's
@@ -170,6 +170,8 @@ every backend benefits:
 | **GitHub Models** (default) | OpenAI Chat Completions | ✅ Yes |
 | **Azure OpenAI** (gpt-* deployments) | Azure Chat Completions / Responses | ✅ Yes |
 | **Azure Foundry** (claude-* deployments) | Anthropic Messages API | ✅ Yes |
+| **Anthropic API** | Anthropic Messages API | ✅ Yes |
+| **AWS Bedrock** | Anthropic Messages API | ✅ Yes |
 
 ## Trade-offs
 
