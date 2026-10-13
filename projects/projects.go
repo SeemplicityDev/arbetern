@@ -142,6 +142,7 @@ var (
 	groupedRe    = regexp.MustCompile(`(?i)\bby\s*\{\s*[^{}\s][^{}]*\}`)
 	tagKeyRe     = regexp.MustCompile(`^[a-z][a-z0-9_./-]{0,199}$`)
 	attributeRe  = regexp.MustCompile(`^@?[A-Za-z_][A-Za-z0-9_.-]{0,199}$`)
+	channelIDRe  = regexp.MustCompile(`^[CG][A-Z0-9]{8,12}$`)
 )
 
 // Repo is the GitHub repository a project works on.
@@ -173,6 +174,11 @@ type Evidence struct {
 	Attributes map[string]string `json:"attributes"`         // metric tag → log attribute holding the same value
 	GroupBy    string            `json:"group_by,omitempty"` // log facet whose most frequent value is the dominant cause
 	Fields     []string          `json:"fields,omitempty"`   // log attributes kept in samples; empty keeps them all
+}
+
+// Notify names where a project reports what it does.
+type Notify struct {
+	SlackChannel string `json:"slack_channel,omitempty"` // channel id, such as C0123456789; empty sends nothing
 }
 
 // Review controls how a project follows the pull requests it opens.
@@ -248,6 +254,7 @@ type Project struct {
 	Signal              Signal   `json:"signal"`
 	Dispatch            Dispatch `json:"dispatch"`
 	Review              Review   `json:"review"`
+	Notify              Notify   `json:"notify"`
 	Limits              Limits   `json:"limits"`
 	Interval            string   `json:"interval"` // Go duration 5m–24h, default "15m"
 	Enabled             bool     `json:"enabled"`
@@ -608,6 +615,14 @@ func (l Limits) effective() Limits {
 	return l
 }
 
+func (n *Notify) normalize() error {
+	n.SlackChannel = strings.TrimSpace(n.SlackChannel)
+	if n.SlackChannel != "" && !channelIDRe.MatchString(n.SlackChannel) {
+		return invalidf("notify.slack_channel must be a Slack channel id such as C0123456789")
+	}
+	return nil
+}
+
 func (r *Review) normalize() error {
 	if r.MaxRounds != 0 && (r.MaxRounds < minRounds || r.MaxRounds > maxRounds) {
 		return invalidf("review.max_rounds must be between %d and %d", minRounds, maxRounds)
@@ -654,6 +669,7 @@ func (p *Project) normalize() error {
 		p.Signal.normalize(),
 		p.Dispatch.normalize(),
 		p.Review.normalize(),
+		p.Notify.normalize(),
 		p.Limits.normalize(),
 	}
 	for _, err := range checks {

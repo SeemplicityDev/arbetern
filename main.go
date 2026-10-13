@@ -2719,6 +2719,7 @@ func main() {
 				return commands.AgentCanUseIntegration(agent, commands.IntegrationDatadog)
 			},
 			KnownAgents: knownAgents,
+			Slack:       slackClient,
 		})
 		projRegistry.UseQueue(tasks)
 		if err := projRegistry.Load(bootCtx); err != nil {

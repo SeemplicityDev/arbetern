@@ -207,9 +207,11 @@ func (r *Registry) syncPRs(ctx context.Context, p *Project, led *Ledger, limits 
 		case !changed:
 		case st.Merged:
 			log.Printf("[projects] %s/%s task %s: pull request #%d merged", p.Agent, p.ID, t.ID, number)
+			r.notify(p, noteClosed(&t, true))
 		default:
 			log.Printf("[projects] %s/%s task %s: pull request #%d closed without merging", p.Agent, p.ID, t.ID, number)
 			r.noteReviewFeedback(ctx, p, t.ID, owner, repo, number)
+			r.notify(p, noteClosed(&t, false))
 		}
 	}
 	return led, errors.Join(errs...)
@@ -471,7 +473,7 @@ func (r *Registry) recordTick(p *Project, out *tickOutcome) {
 		s := computeStats(out.ledger, p, now)
 		stats = &s
 	}
-	autoDisabled := false
+	autoDisabled, reason := false, ""
 	_, err := r.updateDescriptor(ctx, p.Agent, p.ID, func(d *Project) error {
 		d.LastTick = stamp(now)
 		if !out.interrupted {
@@ -496,6 +498,7 @@ func (r *Registry) recordTick(p *Project, out *tickOutcome) {
 		if autoDisabled {
 			d.Enabled = false
 			d.DisabledReason = fmt.Sprintf("auto-disabled after %d consecutive failed dispatches. Last error: %s", d.ConsecutiveFailures, d.LastError)
+			reason = d.DisabledReason
 		}
 		return nil
 	})
@@ -508,6 +511,7 @@ func (r *Registry) recordTick(p *Project, out *tickOutcome) {
 	case autoDisabled:
 		log.Printf("[projects] AUTO-DISABLED %s/%s after %d consecutive failed dispatches: %s", p.Agent, p.ID, MaxConsecutiveFailures, lastErr)
 		r.stopRunner(p.Agent, p.ID)
+		r.notify(p, notePaused(p, reason))
 	}
 	r.touch(p.Agent, p.ID)
 }

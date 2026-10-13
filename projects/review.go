@@ -233,6 +233,9 @@ func (r *Registry) finishReview(ctx context.Context, p *Project, led *Ledger, w 
 		return led
 	}
 	log.Printf("[projects] %s task %s: pull request #%d is done (head %s)", k, w.taskID, w.number, shortSHA(w.pr.HeadSHA))
+	if t := next.task(w.taskID); t != nil {
+		r.notify(p, noteReady(t))
+	}
 	return next
 }
 
@@ -248,6 +251,9 @@ func (r *Registry) stopFollowing(ctx context.Context, p *Project, led *Ledger, w
 		return led
 	}
 	log.Printf("[projects] %s task %s: pull request #%d used its %d follow-up rounds", k, w.taskID, w.number, rv.used())
+	if t := next.task(w.taskID); t != nil {
+		r.notify(p, noteExhausted(t, rv.used()))
+	}
 	return next
 }
 

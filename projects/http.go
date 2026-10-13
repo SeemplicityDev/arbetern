@@ -137,6 +137,7 @@ type createRequest struct {
 	Signal       Signal   `json:"signal"`
 	Dispatch     Dispatch `json:"dispatch"`
 	Review       Review   `json:"review"`
+	Notify       Notify   `json:"notify"`
 	Limits       Limits   `json:"limits"`
 	Interval     string   `json:"interval"`
 	Enabled      *bool    `json:"enabled"`
@@ -171,6 +172,7 @@ func (a *consoleAPI) create(w http.ResponseWriter, req *http.Request) {
 		Signal:       body.Signal,
 		Dispatch:     body.Dispatch,
 		Review:       body.Review,
+		Notify:       body.Notify,
 		Limits:       body.Limits,
 		Interval:     body.Interval,
 	}
@@ -259,6 +261,9 @@ func (a *consoleAPI) update(w http.ResponseWriter, req *http.Request, agent, id 
 		case "review":
 			pt.Review = new(Review)
 			err = decodeStrict(v, pt.Review)
+		case "notify":
+			pt.Notify = new(Notify)
+			err = decodeStrict(v, pt.Notify)
 		case "limits":
 			pt.Limits = new(Limits)
 			err = decodeStrict(v, pt.Limits)

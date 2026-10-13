@@ -485,6 +485,7 @@ func (g *gateway) reportOutcome(ctx context.Context, s *session, raw json.RawMes
 	}
 	log.Printf("[projects] %s/%s task %s reported %s", s.project.Agent, s.project.ID, taskID, o.Status)
 	g.r.refreshStats(s.project.Agent, s.project.ID, s.ledger)
+	g.r.notify(s.project, noteNoFix(s.task, o))
 	return "Recorded. You can stop now.", false, nil
 }
 
@@ -531,6 +532,7 @@ func (g *gateway) openPullRequest(ctx context.Context, s *session, o Outcome, no
 	}
 	log.Printf("[projects] %s/%s task %s opened %s", p.Agent, p.ID, taskID, url)
 	g.r.refreshStats(p.Agent, p.ID, s.ledger)
+	g.r.notify(p, noteOpened(s.task, o))
 	return "Opened pull request " + url + ". You can stop now.", false, nil
 }
 

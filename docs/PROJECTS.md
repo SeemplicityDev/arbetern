@@ -339,6 +339,7 @@ the owning agent under its `allowed_emails` / `allowed_teams`.
 | `signal.lookback` | no | Log signals: how far back the first scan reaches, `24h` by default, from `1h` to `168h` |
 | `signal.sites`, `kept_query`, `window`, `threshold`, `share_threshold`, `fill`, `evidence` | metric signals | See [Metric signals](#metric-signals) |
 | `review` | no | Follow-through, see [Following the pull request](#following-the-pull-request). Off by default |
+| `notify.slack_channel` | no | Slack channel id (`C…` or `G…`) for [notifications](#notifications). Empty sends nothing |
 | `dispatch.routine_id` | yes | The repository's routine, `trig_…` |
 | `dispatch.token` | yes | Trigger token name: lowercase letters, digits and dashes, up to 32 |
 | `interval` | no | Tick interval, `15m` by default, from `5m` to `24h` |
@@ -384,7 +385,7 @@ JSON of at most 64 KiB, and unknown fields are rejected.
 | `GET /api/projects[?agent=]` | All projects, sorted by agent then name, without the daily series |
 | `GET /api/projects/<agent>/<id>` | The project, plus `tasks` (newest first), `backlog` (up to 20 groups that could be dispatched now) and `memory` (newest first), and `state_error` when they could not be read. Also at `/<agent>/project/<id>/data.json` |
 | `POST /api/projects` | Create; the fields above. 201 with the project |
-| `PATCH /api/projects/<agent>/<id>` | Change only the keys sent. `repo`, `signal`, `dispatch`, `review` and `limits` replace the whole object; `null` values are refused with 400. Changing what the signal finds (for a log signal its site, query or pattern) drops the collected candidates at the next scan |
+| `PATCH /api/projects/<agent>/<id>` | Change only the keys sent. `repo`, `signal`, `dispatch`, `review`, `notify` and `limits` replace the whole object; `null` values are refused with 400. Changing what the signal finds (for a log signal its site, query or pattern) drops the collected candidates at the next scan |
 | `DELETE /api/projects/<agent>/<id>` | Delete, as above. 204 |
 | `POST /api/projects/<agent>/<id>/run` | Queue a tick. 202 `{"accepted":true}`, or 409 when the project is paused |
 | `POST /api/projects/<agent>/<id>/memory` | Add an admin note, `{"text":"…"}` of 1–500 characters. 201 with the note |
@@ -536,6 +537,24 @@ the pull request waiting for a person, whose next comment starts the round that
 acts on the answer. When a round is needed but the rounds are used up, arbetern
 posts what is left and stops following that pull request (*out of rounds*).
 arbetern never approves and never merges.
+
+## Notifications
+
+With `notify.slack_channel`, arbetern's Slack bot posts one line to that
+channel when the project:
+
+- opens a pull request, or one that needs a decision (its `question`);
+- gets a `cannot_fix`, `not_reproducible` or `already_fixed` report;
+- finishes a follow-up round that leaves a question or a blocker;
+- marks a pull request ready for review, or stops following it because the
+  rounds ran out;
+- sees a pull request merged or closed without merging;
+- pauses itself after failed dispatches.
+
+GitHub sends no review requests for a draft, so a question on a draft pull
+request reaches people only through this channel or the project page. Invite
+the bot to the channel. A failed post is logged and does not stop the project.
+Text from sessions is escaped, so it cannot mention people or the channel.
 
 ## Sessions and work orders
 

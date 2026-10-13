@@ -877,6 +877,7 @@ function pjdMetaHtml(p) {
       ${metaItemHtml('Datadog site', sites.length ? sites.map(x => x.toUpperCase()).join(' + ') : '—')}
       ${metaItemHtml('Interval', p.interval ? 'every ' + p.interval : '—')}
       ${metaItemHtml('Follow-through', follow)}
+      ${metaItemHtml('Slack channel', (p.notify || {}).slack_channel || 'none')}
       ${metaItemHtml('Routine', d.routine_id || '—')}
       ${metaItemHtml('Trigger token', d.token ? d.token + (d.token_configured === false ? ' (missing)' : '') : '—')}
       ${metaItemHtml('Created by', p.created_by || '—')}
@@ -1090,7 +1091,7 @@ function projectForm(p) {
     uiAlert('Creating a project needs access to at least one agent.', { title: 'No agent available', tone: 'warn' });
     return;
   }
-  const r = (p && p.repo) || {}, sig = (p && p.signal) || {}, d = (p && p.dispatch) || {}, l = (p && p.limits) || {}, rv = (p && p.review) || {};
+  const r = (p && p.repo) || {}, sig = (p && p.signal) || {}, d = (p && p.dispatch) || {}, l = (p && p.limits) || {}, rv = (p && p.review) || {}, nt = (p && p.notify) || {};
   const input = (id, value, attrs) => `<input class="form-input" id="${id}" value="${escapeHtml(value == null ? '' : value)}"${attrs || ''}>`;
   const check = (id, on, label) => `<label class="check-row"><input type="checkbox" id="${id}"${on ? ' checked' : ''}> ${label}</label>`;
   const code = ' autocapitalize="off" spellcheck="false"';
@@ -1136,6 +1137,7 @@ function projectForm(p) {
       + check('pjf-follow', rv.follow_up, 'Follow each pull request: answer failing checks and review comments until it is ready')
       + check('pjf-draft', rv.draft, 'Open pull requests as drafts and mark them ready once nothing is left')
       + `<div class="form-grid2">${formField('Follow-up rounds', input('pjf-rounds', rv.max_rounds || '', ' type="number" min="1" max="10" step="1" inputmode="numeric" placeholder="5"'), 'Sessions per pull request, 1–10.')}${formField('Quiet minutes', input('pjf-settle', rv.settle_minutes || '', ' type="number" min="5" max="240" step="1" inputmode="numeric" placeholder="15"'), 'Nothing new for this long before a pull request counts as ready.')}</div>`
+      + formField('Slack channel', input('pjf-slack', nt.slack_channel, ' maxlength="13" placeholder="C0123456789"' + code), 'Optional channel id. It hears about new pull requests, questions, blocked and ready ones, merges, and an automatic pause.')
       + '<div class="form-section">Dispatch</div>'
       + `<div class="form-grid3">${formField('Routine id', input('pjf-routine', d.routine_id, ' placeholder="trig_0123456789abcdef"' + code))}${formField('Trigger token', input('pjf-token', d.token, ' maxlength="32" placeholder="default"' + code), 'A token name this deployment holds, never the token.')}${formField('Check every', input('pjf-interval', p && p.interval, ' placeholder="15m"' + code), '5m to 24h.')}</div>`
       + `<details class="form-more"><summary>Limits</summary><div class="form-grid2">${limits}</div></details>`
@@ -1214,6 +1216,7 @@ function pjfBody(isNew) {
       follow_up: document.getElementById('pjf-follow').checked, draft: document.getElementById('pjf-draft').checked,
       max_rounds: parseInt(formValue('pjf-rounds'), 10) || 0, settle_minutes: parseInt(formValue('pjf-settle'), 10) || 0,
     },
+    notify: { slack_channel: formValue('pjf-slack') },
     dispatch: { routine_id: formValue('pjf-routine'), token: formValue('pjf-token') },
     limits: Object.fromEntries(PJD_LIMITS.map(([k]) => [k, parseInt(formValue('pjf-l-' + k), 10) || 0])),
     interval: formValue('pjf-interval'),
@@ -1230,12 +1233,13 @@ function pjfBody(isNew) {
 }
 
 function pjfChanges(p, body) {
-  const r = p.repo || {}, d = p.dispatch || {}, l = p.limits || {}, rv = p.review || {};
+  const r = p.repo || {}, d = p.dispatch || {}, l = p.limits || {}, rv = p.review || {}, nt = p.notify || {};
   const before = {
     name: p.name || '', description: p.description || '', goal: p.goal || '', instructions: p.instructions || '',
     repo: { owner: r.owner || '', name: r.name || '', base_branch: r.base_branch || '' },
     signal: pjfSignalShape(p.signal || {}),
     review: { follow_up: !!rv.follow_up, draft: !!rv.draft, max_rounds: rv.max_rounds || 0, settle_minutes: rv.settle_minutes || 0 },
+    notify: { slack_channel: nt.slack_channel || '' },
     dispatch: { routine_id: d.routine_id || '', token: d.token || '' },
     limits: Object.fromEntries(PJD_LIMITS.map(([k]) => [k, l[k] || 0])),
     interval: p.interval || '',

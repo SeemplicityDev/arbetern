@@ -32,6 +32,7 @@ type Deps struct {
 	AgentAllowed func(agent string) bool                 // whether the agent may use Datadog
 	KnownAgents  map[string]bool
 	Fire         Dispatcher // nil → default routine client
+	Slack        Poster     // nil → no notifications
 }
 
 type runner struct {
@@ -386,6 +387,7 @@ func (r *Registry) create(ctx context.Context, draft Project, enabled bool, crea
 		Signal:       draft.Signal,
 		Dispatch:     draft.Dispatch,
 		Review:       draft.Review,
+		Notify:       draft.Notify,
 		Limits:       draft.Limits,
 		Interval:     draft.Interval,
 		Enabled:      enabled,
@@ -409,6 +411,7 @@ type projectPatch struct {
 	Signal                                          *Signal
 	Dispatch                                        *Dispatch
 	Review                                          *Review
+	Notify                                          *Notify
 	Limits                                          *Limits
 	Enabled                                         *bool
 }
@@ -435,6 +438,9 @@ func (pt projectPatch) applyTo(dst *Project) {
 	}
 	if pt.Review != nil {
 		dst.Review = *pt.Review
+	}
+	if pt.Notify != nil {
+		dst.Notify = *pt.Notify
 	}
 	if pt.Limits != nil {
 		dst.Limits = *pt.Limits
@@ -467,6 +473,9 @@ func (pt projectPatch) normalized(draft *Project) projectPatch {
 	}
 	if pt.Review != nil {
 		out.Review = &draft.Review
+	}
+	if pt.Notify != nil {
+		out.Notify = &draft.Notify
 	}
 	if pt.Limits != nil {
 		out.Limits = &draft.Limits

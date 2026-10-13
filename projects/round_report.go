@@ -129,6 +129,7 @@ func (g *gateway) reportRound(ctx context.Context, s *session, a reportArgs) (st
 	}
 	log.Printf("[projects] %s/%s task %s round %d reported %s (%d of %d replies posted)", s.project.Agent, s.project.ID, taskID, n, o.Status, posted, len(replies))
 	g.r.refreshStats(s.project.Agent, s.project.ID, s.ledger)
+	g.r.notify(s.project, noteRound(s.task, o))
 	return "Recorded. You can stop now.", false, nil
 }
 
