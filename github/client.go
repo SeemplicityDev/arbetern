@@ -313,14 +313,30 @@ func (c *Client) lookupTreeEntry(ctx context.Context, owner, repo, treeSHA, path
 }
 
 func (c *Client) CreatePullRequest(ctx context.Context, owner, repo, baseBranch, headBranch, title, body string) (string, error) {
+	return c.createPullRequest(ctx, owner, repo, baseBranch, headBranch, title, body, false)
+}
+
+// CreateDraftPullRequest opens a draft pull request, or a regular one in a repository whose plan has no drafts.
+func (c *Client) CreateDraftPullRequest(ctx context.Context, owner, repo, baseBranch, headBranch, title, body string) (string, error) {
+	return c.createPullRequest(ctx, owner, repo, baseBranch, headBranch, title, body, true)
+}
+
+func (c *Client) createPullRequest(ctx context.Context, owner, repo, baseBranch, headBranch, title, body string, draft bool) (string, error) {
 	pr := gh.CreatePullRequest{
 		Title: new(title),
 		Body:  new(body),
 		Head:  headBranch,
 		Base:  baseBranch,
 	}
+	if draft {
+		pr.Draft = new(true)
+	}
 
 	created, _, err := c.api.PullRequests.Create(ctx, owner, repo, pr)
+	if draft && IsRefused(err) && strings.Contains(strings.ToLower(err.Error()), "draft") {
+		pr.Draft = nil
+		created, _, err = c.api.PullRequests.Create(ctx, owner, repo, pr)
+	}
 	if err != nil {
 		return "", fmt.Errorf("failed to create pull request: %w", err)
 	}

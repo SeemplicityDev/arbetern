@@ -25,6 +25,8 @@ type tickOutcome struct {
 	dispatchFailed bool
 	nextDispatch   time.Time
 	interrupted    bool
+	watches        []prWatch
+	rounds         []roundWant
 }
 
 func (o *tickOutcome) fail(format string, args ...any) {
@@ -72,7 +74,7 @@ func (r *Registry) tick(ctx context.Context, agent, id, trigger string) {
 	defer cancel()
 
 	start := time.Now()
-	out := r.runTick(ctx, p)
+	out := r.runTick(ctx, p, trigger)
 	// A shutdown or a lost lease cut the tick short; that says nothing about the project.
 	out.interrupted = parent.Err() != nil
 	r.recordTick(p, out)
@@ -84,7 +86,7 @@ func (r *Registry) tick(ctx context.Context, agent, id, trigger string) {
 		k, trigger, out.scanned, out.groups, out.dispatched, time.Since(start).Round(time.Millisecond), suffix)
 }
 
-func (r *Registry) runTick(ctx context.Context, p *Project) *tickOutcome {
+func (r *Registry) runTick(ctx context.Context, p *Project, trigger string) *tickOutcome {
 	out := &tickOutcome{}
 	limits := p.Limits.effective()
 	led, err := r.readLedger(ctx, p.Agent, p.ID)
@@ -97,11 +99,16 @@ func (r *Registry) runTick(ctx context.Context, p *Project) *tickOutcome {
 		out.fail("reconciling tasks: %v", err)
 		healthy = false
 	}
-	if led, err = r.syncPRs(ctx, p, led, limits); err != nil {
+	if led, err = r.syncPRs(ctx, p, led, limits, out); err != nil {
 		out.fail("syncing pull requests: %v", err)
 		healthy = false
 	}
-	if led, err = r.scan(ctx, p, led, limits, out); err != nil {
+	if p.Signal.metric() {
+		led, err = r.scanMetrics(ctx, p, led, limits, out, trigger == "manual")
+	} else {
+		led, err = r.scan(ctx, p, led, limits, out)
+	}
+	if err != nil {
 		out.fail("%v", err)
 		healthy = false
 	}
@@ -109,10 +116,11 @@ func (r *Registry) runTick(ctx context.Context, p *Project) *tickOutcome {
 		out.fail("resolving merged fixes: %v", err)
 		healthy = false
 	}
-	out.ledger = led
-	if healthy {
-		r.dispatch(ctx, p, limits, out)
+	if p.Review.FollowUp && len(out.watches) > 0 {
+		led = r.advanceReviews(ctx, p, led, out)
 	}
+	out.ledger = led
+	r.dispatch(ctx, p, limits, out, healthy)
 	return out
 }
 
@@ -128,10 +136,16 @@ func (r *Registry) reconcileTasks(ctx context.Context, p *Project, led *Ledger, 
 			unbound = append(unbound, t.ID)
 		}
 	}
-	if len(unbound) == 0 {
+	if len(unbound) > 0 {
+		if led, _, err = r.mergeLedger(ctx, p.Agent, p.ID, led, func(l *Ledger) bool { return l.unbind(unbound) }); err != nil {
+			return led, err
+		}
+	}
+	rounds := r.deleteRoundBindings(ctx, led, led.finishedRoundSessions())
+	if len(rounds) == 0 {
 		return led, nil
 	}
-	led, _, err = r.mergeLedger(ctx, p.Agent, p.ID, led, func(l *Ledger) bool { return l.unbind(unbound) })
+	led, _, err = r.mergeLedger(ctx, p.Agent, p.ID, led, func(l *Ledger) bool { return l.unbindRounds(rounds) })
 	return led, err
 }
 
@@ -142,7 +156,7 @@ func prCoordinates(p *Project, pr *PR) (owner, repo string, number int) {
 	return p.Repo.Owner, p.Repo.Name, pr.Number
 }
 
-func (r *Registry) syncPRs(ctx context.Context, p *Project, led *Ledger, limits Limits) (*Ledger, error) {
+func (r *Registry) syncPRs(ctx context.Context, p *Project, led *Ledger, limits Limits, out *tickOutcome) (*Ledger, error) {
 	open := led.openPRTasks(maxPRSync)
 	if len(open) == 0 {
 		return led, nil
@@ -168,6 +182,13 @@ func (r *Registry) syncPRs(ctx context.Context, p *Project, led *Ledger, limits 
 			}
 		}
 		if st.State != "closed" {
+			if p.Review.FollowUp {
+				next, err := r.observePR(ctx, p, led, t, owner, repo, number, st, out)
+				if err != nil {
+					errs = append(errs, fmt.Errorf("following pull request #%d: %w", number, err))
+				}
+				led = next
+			}
 			continue
 		}
 		snap := prSnapshot{CreatedAt: st.CreatedAt, MergedAt: st.MergedAt, ClosedAt: st.ClosedAt, Additions: st.Additions, Deletions: st.Deletions}
@@ -312,8 +333,8 @@ func (r *Registry) scan(ctx context.Context, p *Project, led *Ledger, limits Lim
 	return updated, nil
 }
 
-func (r *Registry) dispatch(ctx context.Context, p *Project, limits Limits, out *tickOutcome) {
-	if parseTime(p.NextDispatchAfter).After(time.Now()) {
+func (r *Registry) dispatch(ctx context.Context, p *Project, limits Limits, out *tickOutcome, newWork bool) {
+	if parseTime(p.NextDispatchAfter).After(time.Now()) || (!newWork && len(out.rounds) == 0) {
 		return
 	}
 	if r.gh == nil {
@@ -329,6 +350,13 @@ func (r *Registry) dispatch(ctx context.Context, p *Project, limits Limits, out 
 		out.fail("the trigger token %q is not configured (set %s)", p.Dispatch.Token, TokenEnv(p.Dispatch.Token))
 		return
 	}
+	// An open pull request is closer to done than new work, so its rounds go first.
+	if len(out.rounds) > 0 {
+		r.dispatchRounds(ctx, p, limits, token, out)
+	}
+	if !newWork || out.dispatchFailed || !out.nextDispatch.IsZero() {
+		return
+	}
 	led, signal := out.ledger, p.Signal.key()
 	for {
 		now := time.Now().UTC()
@@ -336,7 +364,12 @@ func (r *Registry) dispatch(ctx context.Context, p *Project, limits Limits, out 
 			break
 		}
 		cand, ok := led.pick(signal, limits, now)
-		if !ok {
+		if !ok || (cand.Group.Reason == reasonFill && !led.fillCapacity(limits, now)) {
+			break
+		}
+		group, err := r.evidence(ctx, p, cand.Group, now)
+		if err != nil {
+			out.fail("fetching the evidence for %s: %v", groupLabel(cand.Group), err)
 			break
 		}
 		taskID, err := store.NewID()
@@ -344,7 +377,7 @@ func (r *Registry) dispatch(ctx context.Context, p *Project, limits Limits, out 
 			out.fail("creating a task id: %v", err)
 			break
 		}
-		draft := Task{ID: taskID, Fingerprint: cand.Group.Fingerprint}
+		draft := Task{ID: taskID, Fingerprint: cand.Group.Fingerprint, Group: group}
 		next, _, err := r.mergeLedger(ctx, p.Agent, p.ID, led, func(l *Ledger) bool { return l.addTask(draft, limits, now) })
 		if err != nil {
 			out.fail("recording a task: %v", err)
@@ -376,7 +409,7 @@ func classifyFire(err error) (reason string, rateLimited bool, retryAfter time.D
 
 // fireTask reports whether dispatching may continue.
 func (r *Registry) fireTask(ctx context.Context, p *Project, led *Ledger, taskID, token string, out *tickOutcome) (*Ledger, bool) {
-	fired, ferr := r.fire.Fire(ctx, p.Dispatch.RoutineID, token, fireText(p.Agent, p.ID, taskID))
+	fired, ferr := r.fire.Fire(ctx, p.Dispatch.RoutineID, token, fireText(p.Agent, p.ID, taskID, 0))
 	// The fire has happened either way; its result is recorded even when the tick is being cancelled.
 	pctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), persistTimeout)
 	defer cancel()

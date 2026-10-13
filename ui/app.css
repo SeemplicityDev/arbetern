@@ -1174,6 +1174,8 @@ html[data-sidebar="collapsed"] .nav-sep { margin: 6px 16px; }
 
 .form-panel { width: min(720px, 100vw); }
 .form-body { display: flex; flex-direction: column; gap: 16px; }
+.form-body [data-signal] { display: flex; flex-direction: column; gap: 16px; }
+.form-body [data-signal][hidden] { display: none; }
 .form-field { display: flex; flex-direction: column; gap: 6px; }
 .form-label { font-size: 12px; font-weight: 600; color: var(--text); }
 .form-hint { font-size: 11.5px; color: var(--text-muted); line-height: 1.45; }
@@ -1469,6 +1471,9 @@ details.cell pre { margin-top: 6px; background: var(--bg); border: 1px solid var
 .proj-more .run-result, .proj-more .run-error { max-height: 240px; }
 .proj-label { margin: 12px 0 4px; font-size: 10.5px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-muted); }
 .proj-title { font-size: 13px; font-weight: 600; color: var(--text-bright); }
+.proj-causes { margin: 0; padding-left: 18px; font-size: 12.5px; line-height: 1.6; color: var(--text); }
+.proj-round { margin: 8px 0; font-size: 12.5px; color: var(--text); }
+.proj-round .run-result, .proj-round .run-error { margin-top: 4px; }
 .panel h2 .h2-btn { margin-left: auto; }
 .proj-note { display: grid; grid-template-columns: 64px minmax(0, 1fr) auto; gap: 12px; align-items: start; padding: 10px 0; border-bottom: 1px solid var(--border); }
 .proj-note:last-child { border-bottom: none; }
@@ -1483,6 +1488,7 @@ details.cell pre { margin-top: 6px; background: var(--bg); border: 1px solid var
 .form-section { padding-top: 14px; border-top: 1px solid var(--border); font-family: var(--font-mono); font-size: 10.5px; font-weight: 600; letter-spacing: 1px; text-transform: uppercase; color: var(--text-muted); }
 .form-grid3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
 .form-textarea.proj-textarea { min-height: 110px; }
+.form-textarea.proj-attrs { min-height: 72px; }
 .form-more > summary { cursor: pointer; font-size: 12.5px; font-weight: 600; color: var(--accent); list-style: none; }
 .form-more > summary::-webkit-details-marker { display: none; }
 .form-more > summary::before { content: '▸ '; }

@@ -3,14 +3,11 @@ package github
 import (
 	"context"
 	"fmt"
-	"slices"
 	"strings"
 	"time"
 	"unicode"
 
 	gh "github.com/google/go-github/v91/github"
-
-	"github.com/justmike1/arbetern/internal/text"
 )
 
 const (
@@ -31,7 +28,11 @@ type PRState struct {
 	Merged       bool      `json:"merged"`
 	Author       string    `json:"author"`
 	HeadRef      string    `json:"head_ref"`
+	HeadSHA      string    `json:"head_sha"`
 	BaseRef      string    `json:"base_ref"`
+	Draft        bool      `json:"draft"`
+	Mergeable    *bool     `json:"mergeable,omitempty"` // nil until GitHub has computed it
+	NodeID       string    `json:"node_id,omitempty"`
 	CreatedAt    time.Time `json:"created_at"`
 	MergedAt     time.Time `json:"merged_at,omitzero"`
 	ClosedAt     time.Time `json:"closed_at,omitzero"`
@@ -54,7 +55,11 @@ func (c *Client) PullRequestState(ctx context.Context, owner, repo string, numbe
 		Merged:       pr.GetMerged(),
 		Author:       pr.GetUser().GetLogin(),
 		HeadRef:      pr.GetHead().GetRef(),
+		HeadSHA:      pr.GetHead().GetSHA(),
 		BaseRef:      pr.GetBase().GetRef(),
+		Draft:        pr.GetDraft(),
+		Mergeable:    pr.Mergeable,
+		NodeID:       pr.GetNodeID(),
 		CreatedAt:    pr.GetCreatedAt().Time,
 		MergedAt:     pr.GetMergedAt().Time,
 		ClosedAt:     pr.GetClosedAt().Time,
@@ -81,67 +86,29 @@ type PRFeedback struct {
 
 // PullRequestFeedback returns reviews and comments on a pull request by repository owners, members and collaborators other than exclude.
 func (c *Client) PullRequestFeedback(ctx context.Context, owner, repo string, number int, exclude string) (*PRFeedback, error) {
+	items, err := c.PullRequestDiscussion(ctx, owner, repo, number)
+	if err != nil {
+		return nil, err
+	}
 	fb := &PRFeedback{Reviews: []PRComment{}, Comments: []PRComment{}}
 	exclude = strings.TrimSpace(exclude)
 	left := maxFeedbackItems
-	add := func(dst *[]PRComment, user *gh.User, association, state, path, body string, at gh.Timestamp) {
-		body = strings.TrimSpace(body)
-		if left == 0 || body == "" || !slices.Contains(trustedAssociations, association) || (exclude != "" && strings.EqualFold(user.GetLogin(), exclude)) {
-			return
+	for _, kind := range []string{DiscussionReview, DiscussionInline, DiscussionComment} {
+		for _, it := range items {
+			if left == 0 {
+				return fb, nil
+			}
+			if it.Kind != kind || it.Body == "" || !it.Trusted() || (exclude != "" && strings.EqualFold(it.Author, exclude)) {
+				continue
+			}
+			cm := PRComment{Author: it.Author, State: it.State, Path: it.Path, Body: it.Body, CreatedAt: it.CreatedAt}
+			if kind == DiscussionReview {
+				fb.Reviews = append(fb.Reviews, cm)
+			} else {
+				fb.Comments = append(fb.Comments, cm)
+			}
+			left--
 		}
-		*dst = append(*dst, PRComment{
-			Author:    user.GetLogin(),
-			State:     state,
-			Path:      path,
-			Body:      text.Truncate(body, maxFeedbackBody),
-			CreatedAt: at.Time,
-		})
-		left--
-	}
-
-	reviewOpts := &gh.ListOptions{PerPage: 100}
-	for page := 0; page < maxFeedbackPages && left > 0; page++ {
-		reviews, resp, err := c.api.PullRequests.ListReviews(ctx, owner, repo, number, reviewOpts)
-		if err != nil {
-			return nil, fmt.Errorf("failed to list reviews for PR #%d: %w", number, err)
-		}
-		for _, r := range reviews {
-			add(&fb.Reviews, r.GetUser(), r.GetAuthorAssociation(), r.GetState(), "", r.GetBody(), r.GetSubmittedAt())
-		}
-		if resp == nil || resp.NextPage == 0 {
-			break
-		}
-		reviewOpts.Page = resp.NextPage
-	}
-
-	inlineOpts := &gh.PullRequestListCommentsOptions{ListOptions: gh.ListOptions{PerPage: 100}}
-	for page := 0; page < maxFeedbackPages && left > 0; page++ {
-		comments, resp, err := c.api.PullRequests.ListComments(ctx, owner, repo, number, inlineOpts)
-		if err != nil {
-			return nil, fmt.Errorf("failed to list review comments for PR #%d: %w", number, err)
-		}
-		for _, cm := range comments {
-			add(&fb.Comments, cm.GetUser(), cm.GetAuthorAssociation(), "", cm.GetPath(), cm.GetBody(), cm.GetCreatedAt())
-		}
-		if resp == nil || resp.NextPage == 0 {
-			break
-		}
-		inlineOpts.Page = resp.NextPage
-	}
-
-	issueOpts := &gh.IssueListCommentsOptions{ListOptions: gh.ListOptions{PerPage: 100}}
-	for page := 0; page < maxFeedbackPages && left > 0; page++ {
-		comments, resp, err := c.api.Issues.ListComments(ctx, owner, repo, number, issueOpts)
-		if err != nil {
-			return nil, fmt.Errorf("failed to list comments for PR #%d: %w", number, err)
-		}
-		for _, cm := range comments {
-			add(&fb.Comments, cm.GetUser(), cm.GetAuthorAssociation(), "", "", cm.GetBody(), cm.GetCreatedAt())
-		}
-		if resp == nil || resp.NextPage == 0 {
-			break
-		}
-		issueOpts.Page = resp.NextPage
 	}
 	return fb, nil
 }

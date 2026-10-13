@@ -44,18 +44,29 @@ func objectSchema(props map[string]any, required ...string) map[string]any {
 var mcpTools = []toolDef{
 	{
 		Name:        "get_task",
-		Description: "Return your work order: the goal, the error group with production log samples, the rules, project notes and recent outcomes. Call it first.",
+		Description: "Return your work order: the goal, the problem with its production evidence, the rules, project notes and recent outcomes; in a follow-up round, the failing checks and the review comments to answer. Call it first.",
 		InputSchema: objectSchema(nil),
 	},
 	{
 		Name:        "report_outcome",
-		Description: "Report the result of the work order exactly once. For status fixed, commit and push your " + BranchPrefix + " branch first; arbetern checks it and opens the pull request. Otherwise report why no change was made.",
+		Description: "Report the result of the work order exactly once. For status fixed, commit and push first; arbetern checks the branch and opens the pull request, or in a follow-up round adds your commits to it and posts your replies. Otherwise report why no change was made.",
 		InputSchema: objectSchema(map[string]any{
-			"status":  map[string]any{"type": "string", "enum": []string{OutcomeFixed, OutcomeNotReproducible, OutcomeCannotFix, OutcomeAlreadyFixed}},
-			"summary": map[string]any{"type": "string", "maxLength": 4000, "description": "What you found and, for fixed, what you changed and why."},
-			"title":   map[string]any{"type": "string", "maxLength": 120, "description": "Pull request title; required for fixed."},
+			"status":  map[string]any{"type": "string", "enum": []string{OutcomeFixed, OutcomeNotReproducible, OutcomeCannotFix, OutcomeAlreadyFixed, OutcomeAnswered}, "description": "answered is for follow-up rounds only; not_reproducible and already_fixed are for first sessions only."},
+			"summary": map[string]any{"type": "string", "maxLength": 4000, "description": "What you found and, for fixed, what you changed and why. In a follow-up round it is posted on the pull request."},
+			"title":   map[string]any{"type": "string", "maxLength": 120, "description": "Pull request title; required for fixed in a first session."},
 			"branch":  map[string]any{"type": "string", "maxLength": 200, "description": "The " + BranchPrefix + " branch you pushed; required for fixed."},
 			"testing": map[string]any{"type": "string", "maxLength": 2000, "description": "How you verified the change."},
+			"question": map[string]any{"type": "string", "maxLength": maxQuestionChars,
+				"description": "A decision only a person can make, with the options named so a one-line reply picks one. The pull request stays a draft until a reviewer answers in it."},
+			"replies": map[string]any{
+				"type": "array", "maxItems": maxReplies,
+				"description": "Follow-up rounds: one entry per review comment in the work order, saying what you changed and why, or why you changed nothing. Each is posted as a reply to its comment.",
+				"items": objectSchema(map[string]any{
+					"id":   map[string]any{"type": "string", "maxLength": 64},
+					"body": map[string]any{"type": "string", "minLength": 1, "maxLength": maxReplyChars},
+				}, "id", "body"),
+			},
+			"rerun_checks": map[string]any{"type": "boolean", "description": "Follow-up rounds: the failing checks are unrelated to this change, so arbetern re-runs their failed jobs once."},
 		}, "status", "summary"),
 	},
 	{

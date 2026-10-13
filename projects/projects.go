@@ -6,8 +6,11 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"regexp"
+	"slices"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -19,7 +22,8 @@ const (
 	SessionPrefix = "project-sessions/"
 	QueueTopic    = "project-tick"
 
-	SignalDatadog = "datadog"
+	SignalDatadog        = "datadog"
+	SignalDatadogMetrics = "datadog_metrics"
 
 	StatusDispatching = "dispatching"
 	StatusRunning     = "running"
@@ -33,6 +37,15 @@ const (
 	OutcomeNotReproducible = "not_reproducible"
 	OutcomeCannotFix       = "cannot_fix"
 	OutcomeAlreadyFixed    = "already_fixed"
+	OutcomeAnswered        = "answered" // follow-up round only: replied without changing code
+
+	PhaseChecking  = "checking"  // waiting for checks, comments or the quiet period
+	PhaseFixing    = "fixing"    // a follow-up round is running
+	PhaseWaiting   = "waiting"   // a question or blocker needs a person
+	PhaseDone      = "done"      // checks pass and every comment is answered
+	PhaseExhausted = "exhausted" // the follow-up rounds are used up
+
+	RoundDone = "done"
 
 	BranchPrefix = "claude/"
 
@@ -79,12 +92,43 @@ const (
 	recentOutcomeCount = 10
 	maxBodyBytes       = 64 << 10
 
+	metricRescan        = time.Hour
+	maxSeriesPerSite    = 5000
+	maxEvidenceCauses   = 5
+	evidenceSearchLimit = 50
+	evidenceSamples     = 2
+	evidenceSampleChars = 12000
+	maxEvidenceFields   = 12
+	maxEvidenceAttrs    = 8
+
+	ciNoChecksGrace     = 10 * time.Minute
+	ciWaitLimit         = time.Hour
+	roundFailedCooldown = 30 * time.Minute
+	maxHandled          = 300
+	maxRoundItems       = 15
+	maxContextComments  = 3
+	maxFailedChecks     = 3
+	checkLogChars       = 6000
+	feedbackBriefChars  = 1200
+	contextBriefChars   = 1500
+	maxReplies          = 50
+	maxReplyChars       = 2000
+	maxQuestionChars    = 1000
+
 	defaultLookback = 24 * time.Hour
 	minLookback     = time.Hour
 	maxLookback     = 168 * time.Hour
+	defaultWindow   = 48 * time.Hour
 	defaultInterval = 15 * time.Minute
 	minInterval     = 5 * time.Minute
 	maxInterval     = 24 * time.Hour
+
+	defaultRounds        = 5
+	minRounds            = 1
+	maxRounds            = 10
+	defaultSettleMinutes = 15
+	minSettleMinutes     = 5
+	maxSettleMinutes     = 240
 )
 
 var (
@@ -95,6 +139,9 @@ var (
 	tokenNameRe  = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,31}$`)
 	sessionKeyRe = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
 	noteIDRe     = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,63}$`)
+	groupedRe    = regexp.MustCompile(`(?i)\bby\s*\{\s*[^{}\s][^{}]*\}`)
+	tagKeyRe     = regexp.MustCompile(`^[a-z][a-z0-9_./-]{0,199}$`)
+	attributeRe  = regexp.MustCompile(`^@?[A-Za-z_][A-Za-z0-9_.-]{0,199}$`)
 )
 
 // Repo is the GitHub repository a project works on.
@@ -104,13 +151,36 @@ type Repo struct {
 	BaseBranch string `json:"base_branch"`
 }
 
-// Signal is where a project finds the errors it fixes.
+// Signal is where a project finds the problems it fixes: Datadog log error groups, or Datadog metric series that cross a threshold.
 type Signal struct {
-	Type     string `json:"type"`               // "datadog"
-	Site     string `json:"site"`               // "us" | "eu"
-	Query    string `json:"query"`              // Datadog log search query
-	Pattern  string `json:"pattern,omitempty"`  // optional RE2, matched against kind, pattern and sample messages
-	Lookback string `json:"lookback,omitempty"` // Go duration for the first scan, default "24h", 1h–168h
+	Type           string    `json:"type"`                      // "datadog" | "datadog_metrics"
+	Site           string    `json:"site,omitempty"`            // logs: "us" | "eu"
+	Sites          []string  `json:"sites,omitempty"`           // metrics: "us" and/or "eu"
+	Query          string    `json:"query"`                     // logs: search query; metrics: grouped query of what went wrong
+	Pattern        string    `json:"pattern,omitempty"`         // optional RE2 over kind, pattern and samples (logs) or the series tags (metrics)
+	Lookback       string    `json:"lookback,omitempty"`        // logs: Go duration for the first scan, default "24h", 1h–168h
+	KeptQuery      string    `json:"kept_query,omitempty"`      // metrics: grouped query of what the same series handled correctly
+	Window         string    `json:"window,omitempty"`          // metrics: Go duration each series is summed over, default "48h", 1h–168h
+	Threshold      float64   `json:"threshold,omitempty"`       // metrics: a series breaches when its sum exceeds it
+	ShareThreshold float64   `json:"share_threshold,omitempty"` // metrics: a series breaches when query / (query + kept) exceeds it
+	Fill           bool      `json:"fill,omitempty"`            // metrics: spare capacity takes the largest series that breach nothing
+	Evidence       *Evidence `json:"evidence,omitempty"`        // metrics: the logs that explain a series
+}
+
+// Evidence names the logs fetched for a metric series when it is dispatched.
+type Evidence struct {
+	Query      string            `json:"query"`              // Datadog log search query, narrowed per series by Attributes
+	Attributes map[string]string `json:"attributes"`         // metric tag → log attribute holding the same value
+	GroupBy    string            `json:"group_by,omitempty"` // log facet whose most frequent value is the dominant cause
+	Fields     []string          `json:"fields,omitempty"`   // log attributes kept in samples; empty keeps them all
+}
+
+// Review controls how a project follows the pull requests it opens.
+type Review struct {
+	FollowUp      bool `json:"follow_up"`                // answer failing checks and review comments until the pull request is ready
+	Draft         bool `json:"draft"`                    // open as a draft and mark it ready once checks pass and nothing is unanswered
+	MaxRounds     int  `json:"max_rounds,omitempty"`     // 1–10, default 5, follow-up sessions per pull request
+	SettleMinutes int  `json:"settle_minutes,omitempty"` // 5–240, default 15, quiet time before a pull request counts as ready
 }
 
 // Dispatch names the routine a project fires and the trigger token it fires with.
@@ -149,6 +219,7 @@ type Stats struct {
 	NoFix                int     `json:"no_fix"`
 	PRsOpened            int     `json:"prs_opened"`
 	PRsOpen              int     `json:"prs_open"`
+	PRsDone              int     `json:"prs_done"` // open, with passing checks and every review comment answered
 	PRsMerged            int     `json:"prs_merged"`
 	PRsClosed            int     `json:"prs_closed"`
 	MergeRate            float64 `json:"merge_rate"`             // merged / (merged + closed); 0 until one is decided
@@ -160,6 +231,7 @@ type Stats struct {
 	Recurred             int     `json:"recurred"`               // merged fixes whose error came back after the grace period
 	ResolutionRate       float64 `json:"resolution_rate"`        // resolved / (resolved + recurred)
 	Backlog              int     `json:"backlog"`                // candidate groups waiting for capacity
+	Rounds               int     `json:"rounds"`                 // follow-up sessions on open pull requests
 	Daily                []Day   `json:"daily,omitempty"`        // last 30 UTC days, oldest first, zero days included
 	UpdatedAt            string  `json:"updated_at,omitempty"`
 }
@@ -175,6 +247,7 @@ type Project struct {
 	Repo                Repo     `json:"repo"`
 	Signal              Signal   `json:"signal"`
 	Dispatch            Dispatch `json:"dispatch"`
+	Review              Review   `json:"review"`
 	Limits              Limits   `json:"limits"`
 	Interval            string   `json:"interval"` // Go duration 5m–24h, default "15m"
 	Enabled             bool     `json:"enabled"`
@@ -203,8 +276,26 @@ func (s Signal) lookback() time.Duration {
 	return durationOr(s.Lookback, defaultLookback, minLookback, maxLookback)
 }
 
+func (s Signal) window() time.Duration {
+	return durationOr(s.Window, defaultWindow, minLookback, maxLookback)
+}
+
+func (s Signal) metric() bool { return s.Type == SignalDatadogMetrics }
+
+func (s Signal) sites() []string {
+	if s.metric() {
+		return s.Sites
+	}
+	return []string{s.Site}
+}
+
 func (s Signal) key() string {
-	sum := sha256.Sum256([]byte(s.Site + "\x00" + s.Query + "\x00" + s.Pattern))
+	parts := []string{s.Site, s.Query, s.Pattern}
+	if s.metric() {
+		parts = append(parts, s.Type, strings.Join(s.Sites, ","), s.KeptQuery, s.window().String(),
+			strconv.FormatFloat(s.Threshold, 'g', -1, 64), strconv.FormatFloat(s.ShareThreshold, 'g', -1, 64), strconv.FormatBool(s.Fill))
+	}
+	sum := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
 	return hex.EncodeToString(sum[:8])
 }
 
@@ -300,17 +391,7 @@ func (s *Signal) normalize() error {
 	if s.Type == "" {
 		s.Type = SignalDatadog
 	}
-	if s.Type != SignalDatadog {
-		return invalidf("signal.type must be %q", SignalDatadog)
-	}
-	s.Site = strings.ToLower(strings.TrimSpace(s.Site))
-	if s.Site != "us" && s.Site != "eu" {
-		return invalidf("signal.site must be us or eu")
-	}
 	s.Query = strings.TrimSpace(s.Query)
-	if err := checkText("signal.query", s.Query, 1, 1000); err != nil {
-		return err
-	}
 	if strings.TrimSpace(s.Pattern) == "" {
 		s.Pattern = ""
 	}
@@ -322,11 +403,149 @@ func (s *Signal) normalize() error {
 			return invalidf("signal.pattern is not a valid regular expression: %v", err)
 		}
 	}
+	switch s.Type {
+	case SignalDatadog:
+		return s.normalizeLogs()
+	case SignalDatadogMetrics:
+		return s.normalizeMetrics()
+	}
+	return invalidf("signal.type must be %q or %q", SignalDatadog, SignalDatadogMetrics)
+}
+
+func normalizeSite(v string) (string, error) {
+	v = strings.ToLower(strings.TrimSpace(v))
+	if v != "us" && v != "eu" {
+		return "", invalidf("signal sites must be us or eu")
+	}
+	return v, nil
+}
+
+func (s *Signal) normalizeLogs() error {
+	site, err := normalizeSite(s.Site)
+	if err != nil {
+		return invalidf("signal.site must be us or eu")
+	}
+	s.Site = site
+	if err := checkText("signal.query", s.Query, 1, 1000); err != nil {
+		return err
+	}
 	s.Lookback = strings.TrimSpace(s.Lookback)
 	if s.Lookback == "" {
 		s.Lookback = humanDuration(defaultLookback)
 	}
+	s.Sites, s.KeptQuery, s.Window, s.Threshold, s.ShareThreshold, s.Fill, s.Evidence = nil, "", "", 0, 0, false, nil
 	return checkDuration("signal.lookback", s.Lookback, minLookback, maxLookback)
+}
+
+func (s *Signal) normalizeMetrics() error {
+	sites := s.Sites
+	if len(sites) == 0 && strings.TrimSpace(s.Site) != "" {
+		sites = []string{s.Site}
+	}
+	var picked []string
+	for _, v := range sites {
+		site, err := normalizeSite(v)
+		if err != nil {
+			return err
+		}
+		if !slices.Contains(picked, site) {
+			picked = append(picked, site)
+		}
+	}
+	if len(picked) == 0 {
+		return invalidf("signal.sites needs us, eu or both")
+	}
+	slices.SortFunc(picked, func(a, b string) int { return strings.Compare(b, a) })
+	s.Sites, s.Site, s.Lookback = picked, "", ""
+	s.KeptQuery = strings.TrimSpace(s.KeptQuery)
+	for _, q := range []struct{ field, v string }{{"signal.query", s.Query}, {"signal.kept_query", s.KeptQuery}} {
+		lo := 1
+		if q.field == "signal.kept_query" {
+			lo = 0
+		}
+		if err := checkText(q.field, q.v, lo, 1000); err != nil {
+			return err
+		}
+		if q.v != "" && !groupedRe.MatchString(q.v) {
+			return invalidf("%s must group its series, such as sum:errors{*} by {service}", q.field)
+		}
+	}
+	s.Window = strings.TrimSpace(s.Window)
+	if s.Window == "" {
+		s.Window = humanDuration(defaultWindow)
+	}
+	if err := checkDuration("signal.window", s.Window, minLookback, maxLookback); err != nil {
+		return err
+	}
+	switch {
+	case math.IsNaN(s.Threshold) || math.IsInf(s.Threshold, 0) || s.Threshold < 0:
+		return invalidf("signal.threshold must be zero or more")
+	case math.IsNaN(s.ShareThreshold) || s.ShareThreshold < 0 || s.ShareThreshold >= 1:
+		return invalidf("signal.share_threshold must be at least 0 and below 1")
+	case s.Threshold == 0 && s.ShareThreshold == 0:
+		return invalidf("set signal.threshold, signal.share_threshold or both")
+	case s.ShareThreshold > 0 && s.KeptQuery == "":
+		return invalidf("signal.share_threshold needs signal.kept_query")
+	}
+	if s.Evidence == nil {
+		return nil
+	}
+	return s.Evidence.normalize()
+}
+
+func normalizeAttribute(field, v string) (string, error) {
+	v = strings.TrimSpace(v)
+	if !attributeRe.MatchString(v) {
+		return "", invalidf("%s %q is not a log attribute such as @error.kind", field, v)
+	}
+	return "@" + strings.TrimPrefix(v, "@"), nil
+}
+
+func (e *Evidence) normalize() error {
+	e.Query = strings.TrimSpace(e.Query)
+	if err := checkText("signal.evidence.query", e.Query, 1, 1000); err != nil {
+		return err
+	}
+	if len(e.Attributes) == 0 || len(e.Attributes) > maxEvidenceAttrs {
+		return invalidf("signal.evidence.attributes must map 1 to %d metric tags to log attributes", maxEvidenceAttrs)
+	}
+	attrs := make(map[string]string, len(e.Attributes))
+	for tag, attr := range e.Attributes {
+		tag = strings.ToLower(strings.TrimSpace(tag))
+		if !tagKeyRe.MatchString(tag) {
+			return invalidf("signal.evidence.attributes: %q is not a metric tag name", tag)
+		}
+		norm, err := normalizeAttribute("signal.evidence.attributes."+tag, attr)
+		if err != nil {
+			return err
+		}
+		attrs[tag] = norm
+	}
+	e.Attributes = attrs
+	if strings.TrimSpace(e.GroupBy) == "" {
+		e.GroupBy = ""
+	} else {
+		norm, err := normalizeAttribute("signal.evidence.group_by", e.GroupBy)
+		if err != nil {
+			return err
+		}
+		e.GroupBy = norm
+	}
+	if len(e.Fields) > maxEvidenceFields {
+		return invalidf("signal.evidence.fields holds at most %d attributes", maxEvidenceFields)
+	}
+	var fields []string
+	for _, f := range e.Fields {
+		norm, err := normalizeAttribute("signal.evidence.fields", f)
+		if err != nil {
+			return err
+		}
+		if !slices.Contains(fields, norm) {
+			fields = append(fields, norm)
+		}
+	}
+	e.Fields = fields
+	return nil
 }
 
 func (d *Dispatch) normalize() error {
@@ -389,6 +608,27 @@ func (l Limits) effective() Limits {
 	return l
 }
 
+func (r *Review) normalize() error {
+	if r.MaxRounds != 0 && (r.MaxRounds < minRounds || r.MaxRounds > maxRounds) {
+		return invalidf("review.max_rounds must be between %d and %d", minRounds, maxRounds)
+	}
+	if r.SettleMinutes != 0 && (r.SettleMinutes < minSettleMinutes || r.SettleMinutes > maxSettleMinutes) {
+		return invalidf("review.settle_minutes must be between %d and %d", minSettleMinutes, maxSettleMinutes)
+	}
+	*r = r.effective()
+	return nil
+}
+
+func (r Review) effective() Review {
+	if r.MaxRounds < minRounds || r.MaxRounds > maxRounds {
+		r.MaxRounds = defaultRounds
+	}
+	if r.SettleMinutes < minSettleMinutes || r.SettleMinutes > maxSettleMinutes {
+		r.SettleMinutes = defaultSettleMinutes
+	}
+	return r
+}
+
 func normalizeInterval(v string) (string, error) {
 	v = strings.TrimSpace(v)
 	if v == "" {
@@ -413,6 +653,7 @@ func (p *Project) normalize() error {
 		p.Repo.normalize(),
 		p.Signal.normalize(),
 		p.Dispatch.normalize(),
+		p.Review.normalize(),
 		p.Limits.normalize(),
 	}
 	for _, err := range checks {

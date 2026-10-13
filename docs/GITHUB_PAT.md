@@ -32,8 +32,9 @@ Grant the following **repository permissions**:
 |---|---|---|
 | **Contents** | Read and Write | Read files, create branches, commit file changes |
 | **Pull requests** | Read and Write | Open pull requests for file modifications |
-| **Actions** | Read-only | Fetch workflow run status and job details for debugging |
-| **Checks** | Read-only | Read check-run annotations to surface CI errors |
+| **Actions** | Read and Write | Fetch workflow runs and job logs; re-run failed jobs |
+| **Checks** | Read-only | Read check runs and their annotations to surface CI errors |
+| **Commit statuses** | Read-only | Read the statuses a [project](PROJECTS.md#following-the-pull-request) waits on before it marks a pull request ready |
 | **Metadata** | Read-only | Required by GitHub for all fine-grained tokens (auto-selected) |
 
 If arbetern should discover repositories across an organization, also grant this **organization permission**:

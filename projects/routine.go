@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -132,6 +133,10 @@ func fireError(resp *http.Response, raw []byte) *FireError {
 	return fe
 }
 
-func fireText(agent, project, task string) string {
-	return text.Truncate("arbetern work order "+agent+"/"+project+"/"+task+". Fetch it with the get_task tool of the arbetern MCP server.", maxFireText)
+func fireText(agent, project, task string, round int) string {
+	ref := agent + "/" + project + "/" + task
+	if round > 0 {
+		ref += " round " + strconv.Itoa(round)
+	}
+	return text.Truncate("arbetern work order "+ref+". Fetch it with the get_task tool of the arbetern MCP server.", maxFireText)
 }

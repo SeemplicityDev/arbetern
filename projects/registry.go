@@ -310,9 +310,11 @@ func (r *Registry) datadogFor(agent, site string) *datadog.Client {
 	return r.deps.Datadog(agent).ForSite(site)
 }
 
-func (r *Registry) checkSite(agent, site string) error {
-	if r.datadogFor(agent, site) == nil {
-		return invalidf("agent %s has no Datadog credentials for site %s", agent, site)
+func (r *Registry) checkSites(agent string, s Signal) error {
+	for _, site := range s.sites() {
+		if r.datadogFor(agent, site) == nil {
+			return invalidf("agent %s has no Datadog credentials for site %s", agent, site)
+		}
 	}
 	return nil
 }
@@ -356,7 +358,7 @@ func (r *Registry) create(ctx context.Context, draft Project, enabled bool, crea
 	if err := draft.normalize(); err != nil {
 		return nil, err
 	}
-	if err := r.checkSite(draft.Agent, draft.Signal.Site); err != nil {
+	if err := r.checkSites(draft.Agent, draft.Signal); err != nil {
 		return nil, err
 	}
 	if r.gh == nil {
@@ -383,6 +385,7 @@ func (r *Registry) create(ctx context.Context, draft Project, enabled bool, crea
 		Repo:         draft.Repo,
 		Signal:       draft.Signal,
 		Dispatch:     draft.Dispatch,
+		Review:       draft.Review,
 		Limits:       draft.Limits,
 		Interval:     draft.Interval,
 		Enabled:      enabled,
@@ -405,6 +408,7 @@ type projectPatch struct {
 	Repo                                            *Repo
 	Signal                                          *Signal
 	Dispatch                                        *Dispatch
+	Review                                          *Review
 	Limits                                          *Limits
 	Enabled                                         *bool
 }
@@ -428,6 +432,9 @@ func (pt projectPatch) applyTo(dst *Project) {
 	}
 	if pt.Dispatch != nil {
 		dst.Dispatch = *pt.Dispatch
+	}
+	if pt.Review != nil {
+		dst.Review = *pt.Review
 	}
 	if pt.Limits != nil {
 		dst.Limits = *pt.Limits
@@ -458,6 +465,9 @@ func (pt projectPatch) normalized(draft *Project) projectPatch {
 	if pt.Dispatch != nil {
 		out.Dispatch = &draft.Dispatch
 	}
+	if pt.Review != nil {
+		out.Review = &draft.Review
+	}
 	if pt.Limits != nil {
 		out.Limits = &draft.Limits
 	}
@@ -478,7 +488,7 @@ func (r *Registry) update(ctx context.Context, agent, id string, pt projectPatch
 		return nil, err
 	}
 	if pt.Signal != nil {
-		if err := r.checkSite(agent, draft.Signal.Site); err != nil {
+		if err := r.checkSites(agent, draft.Signal); err != nil {
 			return nil, err
 		}
 	}
@@ -569,6 +579,14 @@ func (r *Registry) remove(agent, id string) error {
 		for _, t := range led.Tasks {
 			if t.Bound || !isTerminal(t.Status) {
 				r.deleteBinding(ctx, t.SessionID)
+			}
+			if t.Review == nil {
+				continue
+			}
+			for _, rd := range t.Review.Rounds {
+				if rd.Bound || isActiveRound(rd.Status) {
+					r.deleteBinding(ctx, rd.SessionID)
+				}
 			}
 		}
 	}

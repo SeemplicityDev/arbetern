@@ -10,6 +10,10 @@ import (
 )
 
 const (
+	reasonShare     = "share"
+	reasonThreshold = "threshold"
+	reasonFill      = "fill"
+
 	recurrenceResolved = "resolved"
 	recurrenceRecurred = "recurred"
 
@@ -22,24 +26,40 @@ const (
 	noteReview  = "review"
 )
 
-// Sample is one redacted log event of an error group.
+// Sample is one redacted log event of an error group or of a metric series' evidence.
 type Sample struct {
 	At      string `json:"at"`
 	Message string `json:"message"`
 	Stack   string `json:"stack,omitempty"`
+	Fields  string `json:"fields,omitempty"` // evidence: the selected log attributes as JSON
 }
 
-// Group is an error group as the project has seen it so far.
+// Cause is one value of the evidence group-by facet and how many log lines carried it.
+type Cause struct {
+	Value string `json:"value"`
+	Count int    `json:"count"`
+}
+
+// Group is an error group, or a metric series, as the project has seen it so far.
 type Group struct {
-	Fingerprint string   `json:"fingerprint"`
-	Service     string   `json:"service"`
-	Kind        string   `json:"kind"`
-	Pattern     string   `json:"pattern"`
-	Frame       string   `json:"frame,omitempty"`
-	Count       int      `json:"count"` // occurrences seen by this project so far
-	FirstSeen   string   `json:"first_seen"`
-	LastSeen    string   `json:"last_seen"`
-	Samples     []Sample `json:"samples,omitempty"` // redacted and truncated (message 1000, stack tail 4096)
+	Fingerprint   string   `json:"fingerprint"`
+	Service       string   `json:"service"`
+	Kind          string   `json:"kind"`
+	Pattern       string   `json:"pattern"`
+	Frame         string   `json:"frame,omitempty"`
+	Count         int      `json:"count"` // occurrences seen by this project so far; for a series, its sum rounded
+	FirstSeen     string   `json:"first_seen"`
+	LastSeen      string   `json:"last_seen"`
+	Samples       []Sample `json:"samples,omitempty"` // redacted and truncated (message 1000, stack tail 4096)
+	Site          string   `json:"site,omitempty"`    // metric series from here on
+	Tags          []string `json:"tags,omitempty"`
+	Value         float64  `json:"value,omitempty"` // sum over the window
+	Kept          float64  `json:"kept,omitempty"`
+	Share         float64  `json:"share,omitempty"`  // value / (value + kept)
+	Reason        string   `json:"reason,omitempty"` // share | threshold | fill
+	Cause         string   `json:"cause,omitempty"`
+	Causes        []Cause  `json:"causes,omitempty"`
+	EvidenceQuery string   `json:"evidence_query,omitempty"`
 }
 
 // PR is the pull request a task opened.
@@ -58,42 +78,45 @@ type PR struct {
 
 // Outcome is what a session reported through report_outcome.
 type Outcome struct {
-	Status     string `json:"status"`            // fixed | not_reproducible | cannot_fix | already_fixed
+	Status     string `json:"status"`            // fixed | not_reproducible | cannot_fix | already_fixed | answered
 	Summary    string `json:"summary"`           // ≤4000
 	Testing    string `json:"testing,omitempty"` // ≤2000
 	Title      string `json:"title,omitempty"`   // ≤120
 	Branch     string `json:"branch,omitempty"`
+	Question   string `json:"question,omitempty"` // ≤1000, a decision reviewers are asked to make
 	ReportedAt string `json:"reported_at"`
 }
 
 // Task is one dispatched attempt at one error group.
 type Task struct {
-	ID           string   `json:"id"`
-	Fingerprint  string   `json:"fingerprint"`
-	Group        Group    `json:"group"`
-	Status       string   `json:"status"`
-	Attempt      int      `json:"attempt"`
-	SessionID    string   `json:"session_id,omitempty"` // as returned by /fire (session_…)
-	SessionURL   string   `json:"session_url,omitempty"`
-	Branch       string   `json:"branch,omitempty"`
-	PR           *PR      `json:"pr,omitempty"`
-	Outcome      *Outcome `json:"outcome,omitempty"`
-	ExitReason   string   `json:"exit_reason,omitempty"` // runner post-session reason
-	Recurrence   string   `json:"recurrence,omitempty"`  // "" | resolved | recurred (merged tasks only)
-	Learnings    int      `json:"learnings,omitempty"`
-	OpenAttempts int      `json:"open_attempts,omitempty"`
-	Opening      string   `json:"opening,omitempty"` // guard while a PR is being opened; stale after 2m
-	Bound        bool     `json:"bound,omitempty"`   // a session binding may still exist
-	Error        string   `json:"error,omitempty"`
-	CreatedAt    string   `json:"created_at"`
-	DispatchedAt string   `json:"dispatched_at,omitempty"`
-	UpdatedAt    string   `json:"updated_at"`
-	FinishedAt   string   `json:"finished_at,omitempty"`
+	ID           string       `json:"id"`
+	Fingerprint  string       `json:"fingerprint"`
+	Group        Group        `json:"group"`
+	Status       string       `json:"status"`
+	Attempt      int          `json:"attempt"`
+	SessionID    string       `json:"session_id,omitempty"` // as returned by /fire (session_…)
+	SessionURL   string       `json:"session_url,omitempty"`
+	Branch       string       `json:"branch,omitempty"`
+	PR           *PR          `json:"pr,omitempty"`
+	Outcome      *Outcome     `json:"outcome,omitempty"`
+	ExitReason   string       `json:"exit_reason,omitempty"` // runner post-session reason
+	Recurrence   string       `json:"recurrence,omitempty"`  // "" | resolved | recurred (merged tasks only)
+	Learnings    int          `json:"learnings,omitempty"`
+	OpenAttempts int          `json:"open_attempts,omitempty"`
+	Opening      string       `json:"opening,omitempty"` // guard while a PR is being opened; stale after 2m
+	Bound        bool         `json:"bound,omitempty"`   // a session binding may still exist
+	Review       *ReviewState `json:"review,omitempty"`  // follow-through of the pull request
+	Error        string       `json:"error,omitempty"`
+	CreatedAt    string       `json:"created_at"`
+	DispatchedAt string       `json:"dispatched_at,omitempty"`
+	UpdatedAt    string       `json:"updated_at"`
+	FinishedAt   string       `json:"finished_at,omitempty"`
 }
 
-// Candidate is an error group waiting for a session.
+// Candidate is an error group or metric series waiting for a session.
 type Candidate struct {
 	Group Group `json:"group"`
+	Rank  int   `json:"rank,omitempty"` // metric series: admission order
 }
 
 // Track is the per-fingerprint history that outlives task truncation.
@@ -110,6 +133,7 @@ type Track struct {
 // Totals are the lifetime counters of a project.
 type Totals struct {
 	Sessions       int       `json:"sessions"`
+	Rounds         int       `json:"rounds,omitempty"` // follow-up sessions, also counted in Sessions
 	FailedSessions int       `json:"failed_sessions"`
 	NoFix          int       `json:"no_fix"`
 	PRsOpened      int       `json:"prs_opened"`
@@ -152,6 +176,7 @@ type binding struct {
 	Agent     string `json:"agent"`
 	Project   string `json:"project"`
 	Task      string `json:"task"`
+	Round     int    `json:"round,omitempty"`
 	CreatedAt string `json:"created_at"`
 }
 
@@ -265,25 +290,42 @@ func (l *Ledger) candidate(fp string) int {
 	return slices.IndexFunc(l.Candidates, func(c Candidate) bool { return c.Group.Fingerprint == fp })
 }
 
-func (l *Ledger) counts() (open, active int) {
+func (l *Ledger) counts() (open, active, rounds int) {
 	for _, t := range l.Tasks {
 		switch {
 		case t.Status == StatusPROpen:
 			open++
+			if t.Review != nil && t.Review.active() != nil {
+				rounds++
+			}
 		case isActive(t.Status):
 			active++
 		}
 	}
-	return open, active
+	return open, active, rounds
+}
+
+func (l *Ledger) sessionsToday(now time.Time) int {
+	if d := l.Daily[now.UTC().Format(time.DateOnly)]; d != nil {
+		return d.Sessions
+	}
+	return 0
+}
+
+func (l *Ledger) roundCapacity(limits Limits, now time.Time) bool {
+	_, active, rounds := l.counts()
+	return active+rounds < limits.MaxActiveSessions && l.sessionsToday(now) < limits.MaxSessionsPerDay
 }
 
 func (l *Ledger) hasCapacity(limits Limits, now time.Time) bool {
-	open, active := l.counts()
-	sessions := 0
-	if d := l.Daily[now.UTC().Format(time.DateOnly)]; d != nil {
-		sessions = d.Sessions
-	}
-	return open+active < limits.MaxOpenPRs && active < limits.MaxActiveSessions && sessions < limits.MaxSessionsPerDay
+	open, active, _ := l.counts()
+	return open+active < limits.MaxOpenPRs && l.roundCapacity(limits, now)
+}
+
+func (l *Ledger) fillCapacity(limits Limits, now time.Time) bool {
+	open, active, _ := l.counts()
+	// The last free slot stays for a series that breaches.
+	return open+active+1 < limits.MaxOpenPRs && l.roundCapacity(limits, now)
 }
 
 func (l *Ledger) eligible(fp string, limits Limits, now time.Time) bool {
@@ -358,6 +400,15 @@ func (l *Ledger) finish(t *Task, status string, now time.Time) {
 	t.UpdatedAt = t.FinishedAt
 	t.Opening = ""
 	t.Group.Samples = nil
+	if t.Review != nil {
+		for i := range t.Review.Rounds {
+			rd := &t.Review.Rounds[i]
+			if isActiveRound(rd.Status) {
+				rd.Status, rd.Error, rd.FinishedAt = StatusFailed, "the pull request is "+status, t.FinishedAt
+			}
+			dropRoundBodies(rd)
+		}
+	}
 	l.track(t.Fingerprint).LastStatus = status
 }
 
@@ -375,7 +426,9 @@ func (l *Ledger) addTask(t Task, limits Limits, now time.Time) bool {
 	if i < 0 {
 		return false
 	}
-	t.Group = l.Candidates[i].Group
+	if t.Group.Fingerprint != t.Fingerprint {
+		t.Group = l.Candidates[i].Group
+	}
 	t.Attempt = 1
 	if tr := l.Tracks[t.Fingerprint]; tr != nil {
 		t.Attempt = tr.Attempts + 1
@@ -452,7 +505,7 @@ func (l *Ledger) clearOpening(id, guard string) bool {
 	return true
 }
 
-func (l *Ledger) openPR(id string, o Outcome, pr PR, now time.Time) bool {
+func (l *Ledger) openPR(id string, o Outcome, pr PR, follow, draft bool, now time.Time) bool {
 	t := l.task(id)
 	if t == nil || t.Status != StatusRunning || t.PR != nil || t.Outcome != nil {
 		return false
@@ -463,6 +516,10 @@ func (l *Ledger) openPR(id string, o Outcome, pr PR, now time.Time) bool {
 	t.Opening = ""
 	t.Status = StatusPROpen
 	t.UpdatedAt = stamp(now)
+	if follow {
+		t.Review = &ReviewState{Waiting: o.Question, Draft: draft}
+		t.Review.settle()
+	}
 	l.recordSessionTime(t, now)
 	l.Totals.PRsOpened++
 	l.day(now).Opened++
@@ -601,7 +658,8 @@ func (l *Ledger) reconcile(limits Limits, now time.Time) bool {
 	for _, id := range expired {
 		l.failTask(id, []string{StatusRunning}, "session timed out", now)
 	}
-	return len(lost)+len(expired) > 0
+	rounds := l.reconcileRounds(timeout, now)
+	return len(lost)+len(expired) > 0 || rounds
 }
 
 func (l *Ledger) unbind(ids []string) bool {
@@ -635,13 +693,33 @@ func (l *Ledger) sessionEnded(id, reason, branch string, now time.Time) bool {
 	return changed
 }
 
-func (l *Ledger) setLearnings(id string, n int) bool {
+func (l *Ledger) setLearnings(id string, round, n int) bool {
 	t := l.task(id)
-	if t == nil || t.Learnings >= n {
+	if t == nil {
 		return false
 	}
-	t.Learnings = n
+	count := &t.Learnings
+	if round > 0 {
+		if t.Review == nil || t.Review.round(round) == nil {
+			return false
+		}
+		count = &t.Review.round(round).Learnings
+	}
+	if *count >= n {
+		return false
+	}
+	*count = n
 	return true
+}
+
+func (l *Ledger) inFlight(exclude string) []Task {
+	var out []Task
+	for _, t := range l.Tasks {
+		if t.ID != exclude && t.Status == StatusPROpen {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 // applyScan is a no-op unless the stored cursor is still from, the cursor the scan started at.
@@ -654,23 +732,8 @@ func (l *Ledger) applyScan(from, signal string, groups []Group, next time.Time, 
 		l.Candidates, l.Signal = nil, signal
 	}
 	grace := time.Duration(limits.RecurrenceGraceHours) * time.Hour
-	window := time.Duration(limits.RecurrenceWindowHours) * time.Hour
 	for _, g := range groups {
-		first, last := parseTime(g.FirstSeen), parseTime(g.LastSeen)
-		tr := l.track(g.Fingerprint)
-		tr.LastSeen = latest(tr.LastSeen, g.LastSeen)
-		merged := parseTime(tr.MergedAt)
-		if tr.MergedAt != "" && tr.Recurrence == "" && first.After(merged.Add(window)) {
-			// Seen only after the window, which the scans so far covered without a recurrence.
-			l.resolve(tr)
-		}
-		switch {
-		case tr.MergedAt != "" && tr.Recurrence == "" && last.After(merged.Add(grace)):
-			l.recur(g.Fingerprint)
-		case tr.MergedAt != "" && tr.Recurrence == recurrenceResolved && last.After(merged.Add(window)):
-			// The fix held through its window; an error seen after that is new work with a fresh attempt budget.
-			tr.Attempts, tr.MergedAt, tr.Recurrence = 0, "", ""
-		}
+		l.sight(g, grace, limits)
 		if t := l.openTask(g.Fingerprint); t != nil {
 			t.Group.Count += g.Count
 			t.Group.FirstSeen = earliest(t.Group.FirstSeen, g.FirstSeen)
@@ -681,6 +744,55 @@ func (l *Ledger) applyScan(from, signal string, groups []Group, next time.Time, 
 	}
 	l.compact(limits, now)
 	return true
+}
+
+func (l *Ledger) applyMetricScan(signal string, groups []Group, window time.Duration, limits Limits, now time.Time) bool {
+	l.Cursor = now.UTC().Format(time.RFC3339Nano)
+	if l.Signal != signal {
+		l.Candidates, l.Signal = nil, signal
+	}
+	firstSeen := map[string]string{}
+	for _, c := range l.Candidates {
+		firstSeen[c.Group.Fingerprint] = c.Group.FirstSeen
+	}
+	// A trailing sum keeps counting losses from before the fix for a whole window.
+	grace := time.Duration(limits.RecurrenceGraceHours)*time.Hour + window
+	cands := make([]Candidate, 0, len(groups))
+	for i, g := range groups {
+		// A fill series breaches nothing, so it says nothing about whether a merged fix held.
+		if g.Reason != reasonFill {
+			l.sight(g, grace, limits)
+		}
+		if t := l.openTask(g.Fingerprint); t != nil {
+			t.Group.Value, t.Group.Kept, t.Group.Share, t.Group.Count = g.Value, g.Kept, g.Share, g.Count
+			t.Group.LastSeen = latest(t.Group.LastSeen, g.LastSeen)
+			continue
+		}
+		g.FirstSeen = earliest(g.FirstSeen, firstSeen[g.Fingerprint])
+		cands = append(cands, Candidate{Group: g, Rank: i + 1})
+	}
+	l.Candidates = cands
+	l.compact(limits, now)
+	return true
+}
+
+func (l *Ledger) sight(g Group, grace time.Duration, limits Limits) {
+	window := time.Duration(limits.RecurrenceWindowHours) * time.Hour
+	first, last := parseTime(g.FirstSeen), parseTime(g.LastSeen)
+	tr := l.track(g.Fingerprint)
+	tr.LastSeen = latest(tr.LastSeen, g.LastSeen)
+	merged := parseTime(tr.MergedAt)
+	if tr.MergedAt != "" && tr.Recurrence == "" && first.After(merged.Add(window)) {
+		// Seen only after the window, which the scans so far covered without a recurrence.
+		l.resolve(tr)
+	}
+	switch {
+	case tr.MergedAt != "" && tr.Recurrence == "" && last.After(merged.Add(grace)):
+		l.recur(g.Fingerprint)
+	case tr.MergedAt != "" && tr.Recurrence == recurrenceResolved && last.After(merged.Add(window)):
+		// The fix held through its window; an error seen after that is new work with a fresh attempt budget.
+		tr.Attempts, tr.MergedAt, tr.Recurrence = 0, "", ""
+	}
 }
 
 func (l *Ledger) mergeCandidate(g Group) {
@@ -703,6 +815,7 @@ func (l *Ledger) mergeCandidate(g Group) {
 func sortCandidates(cs []Candidate) {
 	slices.SortStableFunc(cs, func(a, b Candidate) int {
 		return cmp.Or(
+			cmp.Compare(a.Rank, b.Rank),
 			cmp.Compare(b.Group.Count, a.Group.Count),
 			parseTime(b.Group.LastSeen).Compare(parseTime(a.Group.LastSeen)),
 			strings.Compare(a.Group.Fingerprint, b.Group.Fingerprint),

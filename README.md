@@ -258,7 +258,7 @@ See [docs/GITOPS.md](docs/GITOPS.md). All variables reuse `GITHUB_TOKEN`.
 </details>
 
 <details>
-<summary><b>Projects</b> — Claude Code sessions on self-hosted runners that fix Datadog errors</summary>
+<summary><b>Projects</b> — Claude Code sessions on self-hosted runners that fix what Datadog finds and follow their pull requests through review</summary>
 
 See [docs/PROJECTS.md](docs/PROJECTS.md). The chart sets all of these from its `projects` block.
 
@@ -311,7 +311,7 @@ URL:
 | Agents | `/ui/agents` | The roster — open a card for its prompts (read-only), or chat where `chat_enabled` |
 | Chats | `/ui/chats` | Conversations of every chat-enabled agent: open, start, rename or delete them (same access rules as the chat itself) |
 | Skills | `/ui/skills` | Instruction blocks the agents follow: the built-in ones from the prompt files (read-only) plus custom skills written here and appended to the system prompts of the agents they target |
-| Projects | `/ui/projects` | Standing goals an agent pursues on one repository, with status, open and merged PRs, merge rate and resolved errors, filterable by agent; each opens at `/ui/<agent>/project/<id>` with its statistics, 30-day chart, tasks, backlog, project memory and editor. Shown only when projects are enabled, and only project admins who may use the agent can change one — see [docs/PROJECTS.md](docs/PROJECTS.md) |
+| Projects | `/ui/projects` | Standing goals an agent pursues on one repository, with status, open, ready and merged PRs, merge rate and resolved problems, filterable by agent; each opens at `/ui/<agent>/project/<id>` with its statistics, 30-day chart, tasks with their follow-up rounds, backlog, project memory and editor. Shown only when projects are enabled, and only project admins who may use the agent can change one — see [docs/PROJECTS.md](docs/PROJECTS.md) |
 | Workflows | `/ui/workflows` | Every workflow across agents with schedule, status, last run, run / delete actions and GitOps sync state; each opens at `/ui/<agent>/workflow/<id>` with its flow diagram, prompt or tasks, run history and editor. "Run now" and "Sync now" both return immediately and report through the shared state the page polls, so neither holds a browser request open for the minutes they take |
 | Dashboards | `/ui/dashboards` | Every dashboard across agents (source dashboards, prompt templates, rendered reports) with sync state; each opens at `/ui/<agent>/dashboard/<id>` |
 | Pull requests | `/ui/pulls` | Open pull requests the agents authored, found by the marker every arbetern-written PR body carries: agent, requester, entry source (Slack / chat / workflow / project) and age, filterable by agent; ready-for-review PRs are listed first, drafts last with a draft label |
@@ -1079,13 +1079,16 @@ round-trip, no LLM call.
 
 A **project** gives an agent a standing goal on one GitHub repository, pursued
 by Claude Code sessions instead of the agent's own tool loop. It follows the
-error log groups a Datadog query finds and, for each group, fires a Claude Code
-routine whose session runs on self-hosted runners the chart deploys as
-locked-down, single-use Jobs (in arbetern's namespace by default). The session
-fixes the error on a `claude/…` branch and reports back through an MCP server
-arbetern serves only to its own sessions; arbetern checks the branch, opens the
-pull request with its own token, and then follows the pull request and the
-error to measure merge rate, time to merge and whether each fix held.
+error log groups a Datadog query finds, or the Datadog metric series that cross
+a threshold, and for each one fires a Claude Code routine whose session runs on
+self-hosted runners the chart deploys as locked-down, single-use Jobs (in
+arbetern's namespace by default). The session fixes the problem on a `claude/…`
+branch and reports back through an MCP server arbetern serves only to its own
+sessions; arbetern checks the branch, opens the pull request with its own token,
+and then follows the pull request and the problem to measure merge rate, time to
+merge and whether each fix held. With follow-through on, follow-up sessions
+answer failing checks and review comments, reply to each comment with what
+changed and why, and the pull request is marked ready once nothing is left.
 
 Projects are off by default, and every runner resource exists only when
 `projects.enabled` is on. They need a Team or Enterprise plan with self-hosted
@@ -1136,7 +1139,7 @@ slack/               # Slack webhook handler + response helpers
 prompts/             # YAML prompt loader + agent discovery
 dashboards/          # dashboard registry, sync runner, executor + CRUD API
 workflows/           # workflow engine (monoflow / subflows / event-triggered) + CRUD API
-projects/            # projects: Datadog error groups fixed by Claude Code sessions, runner gateway + MCP server, CRUD API
+projects/            # projects: Datadog error groups and metric series fixed by Claude Code sessions, PR follow-through, runner gateway + MCP server, CRUD API
 cmd/runner-spawn/    # spawn-runner hook: one Kubernetes Job and work-order Secret per session (stdlib only)
 runner/              # self-hosted runner image: Dockerfile, session wrapper, auth header helper, hooks
 billing/             # usage & billing ledger (per agent / model / source / user / workflow) + summary API

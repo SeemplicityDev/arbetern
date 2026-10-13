@@ -224,6 +224,7 @@ document.getElementById('dialog').addEventListener('keydown', e => {
 });
 
 function safeExternalUrl(value) {
+  if (!String(value || '').trim()) return '';
   try {
     const url = new URL(String(value || ''), window.location.origin);
     return url.protocol === 'http:' || url.protocol === 'https:' ? url.href : '';
@@ -1377,8 +1378,9 @@ function projSummaryHtml(list) {
     `<span class="chip"><b>${fmtInt(list.length)}</b> ${list.length === 1 ? 'project' : 'projects'}</span>`,
     `<span class="chip">sessions running <b>${fmtInt(total('active_sessions'))}</b></span>`,
     `<span class="chip">open pull requests <b>${fmtInt(total('prs_open'))}</b></span>`,
+    `<span class="chip">ready <b>${fmtInt(total('prs_done'))}</b></span>`,
     `<span class="chip">merged <b>${fmtInt(total('prs_merged'))}</b></span>`,
-    `<span class="chip">errors resolved <b>${fmtInt(total('resolved'))}</b></span>`,
+    `<span class="chip">resolved <b>${fmtInt(total('resolved'))}</b></span>`,
     `<span class="chip">in backlog <b>${fmtInt(total('backlog'))}</b></span>`,
   ].join('');
 }
@@ -1434,7 +1436,7 @@ function renderProjectsPage() {
   note.hidden = !words.length;
   if (words.length) note.textContent = `${fmtInt(rows.length)} ${rows.length === 1 ? 'match' : 'matches'} for “${projQuery}”`;
   if (!rows.length) {
-    const none = canCreateProject() ? 'No projects yet. Create one to have an agent fix the errors a Datadog query finds in a repository.' : 'No projects yet.';
+    const none = canCreateProject() ? 'No projects yet. Create one to have an agent keep fixing what a Datadog query finds in a repository.' : 'No projects yet.';
     el.innerHTML = emptyHtml(words.length ? 'No project matches this filter.' : list.length ? 'No projects for this agent.' : none, true);
     return;
   }

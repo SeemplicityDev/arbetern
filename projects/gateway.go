@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -42,6 +43,21 @@ type session struct {
 	project *Project
 	ledger  *Ledger
 	task    *Task
+	roundN  int
+}
+
+func (s *session) round() *Round {
+	if s.roundN == 0 || s.task.Review == nil {
+		return nil
+	}
+	return s.task.Review.round(s.roundN)
+}
+
+func (s *session) learningKey() string {
+	if s.roundN > 0 {
+		return s.task.ID + "#" + strconv.Itoa(s.roundN)
+	}
+	return s.task.ID
 }
 
 type sessionKey struct{}
@@ -148,10 +164,19 @@ func (g *gateway) resolveSession(ctx context.Context, claims *sessiontoken.Claim
 	if t == nil {
 		return nil, http.StatusForbidden, fmt.Errorf("task %s is no longer in the ledger of %s/%s", b.Task, b.Agent, b.Project)
 	}
-	if sessiontoken.NormalizeSessionID(t.SessionID) != sk {
+	s := &session{claims: claims, project: p, ledger: led, task: t, roundN: b.Round}
+	owner := t.SessionID
+	if b.Round > 0 {
+		rd := s.round()
+		if rd == nil {
+			return nil, http.StatusForbidden, fmt.Errorf("round %d of task %s is no longer in the ledger", b.Round, t.ID)
+		}
+		owner = rd.SessionID
+	}
+	if sessiontoken.NormalizeSessionID(owner) != sk {
 		return nil, http.StatusForbidden, fmt.Errorf("task %s belongs to another session", t.ID)
 	}
-	return &session{claims: claims, project: p, ledger: led, task: t}, http.StatusOK, nil
+	return s, http.StatusOK, nil
 }
 
 // bindingWaits covers a session that calls in before the tick that fired it has stored its binding.
@@ -190,6 +215,21 @@ func (g *gateway) handleSession(w http.ResponseWriter, req *http.Request) {
 	s := sessionFrom(req)
 	if isTerminal(s.task.Status) {
 		writeError(w, http.StatusForbidden, "forbidden")
+		return
+	}
+	if s.roundN > 0 {
+		rd := s.round()
+		if rd == nil || !isActiveRound(rd.Status) {
+			writeError(w, http.StatusForbidden, "forbidden")
+			return
+		}
+		httpx.WriteJSON(w, http.StatusOK, map[string]any{
+			"project":  s.project.Agent + "/" + s.project.ID,
+			"task":     s.task.ID,
+			"round":    rd.N,
+			"status":   rd.Status,
+			"reported": rd.Outcome != nil,
+		})
 		return
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{
@@ -238,14 +278,18 @@ func (g *gateway) handleEnded(w http.ResponseWriter, req *http.Request) {
 		}
 	}
 	now := time.Now().UTC()
-	taskID := s.task.ID
-	changed, err := g.apply(req.Context(), s, func(l *Ledger) bool { return l.sessionEnded(taskID, reason, branch, now) })
+	taskID, n := s.task.ID, s.roundN
+	transition := func(l *Ledger) bool { return l.sessionEnded(taskID, reason, branch, now) }
+	if n > 0 {
+		transition = func(l *Ledger) bool { return l.roundEnded(taskID, n, reason, now) }
+	}
+	changed, err := g.apply(req.Context(), s, transition)
 	if err != nil {
 		log.Printf("[projects] gateway: recording the end of session %s: %v", s.claims.SessionID, err)
 		writeError(w, http.StatusServiceUnavailable, "temporarily unavailable")
 		return
 	}
-	log.Printf("[projects] %s/%s task %s: session ended (exit %s, status %s, account %s)", s.project.Agent, s.project.ID, taskID, reason, s.task.Status, s.claims.AccountID)
+	log.Printf("[projects] %s/%s task %s round %d: session ended (exit %s, status %s, account %s)", s.project.Agent, s.project.ID, taskID, n, reason, s.task.Status, s.claims.AccountID)
 	if changed {
 		g.r.refreshStats(s.project.Agent, s.project.ID, s.ledger)
 	}
@@ -305,56 +349,93 @@ func (g *gateway) getTask(ctx context.Context, s *session, raw json.RawMessage) 
 	if err != nil {
 		return "", false, fmt.Errorf("reading project memory: %w", err)
 	}
+	if s.roundN > 0 {
+		rd := s.round()
+		if rd == nil {
+			return "This follow-up round is no longer in the ledger.", true, nil
+		}
+		return renderRoundBrief(s.project, s.task, rd, mem.Notes, g.r.skillsFor(s.project.Agent)), false, nil
+	}
 	recent := s.ledger.recentOutcomes(s.task.ID, recentOutcomeCount)
-	return renderBrief(s.project, s.task, mem.Notes, recent, g.r.skillsFor(s.project.Agent)), false, nil
+	inflight := s.ledger.inFlight(s.task.ID)
+	return renderBrief(s.project, s.task, mem.Notes, recent, inflight, g.r.skillsFor(s.project.Agent)), false, nil
+}
+
+type replyArg struct {
+	ID   string `json:"id"`
+	Body string `json:"body"`
 }
 
 type reportArgs struct {
-	Status  string `json:"status"`
-	Summary string `json:"summary"`
-	Title   string `json:"title"`
-	Branch  string `json:"branch"`
-	Testing string `json:"testing"`
+	Status      string     `json:"status"`
+	Summary     string     `json:"summary"`
+	Title       string     `json:"title"`
+	Branch      string     `json:"branch"`
+	Testing     string     `json:"testing"`
+	Question    string     `json:"question"`
+	Replies     []replyArg `json:"replies"`
+	RerunChecks bool       `json:"rerun_checks"`
 }
 
-func (a reportArgs) outcome(base string, now time.Time) (o Outcome, problem string) {
+func (a reportArgs) common(now time.Time) (o Outcome, problem string) {
 	o = Outcome{
 		Status:     strings.TrimSpace(a.Status),
 		Summary:    strings.TrimSpace(stripControl(a.Summary)),
 		Testing:    strings.TrimSpace(stripControl(a.Testing)),
 		Title:      oneLine(a.Title, 4*120),
+		Question:   strings.TrimSpace(stripControl(a.Question)),
 		ReportedAt: stamp(now),
+	}
+	for _, c := range []error{
+		checkText("summary", o.Summary, 1, 4000),
+		checkText("testing", o.Testing, 0, 2000),
+		checkText("title", o.Title, 0, 120),
+		checkText("question", o.Question, 0, maxQuestionChars),
+	} {
+		if c != nil {
+			return o, c.Error() + "."
+		}
+	}
+	return o, ""
+}
+
+func checkPushBranch(branch, base string) (string, string) {
+	branch = strings.TrimSpace(branch)
+	switch {
+	case branch == "":
+		return "", "branch is required when status is fixed: push your work and pass the branch name."
+	case !strings.HasPrefix(branch, BranchPrefix) || !validBranchName(branch):
+		return "", fmt.Sprintf("branch %q is not a valid %s branch name.", oneLine(branch, 200), BranchPrefix)
+	case branch == base:
+		return "", "branch must not be the base branch."
+	}
+	return branch, ""
+}
+
+func (a reportArgs) outcome(base string, now time.Time) (o Outcome, problem string) {
+	o, problem = a.common(now)
+	switch {
+	case problem != "":
+		return o, problem
+	case len(a.Replies) > 0 || a.RerunChecks:
+		return o, "replies and rerun_checks belong to follow-up rounds only."
 	}
 	switch o.Status {
 	case OutcomeFixed, OutcomeNotReproducible, OutcomeCannotFix, OutcomeAlreadyFixed:
 	default:
 		return o, "status must be one of fixed, not_reproducible, cannot_fix or already_fixed."
 	}
-	for _, c := range []error{
-		checkText("summary", o.Summary, 1, 4000),
-		checkText("testing", o.Testing, 0, 2000),
-		checkText("title", o.Title, 0, 120),
-	} {
-		if c != nil {
-			return o, c.Error() + "."
-		}
-	}
 	if o.Status != OutcomeFixed {
+		if o.Question != "" {
+			return o, "question goes with status fixed: push your best option and ask about the alternatives."
+		}
 		return o, ""
 	}
-	branch := strings.TrimSpace(a.Branch)
-	switch {
-	case o.Title == "":
+	if o.Title == "" {
 		return o, "title is required when status is fixed."
-	case branch == "":
-		return o, "branch is required when status is fixed: push your work and pass the branch name."
-	case !strings.HasPrefix(branch, BranchPrefix) || !validBranchName(branch):
-		return o, fmt.Sprintf("branch %q is not a valid %s branch name.", oneLine(branch, 200), BranchPrefix)
-	case branch == base:
-		return o, "branch must not be the base branch."
 	}
-	o.Branch = branch
-	return o, ""
+	o.Branch, problem = checkPushBranch(a.Branch, base)
+	return o, problem
 }
 
 func reported(t *Task) (string, bool) {
@@ -371,6 +452,9 @@ func (g *gateway) reportOutcome(ctx context.Context, s *session, raw json.RawMes
 	var a reportArgs
 	if err := decodeStrict(raw, &a); err != nil {
 		return "Invalid arguments: " + oneLine(err.Error(), 200), true, nil
+	}
+	if s.roundN > 0 {
+		return g.reportRound(ctx, s, a)
 	}
 	now := time.Now().UTC()
 	o, problem := a.outcome(s.project.Repo.BaseBranch, now)
@@ -432,7 +516,8 @@ func (g *gateway) openPullRequest(ctx context.Context, s *session, o Outcome, no
 	}
 	opened := time.Now().UTC()
 	pr := PR{Number: number, URL: url, Title: prTitle(p.Agent, o.Title), State: prStateOpen, CreatedAt: stamp(opened)}
-	changed, err := g.apply(ctx, s, func(l *Ledger) bool { return l.openPR(taskID, o, pr, opened) })
+	follow, draft := p.Review.FollowUp, opensDraft(p, o)
+	changed, err := g.apply(ctx, s, func(l *Ledger) bool { return l.openPR(taskID, o, pr, follow, draft, opened) })
 	if err != nil {
 		g.releaseOpening(s, guard)
 		log.Printf("[projects] %s/%s task %s: recording pull request %s: %v", p.Agent, p.ID, taskID, url, err)
@@ -448,6 +533,8 @@ func (g *gateway) openPullRequest(ctx context.Context, s *session, o Outcome, no
 	g.r.refreshStats(p.Agent, p.ID, s.ledger)
 	return "Opened pull request " + url + ". You can stop now.", false, nil
 }
+
+func opensDraft(p *Project, o Outcome) bool { return p.Review.Draft || o.Question != "" }
 
 func (g *gateway) releaseOpening(s *session, guard string) {
 	ctx, cancel := context.WithTimeout(context.Background(), persistTimeout)
@@ -490,7 +577,11 @@ func (g *gateway) pullRequestFor(ctx context.Context, s *session, o Outcome) (ur
 	if existing != nil && existing.URL != "" {
 		return existing.URL, ""
 	}
-	url, err = gh.CreatePullRequest(ctx, owner, repo, base, o.Branch, prTitle(p.Agent, o.Title), prBody(p, s.task, o))
+	create := gh.CreatePullRequest
+	if opensDraft(p, o) {
+		create = gh.CreateDraftPullRequest
+	}
+	url, err = create(ctx, owner, repo, base, o.Branch, prTitle(p.Agent, o.Title), prBody(p, s.task, o))
 	if err != nil {
 		return "", "GitHub did not open the pull request (" + githubProblem(err) + ")."
 	}
@@ -509,21 +600,25 @@ func (g *gateway) recordLearning(ctx context.Context, s *session, raw json.RawMe
 		return err.Error() + ".", true, nil
 	}
 	note = text.Truncate(redact.Text(note), maxNoteChars)
+	learnings := s.task.Learnings
+	if rd := s.round(); rd != nil {
+		learnings = rd.Learnings
+	}
 	switch {
 	case isTerminal(s.task.Status):
 		return "This work order is already finished (" + s.task.Status + ").", true, nil
-	case s.task.Learnings >= maxLearnings:
+	case learnings >= maxLearnings:
 		return fmt.Sprintf("You already recorded %d learnings for this work order.", maxLearnings), true, nil
 	}
 	id, err := store.NewID()
 	if err != nil {
 		return "", false, err
 	}
-	taskID := s.task.ID
-	n := Note{ID: id, Text: note, Source: noteSession, Task: taskID, At: stamp(time.Now())}
+	taskID, noteKey, roundN := s.task.ID, s.learningKey(), s.roundN
+	n := Note{ID: id, Text: note, Source: noteSession, Task: noteKey, At: stamp(time.Now())}
 	count := 0
 	_, added, err := g.r.mergeMemory(ctx, s.project.Agent, s.project.ID, func(m *Memory) bool {
-		count = m.count(noteSession, taskID)
+		count = m.count(noteSession, noteKey)
 		return count < maxLearnings && m.add(n)
 	})
 	if err != nil {
@@ -535,7 +630,7 @@ func (g *gateway) recordLearning(ctx context.Context, s *session, raw json.RawMe
 		}
 		return "Project memory is full of admin notes; the note was not saved.", true, nil
 	}
-	if _, err := g.apply(ctx, s, func(l *Ledger) bool { return l.setLearnings(taskID, count+1) }); err != nil {
+	if _, err := g.apply(ctx, s, func(l *Ledger) bool { return l.setLearnings(taskID, roundN, count+1) }); err != nil {
 		log.Printf("[projects] %s/%s task %s: counting a learning: %v", s.project.Agent, s.project.ID, taskID, err)
 	}
 	return "Saved.", false, nil

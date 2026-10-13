@@ -23,9 +23,16 @@ func computeStats(l *Ledger, p *Project, now time.Time) Stats {
 		Recurred:             t.Recurred,
 		ResolutionRate:       ratio(t.Resolved, t.Resolved+t.Recurred),
 		Backlog:              len(l.backlog(p.Signal.key(), p.Limits.effective(), now, 0)),
+		Rounds:               t.Rounds,
 		UpdatedAt:            stamp(now),
 	}
-	s.PRsOpen, s.ActiveSessions = l.counts()
+	open, active, rounds := l.counts()
+	s.PRsOpen, s.ActiveSessions = open, active+rounds
+	for _, task := range l.Tasks {
+		if task.Status == StatusPROpen && task.Review != nil && task.Review.Phase == PhaseDone {
+			s.PRsDone++
+		}
+	}
 	s.Daily = make([]Day, 0, statsDays)
 	today := now.UTC()
 	for i := statsDays - 1; i >= 0; i-- {

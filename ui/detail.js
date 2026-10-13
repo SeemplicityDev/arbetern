@@ -645,7 +645,16 @@ const PJD_TASK_STATUS = {
   closed: ['failed', 'closed'],
   failed: ['failed', 'failed'],
 };
-const PJD_OUTCOMES = { fixed: 'fixed', not_reproducible: 'not reproducible', cannot_fix: 'cannot fix', already_fixed: 'already fixed' };
+const PJD_OUTCOMES = { fixed: 'fixed', not_reproducible: 'not reproducible', cannot_fix: 'cannot fix', already_fixed: 'already fixed', answered: 'answered' };
+const PJD_PHASES = {
+  checking: ['open', 'PR open', 'Waiting for checks, review comments or the quiet period'],
+  fixing: ['running', 'fixing', 'A follow-up round is working on the pull request'],
+  waiting: ['paused', 'needs a person', 'A question or blocker needs a person'],
+  done: ['ok', 'ready', 'Checks pass and every review comment has an answer'],
+  exhausted: ['failed', 'out of rounds', 'The follow-up rounds are used up'],
+};
+const PJD_REASONS = { share: 'share over threshold', threshold: 'sum over threshold', fill: 'spare capacity' };
+const PJD_CI = { pending: 'running', passed: 'passing', failed: 'failing', none: 'none' };
 const PJD_NOTE_SOURCES = ['admin', 'session', 'review'];
 const PJD_LIMITS = [
   ['max_open_prs', 'Open pull requests', 1, 20, 3, 'Counts running sessions too'],
@@ -667,6 +676,11 @@ function pjdTaskStatus(t) {
     return ['ok', 'merged', 'Merged; watching whether the error comes back'];
   }
   if (t.status === 'no_fix') return ['paused', PJD_OUTCOMES[o.status] || 'no fix', o.summary || ''];
+  const rv = t.review;
+  if (t.status === 'pr_open' && rv && PJD_PHASES[rv.phase]) {
+    const [cls, label, title] = PJD_PHASES[rv.phase];
+    return [cls, label, (rv.phase === 'waiting' && rv.waiting) || title];
+  }
   const [cls, label] = PJD_TASK_STATUS[t.status] || ['paused', t.status || 'unknown'];
   return [cls, label, t.error || o.summary || ''];
 }
@@ -676,12 +690,33 @@ function pjdChips(facts) {
   return shown.length ? `<div class="chip-row">${shown.map(([k, v]) => `<span class="chip">${escapeHtml(k)} <b class="key">${escapeHtml(v)}</b></span>`).join('')}</div>` : '';
 }
 
+const pjdIsSeries = g => Array.isArray(g.tags) && g.tags.length > 0;
+const pjdTagValue = t => t.slice(t.indexOf(':') + 1);
+
 function pjdGroupCell(g, key) {
+  if (pjdIsSeries(g)) {
+    return `<button type="button" class="proj-toggle" data-key="${escapeHtml(key)}" aria-expanded="${pjdExpanded.has(key)}" title="${escapeHtml(g.tags.join(', '))}">${escapeHtml(g.tags.map(pjdTagValue).join(' · '))}</button> <span class="tag">${escapeHtml((g.site || '').toUpperCase())}</span>
+        <span class="sub" title="${escapeHtml(g.cause || '')}">${escapeHtml(g.cause || PJD_REASONS[g.reason] || '')}</span>`;
+  }
   return `<button type="button" class="proj-toggle" data-key="${escapeHtml(key)}" aria-expanded="${pjdExpanded.has(key)}">${escapeHtml(g.kind || 'error')}</button>${g.service ? ` <span class="tag">${escapeHtml(g.service)}</span>` : ''}
         <span class="sub" title="${escapeHtml(g.pattern || '')}">${escapeHtml(g.pattern || g.fingerprint || '')}</span>`;
 }
 
+function pjdSeriesDetailHtml(g) {
+  const tags = g.tags.map(t => (t.includes(':') ? [t.slice(0, t.indexOf(':')), pjdTagValue(t)] : ['tag', t]));
+  const causes = (g.causes || []).map(c => `<li><b>${fmtInt(c.count)}</b> × <code>${escapeHtml(c.value)}</code></li>`).join('');
+  const samples = (g.samples || []).map(s => `<div class="proj-label">Sample${s.at ? ' · ' + escapeHtml(fmtDateTime(s.at)) : ''}</div>
+      <pre class="run-result">${escapeHtml([s.message, s.fields].filter(Boolean).join('\n\n'))}</pre>`).join('');
+  return pjdChips([
+    ['site', (g.site || '').toUpperCase()], ...tags,
+    ['sum', fmtInt(Math.round(g.value || 0))], ['kept', g.kept ? fmtInt(Math.round(g.kept)) : ''], ['share', g.share ? pct(g.share * 100) : ''],
+    ['picked for', PJD_REASONS[g.reason]], ['first seen', g.first_seen && fmtDateTime(g.first_seen)], ['last seen', g.last_seen && fmtDateTime(g.last_seen)],
+  ]) + (causes ? `<div class="proj-label">Most frequent causes, in log lines</div><ul class="proj-causes">${causes}</ul>` : '')
+    + (g.evidence_query ? `<div class="proj-label">Evidence query</div><div class="run-result">${escapeHtml(g.evidence_query)}</div>` : '') + samples;
+}
+
 function pjdGroupDetailHtml(g) {
+  if (pjdIsSeries(g)) return pjdSeriesDetailHtml(g);
   const samples = (g.samples || []).map(s => `<div class="proj-label">Sample${s.at ? ' · ' + escapeHtml(fmtDateTime(s.at)) : ''}</div>
       <pre class="run-result">${escapeHtml([s.message, s.stack].filter(Boolean).join('\n\n'))}</pre>`).join('');
   return pjdChips([
@@ -705,7 +740,31 @@ function pjdTaskDetailHtml(t) {
     html += `<div class="proj-label">Session report${head ? ' · ' + head : ''}</div>${o.title ? `<div class="proj-title">${escapeHtml(o.title)}</div>` : ''}<div class="run-result">${escapeHtml(o.summary)}</div>`;
   }
   if (o && o.testing) html += `<div class="proj-label">Testing</div><div class="run-result">${escapeHtml(o.testing)}</div>`;
-  return html + `<div class="proj-label">Error group</div>${pjdGroupDetailHtml(t.group || {})}`;
+  if (o && o.question) html += `<div class="proj-label">Decision asked</div><div class="run-result">${escapeHtml(o.question)}</div>`;
+  if (t.review) html += pjdReviewHtml(t.review);
+  return html + `<div class="proj-label">${pjdIsSeries(t.group || {}) ? 'Series' : 'Error group'}</div>${pjdGroupDetailHtml(t.group || {})}`;
+}
+
+function pjdReviewHtml(rv) {
+  let html = `<div class="proj-label">Follow-through</div>` + pjdChips([
+    ['phase', (PJD_PHASES[rv.phase] || [])[1] || rv.phase], ['checks', PJD_CI[rv.ci] || rv.ci], ['failing', (rv.failed_checks || []).join(', ')],
+    ['unanswered', rv.pending ? fmtInt(rv.pending) : ''], ['conflict', rv.conflict ? 'yes' : ''], ['head', rv.head ? rv.head.slice(0, 7) : ''],
+    ['marked ready', rv.ready_at && fmtDateTime(rv.ready_at)], ['done', rv.done_at && fmtDateTime(rv.done_at)],
+  ]);
+  if (rv.waiting) html += `<div class="proj-label">Waiting on a person</div><div class="run-result">${escapeHtml(rv.waiting)}</div>`;
+  const rounds = rv.rounds || [];
+  if (rounds.length) html += `<div class="proj-label">Follow-up rounds</div>${rounds.map(pjdRoundHtml).join('')}`;
+  return html;
+}
+
+function pjdRoundHtml(rd) {
+  const o = rd.outcome;
+  const session = safeExternalUrl(rd.session_url);
+  const when = rd.finished_at ? timeAgo(rd.finished_at) : rd.dispatched_at ? 'started ' + timeAgo(rd.dispatched_at) : '';
+  const facts = [(rd.trigger || []).join(' + '), rd.replies ? plural(rd.replies, 'answer') : '', when].filter(Boolean).map(escapeHtml).join(' · ');
+  return `<div class="proj-round"><span class="tag">round ${fmtInt(rd.n)}</span> <b>${escapeHtml(o ? PJD_OUTCOMES[o.status] || o.status : rd.status)}</b>
+      ${facts ? `<span class="muted">${facts}</span>` : ''}${session ? ` · <a href="${escapeHtml(session)}" target="_blank" rel="noopener">session</a>` : ''}
+      ${o && o.summary ? `<div class="run-result">${escapeHtml(o.summary)}</div>` : ''}${rd.error ? `<div class="run-error">${escapeHtml(rd.error)}</div>` : ''}</div>`;
 }
 
 function pjdTaskRowsHtml(p, t) {
@@ -754,17 +813,18 @@ function pjdStatsHtml(s) {
     s.failed_sessions ? `${fmtInt(s.failed_sessions)} failed` : '',
     s.no_fix ? `${fmtInt(s.no_fix)} no fix` : '',
   ].filter(Boolean).join(' · ');
+  const open = [s.prs_open ? `${fmtInt(s.prs_open)} open now` : '', s.prs_done ? `${fmtInt(s.prs_done)} ready` : ''].filter(Boolean).join(' · ');
   const tiles = [
-    ['Sessions', fmtInt(s.sessions), sessions],
-    ['PRs opened', fmtInt(s.prs_opened), s.prs_open ? `${fmtInt(s.prs_open)} open now` : ''],
+    ['Sessions', fmtInt(s.sessions), [sessions, s.rounds ? `${fmtInt(s.rounds)} follow-up` : ''].filter(Boolean).join(' · ')],
+    ['PRs opened', fmtInt(s.prs_opened), open],
     ['Merged', fmtInt(s.prs_merged), s.lines_changed ? `${fmtInt(s.lines_changed)} lines changed` : ''],
     ['Closed unmerged', fmtInt(s.prs_closed), ''],
     ['Merge rate', projRate(s.merge_rate, decided), decided ? `of ${plural(decided, 'decided PR')}` : 'no PR decided yet'],
     ['Median time to merge', fmtHours(s.median_merge_hours), s.median_session_minutes ? `median session ${fmtHours(s.median_session_minutes / 60)}` : ''],
-    ['Resolved', fmtInt(s.resolved), 'error stayed quiet'],
-    ['Recurred', fmtInt(s.recurred), 'error came back'],
+    ['Resolved', fmtInt(s.resolved), 'stayed quiet after the merge'],
+    ['Recurred', fmtInt(s.recurred), 'came back after the merge'],
     ['Resolution rate', projRate(s.resolution_rate, settled), settled ? `of ${fmtInt(settled)} settled` : 'no fix settled yet'],
-    ['Backlog', fmtInt(s.backlog), s.error_groups ? `${plural(s.error_groups, 'error group')} tracked` : ''],
+    ['Backlog', fmtInt(s.backlog), s.error_groups ? `${fmtInt(s.error_groups)} tracked` : ''],
   ];
   return `<div class="stats proj-stats">${tiles.map(([k, v, note]) => `<div class="stat"><div class="k">${escapeHtml(k)}</div><div class="v">${escapeHtml(v)}</div>${note ? `<div class="proj-stat-note">${escapeHtml(note)}</div>` : ''}</div>`).join('')}</div>`;
 }
@@ -786,26 +846,44 @@ function pjdChartHtml(s) {
     </section>`;
 }
 
+function pjdSignalMetaHtml(sig, wide) {
+  if (sig.type !== 'datadog_metrics') {
+    return metaItemHtml('First scan', 'last ' + (sig.lookback || '24h'))
+      + wide('Datadog query', `<code>${escapeHtml(sig.query || '—')}</code>`)
+      + (sig.pattern ? wide('Pattern', `<code>${escapeHtml(sig.pattern)}</code>`) : metaItemHtml('Pattern', 'none'));
+  }
+  const ev = sig.evidence;
+  const attrs = ev ? Object.entries(ev.attributes || {}).map(([k, v]) => `${k} → ${v}`).join(', ') : '';
+  return metaItemHtml('Window', 'last ' + (sig.window || '48h'))
+    + metaItemHtml('Thresholds', [sig.threshold ? 'sum over ' + fmtInt(sig.threshold) : '', sig.share_threshold ? 'share over ' + pct(sig.share_threshold * 100) : ''].filter(Boolean).join(' or ') || '—')
+    + metaItemHtml('Spare capacity', sig.fill ? 'largest series under threshold' : 'unused')
+    + wide('Metric query', `<code>${escapeHtml(sig.query || '—')}</code>`)
+    + (sig.kept_query ? wide('Kept query', `<code>${escapeHtml(sig.kept_query)}</code>`) : '')
+    + (sig.pattern ? wide('Pattern', `<code>${escapeHtml(sig.pattern)}</code>`) : '')
+    + (ev ? wide('Evidence', `<code>${escapeHtml(ev.query || '')}</code><div class="sub">${escapeHtml([attrs, ev.group_by ? 'cause from ' + ev.group_by : '', (ev.fields || []).length ? 'samples keep ' + ev.fields.join(', ') : ''].filter(Boolean).join(' · '))}</div>`) : '');
+}
+
 function pjdMetaHtml(p) {
-  const r = p.repo || {}, sig = p.signal || {}, d = p.dispatch || {}, l = p.limits || {};
+  const r = p.repo || {}, sig = p.signal || {}, d = p.dispatch || {}, l = p.limits || {}, rv = p.review || {};
   const repoUrl = r.owner && r.name ? safeExternalUrl(`https://github.com/${encodeURIComponent(r.owner)}/${encodeURIComponent(r.name)}`) : '';
   const nextDispatch = p.next_dispatch_after && new Date(p.next_dispatch_after).getTime() > Date.now() ? fmtDateTime(p.next_dispatch_after) : '—';
   const wide = (label, html) => `<div class="meta-item proj-wide"><div class="label">${escapeHtml(label)}</div><div class="value">${html}</div></div>`;
+  const sites = sig.type === 'datadog_metrics' ? (sig.sites || []) : [sig.site].filter(Boolean);
+  const follow = rv.follow_up ? [rv.draft ? 'drafts' : '', `${fmtInt(rv.max_rounds)} rounds`, `quiet ${fmtInt(rv.settle_minutes)}m`].filter(Boolean).join(' · ') : 'off';
   return `<div class="meta-grid proj-meta">
       ${metaItemHtml('Agent', agentLabel(p.agent))}
       <div class="meta-item"><div class="label">Repository</div><div class="value">${repoUrl ? `<a href="${escapeHtml(repoUrl)}" target="_blank" rel="noopener">${escapeHtml(r.owner + '/' + r.name)}</a>` : '—'}</div></div>
       ${metaItemHtml('Base branch', r.base_branch || '—')}
-      ${metaItemHtml('Datadog site', sig.site ? sig.site.toUpperCase() : '—')}
+      ${metaItemHtml('Datadog site', sites.length ? sites.map(x => x.toUpperCase()).join(' + ') : '—')}
       ${metaItemHtml('Interval', p.interval ? 'every ' + p.interval : '—')}
-      ${metaItemHtml('First scan', 'last ' + (sig.lookback || '24h'))}
+      ${metaItemHtml('Follow-through', follow)}
       ${metaItemHtml('Routine', d.routine_id || '—')}
       ${metaItemHtml('Trigger token', d.token ? d.token + (d.token_configured === false ? ' (missing)' : '') : '—')}
       ${metaItemHtml('Created by', p.created_by || '—')}
       ${metaItemHtml('Created', fmtDateTime(p.created_at))}
       ${metaItemHtml('Last tick', p.last_tick ? fmtDateTime(p.last_tick) : '—')}
       ${metaItemHtml('Next dispatch after', nextDispatch)}
-      ${wide('Datadog query', `<code>${escapeHtml(sig.query || '—')}</code>`)}
-      ${sig.pattern ? wide('Pattern', `<code>${escapeHtml(sig.pattern)}</code>`) : metaItemHtml('Pattern', 'none')}
+      ${pjdSignalMetaHtml(sig, wide)}
       ${wide('Limits', `<div class="chip-row">${PJD_LIMITS.map(([k, label]) => `<span class="chip">${escapeHtml(label)} <b>${fmtInt(l[k])}</b></span>`).join('')}</div>`)}
     </div>`;
 }
@@ -865,16 +943,18 @@ function renderProjectDetail(root, p) {
     banners += `<div class="detail-banner danger"><strong>Last tick failed</strong>${p.last_tick ? ' (' + escapeHtml(fmtDateTime(p.last_tick)) + ')' : ''}: ${escapeHtml(p.last_error)}</div>`;
   }
 
+  const metric = (p.signal || {}).type === 'datadog_metrics';
+  const [what, count] = metric ? ['Series', 'Sum'] : ['Error group', 'Count'];
   const tasksBody = tasks.length
     ? `<div class="list-scroll" data-scroll="tasks"><table class="data-table"><thead><tr>
-        <th>Status</th><th>Error group</th><th class="n">Count</th><th class="n">Attempt</th><th>Session</th><th>Pull request</th><th>Updated</th>
+        <th>Status</th><th>${what}</th><th class="n">${count}</th><th class="n">Attempt</th><th>Session</th><th>Pull request</th><th>Updated</th>
       </tr></thead><tbody>${tasks.map(t => pjdTaskRowsHtml(p, t)).join('')}</tbody></table></div>`
-    : emptyHtml(p.state_error ? 'Tasks could not be loaded.' : 'No sessions dispatched yet. When the query finds an error group and the limits allow, its task shows up here.');
+    : emptyHtml(p.state_error ? 'Tasks could not be loaded.' : `No sessions dispatched yet. When the query finds ${metric ? 'a series over its threshold' : 'an error group'} and the limits allow, its task shows up here.`);
   const backlogBody = backlog.length
     ? `<div class="list-scroll" data-scroll="backlog"><table class="data-table"><thead><tr>
-        <th>Error group</th><th class="n">Count</th><th>First seen</th><th>Last seen</th>
+        <th>${what}</th><th class="n">${count}</th><th>First seen</th><th>Last seen</th>
       </tr></thead><tbody>${backlog.map(pjdBacklogRowsHtml).join('')}</tbody></table></div>`
-    : emptyHtml(p.state_error ? 'The backlog could not be loaded.' : 'No error group is waiting for a session.');
+    : emptyHtml(p.state_error ? 'The backlog could not be loaded.' : 'Nothing is waiting for a session.');
   const waiting = backlog.length
     ? `${s.backlog > backlog.length ? `top ${fmtInt(backlog.length)} of ${fmtInt(s.backlog)}` : fmtInt(backlog.length)} waiting for capacity`
     : '';
@@ -1010,16 +1090,37 @@ function projectForm(p) {
     uiAlert('Creating a project needs access to at least one agent.', { title: 'No agent available', tone: 'warn' });
     return;
   }
-  const r = (p && p.repo) || {}, sig = (p && p.signal) || {}, d = (p && p.dispatch) || {}, l = (p && p.limits) || {};
+  const r = (p && p.repo) || {}, sig = (p && p.signal) || {}, d = (p && p.dispatch) || {}, l = (p && p.limits) || {}, rv = (p && p.review) || {};
   const input = (id, value, attrs) => `<input class="form-input" id="${id}" value="${escapeHtml(value == null ? '' : value)}"${attrs || ''}>`;
+  const check = (id, on, label) => `<label class="check-row"><input type="checkbox" id="${id}"${on ? ' checked' : ''}> ${label}</label>`;
   const code = ' autocapitalize="off" spellcheck="false"';
+  const metric = sig.type === 'datadog_metrics';
   const site = sig.site === 'eu' ? 'eu' : 'us';
+  const sites = metric ? sig.sites || [] : ['us'];
+  const ev = sig.evidence || {};
+  const attrLines = Object.entries(ev.attributes || {}).map(([k, v]) => `${k} = ${v}`).join('\n');
   const limits = PJD_LIMITS.map(([k, label, min, max, def, hint]) => formField(escapeHtml(label),
     `<input class="form-input" id="pjf-l-${k}" type="number" min="${min}" max="${max}" step="1" inputmode="numeric" value="${l[k] ? escapeHtml(l[k]) : ''}" placeholder="${def}">`,
     `${min}–${max}, default ${def}${hint ? '. ' + escapeHtml(hint) : ''}`)).join('');
+  const logFields = `<div data-signal="datadog"${metric ? ' hidden' : ''}>`
+    + `<div class="form-grid2">${formField('Site', `<select class="form-input" id="pjf-site"><option value="us"${site === 'us' ? ' selected' : ''}>US</option><option value="eu"${site === 'eu' ? ' selected' : ''}>EU</option></select>`)}${formField('First scan', input('pjf-lookback', sig.lookback, ' placeholder="24h"' + code), 'How far back the first scan looks, 1h to 168h.')}</div>`
+    + formField('Query', input('pjf-query', metric ? '' : sig.query, ' maxlength="1000" placeholder="service:example status:error"' + code), 'Log search query. Matching errors are grouped by service, error kind, message and top stack frame.')
+    + formField('Pattern', input('pjf-pattern', metric ? '' : sig.pattern, ' maxlength="500" placeholder="(?i)timeout|KeyError"' + code), 'Optional regular expression. A group is kept when it matches the error kind, the message or a sample.')
+    + '</div>';
+  const metricFields = `<div data-signal="datadog_metrics"${metric ? '' : ' hidden'}>`
+    + `<div class="form-grid2">${formField('Sites', `<div class="chip-row">${check('pjf-site-us', sites.includes('us'), 'US')}${check('pjf-site-eu', sites.includes('eu'), 'EU')}</div>`)}${formField('Window', input('pjf-window', sig.window, ' placeholder="48h"' + code), 'Each series is summed over this window, 1h to 168h.')}</div>`
+    + formField('Metric query', input('pjf-mquery', metric ? sig.query : '', ' maxlength="1000" placeholder="sum:jobs.failed{env:prod} by {service,customer}.rollup(sum, 3600)"' + code), 'What went wrong, grouped into series with by {…}. Every point of a series is added up.')
+    + formField('Kept query', input('pjf-kept', sig.kept_query, ' maxlength="1000" placeholder="sum:jobs.succeeded{env:prod} by {service,customer}.rollup(sum, 3600)"' + code), 'Optional. What the same series handled correctly; it gives each series a share.')
+    + `<div class="form-grid2">${formField('Sum threshold', input('pjf-threshold', sig.threshold || '', ' type="number" min="0" step="any" placeholder="0"'), 'A series breaches when its sum is above this. 0 turns it off.')}${formField('Share threshold, %', input('pjf-share', sig.share_threshold ? +(sig.share_threshold * 100).toFixed(4) : '', ' type="number" min="0" max="99.99" step="any" placeholder="0"'), 'A series breaches when its share is above this. Needs a kept query.')}</div>`
+    + formField('Pattern', input('pjf-mpattern', metric ? sig.pattern : '', ' maxlength="500" placeholder="customer:(?:acme|globex)"' + code), 'Optional regular expression over a series’ tags.')
+    + check('pjf-fill', sig.fill, 'Use spare capacity on the largest series under every threshold')
+    + formField('Evidence query', input('pjf-ev-query', ev.query, ' maxlength="1000" placeholder="env:prod status:error"' + code), 'Optional. Logs that explain a series, fetched when its session starts.')
+    + formField('Evidence attributes', `<textarea class="form-textarea proj-attrs" id="pjf-ev-attrs" rows="3"${code} placeholder="service = @service\ncustomer = @usr.org">${escapeHtml(attrLines)}</textarea>`, 'One metric tag = log attribute per line. Narrows the evidence query to each series.')
+    + `<div class="form-grid2">${formField('Cause facet', input('pjf-ev-group', ev.group_by, ' placeholder="@error.kind"' + code), 'Optional. Its most frequent value is the dominant cause.')}${formField('Sample fields', input('pjf-ev-fields', (ev.fields || []).join(', '), ' placeholder="@error.message, @error.stack"' + code), 'Optional. Attributes kept in samples; empty keeps them all.')}</div>`
+    + '</div>';
   openForm({
     title: isNew ? 'New project' : 'Edit project',
-    subtitle: isNew ? 'An agent keeps fixing the errors a Datadog query finds in one repository' : (p.name || p.id),
+    subtitle: isNew ? 'An agent keeps fixing what a Datadog query finds in one repository' : (p.name || p.id),
     saveLabel: isNew ? 'Create project' : 'Save changes',
     html: formField('Name', input('pjf-name', p && p.name, ' maxlength="80" placeholder="Fix production errors"'))
       + (isNew ? formField('Agent', `<select class="form-input" id="pjf-agent">${agents.map(a => `<option value="${escapeHtml(a.id)}">${escapeHtml(a.name)}</option>`).join('')}</select>`, 'Its skills go into every work order. It needs Datadog access.') : '')
@@ -1029,9 +1130,12 @@ function projectForm(p) {
       + '<div class="form-section">Repository</div>'
       + `<div class="form-grid3">${formField('Owner', input('pjf-owner', r.owner, ' placeholder="owner"' + code))}${formField('Name', input('pjf-repo', r.name, ' placeholder="repo"' + code))}${formField('Base branch', input('pjf-base', r.base_branch, ' placeholder="main"' + code), isNew ? 'Empty uses the default branch.' : '')}</div>`
       + '<div class="form-section">Datadog</div>'
-      + `<div class="form-grid2">${formField('Site', `<select class="form-input" id="pjf-site"><option value="us"${site === 'us' ? ' selected' : ''}>US</option><option value="eu"${site === 'eu' ? ' selected' : ''}>EU</option></select>`)}${formField('First scan', input('pjf-lookback', sig.lookback, ' placeholder="24h"' + code), 'How far back the first scan looks, 1h to 168h.')}</div>`
-      + formField('Query', input('pjf-query', sig.query, ' maxlength="1000" placeholder="service:example status:error"' + code), 'Log search query. Matching errors are grouped by service, error kind, message and top stack frame.')
-      + formField('Pattern', input('pjf-pattern', sig.pattern, ' maxlength="500" placeholder="(?i)timeout|KeyError"' + code), 'Optional regular expression. A group is kept when it matches the error kind, the message or a sample.')
+      + formField('Signal', `<select class="form-input" id="pjf-type" onchange="pjfSignalType(this.value)"><option value="datadog"${metric ? '' : ' selected'}>Log errors</option><option value="datadog_metrics"${metric ? ' selected' : ''}>Metric series over a threshold</option></select>`)
+      + logFields + metricFields
+      + '<div class="form-section">Pull requests</div>'
+      + check('pjf-follow', rv.follow_up, 'Follow each pull request: answer failing checks and review comments until it is ready')
+      + check('pjf-draft', rv.draft, 'Open pull requests as drafts and mark them ready once nothing is left')
+      + `<div class="form-grid2">${formField('Follow-up rounds', input('pjf-rounds', rv.max_rounds || '', ' type="number" min="1" max="10" step="1" inputmode="numeric" placeholder="5"'), 'Sessions per pull request, 1–10.')}${formField('Quiet minutes', input('pjf-settle', rv.settle_minutes || '', ' type="number" min="5" max="240" step="1" inputmode="numeric" placeholder="15"'), 'Nothing new for this long before a pull request counts as ready.')}</div>`
       + '<div class="form-section">Dispatch</div>'
       + `<div class="form-grid3">${formField('Routine id', input('pjf-routine', d.routine_id, ' placeholder="trig_0123456789abcdef"' + code))}${formField('Trigger token', input('pjf-token', d.token, ' maxlength="32" placeholder="default"' + code), 'A token name this deployment holds, never the token.')}${formField('Check every', input('pjf-interval', p && p.interval, ' placeholder="15m"' + code), '5m to 24h.')}</div>`
       + `<details class="form-more"><summary>Limits</summary><div class="form-grid2">${limits}</div></details>`
@@ -1056,14 +1160,60 @@ function projectForm(p) {
   });
 }
 
+function pjfSignalType(type) {
+  document.querySelectorAll('#form-body [data-signal]').forEach(el => { el.hidden = el.dataset.signal !== type; });
+}
+
+function pjfSignalShape(sig) {
+  if (sig.type !== 'datadog_metrics') {
+    return { type: 'datadog', site: sig.site || '', query: sig.query || '', pattern: sig.pattern || '', lookback: sig.lookback || '' };
+  }
+  const out = {
+    type: 'datadog_metrics', sites: sig.sites || [], query: sig.query || '', kept_query: sig.kept_query || '', window: sig.window || '',
+    threshold: sig.threshold || 0, share_threshold: sig.share_threshold || 0, fill: !!sig.fill, pattern: sig.pattern || '',
+  };
+  const ev = sig.evidence;
+  if (ev && (ev.query || Object.keys(ev.attributes || {}).length)) {
+    out.evidence = { query: ev.query || '', attributes: Object.fromEntries(Object.entries(ev.attributes || {}).sort()), group_by: ev.group_by || '', fields: ev.fields || [] };
+  }
+  return out;
+}
+
+function pjfAttributes(textValue) {
+  const out = {};
+  for (const line of textValue.split('\n')) {
+    if (!line.trim()) continue;
+    const at = line.indexOf('=');
+    if (at < 1) throw new Error(`Evidence attributes: “${line.trim()}” is not tag = @attribute.`);
+    out[line.slice(0, at).trim()] = line.slice(at + 1).trim();
+  }
+  return out;
+}
+
 function pjfBody(isNew) {
+  const type = formValue('pjf-type') === 'datadog_metrics' ? 'datadog_metrics' : 'datadog';
+  const metric = type === 'datadog_metrics';
+  const signal = pjfSignalShape(metric ? {
+    type, sites: ['us', 'eu'].filter(x => document.getElementById('pjf-site-' + x).checked),
+    query: formValue('pjf-mquery'), kept_query: formValue('pjf-kept'), window: formValue('pjf-window'),
+    threshold: parseFloat(formValue('pjf-threshold')) || 0, share_threshold: (parseFloat(formValue('pjf-share')) || 0) / 100,
+    fill: document.getElementById('pjf-fill').checked, pattern: formValue('pjf-mpattern'),
+    evidence: {
+      query: formValue('pjf-ev-query'), attributes: pjfAttributes(document.getElementById('pjf-ev-attrs').value), group_by: formValue('pjf-ev-group'),
+      fields: formValue('pjf-ev-fields').split(',').map(x => x.trim()).filter(Boolean),
+    },
+  } : { type, site: formValue('pjf-site'), query: formValue('pjf-query'), pattern: formValue('pjf-pattern'), lookback: formValue('pjf-lookback') });
   const body = {
     name: formValue('pjf-name'),
     description: formValue('pjf-desc'),
     goal: formValue('pjf-goal'),
     instructions: formValue('pjf-instructions'),
     repo: { owner: formValue('pjf-owner'), name: formValue('pjf-repo'), base_branch: formValue('pjf-base') },
-    signal: { type: 'datadog', site: formValue('pjf-site'), query: formValue('pjf-query'), pattern: formValue('pjf-pattern'), lookback: formValue('pjf-lookback') },
+    signal,
+    review: {
+      follow_up: document.getElementById('pjf-follow').checked, draft: document.getElementById('pjf-draft').checked,
+      max_rounds: parseInt(formValue('pjf-rounds'), 10) || 0, settle_minutes: parseInt(formValue('pjf-settle'), 10) || 0,
+    },
     dispatch: { routine_id: formValue('pjf-routine'), token: formValue('pjf-token') },
     limits: Object.fromEntries(PJD_LIMITS.map(([k]) => [k, parseInt(formValue('pjf-l-' + k), 10) || 0])),
     interval: formValue('pjf-interval'),
@@ -1073,17 +1223,19 @@ function pjfBody(isNew) {
   if (!body.goal) throw new Error('Goal is required.');
   if (!body.repo.owner || !body.repo.name) throw new Error('Repository owner and name are required.');
   if (!isNew && !body.repo.base_branch) throw new Error('Base branch is required.');
-  if (!body.signal.query) throw new Error('A Datadog query is required.');
+  if (!signal.query) throw new Error('A Datadog query is required.');
+  if (metric && !signal.sites.length) throw new Error('Pick at least one Datadog site.');
   if (!body.dispatch.routine_id || !body.dispatch.token) throw new Error('Routine id and trigger token name are required.');
   return isNew ? { agent: formValue('pjf-agent'), ...body } : body;
 }
 
 function pjfChanges(p, body) {
-  const r = p.repo || {}, sig = p.signal || {}, d = p.dispatch || {}, l = p.limits || {};
+  const r = p.repo || {}, d = p.dispatch || {}, l = p.limits || {}, rv = p.review || {};
   const before = {
     name: p.name || '', description: p.description || '', goal: p.goal || '', instructions: p.instructions || '',
     repo: { owner: r.owner || '', name: r.name || '', base_branch: r.base_branch || '' },
-    signal: { type: 'datadog', site: sig.site || '', query: sig.query || '', pattern: sig.pattern || '', lookback: sig.lookback || '' },
+    signal: pjfSignalShape(p.signal || {}),
+    review: { follow_up: !!rv.follow_up, draft: !!rv.draft, max_rounds: rv.max_rounds || 0, settle_minutes: rv.settle_minutes || 0 },
     dispatch: { routine_id: d.routine_id || '', token: d.token || '' },
     limits: Object.fromEntries(PJD_LIMITS.map(([k]) => [k, l[k] || 0])),
     interval: p.interval || '',
