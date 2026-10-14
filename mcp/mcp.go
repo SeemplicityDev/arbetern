@@ -5,6 +5,8 @@ package mcp
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +14,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -325,22 +328,51 @@ func (r *Registry) Test(ctx context.Context, id string) (*Connector, error) {
 // ToolsFor returns the tools of every enabled connector agentID may use, each
 // with a unique LLM-safe name.
 func (r *Registry) ToolsFor(agentID string) []AgentTool {
+	return r.toolsWhere(func(c *Connector) bool { return appliesTo(c, agentID) })
+}
+
+// ProjectTools returns the tools of the enabled connectors with these ids that are open to every agent, named as ToolsFor names them.
+func (r *Registry) ProjectTools(ids []string) []AgentTool {
+	return r.toolsWhere(func(c *Connector) bool { return slices.Contains(ids, c.ID) && len(c.Agents) == 0 })
+}
+
+func (r *Registry) toolsWhere(keep func(*Connector) bool) []AgentTool {
 	var eligible []*Connector
 	r.docs.Range(func(_ string, c *Connector) {
-		if c.Enabled && c.LastError == "" && len(c.Tools) > 0 && appliesTo(c, agentID) {
+		if c.Enabled && c.LastError == "" && len(c.Tools) > 0 && keep(c) {
 			eligible = append(eligible, c)
 		}
 	})
 	sort.Slice(eligible, func(i, j int) bool { return eligible[i].ID < eligible[j].ID })
-	var out []AgentTool
-	taken := map[string]bool{}
+	type candidate struct {
+		c    *Connector
+		t    ToolInfo
+		base string
+	}
+	var all []candidate
+	shared := map[string]int{}
 	for _, c := range eligible {
 		prefix := "mcp_" + store.Slugify(c.Name, "server")
 		for _, t := range c.Tools {
-			name := llmToolName(prefix, t.Name, taken)
-			taken[name] = true
-			out = append(out, AgentTool{ConnectorID: c.ID, ConnectorName: c.Name, Tool: t, LLMName: name})
+			base := llmToolBase(prefix, t.Name)
+			all = append(all, candidate{c, t, base})
+			shared[base]++
 		}
+	}
+	// A shared name gets a suffix of its connector and tool, not of its position, so a reordered tool list never maps a name to another tool.
+	var out []AgentTool
+	taken := map[string]bool{}
+	for _, cd := range all {
+		name := cd.base
+		if shared[cd.base] > 1 {
+			sum := sha256.Sum256([]byte(cd.c.ID + "/" + cd.t.Name))
+			name = withNameSuffix(cd.base, "_"+hex.EncodeToString(sum[:3]))
+		}
+		for i := 2; taken[name]; i++ {
+			name = withNameSuffix(cd.base, fmt.Sprintf("_%d", i))
+		}
+		taken[name] = true
+		out = append(out, AgentTool{ConnectorID: cd.c.ID, ConnectorName: cd.c.Name, Tool: cd.t, LLMName: name})
 	}
 	return out
 }
@@ -490,17 +522,16 @@ func (r *Registry) validate(c *Connector) error {
 
 var toolNameRe = regexp.MustCompile(`[^a-zA-Z0-9_-]+`)
 
-func llmToolName(prefix, tool string, taken map[string]bool) string {
+func llmToolBase(prefix, tool string) string {
 	base := prefix + "_" + strings.Trim(toolNameRe.ReplaceAllString(tool, "_"), "_")
 	if len(base) > maxLLMToolName {
 		base = base[:maxLLMToolName]
 	}
-	name := base
-	for i := 2; taken[name]; i++ {
-		suffix := fmt.Sprintf("_%d", i)
-		name = base[:min(len(base), maxLLMToolName-len(suffix))] + suffix
-	}
-	return name
+	return base
+}
+
+func withNameSuffix(base, suffix string) string {
+	return base[:min(len(base), maxLLMToolName-len(suffix))] + suffix
 }
 
 // RegisterRoutes mounts the connector API:

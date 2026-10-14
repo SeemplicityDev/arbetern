@@ -349,6 +349,11 @@ func (c *cluster) renderJob(raw []byte, name string, s clusterSession) (map[stri
 		"ARBETERN_RESUME":         resume,
 		"ARBETERN_MODEL":          c.model(s.project),
 		"ARBETERN_MAX_TURNS":      strconv.Itoa(s.project.Session.maxTurns()),
+		// Claude Code's own aliases, including the haiku it uses for background work, follow arbetern's current models.
+		"ANTHROPIC_DEFAULT_HAIKU_MODEL":  llm.AnthropicModel(string(llm.ModelHaiku)),
+		"ANTHROPIC_DEFAULT_SONNET_MODEL": llm.AnthropicModel(string(llm.ModelSonnet)),
+		"ANTHROPIC_DEFAULT_OPUS_MODEL":   llm.AnthropicModel(string(llm.ModelOpus)),
+		"ANTHROPIC_SMALL_FAST_MODEL":     llm.AnthropicModel(string(llm.ModelHaiku)),
 	})
 	return job, nil
 }

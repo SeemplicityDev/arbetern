@@ -169,6 +169,7 @@ type createRequest struct {
 	Goal         string   `json:"goal"`
 	Instructions string   `json:"instructions"`
 	Skills       []string `json:"skills"`
+	Connectors   []string `json:"connectors"`
 	Repo         Repo     `json:"repo"`
 	Signal       Signal   `json:"signal"`
 	Session      Session  `json:"session"`
@@ -194,6 +195,7 @@ func (a *consoleAPI) create(w http.ResponseWriter, req *http.Request) {
 		Goal:         body.Goal,
 		Instructions: body.Instructions,
 		Skills:       body.Skills,
+		Connectors:   body.Connectors,
 		Repo:         body.Repo,
 		Signal:       body.Signal,
 		Session:      body.Session,
@@ -255,6 +257,11 @@ func (a *consoleAPI) update(w http.ResponseWriter, req *http.Request) {
 			pt.Skills = new([]string)
 			if json.Unmarshal(v, pt.Skills) != nil {
 				err = errors.New("must be a list of skill ids")
+			}
+		case "connectors":
+			pt.Connectors = new([]string)
+			if json.Unmarshal(v, pt.Connectors) != nil {
+				err = errors.New("must be a list of MCP connector ids")
 			}
 		case "repo":
 			pt.Repo = new(Repo)

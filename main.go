@@ -2712,16 +2712,17 @@ func main() {
 			Backend: backend,
 			GitHub:  ghClient,
 			Datadog: datadogClients,
-			Skills:  skillRegistry.InstructionsFor,
+			Skills:  skillRegistry.ProjectInstructions,
 			SkillKnown: func(id string) bool {
 				_, ok := skillRegistry.Get(id)
 				return ok
 			},
-			Slack:   slackClient,
-			Usage:   billingStore.Record,
-			Tools:   projectsRouter.ReadOnlyToolkit(),
-			Tickets: projects.JiraTickets(jiraClient),
-			Cluster: projectsCluster(cfg),
+			Slack:      slackClient,
+			Usage:      billingStore.Record,
+			Tools:      projectsRouter.ReadOnlyToolkit(),
+			Connectors: mcpRegistry,
+			Tickets:    projects.JiraTickets(jiraClient),
+			Cluster:    projectsCluster(cfg),
 		})
 		projRegistry.UseQueue(tasks)
 		if err := projRegistry.Load(bootCtx); err != nil {

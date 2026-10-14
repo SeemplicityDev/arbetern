@@ -1379,7 +1379,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 					"properties":{
 						"jql":{"type":"string","description":"JQL query string (e.g. 'assignee = \"John Doe\" AND status = \"In Progress\" ORDER BY updated DESC')"},
 						"max_results":{"type":"integer","description":"Maximum number of results to return (default: 20, max: 50)"},
-						"fields":{"type":"array","items":{"type":"string"},"description":"Up to 10 extra fields to show for each issue, by field id (e.g. 'customfield_10001', 'duedate'). Select, user and multi-value fields show their display values."}
+						"fields":{"type":"array","items":{"type":"string"},"description":"Up to 10 extra fields to show for each issue, by field id or name (e.g. 'customfield_10001', 'Story Points', 'duedate'). Select and user fields show their display values, multi-value fields a JSON list of them."}
 					},
 					"required":["jql"]
 				}`),
@@ -1393,7 +1393,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 					"type":"object",
 					"properties":{
 						"issue_key":{"type":"string","description":"Jira issue key (e.g. 'ENG-123', 'PROJ-456')"},
-						"fields":{"type":"array","items":{"type":"string"},"description":"Up to 10 extra fields to show, by field id (e.g. 'customfield_10001', 'duedate'). Select, user and multi-value fields show their display values."}
+						"fields":{"type":"array","items":{"type":"string"},"description":"Up to 10 extra fields to show, by field id or name (e.g. 'customfield_10001', 'Story Points', 'duedate'). Select and user fields show their display values, multi-value fields a JSON list of them."}
 					},
 					"required":["issue_key"]
 				}`),
@@ -3962,7 +3962,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		if errMsg != "" {
 			return errMsg
 		}
-		issues, err := h.jiraClient.SearchIssuesJQL(args.JQL, args.MaxResults, args.Fields...)
+		issues, err := h.jiraClient.SearchIssuesJQL(args.JQL, min(args.MaxResults, 50), args.Fields...)
 		if err != nil {
 			return fmt.Sprintf("Error searching Jira issues: %v", err)
 		}
@@ -3981,7 +3981,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 			}
 			fmt.Fprintf(&sb, " | Updated: %s\n  URL: %s\n", i.Updated, i.Browse)
 			for _, f := range i.Extra {
-				fmt.Fprintf(&sb, "  %s: %s\n", f.ID, jiraFieldText(f.Text))
+				fmt.Fprintf(&sb, "  %s\n", jiraFieldLine(f))
 			}
 			if i.Description != "" {
 				desc := i.Description
@@ -4025,7 +4025,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 			fmt.Fprintf(&sb, "Labels: %s\n", strings.Join(issue.Labels, ", "))
 		}
 		for _, f := range issue.Extra {
-			fmt.Fprintf(&sb, "%s: %s\n", f.ID, jiraFieldText(f.Text))
+			fmt.Fprintf(&sb, "%s\n", jiraFieldLine(f))
 		}
 		fmt.Fprintf(&sb, "URL: %s\n", issue.Browse)
 		if issue.Description != "" {
@@ -6346,10 +6346,17 @@ func splitTruncatedToolCalls(finishReason string, calls []llm.ToolCall) ([]llm.T
 	return calls[:len(calls)-1], &last
 }
 
-func jiraFieldText(s string) string {
-	s = strings.Join(strings.Fields(s), " ")
-	if s == "" {
-		return "(empty)"
+func jiraFieldLine(f atlassian.FieldValue) string {
+	label := f.Name
+	if f.ID != "" && !strings.EqualFold(f.ID, f.Name) {
+		label += " (" + f.ID + ")"
 	}
-	return text.Truncate(s, 300)
+	if f.Missing != "" {
+		return label + ": (" + f.Missing + ")"
+	}
+	value := strings.Join(strings.Fields(f.Text), " ")
+	if value == "" {
+		return label + ": (empty)"
+	}
+	return label + ": " + text.Truncate(value, 300)
 }

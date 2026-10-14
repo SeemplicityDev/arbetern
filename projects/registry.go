@@ -20,6 +20,7 @@ import (
 	"github.com/justmike1/arbetern/internal/store"
 	"github.com/justmike1/arbetern/internal/ttlcache"
 	"github.com/justmike1/arbetern/llm"
+	"github.com/justmike1/arbetern/mcp"
 )
 
 var (
@@ -43,8 +44,16 @@ type Deps struct {
 	Slack      Poster               // nil → no notifications
 	Usage      func(billing.Event)  // records the model usage of sessions
 	Tools      ToolProvider         // nil → sessions get only the work-order tools
+	Connectors ConnectorTools       // nil → projects cannot name MCP connectors
 	Tickets    TicketFiler          // nil → projects whose conventions file tickets cannot open pull requests
 	Cluster    ClusterConfig
+}
+
+// ConnectorTools serves the MCP connectors a project names to its sessions, with arbetern's stored credentials.
+type ConnectorTools interface {
+	Get(id string) (*mcp.Connector, bool)
+	ProjectTools(ids []string) []mcp.AgentTool
+	Call(ctx context.Context, connectorID, tool string, args json.RawMessage) (string, error)
 }
 
 type runner struct {
@@ -313,6 +322,22 @@ func (r *Registry) checkTickets(c Conventions) error {
 	return nil
 }
 
+func (r *Registry) checkConnectors(ids []string) error {
+	if len(ids) > 0 && r.deps.Connectors == nil {
+		return invalidf("connectors: this deployment has no MCP connectors")
+	}
+	for _, id := range ids {
+		c, ok := r.deps.Connectors.Get(id)
+		switch {
+		case !ok:
+			return invalidf("connectors: %q is not an MCP connector", id)
+		case len(c.Agents) > 0:
+			return invalidf("connectors: %s is limited to some agents; a project may name only a connector open to every agent", c.Name)
+		}
+	}
+	return nil
+}
+
 func (r *Registry) checkSkills(ids []string) error {
 	if r.deps.SkillKnown == nil {
 		return nil
@@ -335,7 +360,7 @@ func (r *Registry) checkSites(s Signal) error {
 }
 
 func (r *Registry) skillsFor(ids []string) []string {
-	if r.deps.Skills == nil || len(ids) == 0 {
+	if r.deps.Skills == nil {
 		return nil
 	}
 	return r.deps.Skills(ids)
@@ -376,6 +401,9 @@ func (r *Registry) create(ctx context.Context, draft Project, enabled bool, crea
 	if err := r.checkSkills(draft.Skills); err != nil {
 		return nil, err
 	}
+	if err := r.checkConnectors(draft.Connectors); err != nil {
+		return nil, err
+	}
 	if err := r.checkTickets(draft.Conventions); err != nil {
 		return nil, err
 	}
@@ -400,6 +428,7 @@ func (r *Registry) create(ctx context.Context, draft Project, enabled bool, crea
 		Goal:         draft.Goal,
 		Instructions: draft.Instructions,
 		Skills:       draft.Skills,
+		Connectors:   draft.Connectors,
 		Repo:         draft.Repo,
 		Signal:       draft.Signal,
 		Session:      draft.Session,
@@ -425,6 +454,7 @@ func (r *Registry) create(ctx context.Context, draft Project, enabled bool, crea
 type projectPatch struct {
 	Name, Description, Goal, Instructions, Interval *string
 	Skills                                          *[]string
+	Connectors                                      *[]string
 	Repo                                            *Repo
 	Signal                                          *Signal
 	Session                                         *Session
@@ -448,6 +478,9 @@ func (pt projectPatch) applyTo(dst *Project) {
 	set(&dst.Interval, pt.Interval)
 	if pt.Skills != nil {
 		dst.Skills = *pt.Skills
+	}
+	if pt.Connectors != nil {
+		dst.Connectors = *pt.Connectors
 	}
 	if pt.Repo != nil {
 		dst.Repo = *pt.Repo
@@ -490,6 +523,9 @@ func (pt projectPatch) normalized(draft *Project) projectPatch {
 	if pt.Skills != nil {
 		out.Skills = &draft.Skills
 	}
+	if pt.Connectors != nil {
+		out.Connectors = &draft.Connectors
+	}
 	if pt.Repo != nil {
 		out.Repo = &draft.Repo
 	}
@@ -529,6 +565,11 @@ func (r *Registry) update(ctx context.Context, id string, pt projectPatch) (*Pro
 	}
 	if pt.Skills != nil {
 		if err := r.checkSkills(draft.Skills); err != nil {
+			return nil, err
+		}
+	}
+	if pt.Connectors != nil {
+		if err := r.checkConnectors(draft.Connectors); err != nil {
 			return nil, err
 		}
 	}

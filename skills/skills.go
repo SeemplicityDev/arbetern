@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -276,6 +277,22 @@ func (r *Registry) InstructionsFor(ids []string) []string {
 		if s, ok := r.Get(id); ok && s.Enabled {
 			out = append(out, fmt.Sprintf("Skill — %s:\n%s", s.Name, s.Instructions))
 		}
+	}
+	return out
+}
+
+// ProjectInstructions returns the blocks of the skills a project names, then those of every enabled skill that applies to all agents, as every agent gets them.
+func (r *Registry) ProjectInstructions(ids []string) []string {
+	out := r.InstructionsFor(ids)
+	var global []*Skill
+	r.docs.Range(func(_ string, s *Skill) {
+		if s.Enabled && len(s.Agents) == 0 && !slices.Contains(ids, s.ID) {
+			global = append(global, s)
+		}
+	})
+	sort.Slice(global, func(i, j int) bool { return strings.ToLower(global[i].Name) < strings.ToLower(global[j].Name) })
+	for _, s := range global {
+		out = append(out, fmt.Sprintf("Skill — %s:\n%s", s.Name, s.Instructions))
 	}
 	return out
 }

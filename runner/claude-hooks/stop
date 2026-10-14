@@ -12,6 +12,6 @@ reported=$(printf 'Authorization: Bearer %s\n' "$token" |
 	jq -r '.reported' 2>/dev/null)
 [ "$reported" = false ] || exit 0
 
-jq -nc --arg reason 'Commit and push your work on the current claude/ branch, then call report_outcome on the arbetern MCP server before stopping.' \
+jq -nc --arg reason 'Commit and push your work to the branch your work order names, then call report_outcome on the arbetern MCP server before stopping.' \
 	'{decision: "block", reason: $reason}'
 exit 0

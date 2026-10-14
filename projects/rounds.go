@@ -91,6 +91,7 @@ type CheckFailure struct {
 
 type observation struct {
 	head         string
+	seenHead     string // the head the ledger held when the pull request was read
 	ci           string
 	failed       []string
 	conflict     bool
@@ -99,13 +100,20 @@ type observation struct {
 }
 
 type roundResult struct {
-	outcome Outcome
-	head    string
-	replies int
-	rerun   bool
+	outcome   Outcome
+	head      string
+	replies   int
+	rerun     bool
+	described *Outcome
+	bodySHA   string
 }
 
 func isActiveRound(status string) bool { return status == StatusDispatching || status == StatusRunning }
+
+// personSpoke reports whether a person, not a bot, commented in the round: only a person can answer an open question.
+func personSpoke(rd *Round) bool {
+	return slices.ContainsFunc(rd.Items, func(f Feedback) bool { return !f.Bot })
+}
 
 func (r *ReviewState) round(n int) *Round {
 	for i := range r.Rounds {
@@ -198,7 +206,8 @@ func (l *Ledger) observe(id string, o observation, now time.Time) bool {
 	}
 	rv := t.Review
 	before := *rv
-	if o.head != "" && o.head != rv.Head {
+	// A round that reported after the read may have moved the head on; an older read must not move it back.
+	if o.head != "" && o.head != rv.Head && (o.seenHead == "" || rv.Head == o.seenHead) {
 		rv.Head, rv.HeadAt = o.head, stamp(now)
 	}
 	rv.CI, rv.Conflict, rv.Pending = o.ci, o.conflict, o.pending
@@ -215,6 +224,15 @@ func (l *Ledger) addRound(id string, rd Round, maxRounds int, now time.Time) boo
 	_, rv := l.review(id)
 	if rv == nil || rv.active() != nil || rv.used() >= maxRounds || rv.Phase == PhaseExhausted || parseTime(rv.NextRoundAfter).After(now) {
 		return false
+	}
+	if slices.Contains(rd.Trigger, triggerFeedback) {
+		rd.Items = slices.DeleteFunc(slices.Clone(rd.Items), func(f Feedback) bool { return rv.isHandled(f.ID) })
+		if len(rd.Items) == 0 {
+			rd.Trigger = slices.DeleteFunc(slices.Clone(rd.Trigger), func(s string) bool { return s == triggerFeedback })
+			if len(rd.Trigger) == 0 {
+				return false
+			}
+		}
 	}
 	rv.Rounds = slices.DeleteFunc(rv.Rounds, func(r Round) bool { return r.Status == StatusFailed && r.SessionID == "" })
 	rd.N = len(rv.Rounds) + 1
@@ -444,12 +462,16 @@ func recordRoundResult(t *Task, rv *ReviewState, rd *Round, res roundResult, now
 	if res.rerun {
 		rv.RerunHead = rd.HeadAfter
 	}
+	if d := res.described; d != nil && t.Outcome != nil && t.PR != nil {
+		t.Outcome.Summary, t.Outcome.Question = d.Summary, d.Question
+		t.PR.BodySHA = res.bodySHA
+	}
 	switch {
 	case o.Question != "":
 		rv.Waiting = o.Question
 	case o.Status == OutcomeCannotFix:
 		rv.Waiting = oneLine(o.Summary, maxQuestionChars)
-	default:
+	case personSpoke(rd):
 		rv.Waiting = ""
 	}
 	if rd.HeadAfter != rv.Head {

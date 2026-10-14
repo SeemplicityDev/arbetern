@@ -74,6 +74,7 @@ type PR struct {
 	Additions       int    `json:"additions,omitempty"`
 	Deletions       int    `json:"deletions,omitempty"`
 	UnreadableSince string `json:"unreadable_since,omitempty"` // first 404 from GitHub
+	BodySHA         string `json:"body_sha,omitempty"`         // of the description arbetern last wrote
 }
 
 // Outcome is what a session reported through report_outcome.

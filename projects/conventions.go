@@ -219,7 +219,22 @@ type TicketRequest struct {
 	Project, IssueType, Summary, Description, AssigneeID string
 	Labels                                               []string
 	Fields                                               map[string]any
+	SessionFields                                        []string // keys of Fields the session set, which Jira's refusal goes back to
 }
+
+type refusedFieldsError struct {
+	fields []string
+	err    error
+}
+
+func (e *refusedFieldsError) Error() string {
+	return "jira refused " + strings.Join(e.fields, ", ") + ": " + e.err.Error()
+}
+
+func (e *refusedFieldsError) Unwrap() error { return e.err }
+
+// defuseMentions keeps session text from @-mentioning Jira users: the issue text turns @[Name](accountId) into a mention.
+func defuseMentions(s string) string { return strings.ReplaceAll(s, "@[", "@"+zeroWidthSpace+"[") }
 
 type jiraTickets struct {
 	c *atlassian.Client
@@ -312,6 +327,9 @@ func fileTicket(ctx context.Context, filer TicketFiler, req TicketRequest) (key,
 			break
 		}
 		sort.Strings(refused)
+		if own := slices.DeleteFunc(slices.Clone(refused), func(k string) bool { return !slices.Contains(req.SessionFields, k) }); len(own) > 0 {
+			return "", "", dropped, &refusedFieldsError{fields: own, err: err}
+		}
 		fields = maps.Clone(fields)
 		for _, k := range refused {
 			delete(fields, k)

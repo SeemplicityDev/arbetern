@@ -24,6 +24,9 @@ const (
 
 var mentionRe = regexp.MustCompile(`@([A-Za-z0-9])`)
 
+// A comment never spans a backtick, so a literal "<!--" in inline code does not swallow the text up to a later "-->".
+var htmlCommentRe = regexp.MustCompile("(?s)<!--[^`]*?-->")
+
 func splitNotes(notes []Note) (admin, other []Note) {
 	for _, n := range notes {
 		if n.Source == noteAdmin {
@@ -70,7 +73,7 @@ func renderRoundBrief(p *Project, t *Task, rd *Round, notes []Note, skills []str
 		roundHeader(p, t, rd),
 		"## Goal\n\n" + p.Goal,
 		optionalSection("## Instructions from the project", p.Instructions),
-		roundPullRequest(t),
+		roundPullRequest(p, t),
 		roundChecks(rd),
 		roundFeedback(rd),
 		roundConflict(rd, t.Branch, p.Repo.BaseBranch),
@@ -82,8 +85,12 @@ func renderRoundBrief(p *Project, t *Task, rd *Round, notes []Note, skills []str
 		briefNotes("## Notes from earlier sessions and reviews", sessionNotesPreface, other, true),
 		optionalSection("## Skills", text.Truncate(strings.TrimSpace(strings.Join(skills, "\n\n")), maxSkillsChars)),
 	}
+	budget := maxBriefChars
+	if p.Conventions.Description == descriptionSession {
+		budget += maxSessionSummary
+	}
 	// The header, pull request, feedback and rules stay well under the budget: items are capped in number and length.
-	return fitSections(sections, []int{13, 12, 8, 10, 11, 4, 9, 2}, maxBriefChars)
+	return fitSections(sections, []int{13, 12, 8, 10, 11, 4, 9, 2}, budget)
 }
 
 func roundHeader(p *Project, t *Task, rd *Round) string {
@@ -106,13 +113,17 @@ func roundHeader(p *Project, t *Task, rd *Round) string {
 	return strings.Join(lines, "\n")
 }
 
-func roundPullRequest(t *Task) string {
+func roundPullRequest(p *Project, t *Task) string {
 	var b strings.Builder
 	b.WriteString("## The pull request so far\n\n")
 	if t.PR != nil {
 		fmt.Fprintf(&b, "Title: %s\n\n", oneLine(t.PR.Title, 200))
 	}
-	if t.Outcome != nil {
+	switch {
+	case t.Outcome == nil:
+	case p.Conventions.Description == descriptionSession:
+		b.WriteString("Its description, as arbetern last wrote it:\n\n" + quoteBlock(t.Outcome.Summary, maxSessionSummary))
+	default:
 		b.WriteString("What the first session reported:\n\n" + quoteBlock(t.Outcome.Summary, 3000))
 	}
 	if t.Review == nil {
@@ -130,6 +141,9 @@ func roundPullRequest(t *Task) string {
 	}
 	if q := t.Review.Waiting; q != "" {
 		b.WriteString("\n\nOpen question or blocker from the last report: " + oneLine(q, maxQuestionChars))
+	}
+	if t.Outcome != nil && t.Outcome.Question != "" && t.Outcome.Question != t.Review.Waiting {
+		b.WriteString("\n\nOpen question in the description: " + oneLine(t.Outcome.Question, maxQuestionChars))
 	}
 	return b.String()
 }
@@ -233,6 +247,12 @@ func roundRules(p *Project, t *Task, rd *Round) string {
 		"When what is left is a decision only a person can make, pass it as `question` with the options named.",
 		"Never push to the base branch `" + base + "`. Never start other sessions.",
 		fmt.Sprintf("Use `record_learning` for durable facts future sessions on this project need (at most %d).", maxLearnings),
+	}
+	if p.Conventions.Description == descriptionSession {
+		rules = append(rules, "When a review comment asks to change the pull request description, pass the whole corrected description in `description`. It replaces the one quoted above, so keep everything that still holds and `{ticket}` where the key belongs.")
+	}
+	if t.Review != nil && t.Review.Waiting != "" {
+		rules = append(rules, "The open question above stays open until a person answers it in this pull request. When a person's comment above answers it, apply the answer; when it is still open, pass it again in `question`.")
 	}
 	if len(rd.Items) > 0 {
 		rules = slices.Insert(rules, 4, "Pass one entry in `replies` for every review comment above: its `id` and a short answer saying what you changed and why, or why you changed nothing. Each answer is posted as a reply to that comment.")
@@ -541,20 +561,27 @@ func briefOutcomes(tasks []Task) string {
 	return "## Recent outcomes\n\n" + strings.Join(lines, "\n")
 }
 
+// summaryBlock is the session's text as the pull request description shows it.
+func summaryBlock(p *Project, t *Task, o Outcome) string {
+	if p.Conventions.Description == descriptionSession {
+		return withTicket(cleanPRText(o.Summary, maxSessionSummary), t)
+	}
+	return withTicket(cleanPRText(o.Summary, 4000), t)
+}
+
 // prBody renders the pull request description; every session-supplied string goes through cleanPRText.
 func prBody(p *Project, t *Task, o Outcome) string {
 	var b strings.Builder
 	if q := cleanPRText(o.Question, maxQuestionChars); q != "" {
-		b.WriteString("> [!IMPORTANT]\n> **Decision needed:** " + strings.ReplaceAll(q, "\n", "\n> ") + "\n> Reply in this pull request; it stays a draft until the answer is applied.\n\n")
+		b.WriteString("> [!IMPORTANT]\n> **Decision needed:** " + strings.ReplaceAll(q, "\n", "\n> ") + "\n> Reply in this pull request; a follow-up round applies the answer.\n\n")
 	}
+	summary := summaryBlock(p, t, o)
+	b.WriteString(summary)
 	if p.Conventions.Description == descriptionSession {
-		summary := withTicket(cleanPRText(o.Summary, maxSessionSummary), t)
-		b.WriteString(summary)
 		if t.Ticket != "" && !strings.Contains(summary, t.Ticket) {
 			b.WriteString("\n\n**Ticket:** " + ticketMarkdown(t))
 		}
 	} else {
-		b.WriteString(withTicket(cleanPRText(o.Summary, 4000), t))
 		if t.Ticket != "" {
 			b.WriteString("\n\n**Ticket:** " + ticketMarkdown(t))
 		}
@@ -595,15 +622,36 @@ func seriesLine(p *Project, g Group) string {
 // cleanPRText strips comment markers (a fake arbetern marker must never precede the real one), neutralises @mentions and caps the length.
 func cleanPRText(s string, max int) string {
 	s = stripControl(s)
-	for {
-		next := strings.ReplaceAll(strings.ReplaceAll(s, "<!--", ""), "-->", "")
-		if next == s {
-			break
-		}
-		s = next
-	}
+	s = outsideFences(s, func(part string) string { return htmlCommentRe.ReplaceAllString(part, "") })
+	// Whatever opener is left is defused, so session text can neither forge arbetern's marker nor hide what follows it.
+	s = strings.ReplaceAll(s, "<!--", "<!"+zeroWidthSpace+"--")
 	s = mentionRe.ReplaceAllString(s, "@"+zeroWidthSpace+"$1")
 	return strings.TrimSpace(text.Truncate(strings.TrimSpace(s), max))
+}
+
+// outsideFences applies fn to the text outside fenced code blocks; an unclosed fence runs to the end.
+func outsideFences(s string, fn func(string) string) string {
+	var out, prose strings.Builder
+	fence := ""
+	for _, line := range strings.SplitAfter(s, "\n") {
+		trimmed := strings.TrimLeft(line, " \t")
+		switch {
+		case fence == "" && (strings.HasPrefix(trimmed, "```") || strings.HasPrefix(trimmed, "~~~")):
+			out.WriteString(fn(prose.String()))
+			prose.Reset()
+			fence = trimmed[:3]
+			out.WriteString(line)
+		case fence != "":
+			out.WriteString(line)
+			if strings.HasPrefix(trimmed, fence) && strings.TrimSpace(strings.TrimLeft(trimmed, fence[:1])) == "" {
+				fence = ""
+			}
+		default:
+			prose.WriteString(line)
+		}
+	}
+	out.WriteString(fn(prose.String()))
+	return out.String()
 }
 
 func stripControl(s string) string {

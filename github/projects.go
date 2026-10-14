@@ -39,6 +39,7 @@ type PRState struct {
 	Additions    int       `json:"additions"`
 	Deletions    int       `json:"deletions"`
 	ChangedFiles int       `json:"changed_files"`
+	Body         string    `json:"-"`
 }
 
 // PullRequestState fetches a pull request's state, timestamps and size.
@@ -66,6 +67,7 @@ func (c *Client) PullRequestState(ctx context.Context, owner, repo string, numbe
 		Additions:    pr.GetAdditions(),
 		Deletions:    pr.GetDeletions(),
 		ChangedFiles: pr.GetChangedFiles(),
+		Body:         pr.GetBody(),
 	}, nil
 }
 

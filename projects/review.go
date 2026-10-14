@@ -131,6 +131,7 @@ func (r *Registry) observePR(ctx context.Context, p *Project, led *Ledger, t Tas
 	}
 	obs := observation{
 		head:         pr.HeadSHA,
+		seenHead:     rv.Head,
 		ci:           ci,
 		failed:       names,
 		conflict:     pr.Mergeable != nil && !*pr.Mergeable,
@@ -188,9 +189,11 @@ func (r *Registry) advanceReviews(ctx context.Context, p *Project, led *Ledger, 
 	now := time.Now().UTC()
 	for _, w := range out.watches {
 		_, rv := led.review(w.taskID)
-		if rv == nil || rv.active() != nil {
+		// The watch was read before rounds that reported during this tick: skip a moved head, drop comments since answered.
+		if rv == nil || rv.active() != nil || rv.Head != w.pr.HeadSHA {
 			continue
 		}
+		w.items = slices.DeleteFunc(slices.Clone(w.items), func(f Feedback) bool { return rv.isHandled(f.ID) })
 		need := needsRound(rv, w, now)
 		switch {
 		case len(need) > 0 && rv.used() >= review.MaxRounds:

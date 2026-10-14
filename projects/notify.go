@@ -62,13 +62,16 @@ func headline(t *Task) string {
 func links(t *Task) string {
 	parts := []string{prLink(t.PR)}
 	if t.Ticket != "" {
-		if strings.HasPrefix(t.TicketURL, "https://") {
-			parts = append(parts, fmt.Sprintf("<%s|%s>", t.TicketURL, slackText(t.Ticket, 40)))
-		} else {
-			parts = append(parts, slackText(t.Ticket, 40))
-		}
+		parts = append(parts, ticketLink(t))
 	}
 	return strings.Join(parts, " · ")
+}
+
+func ticketLink(t *Task) string {
+	if strings.HasPrefix(t.TicketURL, "https://") {
+		return fmt.Sprintf("<%s|%s>", t.TicketURL, slackText(t.Ticket, 40))
+	}
+	return slackText(t.Ticket, 40)
 }
 
 func belowThreshold(t *Task) string {
@@ -86,10 +89,14 @@ func noteOpened(t *Task, o Outcome) string {
 }
 
 func noteNoFix(t *Task, o Outcome) string {
-	if o.Status == OutcomeCannotFix {
-		return fmt.Sprintf(":red_circle: %s — need your review: %s%s", headline(t), slackText(o.Summary, 300), belowThreshold(t))
+	head := headline(t)
+	if t.Ticket != "" {
+		head += " — " + ticketLink(t)
 	}
-	return fmt.Sprintf(":white_circle: %s — %s: %s%s", headline(t), strings.ReplaceAll(o.Status, "_", " "), slackText(o.Summary, 300), belowThreshold(t))
+	if o.Status == OutcomeCannotFix {
+		return fmt.Sprintf(":red_circle: %s — need your review: %s%s", head, slackText(o.Summary, 300), belowThreshold(t))
+	}
+	return fmt.Sprintf(":white_circle: %s — %s: %s%s", head, strings.ReplaceAll(o.Status, "_", " "), slackText(o.Summary, 300), belowThreshold(t))
 }
 
 func noteRound(t *Task, o Outcome) string {

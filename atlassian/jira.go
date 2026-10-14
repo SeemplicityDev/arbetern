@@ -2,13 +2,18 @@ package atlassian
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"regexp"
+	"slices"
+	"strconv"
 	"strings"
+	"time"
+	"unicode"
 )
 
 // Jira REST API v3
@@ -951,42 +956,49 @@ func (c *Client) FindTeamFields() ([]TeamFieldInfo, error) {
 	return result, nil
 }
 
+type jiraField struct {
+	ID          string   `json:"id"`
+	Name        string   `json:"name"`
+	ClauseNames []string `json:"clauseNames"`
+	Schema      *struct {
+		Type   string `json:"type"`
+		Custom string `json:"custom"`
+	} `json:"schema"`
+}
+
+func (c *Client) fetchFields() ([]jiraField, error) {
+	req, err := http.NewRequest(http.MethodGet, c.baseURL+"/rest/api/3/field", nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if err := c.authRequest(req); err != nil {
+		return nil, err
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("jira API error (HTTP %d)", resp.StatusCode)
+	}
+	var fields []jiraField
+	if err := json.Unmarshal(body, &fields); err != nil {
+		return nil, err
+	}
+	return fields, nil
+}
+
 // discoverExtraFields lazily discovers custom field IDs for Team and Sprint.
 // Called once; results are cached on the Client.
 func (c *Client) discoverExtraFields() {
 	c.extraFieldsOnce.Do(func() {
-		reqURL := fmt.Sprintf("%s/rest/api/3/field", c.baseURL)
-		req, err := http.NewRequest(http.MethodGet, reqURL, nil)
+		fields, err := c.fetchFields()
 		if err != nil {
 			return
 		}
-		req.Header.Set("Content-Type", "application/json")
-		if err := c.authRequest(req); err != nil {
-			return
-		}
-		resp, err := c.httpClient.Do(req)
-		if err != nil {
-			return
-		}
-		defer func() { _ = resp.Body.Close() }()
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
-		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			return
-		}
-
-		var fields []struct {
-			ID          string   `json:"id"`
-			Name        string   `json:"name"`
-			ClauseNames []string `json:"clauseNames"`
-			Schema      *struct {
-				Type   string `json:"type"`
-				Custom string `json:"custom"`
-			} `json:"schema"`
-		}
-		if err := json.Unmarshal(body, &fields); err != nil {
-			return
-		}
-
 		for _, f := range fields {
 			nameL := strings.ToLower(f.Name)
 			if f.Schema != nil {
@@ -1471,31 +1483,26 @@ func (c *Client) ResolveUserViaIssues(displayName string) ([]JiraUser, error) {
 }
 
 // SearchIssuesJQL searches for issues using JQL and returns a formatted summary.
-// Paginates through results using startAt/maxResults until all issues up to
-// maxResults are fetched (Jira caps each page at 100).
+// It follows nextPageToken until maxResults issues are read (Jira caps each page at 100);
+// extra names further fields, by id or name, returned in IssueSummary.Extra.
 func (c *Client) SearchIssuesJQL(jql string, maxResults int, extra ...string) ([]IssueSummary, error) {
 	if maxResults <= 0 {
 		maxResults = 20
 	}
-	extras, err := extraFieldList(extra)
+	refs, err := c.resolveFields(extra)
 	if err != nil {
 		return nil, err
 	}
-	fields := "summary,status,assignee,reporter,priority,issuetype,project,labels,created,updated,description"
-	for _, id := range append(c.extraFieldIDs(), extras...) {
-		fields += "," + id
-	}
+	fields := strings.Join(append([]string{"summary,status,assignee,reporter,priority,issuetype,project,labels,created,updated,description"}, append(c.extraFieldIDs(), fieldIDs(refs)...)...), ",")
 
 	var allIssues []IssueSummary
-	startAt := 0
-	pageSize := maxResults
-	if pageSize > jiraPageSize {
-		pageSize = jiraPageSize
-	}
-
+	token := ""
 	for {
-		searchURL := fmt.Sprintf("%s/rest/api/3/search/jql?jql=%s&startAt=%d&maxResults=%d&fields=%s",
-			c.baseURL, url.QueryEscape(jql), startAt, pageSize, fields)
+		q := url.Values{"jql": {jql}, "maxResults": {strconv.Itoa(min(maxResults-len(allIssues), jiraPageSize))}, "fields": {fields}}
+		if token != "" {
+			q.Set("nextPageToken", token)
+		}
+		searchURL := c.baseURL + "/rest/api/3/search/jql?" + q.Encode()
 
 		req, err := http.NewRequest(http.MethodGet, searchURL, nil)
 		if err != nil {
@@ -1522,12 +1529,12 @@ func (c *Client) SearchIssuesJQL(jql string, maxResults int, extra ...string) ([
 		}
 
 		var result struct {
-			StartAt int `json:"startAt"`
-			Total   int `json:"total"`
-			Issues  []struct {
+			Issues []struct {
 				Key    string          `json:"key"`
 				Fields json.RawMessage `json:"fields"`
 			} `json:"issues"`
+			NextPageToken string `json:"nextPageToken"`
+			IsLast        bool   `json:"isLast"`
 		}
 		if err := json.Unmarshal(respBody, &result); err != nil {
 			return nil, fmt.Errorf("unmarshal response: %w", err)
@@ -1580,20 +1587,14 @@ func (c *Client) SearchIssuesJQL(jql string, maxResults int, extra ...string) ([
 				Browse:      fmt.Sprintf("%s/browse/%s", c.siteURL, i.Key),
 				Team:        team,
 				Sprint:      sprint,
-				Extra:       fieldValues(i.Fields, extras),
+				Extra:       fieldValues(i.Fields, refs),
 			})
 		}
 
-		// Stop if we've reached the caller's desired count or exhausted results.
-		if len(allIssues) >= maxResults || startAt+len(result.Issues) >= result.Total || len(result.Issues) == 0 {
+		if len(allIssues) >= maxResults || result.IsLast || result.NextPageToken == "" || len(result.Issues) == 0 {
 			break
 		}
-		startAt += len(result.Issues)
-		// Shrink page size for the final page if needed.
-		remaining := maxResults - len(allIssues)
-		if remaining < pageSize {
-			pageSize = remaining
-		}
+		token = result.NextPageToken
 	}
 
 	// Trim to exact maxResults in case the last page overshoots.
@@ -1610,18 +1611,14 @@ func (c *Client) AssignedIssues(maxResults int) ([]IssueSummary, error) {
 	return c.SearchIssuesJQL("assignee = currentUser() AND statusCategory != Done ORDER BY updated DESC", maxResults)
 }
 
-// GetIssue fetches a single Jira issue by key with full details.
+// GetIssue fetches a single Jira issue by key with full details; extra names further fields, by id or name.
 func (c *Client) GetIssue(issueKey string, extra ...string) (*IssueSummary, error) {
-	extras, err := extraFieldList(extra)
+	refs, err := c.resolveFields(extra)
 	if err != nil {
 		return nil, err
 	}
-	fieldList := "summary,status,assignee,priority,issuetype,updated,description,labels,reporter"
-	for _, id := range append(c.extraFieldIDs(), extras...) {
-		fieldList += "," + id
-	}
-	reqURL := fmt.Sprintf("%s/rest/api/3/issue/%s?fields=%s",
-		c.baseURL, issueKey, fieldList)
+	fieldList := strings.Join(append([]string{"summary,status,assignee,priority,issuetype,updated,description,labels,reporter"}, append(c.extraFieldIDs(), fieldIDs(refs)...)...), ",")
+	reqURL := c.baseURL + "/rest/api/3/issue/" + url.PathEscape(issueKey) + "?" + url.Values{"fields": {fieldList}}.Encode()
 
 	req, err := http.NewRequest(http.MethodGet, reqURL, nil)
 	if err != nil {
@@ -1699,7 +1696,7 @@ func (c *Client) GetIssue(issueKey string, extra ...string) (*IssueSummary, erro
 		Browse:      fmt.Sprintf("%s/browse/%s", c.siteURL, raw.Key),
 		Team:        team,
 		Sprint:      sprint,
-		Extra:       fieldValues(raw.Fields, extras),
+		Extra:       fieldValues(raw.Fields, refs),
 	}, nil
 }
 
@@ -1892,47 +1889,135 @@ type IssueSummary struct {
 	Extra       []FieldValue `json:"extra,omitempty"`
 }
 
-// FieldValue is one requested issue field rendered as text; Text is empty when the issue has no value.
+// FieldValue is one requested issue field as text; Missing says why Jira gave no value, otherwise an empty Text means the field is empty.
 type FieldValue struct {
-	ID   string `json:"id"`
-	Text string `json:"text"`
+	Name    string `json:"name"`
+	ID      string `json:"id,omitempty"`
+	Text    string `json:"text,omitempty"`
+	Missing string `json:"missing,omitempty"`
 }
 
-const maxExtraFields = 10
+const (
+	maxExtraFields    = 10
+	maxFieldRef       = 100
+	fieldCatalogTTL   = time.Hour
+	fieldCatalogRetry = time.Minute
+)
 
-var fieldIDPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,64}$`)
+var fieldIDPattern = regexp.MustCompile(`^[a-z][A-Za-z0-9_.-]{0,63}$`)
 
-func extraFieldList(extra []string) ([]string, error) {
-	var ids []string
-	seen := make(map[string]bool, len(extra))
+type fieldCatalog struct {
+	ids    map[string]string   // lowercased id to id
+	byName map[string][]string // lowercased name or JQL clause name to ids
+}
+
+func (c *Client) fieldCatalog() *fieldCatalog {
+	c.fieldsMu.Lock()
+	defer c.fieldsMu.Unlock()
+	now := time.Now()
+	if c.catalog != nil && now.Sub(c.catalogAt) < fieldCatalogTTL || now.Sub(c.catalogTried) < fieldCatalogRetry {
+		return c.catalog
+	}
+	c.catalogTried = now
+	list, err := c.fetchFields()
+	if err != nil {
+		return c.catalog
+	}
+	cat := &fieldCatalog{ids: make(map[string]string, len(list)), byName: map[string][]string{}}
+	for _, f := range list {
+		cat.ids[strings.ToLower(f.ID)] = f.ID
+		for _, n := range append([]string{f.Name}, f.ClauseNames...) {
+			k := strings.ToLower(strings.TrimSpace(n))
+			if k != "" && !slices.Contains(cat.byName[k], f.ID) {
+				cat.byName[k] = append(cat.byName[k], f.ID)
+			}
+		}
+	}
+	c.catalog, c.catalogAt = cat, now
+	return cat
+}
+
+type fieldRef struct {
+	asked   string
+	id      string
+	problem string
+}
+
+// resolveFields maps the requested field ids or names to the ids Jira returns.
+func (c *Client) resolveFields(extra []string) ([]fieldRef, error) {
+	var refs []fieldRef
+	seen := map[string]bool{}
 	for _, f := range extra {
 		f = strings.TrimSpace(f)
 		if f == "" || seen[f] {
 			continue
 		}
-		if !fieldIDPattern.MatchString(f) {
-			return nil, fmt.Errorf("invalid field id %q", f)
+		if len(f) > maxFieldRef || strings.ContainsFunc(f, unicode.IsControl) {
+			return nil, fmt.Errorf("invalid field %q", f)
 		}
 		seen[f] = true
-		ids = append(ids, f)
+		refs = append(refs, fieldRef{asked: f})
 	}
-	if len(ids) > maxExtraFields {
+	if len(refs) > maxExtraFields {
 		return nil, fmt.Errorf("at most %d extra fields per request", maxExtraFields)
 	}
-	return ids, nil
+	if len(refs) == 0 {
+		return nil, nil
+	}
+	cat := c.fieldCatalog()
+	for i := range refs {
+		r := &refs[i]
+		key := strings.ToLower(r.asked)
+		switch {
+		case cat != nil && cat.ids[key] == r.asked:
+			r.id = r.asked
+		case cat != nil && len(cat.byName[key]) == 1:
+			r.id = cat.byName[key][0]
+		case cat != nil && len(cat.byName[key]) > 1:
+			r.problem = "several fields have this name (" + strings.Join(cat.byName[key], ", ") + "); ask for one by id"
+		case cat != nil && cat.ids[key] != "":
+			r.id = cat.ids[key]
+		case fieldIDPattern.MatchString(r.asked):
+			// Not in the catalog, which may predate the field: Jira decides.
+			r.id = r.asked
+		case cat == nil:
+			r.problem = "field names cannot be looked up right now; ask by field id"
+		default:
+			r.problem = "no field with this id or name is visible to arbetern"
+		}
+	}
+	return refs, nil
 }
 
-func fieldValues(raw json.RawMessage, ids []string) []FieldValue {
-	if len(ids) == 0 {
+func fieldIDs(refs []fieldRef) []string {
+	var ids []string
+	for _, r := range refs {
+		if r.id != "" && !slices.Contains(ids, r.id) {
+			ids = append(ids, r.id)
+		}
+	}
+	return ids
+}
+
+func fieldValues(raw json.RawMessage, refs []fieldRef) []FieldValue {
+	if len(refs) == 0 {
 		return nil
 	}
 	var all map[string]any
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.UseNumber()
 	_ = dec.Decode(&all)
-	out := make([]FieldValue, 0, len(ids))
-	for _, id := range ids {
-		out = append(out, FieldValue{ID: id, Text: fieldText(all[id])})
+	out := make([]FieldValue, 0, len(refs))
+	for _, r := range refs {
+		fv := FieldValue{Name: r.asked, ID: r.id, Missing: r.problem}
+		if fv.Missing == "" {
+			if v, ok := all[r.id]; ok {
+				fv.Text = fieldText(v)
+			} else {
+				fv.Missing = "Jira returned no such field for this issue"
+			}
+		}
+		out = append(out, fv)
 	}
 	return out
 }
@@ -1954,13 +2039,19 @@ func fieldText(v any) string {
 				parts = append(parts, s)
 			}
 		}
-		return strings.Join(parts, ", ")
+		if len(parts) == 0 {
+			return ""
+		}
+		return jsonText(parts)
 	case map[string]any:
 		if t["type"] == "doc" {
 			raw, _ := json.Marshal(t)
 			return adfToPlainText(raw)
 		}
-		for _, k := range []string{"value", "displayName", "name", "key"} {
+		if link := issueLinkText(t); link != "" {
+			return link
+		}
+		for _, k := range []string{"value", "displayName", "name", "filename", "key"} {
 			s, ok := t[k].(string)
 			if !ok || s == "" {
 				continue
@@ -1970,10 +2061,39 @@ func fieldText(v any) string {
 			}
 			return s
 		}
-		raw, _ := json.Marshal(t)
-		return string(raw)
+		rest := make(map[string]any, len(t))
+		for k, v := range t {
+			switch k {
+			case "self", "avatarUrls", "iconUrl", "_links", "expand":
+			default:
+				rest[k] = v
+			}
+		}
+		return jsonText(rest)
 	}
 	return ""
+}
+
+func issueLinkText(m map[string]any) string {
+	typ, _ := m["type"].(map[string]any)
+	for _, side := range [][2]string{{"outwardIssue", "outward"}, {"inwardIssue", "inward"}} {
+		if issue, ok := m[side[0]].(map[string]any); ok {
+			verb, _ := typ[side[1]].(string)
+			key, _ := issue["key"].(string)
+			return strings.TrimSpace(verb + " " + key)
+		}
+	}
+	return ""
+}
+
+func jsonText(v any) string {
+	var b bytes.Buffer
+	enc := json.NewEncoder(&b)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(b.String())
 }
 
 // adfToPlainText extracts plain text from an ADF document (json.RawMessage).
@@ -2000,26 +2120,50 @@ func extractText(data json.RawMessage, sb *strings.Builder) {
 		Type  string `json:"type"`
 		Text  string `json:"text"`
 		Attrs struct {
-			Text string `json:"text"`
+			Text      string `json:"text"`
+			URL       string `json:"url"`
+			ShortName string `json:"shortName"`
+			Timestamp string `json:"timestamp"`
 		} `json:"attrs"`
 		Content []json.RawMessage `json:"content"`
 	}
 	if err := json.Unmarshal(data, &node); err != nil {
 		return
 	}
-	if node.Type == "mention" && node.Attrs.Text != "" {
+	switch {
+	case node.Type == "mention" && node.Attrs.Text != "":
 		// Render mentions as their @-prefixed display name so downstream
 		// LLM consumers see the same thing a human would in the UI.
 		sb.WriteString(node.Attrs.Text)
-	} else if node.Text != "" {
+	case node.Type == "hardBreak":
+		sb.WriteString("\n")
+	case node.Type == "inlineCard" || node.Type == "blockCard" || node.Type == "embedCard":
+		sb.WriteString(node.Attrs.URL)
+	case node.Type == "status" || node.Type == "emoji":
+		sb.WriteString(cmp.Or(node.Attrs.Text, node.Attrs.ShortName))
+	case node.Type == "date":
+		sb.WriteString(adfDate(node.Attrs.Timestamp))
+	case node.Text != "":
 		sb.WriteString(node.Text)
 	}
 	for _, child := range node.Content {
 		extractText(child, sb)
 	}
-	if node.Type == "paragraph" || node.Type == "heading" || node.Type == "bulletList" || node.Type == "orderedList" || node.Type == "listItem" {
+	if node.Type == "paragraph" || node.Type == "heading" || node.Type == "bulletList" || node.Type == "orderedList" || node.Type == "listItem" || node.Type == "blockCard" || node.Type == "embedCard" {
 		sb.WriteString("\n")
 	}
+}
+
+// adfDate renders an ADF date node's timestamp, documented as milliseconds; smaller values are read as seconds.
+func adfDate(ts string) string {
+	n, err := strconv.ParseInt(ts, 10, 64)
+	if err != nil {
+		return ts
+	}
+	if n > 0 && n < 1e11 {
+		n *= 1000
+	}
+	return time.UnixMilli(n).UTC().Format(time.DateOnly)
 }
 
 // UpdateIssueFields sets arbitrary fields on an existing Jira issue.

@@ -1,7 +1,10 @@
 package projects
 
 import (
+	"cmp"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"log"
 	"strings"
@@ -88,6 +91,10 @@ func (g *gateway) reportRound(ctx context.Context, s *session, a reportArgs) (st
 	}
 	now := time.Now().UTC()
 	o, replies, problem := a.roundOutcome(rd, s.project.Repo.BaseBranch, now)
+	description := strings.TrimSpace(stripControl(a.Description))
+	if problem == "" && description != "" {
+		problem = checkRoundDescription(s.project, description)
+	}
 	if problem == "" && o.Status == OutcomeFixed && o.Branch != "" {
 		if err := s.pushAllowed(o.Branch); err != nil {
 			problem = "Report the pull request's branch or a name derived from it: " + err.Error() + "."
@@ -114,21 +121,36 @@ func (g *gateway) reportRound(ctx context.Context, s *session, a reportArgs) (st
 	}
 	owner, repo, number := prCoordinates(s.project, s.task.PR)
 	head := rd.HeadBefore
+	var extra []string
 	if o.Status == OutcomeFixed {
 		var problem string
-		if head, problem = g.landRound(ctx, rd, owner, repo, number, o.Branch); problem != "" {
+		var rewritten bool
+		if head, problem, rewritten = g.landRound(ctx, rd, owner, repo, number, o.Branch); problem != "" {
 			g.releaseRoundReport(s, guard)
 			return problem, true, nil
 		}
+		if rewritten {
+			log.Printf("[projects] %s task %s round %d: the pull request branch no longer contains %s", s.project.ID, taskID, n, shortSHA(rd.HeadBefore))
+			extra = append(extra, "The pull request branch no longer contains `"+shortSHA(rd.HeadBefore)+"`, the head this round started from: its history was rewritten while the round ran.")
+		}
+	}
+	plan := g.planDescription(ctx, s, owner, repo, number, description, o, rd)
+	if description != "" && plan.edited {
+		g.releaseRoundReport(s, guard)
+		return "The pull request description was edited on GitHub since arbetern wrote it, so arbetern will not replace it: call report_outcome again without description, and say in your reply what the description should change.", true, nil
 	}
 	posted := g.postReplies(ctx, owner, repo, number, replies)
 	rerun := a.RerunChecks && head == rd.HeadBefore && g.rerunChecks(ctx, s, rd, owner, repo)
-	if _, err := g.r.gh.CommentOnPullRequest(ctx, owner, repo, number, roundComment(s.project, rd, o, owner, repo, head, posted, rerun)); err != nil {
-		log.Printf("[projects] %s task %s round %d: posting the round summary: %v", s.project.ID, taskID, n, err)
-	}
-	res := roundResult{outcome: o, head: head, replies: posted, rerun: rerun}
 	pctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), persistTimeout)
 	defer cancel()
+	described, sha, fact := g.applyDescription(pctx, s, owner, repo, number, plan)
+	if fact != "" {
+		extra = append(extra, fact)
+	}
+	if _, err := g.r.gh.CommentOnPullRequest(ctx, owner, repo, number, roundComment(s.project, rd, o, owner, repo, head, posted, rerun, extra)); err != nil {
+		log.Printf("[projects] %s task %s round %d: posting the round summary: %v", s.project.ID, taskID, n, err)
+	}
+	res := roundResult{outcome: o, head: head, replies: posted, rerun: rerun, described: described, bodySHA: sha}
 	changed, err := g.apply(pctx, s, func(l *Ledger) bool { return l.finishRound(taskID, n, res, now) })
 	if err != nil {
 		log.Printf("[projects] %s task %s round %d: recording the report: %v", s.project.ID, taskID, n, err)
@@ -148,7 +170,86 @@ func (g *gateway) reportRound(ctx context.Context, s *session, a reportArgs) (st
 	log.Printf("[projects] %s task %s round %d reported %s (%d of %d replies posted)", s.project.ID, taskID, n, o.Status, posted, len(replies))
 	g.r.refreshStats(s.project.ID, s.ledger)
 	g.r.notify(s.project, noteRound(s.task, o))
+	if description != "" && described == nil {
+		return "Recorded, but the pull request description could not be updated; the round summary says why. You can stop now.", false, nil
+	}
 	return "Recorded. You can stop now.", false, nil
+}
+
+func checkRoundDescription(p *Project, description string) string {
+	if p.Conventions.Description != descriptionSession {
+		return "description is not used in this project: arbetern writes the pull request description from the first report."
+	}
+	if err := checkText("description", description, 1, maxSessionSummary); err != nil {
+		return err.Error() + "."
+	}
+	return ""
+}
+
+type descriptionPlan struct {
+	next   *Outcome // nil when the description stays
+	body   string
+	edited bool // the live description is not the one arbetern last wrote
+	reason string
+}
+
+// planDescription works out whether the round changes what the description shows: the session's new description, or the decision callout.
+func (g *gateway) planDescription(ctx context.Context, s *session, owner, repo string, number int, description string, o Outcome, rd *Round) descriptionPlan {
+	t := s.task
+	if t.Outcome == nil || t.PR == nil {
+		return descriptionPlan{reason: "the task has no recorded description"}
+	}
+	next := *t.Outcome
+	next.Summary = cmp.Or(description, next.Summary)
+	switch {
+	case o.Question != "":
+		next.Question = o.Question
+	case personSpoke(rd):
+		next.Question = ""
+	}
+	if next.Summary == t.Outcome.Summary && next.Question == t.Outcome.Question {
+		return descriptionPlan{}
+	}
+	pr, err := g.r.gh.PullRequestState(ctx, owner, repo, number)
+	if err != nil {
+		log.Printf("[projects] %s task %s round %d: reading the pull request description: %v", s.project.ID, t.ID, s.roundN, err)
+		return descriptionPlan{reason: "GitHub could not be read"}
+	}
+	if !arbeternWrote(s.project, t, pr.Body) {
+		return descriptionPlan{edited: true, reason: "someone edited it on GitHub since arbetern wrote it"}
+	}
+	return descriptionPlan{next: &next, body: prBody(s.project, t, next)}
+}
+
+// arbeternWrote reports whether body is still the description arbetern last wrote: by its hash, or, for a pull request opened before hashes were kept, by the rendered summary and the marker.
+func arbeternWrote(p *Project, t *Task, body string) bool {
+	if t.PR.BodySHA != "" {
+		return bodySHA(body) == t.PR.BodySHA
+	}
+	body = strings.ReplaceAll(body, "\r\n", "\n")
+	return strings.Contains(body, summaryBlock(p, t, *t.Outcome)) && strings.Contains(body, github.ProjectPRMarker(p.ID, t.ID))
+}
+
+func (g *gateway) applyDescription(ctx context.Context, s *session, owner, repo string, number int, plan descriptionPlan) (described *Outcome, sha, fact string) {
+	switch {
+	case plan.next == nil && plan.reason != "":
+		return nil, "", "The pull request description was left as is: " + plan.reason + "."
+	case plan.next == nil:
+		return nil, "", ""
+	}
+	if err := g.r.gh.EditPullRequestBody(ctx, owner, repo, number, plan.body); err != nil {
+		// GitHub may have applied the edit and failed only to answer.
+		if pr, rerr := g.r.gh.PullRequestState(ctx, owner, repo, number); rerr != nil || bodySHA(pr.Body) != bodySHA(plan.body) {
+			log.Printf("[projects] %s task %s round %d: updating the pull request description: %v", s.project.ID, s.task.ID, s.roundN, err)
+			return nil, "", "The pull request description could not be updated: GitHub refused the edit."
+		}
+	}
+	return plan.next, bodySHA(plan.body), "Updated the pull request description."
+}
+
+func bodySHA(body string) string {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(strings.ReplaceAll(body, "\r\n", "\n"))))
+	return hex.EncodeToString(sum[:])
 }
 
 func (g *gateway) releaseRoundReport(s *session, guard string) {
@@ -160,47 +261,49 @@ func (g *gateway) releaseRoundReport(s *session, guard string) {
 	}
 }
 
-func (g *gateway) landRound(ctx context.Context, rd *Round, owner, repo string, number int, branch string) (string, string) {
+// landRound reports the pull request head the round's commits are on, and whether its history no longer holds the head the round started from.
+func (g *gateway) landRound(ctx context.Context, rd *Round, owner, repo string, number int, branch string) (head, problem string, rewritten bool) {
 	gh := g.r.gh
 	pr, err := gh.PullRequestState(ctx, owner, repo, number)
 	switch {
 	case err != nil:
-		return "", "Could not read the pull request on GitHub (" + githubProblem(err) + "); call report_outcome again in a minute."
+		return "", "Could not read the pull request on GitHub (" + githubProblem(err) + "); call report_outcome again in a minute.", false
 	case pr.State != "open":
-		return "", "The pull request is no longer open, so nothing can be added to it."
+		return "", "The pull request is no longer open, so nothing can be added to it.", false
 	case branch == pr.HeadRef && pr.HeadSHA == rd.HeadBefore:
-		return "", "Nothing new is on " + branch + " yet: commit, push with `git push origin HEAD:" + branch + "`, then call report_outcome again."
+		return "", "Nothing new is on " + branch + " yet: commit, push with `git push origin HEAD:" + branch + "`, then call report_outcome again.", false
 	case branch == pr.HeadRef:
-		return pr.HeadSHA, ""
+		_, behind, err := gh.Divergence(ctx, owner, repo, rd.HeadBefore, pr.HeadSHA)
+		return pr.HeadSHA, "", err == nil && behind > 0
 	}
 	sha, err := gh.BranchHead(ctx, owner, repo, branch)
 	switch {
 	case github.IsNotFound(err):
-		return "", "Branch " + branch + " is not on GitHub yet — push it and call report_outcome again."
+		return "", "Branch " + branch + " is not on GitHub yet — push it and call report_outcome again.", false
 	case err != nil:
-		return "", "Could not read branch " + branch + " on GitHub (" + githubProblem(err) + "); call report_outcome again in a minute."
+		return "", "Could not read branch " + branch + " on GitHub (" + githubProblem(err) + "); call report_outcome again in a minute.", false
 	}
 	ahead, behind, err := gh.Divergence(ctx, owner, repo, pr.HeadSHA, sha)
 	switch {
 	case err != nil:
-		return "", "Could not compare " + branch + " with the pull request on GitHub (" + githubProblem(err) + "); call report_outcome again in a minute."
+		return "", "Could not compare " + branch + " with the pull request on GitHub (" + githubProblem(err) + "); call report_outcome again in a minute.", false
 	case ahead == 0:
-		return "", "Branch " + branch + " has no commits beyond the pull request head " + shortSHA(pr.HeadSHA) + "."
+		return "", "Branch " + branch + " has no commits beyond the pull request head " + shortSHA(pr.HeadSHA) + ".", false
 	case behind > 0:
-		return "", "Branch " + branch + " does not contain the pull request head " + shortSHA(pr.HeadSHA) + ": start from origin/" + pr.HeadRef + ", reapply your commits and push again."
+		return "", "Branch " + branch + " does not contain the pull request head " + shortSHA(pr.HeadSHA) + ": start from origin/" + pr.HeadRef + ", reapply your commits and push again.", false
 	}
 	if err := gh.FastForwardBranch(ctx, owner, repo, pr.HeadRef, sha); err != nil {
 		if github.IsRefused(err) {
-			return "", "A branch rule of the repository refuses updates to " + pr.HeadRef + " by arbetern's token, which your pushes use too. Report cannot_fix and say so; an admin has to let the token's account update " + BranchPrefix + "** branches."
+			return "", "A branch rule of the repository refuses updates to " + pr.HeadRef + " by arbetern's token, which your pushes use too. Report cannot_fix and say so; an admin has to let the token's account update the project's branches, such as " + pr.HeadRef + ".", false
 		}
-		return "", "Could not move " + pr.HeadRef + " onto " + branch + " (" + githubProblem(err) + "); call report_outcome again in a minute."
+		return "", "Could not move " + pr.HeadRef + " onto " + branch + " (" + githubProblem(err) + "); call report_outcome again in a minute.", false
 	}
 	if other, err := gh.FindOpenPullRequestByHead(ctx, owner, repo, branch); err == nil && other == nil {
 		if err := gh.DeleteBranch(ctx, owner, repo, branch); err != nil {
 			log.Printf("[projects] deleting the merged-in branch %s of %s/%s: %v", branch, owner, repo, err)
 		}
 	}
-	return sha, ""
+	return sha, "", false
 }
 
 func (g *gateway) postReplies(ctx context.Context, owner, repo string, number int, replies []plannedReply) int {
@@ -256,7 +359,7 @@ func (g *gateway) rerunChecks(ctx context.Context, s *session, rd *Round, owner,
 	return rerun
 }
 
-func roundComment(p *Project, rd *Round, o Outcome, owner, repo, head string, posted int, rerun bool) string {
+func roundComment(p *Project, rd *Round, o Outcome, owner, repo, head string, posted int, rerun bool, extra []string) string {
 	label := map[string]string{
 		OutcomeFixed:     "pushed a fix",
 		OutcomeAnswered:  "answered without changing code",
@@ -278,6 +381,7 @@ func roundComment(p *Project, rd *Round, o Outcome, owner, repo, head string, po
 	if rerun {
 		facts = append(facts, "Re-ran the failed jobs on `"+shortSHA(head)+"`.")
 	}
+	facts = append(facts, extra...)
 	if q := cleanPRText(o.Question, maxQuestionChars); q != "" {
 		facts = append(facts, "**Decision needed:** "+q+" Reply in this pull request and a follow-up round applies the answer.")
 	}

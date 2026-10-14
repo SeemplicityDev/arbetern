@@ -211,8 +211,8 @@ Once configured, the bot exposes the following Jira tools to the LLM:
 |---|---|
 | **create_jira_ticket** | Create an issue with summary, description, type, labels, assignee, and team |
 | **list_jira_projects** | Discover available project keys |
-| **search_jira_issues** | Search for issues using JQL (e.g., find all in-progress tickets for a user); `fields` adds up to 10 more fields to each result, such as a custom field's option values |
-| **get_jira_issue** | Fetch full details of a specific issue by key (including description); `fields` adds up to 10 more fields |
+| **search_jira_issues** | Search for issues using JQL (e.g., find all in-progress tickets for a user); `fields` adds up to 10 more fields to each result, by id or name, such as a custom field's option values. A field Jira does not return is named as such, not shown as empty |
+| **get_jira_issue** | Fetch full details of a specific issue by key (including description); `fields` adds up to 10 more fields, by id or name |
 | **update_jira_issue** | Update an issue's summary and/or description |
 
 | **search_confluence_pages** | Search for Confluence pages by keyword |

@@ -66,6 +66,11 @@ type Client struct {
 	extraFieldsOnce sync.Once
 	teamFieldID     string // e.g. "customfield_10001"
 	sprintFieldID   string // e.g. "customfield_10020"
+
+	fieldsMu     sync.Mutex
+	catalog      *fieldCatalog
+	catalogAt    time.Time
+	catalogTried time.Time
 }
 
 // NewClient creates an Atlassian API client using Basic Auth (email + API token).

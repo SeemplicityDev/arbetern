@@ -17,9 +17,10 @@ nothing is left.
 
 A project belongs to no agent. It is defined by its goal, its signal, the
 skills it is given and the repository it works on, and its sessions inherit
-arbetern's context: the console skills the project names, the project's memory,
-and every integration arbetern is connected to, read-only, with arbetern's own
-credentials. The session pod itself holds no credential at all.
+arbetern's context: the console skills the project names and those that apply
+to every agent, the project's memory, every integration arbetern is connected
+to, read-only, with arbetern's own credentials, and the MCP connectors the
+project names. The session pod itself holds no credential at all.
 
 Projects are off by default. `projects.enabled` turns on the console API, the
 tick loop, the session gateway and every session resource in the chart.
@@ -249,7 +250,8 @@ deployment has projects enabled, and **New project** only to project admins.
 | `description` | no | Up to 240 characters |
 | `goal` | yes | The standing goal, up to 4000 characters. It leads every work order |
 | `instructions` | no | Repository-specific rules for the sessions, up to 8000 characters |
-| `skills` | no | Up to 20 ids of console skills whose instructions go into every work order, in that order. Unknown ids are refused; a skill that is disabled later stays on the project and contributes nothing until it is enabled again |
+| `skills` | no | Up to 20 ids of console skills whose instructions go into every work order, in that order, followed by every enabled skill that applies to all agents, as arbetern's agents get them. Unknown ids are refused; a skill that is disabled later stays on the project and contributes nothing until it is enabled again |
+| `connectors` | no | Up to 10 ids of the console's MCP connectors whose tools the sessions may call, with the credentials stored on the connector. Only a connector open to every agent (no agent allowlist) can be named, and sessions stop getting one that is limited later. Unknown ids are refused. arbetern cannot tell which MCP tools only read, so name only connectors whose tools read |
 | `repo.owner`, `repo.name` | yes | The GitHub repository, such as `acme` / `repo` |
 | `repo.base_branch` | no | Where pull requests go. Empty means the repository's default branch, resolved when saved |
 | `signal.type` | no | `datadog` (log error groups, the default) or `datadog_metrics` ([metric series](#metric-signals)) |
@@ -258,7 +260,7 @@ deployment has projects enabled, and **New project** only to project admins.
 | `signal.pattern` | no | RE2 regular expression, up to 500 characters. A group is kept only when it matches the group's error kind, its message pattern or one of its sample messages; a series only when it matches its tags |
 | `signal.lookback` | no | Log signals: how far back the first scan reaches, `24h` by default, from `1h` to `168h` |
 | `signal.sites`, `kept_query`, `window`, `threshold`, `share_threshold`, `fill`, `evidence` | metric signals | See [Metric signals](#metric-signals) |
-| `session.model` | no | A model label (`sonnet`, `opus`, `haiku`, `fable`) or a `claude-…` model ID for this project's sessions; empty uses `PROJECTS_MODEL` |
+| `session.model` | no | A model label (`sonnet`, `opus`, `haiku`, `fable`) or a `claude-…` model ID for this project's sessions; empty uses `PROJECTS_MODEL`. An older release resolves to its family's current model. Claude Code's own `haiku`, `sonnet` and `opus` aliases, such as the haiku it uses for background work, are set to arbetern's current models |
 | `session.max_turns` | no | Claude Code turns per session, 10–500, default 200 |
 | `review` | no | Follow-through, see [Following the pull request](#following-the-pull-request). Off by default |
 | `notify.slack_channel` | no | Slack channel id (`C…` or `G…`) for [notifications](#notifications). Empty sends nothing |
@@ -273,7 +275,7 @@ be set to zero.
 |---|---|---|---|
 | `max_open_prs` | 3 | 1–20 | Open pull requests plus active sessions |
 | `max_active_sessions` | 1 | 1–5 | Sessions dispatching or running at once, follow-up rounds included |
-| `max_sessions_per_day` | 6 | 1–48 | New-work sessions started per UTC day. Follow-up rounds count toward it but are never held back by it |
+| `max_sessions_per_day` | 6 | 1–48 | Sessions started per UTC day, follow-up rounds included. Once it is reached only follow-up rounds start, so rounds can use up the day's budget for new work |
 | `max_attempts` | 2 | 1–5 | Sessions per error group. A fix whose error recurs gets a fresh budget |
 | `cooldown_hours` | 72 | 1–720 | Wait after a closed pull request or a no-fix report before the group is tried again. A failed session waits one hour |
 | `session_timeout_minutes` | 240 | 30–600 | A running session with no report is failed this long plus 30 minutes after dispatch, and its Job is deleted. The Job's own deadline is this plus 10 minutes |
@@ -307,7 +309,7 @@ reads need the admin list. Bodies are JSON of at most 64 KiB, and unknown fields
 | `GET /api/projects` | All projects, sorted by name, without the daily series |
 | `GET /api/projects/<id>` | The project, plus `tasks` (newest first), `backlog` (up to 20 groups that could be dispatched now) and `memory` (newest first), and `state_error` when they could not be read |
 | `POST /api/projects` | Create; the fields above. 201 with the project |
-| `PATCH /api/projects/<id>` | Change only the keys sent. `repo`, `signal`, `session`, `review`, `notify`, `conventions`, `limits` and `skills` replace the whole value; `null` values are refused with 400. Changing what the signal finds (for a log signal its site, query or pattern) drops the collected candidates at the next scan |
+| `PATCH /api/projects/<id>` | Change only the keys sent. `repo`, `signal`, `session`, `review`, `notify`, `conventions`, `limits`, `skills` and `connectors` replace the whole value; `null` values are refused with 400. Changing what the signal finds (for a log signal its site, query or pattern) drops the collected candidates at the next scan |
 | `DELETE /api/projects/<id>` | Delete, as above. 204 |
 | `POST /api/projects/<id>/run` | Queue a tick. 202 `{"accepted":true}`, or 409 when the project is paused |
 | `POST /api/projects/<id>/memory` | Add an admin note, `{"text":"…"}` of 1–500 characters. 201 with the note |
@@ -410,9 +412,10 @@ requests it already has open.
 ### Rounds
 
 A round starts when there are unanswered review comments, failing checks not
-yet taken on at the current head, or a conflict. It waits until no round is
-running, the checks have finished (or an hour has passed since the head
-appeared) and a session slot is free: a round counts against
+yet taken on at the current head, or a conflict. Comments and failing checks
+wait until the checks have finished, or an hour has passed since the head
+appeared; a conflict does not wait for them. Every round waits until no round
+is running and a session slot is free: a round counts against
 `max_active_sessions` but needs no pull request slot of its own, and rounds are
 dispatched before new work. It counts toward `max_sessions_per_day` without
 being held back by it, because new work spends the day's budget before review
@@ -440,6 +443,21 @@ new commits, how many comments got a reply, and any question. With
 for failures unrelated to the change. A round that leaves the head where it was
 marks that head's failing checks and conflict as taken on, so they start no
 other round until the head moves.
+
+The pull request description follows the rounds. Its **Decision needed**
+callout shows the open question. Only a person can answer it: a round started
+by checks, a conflict or a bot comment leaves the question open, even when it
+reports `cannot_fix`, and a round that answers a person's comment closes it
+unless the session asks again. A round's own question replaces it. With
+`description: session`, a round may also pass the whole corrected description
+in `description`, for a review comment about it; the brief quotes the current
+one in full. arbetern rewrites the description only while it is still the one
+arbetern last wrote, so a description someone edited on GitHub, such as a
+ticked checkbox, is kept: a round that passed `description` is told so before
+anything is posted and reports again without it, and any other change it
+skipped is named in the round's summary comment. When a round finds that the
+pull request branch no longer contains the head it started from, its summary
+comment says the history was rewritten.
 
 A round whose session ends without a report, or that never starts, is failed,
 and the pull request waits 30 minutes before another one. A Job that could not
@@ -493,13 +511,18 @@ as a slug of up to 50 characters.
 
 When a session reports `fixed`, arbetern files the issue with the summary and
 description the session passes in `ticket`, the configured fields, the site's
-and then the session's. Jira names a field it refuses, and arbetern drops those
-fields for up to two more tries, so a wrong option costs one field, not the
-ticket. The key is recorded on the task before anything else happens, so a
-report that is retried reuses the issue. arbetern then creates the convention
-branch at the commit the session pushed, opens the pull request from it,
-comments the pull request's link on the issue and deletes the session's own
-branch. Follow-up rounds work on the convention branch.
+and then the session's. Jira names a field it refuses. A field the session set
+goes back to the session with Jira's reason before any issue exists, so it can
+correct the value or leave the field out; a configured field is dropped for up
+to two more tries, so a wrong option there costs one field, not the ticket.
+`@[Name](accountId)` in the session's text is defused, so it mentions nobody.
+The key is recorded on the task before anything else happens, even when Jira
+answers late, so a report that is retried reuses the issue. arbetern then
+creates the convention branch at the commit the session pushed, opens the pull
+request from it, comments the pull request's link on the issue and deletes the
+session's own branch. Follow-up rounds work on the convention branch. When the
+pull request is never opened and the session reports another status, arbetern
+comments that outcome on the issue, and the channel line links it.
 
 With `description: session`, the session writes `{ticket}` and `{ticket_url}`
 where the key belongs and arbetern fills them in; a description without the key
@@ -592,9 +615,9 @@ The entrypoint, `/opt/arbetern/bin/session`:
    `terminationGracePeriodSeconds`, with the exit reason `stopped`.
 
 The **Stop hook** asks the gateway whether the work order has been reported.
-If not, it sends Claude back with "Commit and push your work on the current
-claude/ branch, then call report_outcome on the arbetern MCP server before
-stopping." It never fails the turn.
+If not, it sends Claude back with "Commit and push your work to the branch
+your work order names, then call report_outcome on the arbetern MCP server
+before stopping." It never fails the turn.
 
 ### The gateway
 
@@ -615,16 +638,17 @@ model streams, git transfers and transcripts may take up to 30 minutes.
 | `GET /v1/session/transcript` | Entrypoint | Returns the stored transcript for a round to resume |
 | `POST /mcp` | Claude Code | MCP over Streamable HTTP, stateless, JSON responses only |
 | `POST /anthropic/v1/messages`, `…/count_tokens`, `GET /anthropic/v1/models` | Claude Code | Proxied to the Anthropic API with arbetern's key in place of the session token. Usage from every response, streamed or not, is metered to the project. Closed once the work order has finished for ten minutes |
-| `GET /git/<owner>/<repo>/info/refs`, `POST …/git-upload-pack`, `POST …/git-receive-pack` | git | Smart HTTP proxied to GitHub with arbetern's token, for the project's repository only. A push may only create or move `claude/` branches, never delete, never tags, never the base branch |
+| `GET /git/<owner>/<repo>/info/refs`, `POST …/git-upload-pack`, `POST …/git-receive-pack` | git | Smart HTTP proxied to GitHub with arbetern's token, for the project's repository only. A push may only create or move the session's own branch, the `claude/` branch of a first session or the pull request's branch in a round, and names starting with it and a dash; never delete, never tags, never the base branch |
 
 ### MCP tools
 
 | Tool | Arguments | What it does |
 |---|---|---|
 | `get_task` | none | Returns the work order |
-| `report_outcome` | `status`: `fixed`, `not_reproducible`, `cannot_fix` or `already_fixed` (a follow-up round takes `fixed`, `answered` or `cannot_fix`); `summary` (required, up to 4000, or 12,000 when the conventions make it the whole description); `title` (up to 120) and `branch`, both required for `fixed` in a first session, `branch` for `fixed` in a round; `testing` (up to 2000); `question` (up to 1000, a decision for reviewers, with `fixed`); `headline` (up to 300, one line for the channel); `ticket` (`summary` up to 250, `description` up to 4000, and the `fields` the conventions let the session set), required for `fixed` when the project files tickets; in a round, `replies` (`id` and `body` up to 2000, one per comment) and `rerun_checks` | For `fixed`, arbetern checks the title against the conventions' pattern, checks that the branch is the one the work order named or a name derived from it (the same rule the git proxy enforces), is not the base branch, exists on GitHub and has commits ahead of the base, files the ticket, places the convention branch, then reuses an open pull request from that branch or opens one, as a draft with `review.draft` or a `question`. A problem comes back as a tool error the session can act on, such as a branch that is not pushed yet. A `fixed` report is checked at most 10 times per work order; after that the session must report another status. Any other status records the outcome and starts the group's cooldown. In a round, see [Rounds](#rounds). Calling it again returns what was recorded |
+| `report_outcome` | `status`: `fixed`, `not_reproducible`, `cannot_fix` or `already_fixed` (a follow-up round takes `fixed`, `answered` or `cannot_fix`); `summary` (required, up to 4000, or 12,000 when the conventions make it the whole description); `title` (up to 120) and `branch`, both required for `fixed` in a first session, `branch` for `fixed` in a round; `testing` (up to 2000); `question` (up to 1000, a decision for reviewers, with `fixed`); `headline` (up to 300, one line for the channel); `ticket` (`summary` up to 250, `description` up to 4000, and the `fields` the conventions let the session set), required for `fixed` when the project files tickets; in a round, `replies` (`id` and `body` up to 2000, one per comment), `rerun_checks`, and `description` (up to 12,000, the whole corrected pull request description, only with `description: session`) | For `fixed`, arbetern checks the title against the conventions' pattern, checks that the branch is the one the work order named or a name derived from it (the same rule the git proxy enforces), is not the base branch, exists on GitHub and has commits ahead of the base, files the ticket, places the convention branch, then reuses an open pull request from that branch or opens one, as a draft with `review.draft` or a `question`. A problem comes back as a tool error the session can act on, such as a branch that is not pushed yet. A `fixed` report is checked at most 10 times per work order; after that the session must report another status. Any other status records the outcome and starts the group's cooldown. In a round, see [Rounds](#rounds). Calling it again returns what was recorded |
 | `record_learning` | `note`, 1–500 characters | Saves a durable fact into project memory for later sessions, at most five per work order. The note is redacted first |
 | arbetern's integration tools | as on the Integrations page | The read-only tools of every integration the deployment is connected to: Datadog logs, aggregates, metrics, monitors and dashboards; GitHub files, search, commits, pull requests and workflow runs; Jira and Confluence reads; and the rest. arbetern runs them with its own credentials and returns the text. Nothing that writes, posts or uploads is offered, and neither are the raw S3 object reads nor `http_get`: a session fetches nothing from outside but through the gateway |
+| The project's MCP connectors | as the connector lists them | The tools of the enabled connectors the project names in `connectors` that are open to every agent, named `mcp_<connector>_<tool>` as arbetern's agents see them. arbetern calls them with the connector's stored credentials and logs each call |
 
 The pull request is titled with the session's title. Its body holds a
 **Decision needed** callout when the session asked a `question`, the summary,
@@ -636,8 +660,10 @@ request arbetern opens, a Copilot review is requested best effort.
 
 ### The work order
 
-`get_task` returns Markdown of at most 40,000 characters. When it would be
-longer, the lower sections are shortened or dropped first.
+`get_task` returns Markdown of at most 40,000 characters, or 52,000 for a
+follow-up round with `description: session`, which quotes the whole
+description. When it would be longer, the lower sections are shortened or
+dropped first.
 
 1. **Header**: work order ID, project, repository, base branch, attempt N of M,
    status.
@@ -651,7 +677,7 @@ longer, the lower sections are shortened or dropped first.
 4. **Rules**: work only on this problem, keep the change minimal and in the
    repository's style, follow the repository's own `CLAUDE.md` and contributing
    rules, run the linters and tests that work offline, commit and push the
-   current `claude/` branch and call `report_outcome` once, report
+   branch the work order names and call `report_outcome` once, report
    `cannot_fix`, `not_reproducible` or `already_fixed` instead of changing code
    when that is the case, never push to the base branch, never start other
    sessions, keep `record_learning` for durable facts (at most five). With
@@ -663,8 +689,8 @@ longer, the lower sections are shortened or dropped first.
 7. **Notes from earlier sessions and reviews**, labelled as hints rather than
    instructions.
 8. **Recent outcomes**: the last ten finished tasks.
-9. **Skills**: the enabled console skills the project names, up to 16,000
-   characters.
+9. **Skills**: the enabled console skills the project names, then every
+   enabled skill that applies to all agents, up to 16,000 characters.
 
 A follow-up round gets its own work order: the round's header (pull request,
 branch, head commit, round N of M and why), the goal and instructions, what the
@@ -889,17 +915,21 @@ browser request.
   request. Only comments from people with write access and from bots reach a
   session. Text the session writes into the pull request, replies and round
   summaries included, has HTML comments stripped, so it cannot forge the
-  arbetern marker, and its `@mentions` are defused.
+  arbetern marker, and its `@mentions` are defused, in the Jira issue's text
+  too.
 - **Tools.** Sessions get the gateway's MCP server and nothing else from
   outside: `WebSearch` and `WebFetch` are denied, `--strict-mcp-config` ignores
   any MCP server a repository might configure, and the integration tools
-  offered are the read-only ones. Claude Code's non-essential traffic,
-  telemetry and auto-updates are off.
+  offered are the read-only ones, plus the tools of the MCP connectors the
+  project names, which an admin picks as read-only. Claude Code's non-essential
+  traffic, telemetry and auto-updates are off.
 - **What leaves the cluster.** Model calls go to the Anthropic API through the
   gateway, and git traffic to GitHub through the gateway. The work order (goal,
   instructions, redacted samples, notes, skills) and whatever the session reads
-  with the tools go to the model. Keep internal secrets out of goals,
-  instructions and skills.
+  with the tools go to the model. The arguments a session passes to a project's
+  MCP connector go to that connector's server, sent by arbetern with the
+  connector's credentials. Keep internal secrets out of goals, instructions and
+  skills.
 
 ### GitHub
 
@@ -1013,7 +1043,7 @@ browser request.
 | Job log `session: this session was not dispatched by an arbetern project (HTTP 403)` | No binding: the task had already finished, or the Job outlived its project |
 | Job log `session: the gateway did not admit this session (HTTP 000)` | The pod cannot reach the gateway: check the session egress policy, the gateway Service and port, and that the cluster domain is `cluster.local` |
 | Job log `session: the repository could not be cloned` | The git proxy refused: arbetern's token lacks access to the repository, or the project names the wrong repository |
-| arbetern logs `refused a push: this session may push only claude/…` | The session pushed to a branch that is not its own; the work order names the branch to use. The whole push is refused, including any of its own refs in it; its own branch pushed on its own goes through |
+| arbetern logs `refused a push: this session may push only <branch>…` | The session pushed to a branch that is not its own; the work order names the branch to use. The whole push is refused, including any of its own refs in it; its own branch pushed on its own goes through |
 | A session is told `Could not file the ticket in Jira` | Jira refused the issue for a reason that names no field, or was unreachable. The session retries; check the Atlassian connection and that its account may create issues in the conventions' project |
 | A session is told `This deployment has no Jira connection` | The project's conventions file tickets, and the Atlassian integration was removed after the project was saved. Configure it again, or remove `conventions.ticket` |
 | Job log `session: the stored transcript could not be downloaded` | A follow-up round could not fetch the transcript it resumes after several attempts; the round fails and, after the 30-minute wait that follows a failed round, a later tick starts another one |
@@ -1024,7 +1054,7 @@ browser request.
 | Task failed with `session timed out` | No report within `session_timeout_minutes` plus 30 minutes; the Job was deleted |
 | Job stuck `Pending` or `ContainerCreating` | Image pull (the pull secret must be in the session namespace), node capacity, or the token Secret; `kubectl -n <session namespace> describe job claude-runner-<…>` says which |
 | Sessions cannot resolve names on a cluster with NodeLocal DNSCache | The DNS rule reaches only the `kube-dns` pods. Add UDP and TCP 53 to the node-local address through `sessions.egress.extraRules` |
-| A round ends `cannot_fix` because a branch rule refuses updates to `claude/…` | A branch rule or ruleset refuses updates to `claude/**` by the token's account. Sessions push with the same token, so add that account to the rule's bypass list |
+| A round ends `cannot_fix` because a branch rule refuses updates to the pull request's branch | A branch rule or ruleset refuses updates to the project's branches, `claude/**` or the names the conventions' `branch` produces, by the token's account. Sessions push with the same token, so add that account to the rule's bypass list |
 | A pull request never gets the ready note | A check still fails after a round called it unrelated and re-ran it once, a question or blocker waits for a person (the task shows *needs a person*), or the rounds ran out. The task's follow-through details on the project page say which |
 | A metric task's work order says no log matched | The evidence attributes do not match the series' tags: a wrong attribute, or log values with capitals or several spaces in a row |
 

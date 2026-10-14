@@ -157,6 +157,14 @@ func (h *GeneralHandler) recordTool(name string, took time.Duration, result stri
 	})
 }
 
+// afterRefusal returns the client a declined turn moves to: a model without a server-side fallback, such as the light tier's, hands the turn to the code client once.
+func afterRefusal(finish string, active, fallback *llm.Client) *llm.Client {
+	if finish != "refusal" || fallback == nil || active == fallback {
+		return nil
+	}
+	return fallback
+}
+
 // toolFailed reports whether a tool result is the error convention every tool
 // in this package follows: a plain string starting with "Error".
 func toolFailed(result string) bool { return strings.HasPrefix(result, "Error") }
@@ -233,6 +241,11 @@ func (h *GeneralHandler) runToolLoop(ctx context.Context, lp toolLoop) (res loop
 			}
 			content = strings.TrimSpace(content)
 			if content == "" {
+				if next := afterRefusal(choice.FinishReason, active, lp.codeClient); next != nil {
+					log.Printf("%s %s declined the turn; retrying it on %s", lp.logPrefix, active.Model(), next.Model())
+					active = next
+					continue
+				}
 				if emptyRetries < lp.emptyRetries {
 					emptyRetries++
 					nudge := emptyTurnNudge

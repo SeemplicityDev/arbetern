@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"maps"
 	"net/http"
 	"net/http/httputil"
 	"regexp"
@@ -23,6 +24,7 @@ import (
 	"github.com/justmike1/arbetern/internal/safego"
 	"github.com/justmike1/arbetern/internal/store"
 	"github.com/justmike1/arbetern/internal/text"
+	"github.com/justmike1/arbetern/mcp"
 )
 
 const (
@@ -397,7 +399,8 @@ func (g *gateway) handleMCP(w http.ResponseWriter, req *http.Request) {
 		writeError(w, status, err.Error())
 		return
 	}
-	code, resp := serveRPC(req.Context(), body, g.tools, g.toolCall(s))
+	tools, connectors := g.sessionTools(s)
+	code, resp := serveRPC(req.Context(), body, tools, g.toolCall(s, connectors))
 	if code == http.StatusAccepted {
 		w.WriteHeader(http.StatusAccepted)
 		return
@@ -408,7 +411,24 @@ func (g *gateway) handleMCP(w http.ResponseWriter, req *http.Request) {
 	_, _ = w.Write(resp)
 }
 
-func (g *gateway) toolCall(s *session) toolCaller {
+// sessionTools adds the tools of the MCP connectors the session's project names to the shared ones.
+func (g *gateway) sessionTools(s *session) ([]toolDef, map[string]mcp.AgentTool) {
+	if g.r.deps.Connectors == nil || len(s.project.Connectors) == 0 {
+		return g.tools, nil
+	}
+	tools := slices.Clone(g.tools)
+	byName := map[string]mcp.AgentTool{}
+	for _, t := range g.r.deps.Connectors.ProjectTools(s.project.Connectors) {
+		if _, taken := findTool(tools, t.LLMName); taken {
+			continue
+		}
+		byName[t.LLMName] = t
+		tools = append(tools, toolDef{Name: t.LLMName, Description: t.Description(), InputSchema: t.Schema()})
+	}
+	return tools, byName
+}
+
+func (g *gateway) toolCall(s *session, connectors map[string]mcp.AgentTool) toolCaller {
 	return func(ctx context.Context, name string, args json.RawMessage) (string, bool, error) {
 		switch name {
 		case "get_task":
@@ -417,6 +437,17 @@ func (g *gateway) toolCall(s *session) toolCaller {
 			return g.reportOutcome(ctx, s, args)
 		case "record_learning":
 			return g.recordLearning(ctx, s, args)
+		}
+		if t, ok := connectors[name]; ok {
+			if !s.live() {
+				return "This work order is finished, so its tools are closed.", true, nil
+			}
+			log.Printf("[projects] %s task %s: MCP %s %s", s.project.ID, s.task.ID, t.ConnectorName, t.Tool.Name)
+			out, err := g.r.deps.Connectors.Call(ctx, t.ConnectorID, t.Tool.Name, args)
+			if err != nil {
+				return "Error from " + t.ConnectorName + ": " + oneLine(redact.Text(err.Error()), 300), true, nil
+			}
+			return out, strings.HasPrefix(out, "Error"), nil
 		}
 		if g.r.deps.Tools == nil {
 			return "", false, fmt.Errorf("no handler for tool %q", name)
@@ -479,6 +510,7 @@ type reportArgs struct {
 	Ticket      *ticketArg `json:"ticket"`
 	Replies     []replyArg `json:"replies"`
 	RerunChecks bool       `json:"rerun_checks"`
+	Description string     `json:"description"`
 }
 
 func (a reportArgs) common(now time.Time, maxSummary int) (o Outcome, problem string) {
@@ -527,8 +559,8 @@ func (a reportArgs) outcome(p *Project, now time.Time) (o Outcome, problem strin
 	switch {
 	case problem != "":
 		return o, problem
-	case len(a.Replies) > 0 || a.RerunChecks:
-		return o, "replies and rerun_checks belong to follow-up rounds only."
+	case len(a.Replies) > 0 || a.RerunChecks || strings.TrimSpace(a.Description) != "":
+		return o, "replies, rerun_checks and description belong to follow-up rounds only."
 	}
 	switch o.Status {
 	case OutcomeFixed, OutcomeNotReproducible, OutcomeCannotFix, OutcomeAlreadyFixed:
@@ -586,7 +618,8 @@ func (g *gateway) reportOutcome(ctx context.Context, s *session, raw json.RawMes
 			var fields map[string]any
 			if summary, description, fields, problem = a.Ticket.check(tc); problem == "" {
 				ticket = &TicketRequest{Project: tc.Project, IssueType: tc.IssueType, Summary: summary, Description: description,
-					AssigneeID: tc.AssigneeID, Labels: tc.Labels, Fields: ticketFields(tc, taskSite(s.project, s.task.Group), fields)}
+					AssigneeID: tc.AssigneeID, Labels: tc.Labels, Fields: ticketFields(tc, taskSite(s.project, s.task.Group), fields),
+					SessionFields: slices.Sorted(maps.Keys(fields))}
 			}
 		}
 	}
@@ -615,6 +648,17 @@ func (g *gateway) reportOutcome(ctx context.Context, s *session, raw json.RawMes
 	log.Printf("[projects] %s task %s reported %s", s.project.ID, taskID, o.Status)
 	g.r.refreshStats(s.project.ID, s.ledger)
 	g.r.notify(s.project, noteNoFix(s.task, o))
+	if key := s.task.Ticket; key != "" && g.r.deps.Tickets != nil {
+		note := defuseMentions("No pull request was opened for this issue. The session reported " + strings.ReplaceAll(o.Status, "_", " ") + ": " + oneLine(o.Summary, 2000))
+		projectID := s.project.ID
+		safego.Go("projects: ticket note "+taskID, func() {
+			cctx, cancel := context.WithTimeout(context.Background(), persistTimeout)
+			defer cancel()
+			if err := g.r.deps.Tickets.CommentTicket(cctx, key, note); err != nil {
+				log.Printf("[projects] %s task %s: commenting the outcome on %s: %v", projectID, taskID, key, err)
+			}
+		})
+	}
 	return "Recorded. You can stop now.", false, nil
 }
 
@@ -634,7 +678,7 @@ func (g *gateway) openPullRequest(ctx context.Context, s *session, o Outcome, ti
 	default:
 		return "A pull request is already being opened for this work order; call report_outcome again in a minute if it does not appear.", true, nil
 	}
-	url, branch, problem := g.pullRequestFor(ctx, s, o, ticket)
+	url, branch, body, problem := g.pullRequestFor(ctx, s, o, ticket)
 	if problem != "" {
 		g.releaseOpening(s, guard)
 		return problem, true, nil
@@ -647,7 +691,7 @@ func (g *gateway) openPullRequest(ctx context.Context, s *session, o Outcome, ti
 		return "", false, fmt.Errorf("GitHub returned an unexpected pull request URL: %w", err)
 	}
 	opened := time.Now().UTC()
-	pr := PR{Number: number, URL: url, Title: prTitle(p, s.task, o.Title), State: prStateOpen, CreatedAt: stamp(opened)}
+	pr := PR{Number: number, URL: url, Title: prTitle(p, s.task, o.Title), State: prStateOpen, CreatedAt: stamp(opened), BodySHA: bodySHA(body)}
 	follow, draft := p.Review.FollowUp, opensDraft(p, o)
 	changed, err := g.apply(ctx, s, func(l *Ledger) bool { return l.openPR(taskID, o, pr, follow, draft, opened) })
 	if err != nil {
@@ -703,54 +747,55 @@ func githubProblem(err error) string {
 	return oneLine(redact.Text(err.Error()), 300)
 }
 
-func (g *gateway) pullRequestFor(ctx context.Context, s *session, o Outcome, ticket *TicketRequest) (url, branch, problem string) {
+func (g *gateway) pullRequestFor(ctx context.Context, s *session, o Outcome, ticket *TicketRequest) (url, branch, body, problem string) {
 	gh := g.r.gh
 	if gh == nil {
-		return "", "", "GitHub is not configured in this deployment, so no pull request can be opened."
+		return "", "", "", "GitHub is not configured in this deployment, so no pull request can be opened."
 	}
 	p := s.project
 	owner, repo, base := p.Repo.Owner, p.Repo.Name, p.Repo.BaseBranch
 	exists, err := gh.BranchExists(ctx, owner, repo, o.Branch)
 	if err != nil {
-		return "", "", "Could not check branch " + o.Branch + " on GitHub (" + githubProblem(err) + "); call report_outcome again in a minute."
+		return "", "", "", "Could not check branch " + o.Branch + " on GitHub (" + githubProblem(err) + "); call report_outcome again in a minute."
 	}
 	if !exists {
-		return "", "", "Branch " + o.Branch + " is not on GitHub yet — push it and call report_outcome again."
+		return "", "", "", "Branch " + o.Branch + " is not on GitHub yet — push it and call report_outcome again."
 	}
 	ahead, err := gh.CommitsAhead(ctx, owner, repo, base, o.Branch)
 	if err != nil {
-		return "", "", "Could not compare " + o.Branch + " with " + base + " on GitHub (" + githubProblem(err) + "); call report_outcome again in a minute."
+		return "", "", "", "Could not compare " + o.Branch + " with " + base + " on GitHub (" + githubProblem(err) + "); call report_outcome again in a minute."
 	}
 	if ahead == 0 {
-		return "", "", "Branch " + o.Branch + " has no commits ahead of base " + base + " — commit and push your change, then call report_outcome again."
+		return "", "", "", "Branch " + o.Branch + " has no commits ahead of base " + base + " — commit and push your change, then call report_outcome again."
 	}
 	if ticket != nil {
 		if problem = g.fileTaskTicket(ctx, s, *ticket); problem != "" {
-			return "", "", problem
+			return "", "", "", problem
 		}
 	}
 	branch = prBranch(p, s.task, o)
 	if branch != o.Branch {
 		if problem = g.placeBranch(ctx, s, o.Branch, branch); problem != "" {
-			return "", "", problem
+			return "", "", "", problem
 		}
 	}
 	existing, err := gh.FindOpenPullRequestByHead(ctx, owner, repo, branch)
 	if err != nil {
-		return "", "", "Could not look for an open pull request on GitHub (" + githubProblem(err) + "); call report_outcome again in a minute."
+		return "", "", "", "Could not look for an open pull request on GitHub (" + githubProblem(err) + "); call report_outcome again in a minute."
 	}
 	if existing != nil && existing.URL != "" {
-		return existing.URL, branch, ""
+		return existing.URL, branch, existing.Body, ""
 	}
 	create := gh.CreatePullRequest
 	if opensDraft(p, o) {
 		create = gh.CreateDraftPullRequest
 	}
-	url, err = create(ctx, owner, repo, base, branch, prTitle(p, s.task, o.Title), prBody(p, s.task, o))
+	body = prBody(p, s.task, o)
+	url, err = create(ctx, owner, repo, base, branch, prTitle(p, s.task, o.Title), body)
 	if err != nil {
-		return "", "", "GitHub did not open the pull request (" + githubProblem(err) + ")."
+		return "", "", "", "GitHub did not open the pull request (" + githubProblem(err) + "); call report_outcome again in a minute, and report cannot_fix if it keeps failing."
 	}
-	return url, branch, ""
+	return url, branch, body, ""
 }
 
 // fileTaskTicket files the task's issue once; a report that is retried reuses the issue already recorded.
@@ -764,9 +809,14 @@ func (g *gateway) fileTaskTicket(ctx context.Context, s *session, req TicketRequ
 	if req.Description == "" {
 		req.Description = req.Summary
 	}
+	req.Summary, req.Description = defuseMentions(req.Summary), defuseMentions(req.Description)
 	req.Description += "\n\nFiled by the arbetern project \"" + oneLine(s.project.Name, 80) + "\" (task " + s.task.ID + ")."
 	key, url, dropped, err := fileTicket(ctx, g.r.deps.Tickets, req)
-	if err != nil {
+	var refused *refusedFieldsError
+	switch {
+	case errors.As(err, &refused):
+		return "Jira refused ticket.fields " + strings.Join(refused.fields, ", ") + " (" + oneLine(redact.Text(refused.err.Error()), 300) + "). Correct the value, or leave the field out when you cannot find a valid one, then call report_outcome again."
+	case err != nil:
 		log.Printf("[projects] %s task %s: filing the ticket: %v", s.project.ID, s.task.ID, err)
 		return "Could not file the ticket in Jira (" + oneLine(redact.Text(err.Error()), 300) + "); call report_outcome again in a minute."
 	}
@@ -774,7 +824,10 @@ func (g *gateway) fileTaskTicket(ctx context.Context, s *session, req TicketRequ
 		log.Printf("[projects] %s task %s: filed %s without the fields Jira refused: %s", s.project.ID, s.task.ID, key, strings.Join(dropped, ", "))
 	}
 	taskID := s.task.ID
-	if _, err := g.apply(ctx, s, func(l *Ledger) bool { return l.setTicket(taskID, key, url) }); err != nil {
+	// Jira may answer after the request's deadline; the key must still be recorded or a retry files a second issue.
+	pctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), persistTimeout)
+	defer cancel()
+	if _, err := g.apply(pctx, s, func(l *Ledger) bool { return l.setTicket(taskID, key, url) }); err != nil {
 		log.Printf("[projects] %s task %s: recording ticket %s: %v", s.project.ID, taskID, key, err)
 		return "Filed " + key + " but could not record it; call report_outcome again in a minute."
 	}

@@ -57,10 +57,10 @@ var workOrderTools = []toolDef{
 			"status":  map[string]any{"type": "string", "enum": []string{OutcomeFixed, OutcomeNotReproducible, OutcomeCannotFix, OutcomeAlreadyFixed, OutcomeAnswered}, "description": "answered is for follow-up rounds only; not_reproducible and already_fixed are for first sessions only."},
 			"summary": map[string]any{"type": "string", "maxLength": maxSessionSummary, "description": "What you found and, for fixed, what you changed and why; 4000 characters unless the work order makes it the whole pull request description. In a follow-up round it is posted on the pull request."},
 			"title":   map[string]any{"type": "string", "maxLength": 120, "description": "Pull request title; required for fixed in a first session."},
-			"branch":  map[string]any{"type": "string", "maxLength": 200, "description": "The " + BranchPrefix + " branch you pushed; required for fixed."},
+			"branch":  map[string]any{"type": "string", "maxLength": 200, "description": "The branch you pushed, as the work order names it; required for fixed."},
 			"testing": map[string]any{"type": "string", "maxLength": 2000, "description": "How you verified the change."},
 			"question": map[string]any{"type": "string", "maxLength": maxQuestionChars,
-				"description": "A decision only a person can make, with the options named so a one-line reply picks one. The pull request stays a draft until a reviewer answers in it."},
+				"description": "A decision only a person can make, with the options named so a one-line reply picks one. A first session's pull request opens as a draft and stays one until a reviewer answers in it."},
 			"headline": map[string]any{"type": "string", "maxLength": maxHeadlineChars, "description": "One line for the team's channel naming what failed, where, and how much."},
 			"ticket": json.RawMessage(objectSchema(map[string]any{
 				"summary":     map[string]any{"type": "string", "minLength": 1, "maxLength": maxTicketSummary},
@@ -76,6 +76,8 @@ var workOrderTools = []toolDef{
 				}, "id", "body")),
 			},
 			"rerun_checks": map[string]any{"type": "boolean", "description": "Follow-up rounds: the failing checks are unrelated to this change, so arbetern re-runs their failed jobs once."},
+			"description": map[string]any{"type": "string", "maxLength": maxSessionSummary,
+				"description": "Follow-up rounds, when the work order allows it: the whole corrected pull request description, replacing the current one."},
 		}, "status", "summary"),
 	},
 	{

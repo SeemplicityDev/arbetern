@@ -142,13 +142,18 @@ Bedrock, so keep `bedrock-api-key` (or the AWS chain) when you use
 | `fable` | `claude-fable-5-1` | — |
 | `opus` | `claude-opus-5-5` | `global.anthropic.claude-opus-5-5` |
 | `sonnet` | `claude-sonnet-5-5` | `global.anthropic.claude-sonnet-5-5` |
-| `haiku` | `claude-haiku-4-5` | `global.anthropic.claude-haiku-4-5-20251001-v1:0` |
+| `haiku` | `claude-haiku-5-5` | `global.anthropic.claude-haiku-5-5` |
 
-Full model IDs keep working. A Claude ID written for another backend is
-translated as well, so a workflow saved with `global.anthropic.claude-sonnet-5-5`
-runs as `claude-sonnet-5-5` on the Anthropic API. An ID already in the active
-backend's form, such as an `eu.` Bedrock profile, is used as is. Foundry
-deployments must be named after the model for a label to find them.
+Full model IDs keep working. On the Anthropic API an older release of a family
+resolves to the family's model above, so `claude-sonnet-4-5` or
+`claude-3-5-haiku-20241022` runs as `claude-sonnet-5-5` or `claude-haiku-5-5`,
+keeping a Claude Code option such as `[1m]`; a newer or unknown ID is used as
+is. A Claude ID written for another backend is translated as well, so a
+workflow saved with `global.anthropic.claude-sonnet-5-5` runs as
+`claude-sonnet-5-5` on the Anthropic API. A Bedrock profile already in the
+active backend's form, such as an `eu.` one, and an Azure Foundry deployment
+name are used as is. Foundry deployments must be named after the model for a
+label to find them.
 
 <details>
 <summary><b>Runtime tuning</b> — sessions, tool rounds, UI access</summary>
@@ -1086,7 +1091,8 @@ that clones the repository through arbetern's git proxy, fixes the problem on a
 `claude/…` branch, runs what it can offline and pushes. The session reaches the
 model, GitHub and arbetern's integrations only through a gateway arbetern
 serves to its own sessions, with arbetern's credentials never leaving arbetern;
-it is given the goal, the skills the project names, the project's memory and the
+it is given the goal, the skills the project names and those that apply to
+every agent, the project's memory, the MCP connectors the project names and the
 production evidence. arbetern opens the pull request with its own token, stores
 every session's transcript in the state bucket, and then follows the pull
 request and the problem to measure merge rate, time to merge and whether each

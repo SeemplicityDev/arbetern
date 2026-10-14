@@ -665,7 +665,7 @@ const PJD_NOTE_SOURCES = ['admin', 'session', 'review'];
 const PJD_LIMITS = [
   ['max_open_prs', 'Open pull requests', 1, 20, 3, 'Counts running sessions too'],
   ['max_active_sessions', 'Sessions at once', 1, 5, 1],
-  ['max_sessions_per_day', 'Sessions per day', 1, 48, 6, 'New work per UTC day; follow-up rounds are not held back'],
+  ['max_sessions_per_day', 'Sessions per day', 1, 48, 6, 'Per UTC day, rounds included; once reached, only follow-up rounds start'],
   ['max_attempts', 'Attempts per error', 1, 5, 2],
   ['cooldown_hours', 'Cooldown, hours', 1, 720, 72, 'After a closed PR or no fix'],
   ['session_timeout_minutes', 'Session timeout, minutes', 30, 600, 240],
@@ -893,6 +893,15 @@ function skillNames(ids) {
   });
 }
 
+function connectorNames(ids) {
+  if (!mcpData || !mcpData.list) return ids || [];
+  return (ids || []).map(id => {
+    const c = mcpData.list.find(x => x.id === id);
+    if (!c) return id + ' (deleted)';
+    return c.enabled === false ? c.name + ' (disabled)' : c.name;
+  });
+}
+
 function pjdMetaHtml(p) {
   const r = p.repo || {}, sig = p.signal || {}, se = p.session || {}, l = p.limits || {}, rv = p.review || {};
   const repoUrl = r.owner && r.name ? safeExternalUrl(`https://github.com/${encodeURIComponent(r.owner)}/${encodeURIComponent(r.name)}`) : '';
@@ -900,6 +909,7 @@ function pjdMetaHtml(p) {
   const sites = sig.type === 'datadog_metrics' ? (sig.sites || []) : [sig.site].filter(Boolean);
   const follow = rv.follow_up ? [rv.draft ? 'drafts' : '', `${fmtInt(rv.max_rounds)} rounds`, `quiet ${fmtInt(rv.settle_minutes)}m`].filter(Boolean).join(' · ') : 'off';
   const skills = skillNames(p.skills);
+  const connectors = connectorNames(p.connectors);
   return `<div class="meta-grid proj-meta">
       <div class="meta-item"><div class="label">Repository</div><div class="value">${repoUrl ? `<a href="${escapeHtml(repoUrl)}" target="_blank" rel="noopener">${escapeHtml(r.owner + '/' + r.name)}</a>` : '—'}</div></div>
       ${metaItemHtml('Base branch', r.base_branch || '—')}
@@ -913,6 +923,7 @@ function pjdMetaHtml(p) {
       ${metaItemHtml('Created', fmtDateTime(p.created_at))}
       ${metaItemHtml('Last tick', p.last_tick ? fmtDateTime(p.last_tick) : '—')}
       ${wide('Skills', skills.length ? `<div class="chip-row">${skills.map(n => `<span class="chip">${escapeHtml(n)}</span>`).join('')}</div>` : '<span class="muted">none</span>')}
+      ${wide('MCP connectors', connectors.length ? `<div class="chip-row">${connectors.map(n => `<span class="chip">${escapeHtml(n)}</span>`).join('')}</div>` : '<span class="muted">none</span>')}
       ${pjdConventionsText(p.conventions) ? wide('Conventions', `<code>${escapeHtml(pjdConventionsText(p.conventions))}</code>`) : ''}
       ${pjdSignalMetaHtml(sig, wide)}
       ${wide('Limits', `<div class="chip-row">${PJD_LIMITS.map(([k, label]) => `<span class="chip">${escapeHtml(label)} <b>${fmtInt(l[k])}</b></span>`).join('')}</div>`)}
@@ -1163,7 +1174,8 @@ async function projectForm(p) {
   const isNew = !p;
   // A fresh list, so a skill created since the page loaded is not taken for a deleted one.
   delete lastFetched.skills;
-  await loadSkills();
+  delete lastFetched.mcp;
+  await Promise.all([loadSkills(), loadMCP()]);
   const r = (p && p.repo) || {}, sig = (p && p.signal) || {}, se = (p && p.session) || {}, l = (p && p.limits) || {}, rv = (p && p.review) || {}, nt = (p && p.notify) || {};
   const input = (id, value, attrs) => `<input class="form-input" id="${id}" value="${escapeHtml(value == null ? '' : value)}"${attrs || ''}>`;
   const check = (id, on, label) => `<label class="check-row"><input type="checkbox" id="${id}"${on ? ' checked' : ''}> ${label}</label>`;
@@ -1185,6 +1197,18 @@ async function projectForm(p) {
     : '<div class="muted">No custom skills yet. Add them on the Skills page.</div>')
     + (loaded ? '' : '<div class="form-hint">The skills list could not be loaded, so the project keeps the skills it has.</div>')
     + (missing.length ? `<div class="form-hint">${missing.length === 1 ? 'One skill this project names no longer exists and is' : missing.length + ' skills this project names no longer exist and are'} dropped when you save.</div>` : '');
+  const storedC = (p && p.connectors) || [];
+  const chosenC = new Set(storedC);
+  const loadedC = !!(mcpData && mcpData.list);
+  const listC = loadedC ? mcpData.list : [];
+  // Only connectors open to every agent may serve a project; one narrowed later stays visible so it can be removed.
+  const conns = loadedC ? listC.filter(c => chosenC.has(c.id) || (c.enabled !== false && !(c.agents || []).length)) : storedC.map(id => ({ id, name: id }));
+  const missingC = loadedC ? storedC.filter(id => !listC.some(c => c.id === id)) : [];
+  const connectorChips = (conns.length
+    ? `<div class="chip-select" id="pjf-connectors">${conns.map(c => `<button type="button" class="chip${chosenC.has(c.id) ? ' on' : ''}" data-id="${escapeHtml(c.id)}">${escapeHtml(c.name)}${c.enabled === false ? ' <span class="muted">(disabled)</span>' : ''}${(c.agents || []).length ? ' <span class="muted">(limited to some agents)</span>' : ''}</button>`).join('')}</div>`
+    : '<div class="muted">No MCP connector is open to every agent. A connector limited to some agents cannot serve a project.</div>')
+    + (loadedC ? '' : '<div class="form-hint">The connector list could not be loaded, so the project keeps the connectors it has.</div>')
+    + (missingC.length ? `<div class="form-hint">${missingC.length === 1 ? 'One connector this project names no longer exists and is' : missingC.length + ' connectors this project names no longer exist and are'} dropped when you save.</div>` : '');
   const limits = PJD_LIMITS.map(([k, label, min, max, def, hint]) => formField(escapeHtml(label),
     `<input class="form-input" id="pjf-l-${k}" type="number" min="${min}" max="${max}" step="1" inputmode="numeric" value="${l[k] ? escapeHtml(l[k]) : ''}" placeholder="${def}">`,
     `${min}–${max}, default ${def}${hint ? '. ' + escapeHtml(hint) : ''}`)).join('');
@@ -1212,7 +1236,8 @@ async function projectForm(p) {
       + formField('Description', input('pjf-desc', p && p.description, ' maxlength="240" placeholder="One line on what this project covers"'))
       + formField('Goal', `<textarea class="form-textarea proj-textarea" id="pjf-goal" maxlength="4000" placeholder="Fix the root cause of each production error with the smallest change that makes it stop.">${escapeHtml((p && p.goal) || '')}</textarea>`, 'Every work order starts with it.')
       + formField('Instructions', `<textarea class="form-textarea proj-textarea" id="pjf-instructions" maxlength="8000" placeholder="Optional. Conventions the sessions should follow in this repository.">${escapeHtml((p && p.instructions) || '')}</textarea>`)
-      + formField('Skills', skillChips, 'Their instructions go into every work order.')
+      + formField('Skills', skillChips, 'Their instructions go into every work order, with those of the skills that apply to every agent.')
+      + formField('MCP connectors', connectorChips, 'Connectors open to every agent. Sessions may call every tool of these connectors with their stored credentials, so pick only connectors whose tools read.')
       + '<div class="form-section">Repository</div>'
       + `<div class="form-grid3">${formField('Owner', input('pjf-owner', r.owner, ' placeholder="owner"' + code))}${formField('Name', input('pjf-repo', r.name, ' placeholder="repo"' + code))}${formField('Base branch', input('pjf-base', r.base_branch, ' placeholder="main"' + code), isNew ? 'Empty uses the default branch.' : '')}</div>`
       + '<div class="form-section">Datadog</div>'
@@ -1295,7 +1320,8 @@ function pjfBody(isNew) {
     description: formValue('pjf-desc'),
     goal: formValue('pjf-goal'),
     instructions: formValue('pjf-instructions'),
-    skills: pjfSkills(isNew ? [] : ((detailEntity && detailEntity.skills) || [])),
+    skills: pjfChips('pjf-skills', isNew ? [] : ((detailEntity && detailEntity.skills) || [])),
+    connectors: pjfChips('pjf-connectors', isNew ? [] : ((detailEntity && detailEntity.connectors) || [])),
     repo: { owner: formValue('pjf-owner'), name: formValue('pjf-repo'), base_branch: formValue('pjf-base') },
     signal,
     session: { model: formValue('pjf-model'), max_turns: parseInt(formValue('pjf-turns'), 10) || 0 },
@@ -1318,8 +1344,8 @@ function pjfBody(isNew) {
 }
 
 // The stored order is what the work order uses, so an unrelated edit keeps it and new picks go last.
-function pjfSkills(stored) {
-  const chosen = new Set([...document.querySelectorAll('#pjf-skills .chip.on')].map(b => b.dataset.id));
+function pjfChips(id, stored) {
+  const chosen = new Set([...document.querySelectorAll('#' + id + ' .chip.on')].map(b => b.dataset.id));
   const kept = stored.filter(id => chosen.has(id));
   return [...kept, ...[...chosen].filter(id => !kept.includes(id))];
 }
@@ -1329,6 +1355,7 @@ function pjfChanges(p, body) {
   const before = {
     name: p.name || '', description: p.description || '', goal: p.goal || '', instructions: p.instructions || '',
     skills: p.skills || [],
+    connectors: p.connectors || [],
     repo: { owner: r.owner || '', name: r.name || '', base_branch: r.base_branch || '' },
     signal: pjfSignalShape(p.signal || {}),
     session: { model: se.model || '', max_turns: se.max_turns || 0 },

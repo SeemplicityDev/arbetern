@@ -153,7 +153,7 @@ model card's *Programmatic Access* table for the profiles your region offers):
 
 ```yaml
 env:
-  LIGHT_MODEL: "haiku"   # claude-haiku-4-5 on the Anthropic API
+  LIGHT_MODEL: "haiku"   # claude-haiku-5-5 on the Anthropic API
   HEAVY_MODEL: "opus"    # claude-opus-5-5 on the Anthropic API
 ```
 
@@ -348,14 +348,14 @@ model and left on the hosted one:
 Startup logs the configuration and, once the sidecar answers, the warm-up:
 
 ```
-Model router enabled via http://127.0.0.1:8788 (timeout 5s; light: claude-haiku-4-5, heavy: general model; thread acknowledgements skipped: true)
+Model router enabled via http://127.0.0.1:8788 (timeout 5s; light: claude-haiku-5-5, heavy: general model; thread acknowledgements skipped: true)
 [llm] model router warmed 2 slot(s) in 1m12s
 ```
 
 Each routed turn logs its decision, and a dropped thank-you says so:
 
 ```
-[user=U0123456789 channel=C0123456789] model router: light request, starting on claude-haiku-4-5 (routed in 1.4s)
+[user=U0123456789 channel=C0123456789] model router: light request, starting on claude-haiku-5-5 (routed in 1.4s)
 [user=U0123456789 channel=C0123456789] thread reply only thanks the bot; no model turn
 ```
 

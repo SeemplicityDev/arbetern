@@ -255,6 +255,14 @@ func (c *Client) CommentOnPullRequest(ctx context.Context, owner, repo string, n
 	return cm.GetHTMLURL(), nil
 }
 
+// EditPullRequestBody replaces a pull request's description.
+func (c *Client) EditPullRequestBody(ctx context.Context, owner, repo string, number int, body string) error {
+	if _, _, err := c.api.PullRequests.Edit(ctx, owner, repo, number, &gh.PullRequest{Body: &body}); err != nil {
+		return fmt.Errorf("failed to edit the description of PR #%d: %w", number, err)
+	}
+	return nil
+}
+
 // BranchHead returns the commit a branch points at.
 func (c *Client) BranchHead(ctx context.Context, owner, repo, branch string) (string, error) {
 	ref, _, err := c.api.Git.GetRef(ctx, owner, repo, "heads/"+branch)

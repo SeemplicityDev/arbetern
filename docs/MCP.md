@@ -57,7 +57,9 @@ is passed through unchanged. A call opens a fresh session (`initialize` +
 output to the model. A tool-side `isError` result is returned as text prefixed
 with `Error from <connector>` so the model can react.
 
-Agents outside a connector's allowlist never receive its tools.
+Agents outside a connector's allowlist never receive its tools. A project may
+name only a connector open to every agent, and its sessions lose the connector
+as soon as it is limited to some agents.
 
 ## Current scope
 

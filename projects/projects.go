@@ -95,6 +95,7 @@ const (
 	recentOutcomeCount = 10
 	maxBodyBytes       = 64 << 10
 	maxSkills          = 20
+	maxConnectors      = 10
 
 	metricRescan        = time.Hour
 	maxSeriesPerSite    = 5000
@@ -256,6 +257,7 @@ type Project struct {
 	Goal                string      `json:"goal"`                   // 1–4000
 	Instructions        string      `json:"instructions,omitempty"` // ≤8000
 	Skills              []string    `json:"skills,omitempty"`       // console skill ids whose instructions go into every work order
+	Connectors          []string    `json:"connectors,omitempty"`   // MCP connector ids whose tools sessions may call
 	Repo                Repo        `json:"repo"`
 	Signal              Signal      `json:"signal"`
 	Session             Session     `json:"session"`
@@ -657,19 +659,19 @@ func normalizeInterval(v string) (string, error) {
 	return v, nil
 }
 
-func normalizeSkills(in []string) ([]string, error) {
+func normalizeIDs(field, noun string, in []string, max int) ([]string, error) {
 	var out []string
 	for _, id := range in {
 		id = strings.TrimSpace(id)
 		if !store.IDRe.MatchString(id) {
-			return nil, invalidf("skills: %q is not a skill id", id)
+			return nil, invalidf("%s: %q is not %s id", field, id, noun)
 		}
 		if !slices.Contains(out, id) {
 			out = append(out, id)
 		}
 	}
-	if len(out) > maxSkills {
-		return nil, invalidf("a project uses at most %d skills", maxSkills)
+	if len(out) > max {
+		return nil, invalidf("a project uses at most %d %s", max, field)
 	}
 	return out, nil
 }
@@ -697,11 +699,16 @@ func (p *Project) normalize() error {
 			return err
 		}
 	}
-	skills, err := normalizeSkills(p.Skills)
+	skills, err := normalizeIDs("skills", "a skill", p.Skills, maxSkills)
 	if err != nil {
 		return err
 	}
 	p.Skills = skills
+	connectors, err := normalizeIDs("connectors", "an MCP connector", p.Connectors, maxConnectors)
+	if err != nil {
+		return err
+	}
+	p.Connectors = connectors
 	iv, err := normalizeInterval(p.Interval)
 	if err != nil {
 		return err
