@@ -362,7 +362,7 @@ func conventionRules(p *Project) []string {
 	if t := c.Ticket; t != nil {
 		rule := "With status `fixed`, also pass `ticket` with a one-line `summary` and a short `description` for the " + t.Project + " issue arbetern files with the pull request."
 		if len(t.SessionFields) > 0 {
-			rule += " Its `fields` may set " + strings.Join(t.SessionFields, ", ") + " with values you have looked up; leave out any you are not sure of."
+			rule += " Its `fields` may set " + strings.Join(t.SessionFields, ", ") + "; the project's instructions say how to find their values. Never guess one."
 		}
 		rules = append(rules, rule)
 	}
