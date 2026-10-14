@@ -271,6 +271,9 @@ func (a *consoleAPI) update(w http.ResponseWriter, req *http.Request) {
 		case "notify":
 			pt.Notify = new(Notify)
 			err = decodeStrict(v, pt.Notify)
+		case "conventions":
+			pt.Conventions = new(Conventions)
+			err = decodeStrict(v, pt.Conventions)
 		case "limits":
 			pt.Limits = new(Limits)
 			err = decodeStrict(v, pt.Limits)

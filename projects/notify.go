@@ -47,47 +47,74 @@ func prLink(pr *PR) string {
 	if pr == nil || !strings.HasPrefix(pr.URL, "https://") {
 		return "its pull request"
 	}
-	return fmt.Sprintf("<%s|#%d>", pr.URL, pr.Number)
+	return fmt.Sprintf("<%s|PR #%d>", pr.URL, pr.Number)
+}
+
+// headline names the task the way its session put it for the channel, else by its series or error group.
+func headline(t *Task) string {
+	if t.Outcome != nil && t.Outcome.Headline != "" {
+		return slackText(t.Outcome.Headline, maxHeadlineChars)
+	}
+	return "*" + subjectLabel(t.Group) + "*"
+}
+
+// links are the task's pull request and ticket, as the channel shows them.
+func links(t *Task) string {
+	parts := []string{prLink(t.PR)}
+	if t.Ticket != "" {
+		if strings.HasPrefix(t.TicketURL, "https://") {
+			parts = append(parts, fmt.Sprintf("<%s|%s>", t.TicketURL, slackText(t.Ticket, 40)))
+		} else {
+			parts = append(parts, slackText(t.Ticket, 40))
+		}
+	}
+	return strings.Join(parts, " · ")
+}
+
+func belowThreshold(t *Task) string {
+	if t.Group.Reason == reasonFill {
+		return " _(below threshold)_"
+	}
+	return ""
 }
 
 func noteOpened(t *Task, o Outcome) string {
 	if o.Question != "" {
-		return fmt.Sprintf(":large_yellow_circle: *%s* · %s needs a call: %s", subjectLabel(t.Group), prLink(t.PR), slackText(o.Question, maxQuestionChars))
+		return fmt.Sprintf(":large_yellow_circle: %s — %s — need a call: %s%s", headline(t), links(t), slackText(o.Question, maxQuestionChars), belowThreshold(t))
 	}
-	return fmt.Sprintf(":large_green_circle: *%s* · opened %s: %s", subjectLabel(t.Group), prLink(t.PR), slackText(o.Title, 120))
+	return fmt.Sprintf(":large_green_circle: %s — %s%s", headline(t), links(t), belowThreshold(t))
 }
 
 func noteNoFix(t *Task, o Outcome) string {
-	icon := ":white_circle:"
 	if o.Status == OutcomeCannotFix {
-		icon = ":red_circle:"
+		return fmt.Sprintf(":red_circle: %s — need your review: %s%s", headline(t), slackText(o.Summary, 300), belowThreshold(t))
 	}
-	return fmt.Sprintf("%s *%s* · %s: %s", icon, subjectLabel(t.Group), strings.ReplaceAll(o.Status, "_", " "), slackText(o.Summary, 300))
+	return fmt.Sprintf(":white_circle: %s — %s: %s%s", headline(t), strings.ReplaceAll(o.Status, "_", " "), slackText(o.Summary, 300), belowThreshold(t))
 }
 
 func noteRound(t *Task, o Outcome) string {
 	switch {
 	case o.Question != "":
-		return fmt.Sprintf(":large_yellow_circle: *%s* · %s needs a call: %s", subjectLabel(t.Group), prLink(t.PR), slackText(o.Question, maxQuestionChars))
+		return fmt.Sprintf(":large_yellow_circle: %s — %s — need a call: %s", headline(t), links(t), slackText(o.Question, maxQuestionChars))
 	case o.Status == OutcomeCannotFix:
-		return fmt.Sprintf(":red_circle: *%s* · %s is blocked: %s", subjectLabel(t.Group), prLink(t.PR), slackText(o.Summary, 300))
+		return fmt.Sprintf(":red_circle: %s — %s — need your review: %s", headline(t), links(t), slackText(o.Summary, 300))
 	}
 	return ""
 }
 
 func noteReady(t *Task) string {
-	return fmt.Sprintf(":eyes: *%s* · %s is ready for review: every check passes and every comment has an answer.", subjectLabel(t.Group), prLink(t.PR))
+	return fmt.Sprintf(":eyes: %s — %s is ready for review: every check passes and every comment has an answer.", headline(t), links(t))
 }
 
 func noteExhausted(t *Task, rounds int) string {
-	return fmt.Sprintf(":warning: *%s* · %s stopped after %s; over to a person.", subjectLabel(t.Group), prLink(t.PR), plural(rounds, "follow-up round"))
+	return fmt.Sprintf(":warning: %s — %s stopped after %s; over to a person.", headline(t), links(t), plural(rounds, "follow-up round"))
 }
 
 func noteClosed(t *Task, merged bool) string {
 	if merged {
-		return fmt.Sprintf(":white_check_mark: *%s* · %s merged.", subjectLabel(t.Group), prLink(t.PR))
+		return fmt.Sprintf(":white_check_mark: %s — %s merged.", headline(t), links(t))
 	}
-	return fmt.Sprintf(":x: *%s* · %s was closed without merging.", subjectLabel(t.Group), prLink(t.PR))
+	return fmt.Sprintf(":x: %s — %s was closed without merging.", headline(t), links(t))
 }
 
 func notePaused(p *Project, reason string) string {

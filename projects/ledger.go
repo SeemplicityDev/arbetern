@@ -84,6 +84,7 @@ type Outcome struct {
 	Title      string `json:"title,omitempty"`   // ≤120
 	Branch     string `json:"branch,omitempty"`
 	Question   string `json:"question,omitempty"` // ≤1000, a decision reviewers are asked to make
+	Headline   string `json:"headline,omitempty"` // one line for the project's channel
 	ReportedAt string `json:"reported_at"`
 }
 
@@ -96,6 +97,8 @@ type Task struct {
 	Attempt        int          `json:"attempt"`
 	SessionID      string       `json:"session_id,omitempty"`
 	Branch         string       `json:"branch,omitempty"`
+	Ticket         string       `json:"ticket,omitempty"` // issue key filed with the pull request
+	TicketURL      string       `json:"ticket_url,omitempty"`
 	PR             *PR          `json:"pr,omitempty"`
 	Outcome        *Outcome     `json:"outcome,omitempty"`
 	ExitReason     string       `json:"exit_reason,omitempty"` // how the session process ended
@@ -501,6 +504,15 @@ func (l *Ledger) beginOpening(id, guard string, now time.Time) bool {
 	}
 	t.Opening = guard
 	t.OpenAttempts++
+	return true
+}
+
+func (l *Ledger) setTicket(id, key, url string) bool {
+	t := l.task(id)
+	if t == nil || t.Ticket != "" {
+		return false
+	}
+	t.Ticket, t.TicketURL = key, url
 	return true
 }
 

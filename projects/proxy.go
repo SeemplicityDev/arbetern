@@ -155,7 +155,13 @@ func (g *gateway) handleGit(w http.ResponseWriter, req *http.Request) {
 		}
 	case strings.HasSuffix(req.URL.Path, "/git-receive-pack"):
 		gzipped := strings.EqualFold(strings.TrimSpace(req.Header.Get("Content-Encoding")), "gzip")
-		body, err := checkPush(http.MaxBytesReader(w, req.Body, maxPushRequest), gzipped, s.pushAllowed)
+		allowed := func(branch string) error {
+			if branch == s.project.Repo.BaseBranch {
+				return fmt.Errorf("sessions may not push to the base branch %s", branch)
+			}
+			return s.pushAllowed(branch)
+		}
+		body, err := checkPush(http.MaxBytesReader(w, req.Body, maxPushRequest), gzipped, allowed)
 		if err != nil {
 			log.Printf("[projects] %s task %s: refused a push: %v", s.project.ID, s.task.ID, err)
 			http.Error(w, err.Error(), http.StatusForbidden)
@@ -246,10 +252,11 @@ func checkRefUpdate(cmd string, allowed func(branch string) error) error {
 		return errors.New("the push has a malformed ref update")
 	case fields[1] == zeroOID:
 		return fmt.Errorf("deleting %s is not allowed", fields[2])
-	case !strings.HasPrefix(fields[2], pushRefPrefix) || !validBranchName(strings.TrimPrefix(fields[2], "refs/heads/")):
+	case !strings.HasPrefix(fields[2], "refs/heads/") || !validBranchName(strings.TrimPrefix(fields[2], "refs/heads/")):
+		return fmt.Errorf("sessions may push only branches, not %s", fields[2])
+	case allowed == nil && !strings.HasPrefix(fields[2], pushRefPrefix):
 		return fmt.Errorf("sessions may push only %s branches, not %s", BranchPrefix, fields[2])
-	}
-	if allowed == nil {
+	case allowed == nil:
 		return nil
 	}
 	return allowed(strings.TrimPrefix(fields[2], "refs/heads/"))

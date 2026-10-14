@@ -88,12 +88,20 @@ Usage & Billing page under the source `project`.
   pull requests are authored by that token's account and carry the arbetern
   body marker, so they also appear on the console's **Pull requests** page
   with source `project`.
-- Protect the base branch, let only the token's account create, update or
-  delete `claude/**` branches and tags, keep the **Workflows** permission off
-  the token, and treat the CI runs that session pushes start as untrusted
+- Protect the base branch, keep the **Workflows** permission off the token, and
+  treat the CI runs that session pushes start as untrusted
   (see [Security](#security)).
 - Branch and title rules in CI apply to project pull requests too: their
-  branches start with `claude/` and their author is the token's account.
+  branches start with `claude/` unless the project's
+  [conventions](#repository-conventions-and-tickets) name them, and their
+  author is the token's account.
+
+### Jira
+
+Only for projects whose [conventions](#repository-conventions-and-tickets) file
+tickets: the deployment's Atlassian connection, with an account that may create
+issues and add comments in the project the conventions name. Saving such a
+project without the connection is refused.
 
 ### Datadog
 
@@ -254,6 +262,7 @@ deployment has projects enabled, and **New project** only to project admins.
 | `session.max_turns` | no | Claude Code turns per session, 10–500, default 200 |
 | `review` | no | Follow-through, see [Following the pull request](#following-the-pull-request). Off by default |
 | `notify.slack_channel` | no | Slack channel id (`C…` or `G…`) for [notifications](#notifications). Empty sends nothing |
+| `conventions` | no | The repository's rules for pull requests: a ticket per pull request, the branch and title layout, the title pattern and who writes the description. See [Repository conventions and tickets](#repository-conventions-and-tickets) |
 | `interval` | no | Tick interval, `15m` by default, from `5m` to `24h` |
 | `enabled` | no | `true` by default |
 
@@ -298,7 +307,7 @@ reads need the admin list. Bodies are JSON of at most 64 KiB, and unknown fields
 | `GET /api/projects` | All projects, sorted by name, without the daily series |
 | `GET /api/projects/<id>` | The project, plus `tasks` (newest first), `backlog` (up to 20 groups that could be dispatched now) and `memory` (newest first), and `state_error` when they could not be read |
 | `POST /api/projects` | Create; the fields above. 201 with the project |
-| `PATCH /api/projects/<id>` | Change only the keys sent. `repo`, `signal`, `session`, `review`, `notify`, `limits` and `skills` replace the whole value; `null` values are refused with 400. Changing what the signal finds (for a log signal its site, query or pattern) drops the collected candidates at the next scan |
+| `PATCH /api/projects/<id>` | Change only the keys sent. `repo`, `signal`, `session`, `review`, `notify`, `conventions`, `limits` and `skills` replace the whole value; `null` values are refused with 400. Changing what the signal finds (for a log signal its site, query or pattern) drops the collected candidates at the next scan |
 | `DELETE /api/projects/<id>` | Delete, as above. 204 |
 | `POST /api/projects/<id>/run` | Queue a tick. 202 `{"accepted":true}`, or 409 when the project is paused |
 | `POST /api/projects/<id>/memory` | Add an admin note, `{"text":"…"}` of 1–500 characters. 201 with the note |
@@ -449,6 +458,69 @@ acts on the answer. When a round is needed but the rounds are used up, arbetern
 posts what is left and stops following that pull request (*out of rounds*).
 arbetern never approves and never merges.
 
+## Repository conventions and tickets
+
+Many repositories ask more of a pull request than a branch and a description:
+a ticket, a branch named after it, a title in a fixed form, a description in a
+template. `conventions` makes the project's pull requests follow those rules.
+Every key is optional.
+
+| Field | Meaning |
+|---|---|
+| `ticket` | File an issue in the deployment's Jira with every pull request, see below |
+| `branch` | The branch the pull request is opened from, from the placeholders `{ticket}`, `{title}`, `{task}` and `{project}`, such as `{ticket}/{title}`. It must contain `{ticket}` or `{task}`. Empty opens the pull request from the session's own `claude/` branch |
+| `title` | The pull request title from `{title}` (the session's title) and `{ticket}`, such as `{title} \| {ticket}` |
+| `title_pattern` | RE2 the session's title must match, such as a conventional-commit pattern `^(feat\|fix\|chore)(\([^()]+\))?!?: \S.*$`. `report_outcome` refuses any other title and says why |
+| `description` | `session` posts the session's `summary`, up to 12,000 characters, as the whole pull request description, for repositories with a pull request template. Empty lays the description out from the summary and testing |
+
+`{title}` in a branch is the session's title without a conventional-commit type,
+as a slug of up to 50 characters.
+
+### Tickets
+
+| `conventions.ticket` field | Meaning |
+|---|---|
+| `project` | Jira project key, such as `ABC` |
+| `issue_type` | `Task` by default |
+| `assignee_id` | Jira account id of the assignee |
+| `labels` | Up to 10 labels |
+| `fields` | Further create fields, sent as given, such as `{"customfield_10001": {"value": "Team"}}` |
+| `site_fields` | Fields merged in for the series' Datadog site, such as a region option: `{"us": {...}, "eu": {...}}` |
+| `session_fields` | Fields the session may set in its report, up to 10, for values it looks up itself, such as a customer option it finds on earlier tickets with the read-only Jira tools |
+
+When a session reports `fixed`, arbetern files the issue with the summary and
+description the session passes in `ticket`, the configured fields, the site's
+and then the session's. Jira names a field it refuses, and arbetern drops those
+fields for up to two more tries, so a wrong option costs one field, not the
+ticket. The key is recorded on the task before anything else happens, so a
+report that is retried reuses the issue. arbetern then creates the convention
+branch at the commit the session pushed, opens the pull request from it,
+comments the pull request's link on the issue and deletes the session's own
+branch. Follow-up rounds work on the convention branch.
+
+With `description: session`, the session writes `{ticket}` and `{ticket_url}`
+where the key belongs and arbetern fills them in; a description without the key
+gets a `**Ticket:**` line. The task and the notifications link the ticket.
+
+```json
+"conventions": {
+  "ticket": {
+    "project": "ABC",
+    "fields": {"customfield_10001": {"value": "Team"}},
+    "site_fields": {"us": {"customfield_10002": [{"value": "NA"}]}, "eu": {"customfield_10002": [{"value": "EMEA"}]}},
+    "session_fields": ["customfield_10003"]
+  },
+  "branch": "{ticket}/{title}",
+  "title": "{title} | {ticket}",
+  "title_pattern": "^(feat|fix|refactor|perf|style|docs|test|build|ci|chore)(\\([^()]+\\))?!?: \\S.*$",
+  "description": "session"
+}
+```
+
+The project's `instructions` are the place for what the convention asks of the
+text itself: the description template, the ticket summary's form, how to find a
+field's value.
+
 ## Notifications
 
 With `notify.slack_channel`, arbetern's Slack bot posts one line to that
@@ -461,6 +533,12 @@ channel when the project:
   rounds ran out;
 - sees a pull request merged or closed without merging;
 - pauses itself after failed dispatches.
+
+Each line starts with a status (green for a pull request in review, yellow for
+a decision, red for something that needs a person), then the session's
+`headline` (what failed, where and how much; the series or error group when it
+gave none), the pull request and ticket links, the question or the reason, and
+_(below threshold)_ for spare-capacity work.
 
 GitHub sends no review requests for a draft, so a question on a draft pull
 request reaches people only through this channel or the project page. Invite
@@ -541,7 +619,7 @@ model streams, git transfers and transcripts may take up to 30 minutes.
 | Tool | Arguments | What it does |
 |---|---|---|
 | `get_task` | none | Returns the work order |
-| `report_outcome` | `status`: `fixed`, `not_reproducible`, `cannot_fix` or `already_fixed` (a follow-up round takes `fixed`, `answered` or `cannot_fix`); `summary` (required, up to 4000); `title` (up to 120) and `branch`, both required for `fixed` in a first session, `branch` for `fixed` in a round; `testing` (up to 2000); `question` (up to 1000, a decision for reviewers, with `fixed`); in a round, `replies` (`id` and `body` up to 2000, one per comment) and `rerun_checks` | For `fixed`, arbetern checks that the branch is the one the work order named or a name derived from it (the same rule the git proxy enforces), is not the base branch, exists on GitHub and has commits ahead of the base, then reuses an open pull request from that branch or opens one, as a draft with `review.draft` or a `question`. A problem comes back as a tool error the session can act on, such as a branch that is not pushed yet. A `fixed` report is checked at most 10 times per work order; after that the session must report another status. Any other status records the outcome and starts the group's cooldown. In a round, see [Rounds](#rounds). Calling it again returns what was recorded |
+| `report_outcome` | `status`: `fixed`, `not_reproducible`, `cannot_fix` or `already_fixed` (a follow-up round takes `fixed`, `answered` or `cannot_fix`); `summary` (required, up to 4000, or 12,000 when the conventions make it the whole description); `title` (up to 120) and `branch`, both required for `fixed` in a first session, `branch` for `fixed` in a round; `testing` (up to 2000); `question` (up to 1000, a decision for reviewers, with `fixed`); `headline` (up to 300, one line for the channel); `ticket` (`summary` up to 250, `description` up to 4000, and the `fields` the conventions let the session set), required for `fixed` when the project files tickets; in a round, `replies` (`id` and `body` up to 2000, one per comment) and `rerun_checks` | For `fixed`, arbetern checks the title against the conventions' pattern, checks that the branch is the one the work order named or a name derived from it (the same rule the git proxy enforces), is not the base branch, exists on GitHub and has commits ahead of the base, files the ticket, places the convention branch, then reuses an open pull request from that branch or opens one, as a draft with `review.draft` or a `question`. A problem comes back as a tool error the session can act on, such as a branch that is not pushed yet. A `fixed` report is checked at most 10 times per work order; after that the session must report another status. Any other status records the outcome and starts the group's cooldown. In a round, see [Rounds](#rounds). Calling it again returns what was recorded |
 | `record_learning` | `note`, 1–500 characters | Saves a durable fact into project memory for later sessions, at most five per work order. The note is redacted first |
 | arbetern's integration tools | as on the Integrations page | The read-only tools of every integration the deployment is connected to: Datadog logs, aggregates, metrics, monitors and dashboards; GitHub files, search, commits, pull requests and workflow runs; Jira and Confluence reads; and the rest. arbetern runs them with its own credentials and returns the text. Nothing that writes, posts or uploads is offered, and neither are the raw S3 object reads nor `http_get`: a session fetches nothing from outside but through the gateway |
 
@@ -822,11 +900,12 @@ browser request.
 
 ### GitHub
 
-- **arbetern opens the pull request** with its own token, and only from a pushed
-  `claude/` branch with commits ahead of the base, never from the base branch.
+- **arbetern opens the pull request** with its own token, and only from the
+  branch the session pushed, with commits ahead of the base, or from the
+  convention branch it creates at that same commit; never from the base branch.
   In a follow-up round it moves the pull request branch only by fast-forward,
-  onto a `claude/` branch that contains its head, and posts comments only on
-  that pull request.
+  onto a branch derived from it that contains its head, and posts comments only
+  on that pull request.
 - **The git proxy** serves the project's repository only, and reads the ref
   updates of every push before forwarding it: a session may create or move
   only the `claude/` branch its work order named (in a follow-up round, the
@@ -836,9 +915,11 @@ browser request.
   pod.
 - **No auto-merge.** arbetern never merges. A person reviews and merges every
   pull request, and the statistics measure exactly those decisions.
-- **Branch rules.** Protect the base branch against direct pushes, and add a
-  ruleset on `claude/**` branches and on tags that only the token's account
-  bypasses, so nothing but arbetern's token creates, moves or deletes them.
+- **Branch rules.** Protect the base branch against direct pushes. Where
+  nothing else uses the project's branch names, a ruleset on them and on tags
+  that only the token's account bypasses keeps everything else from creating,
+  moving or deleting them; Claude Code on the web pushes `claude/` branches
+  too, so a ruleset on all of `claude/**` would block it.
 - **CI on session branches.** A push the proxy forwards still starts the
   repository's `push` and `pull_request` workflows, which run code the session
   wrote on GitHub's runners, outside the pod and the proxy. Treat those runs as
@@ -930,6 +1011,8 @@ browser request.
 | Job log `session: the gateway did not admit this session (HTTP 000)` | The pod cannot reach the gateway: check the session egress policy, the gateway Service and port, and that the cluster domain is `cluster.local` |
 | Job log `session: the repository could not be cloned` | The git proxy refused: arbetern's token lacks access to the repository, or the project names the wrong repository |
 | arbetern logs `refused a push: this session may push only claude/…` | The session pushed to a branch that is not its own; the work order names the branch to use. The whole push is refused, including any of its own refs in it; its own branch pushed on its own goes through |
+| A session is told `Could not file the ticket in Jira` | Jira refused the issue for a reason that names no field, or was unreachable. The session retries; check the Atlassian connection and that its account may create issues in the conventions' project |
+| A session is told `This deployment has no Jira connection` | The project's conventions file tickets, and the Atlassian integration was removed after the project was saved. Configure it again, or remove `conventions.ticket` |
 | Job log `session: the stored transcript could not be downloaded` | A follow-up round could not fetch the transcript it resumes after several attempts; the round fails and, after the 30-minute wait that follows a failed round, a later tick starts another one |
 | Task failed with `session ended without a report (the Job finished)` | The pod exited, or its Job disappeared, without reaching `/v1/session/ended`: the gateway was unreachable from the pod for five minutes, or the pod was killed before it could report. The Job's log, while it lasts, says which |
 | Task failed with `dispatch outcome unknown` | The Job was created but no session was recorded within 15 minutes, for example because arbetern restarted mid-dispatch. A pod that did start is refused by the gateway |

@@ -531,6 +531,15 @@ func (c *Client) CreateIssue(input CreateIssueInput) (*Issue, error) {
 	if c.projectKey != "" {
 		input.Project = c.projectKey
 	}
+	return c.createIssue(input)
+}
+
+// CreateIssueInProject creates an issue in input.Project, which configuration chose rather than a model.
+func (c *Client) CreateIssueInProject(input CreateIssueInput) (*Issue, error) {
+	return c.createIssue(input)
+}
+
+func (c *Client) createIssue(input CreateIssueInput) (*Issue, error) {
 	if input.Project == "" {
 		return nil, fmt.Errorf("project key is required (no default configured)")
 	}

@@ -16,7 +16,7 @@ type plannedReply struct {
 }
 
 func (a reportArgs) roundOutcome(rd *Round, base string, now time.Time) (Outcome, []plannedReply, string) {
-	o, problem := a.common(now)
+	o, problem := a.common(now, 4000)
 	if problem != "" {
 		return o, nil, problem
 	}

@@ -43,6 +43,7 @@ type Deps struct {
 	Slack      Poster               // nil → no notifications
 	Usage      func(billing.Event)  // records the model usage of sessions
 	Tools      ToolProvider         // nil → sessions get only the work-order tools
+	Tickets    TicketFiler          // nil → projects whose conventions file tickets cannot open pull requests
 	Cluster    ClusterConfig
 }
 
@@ -305,6 +306,13 @@ func (r *Registry) datadogFor(site string) *datadog.Client {
 	return r.deps.Datadog.ForSite(site)
 }
 
+func (r *Registry) checkTickets(c Conventions) error {
+	if c.Ticket != nil && r.deps.Tickets == nil {
+		return invalidf("conventions.ticket needs the deployment's Jira connection, which is not configured")
+	}
+	return nil
+}
+
 func (r *Registry) checkSkills(ids []string) error {
 	if r.deps.SkillKnown == nil {
 		return nil
@@ -368,6 +376,9 @@ func (r *Registry) create(ctx context.Context, draft Project, enabled bool, crea
 	if err := r.checkSkills(draft.Skills); err != nil {
 		return nil, err
 	}
+	if err := r.checkTickets(draft.Conventions); err != nil {
+		return nil, err
+	}
 	if r.gh == nil {
 		return nil, invalidf("GitHub is not configured in this deployment; projects need it to open pull requests")
 	}
@@ -419,6 +430,7 @@ type projectPatch struct {
 	Session                                         *Session
 	Review                                          *Review
 	Notify                                          *Notify
+	Conventions                                     *Conventions
 	Limits                                          *Limits
 	Enabled                                         *bool
 }
@@ -451,6 +463,9 @@ func (pt projectPatch) applyTo(dst *Project) {
 	}
 	if pt.Notify != nil {
 		dst.Notify = *pt.Notify
+	}
+	if pt.Conventions != nil {
+		dst.Conventions = *pt.Conventions
 	}
 	if pt.Limits != nil {
 		dst.Limits = *pt.Limits
@@ -490,6 +505,9 @@ func (pt projectPatch) normalized(draft *Project) projectPatch {
 	if pt.Notify != nil {
 		out.Notify = &draft.Notify
 	}
+	if pt.Conventions != nil {
+		out.Conventions = &draft.Conventions
+	}
 	if pt.Limits != nil {
 		out.Limits = &draft.Limits
 	}
@@ -511,6 +529,11 @@ func (r *Registry) update(ctx context.Context, id string, pt projectPatch) (*Pro
 	}
 	if pt.Skills != nil {
 		if err := r.checkSkills(draft.Skills); err != nil {
+			return nil, err
+		}
+	}
+	if pt.Conventions != nil {
+		if err := r.checkTickets(draft.Conventions); err != nil {
 			return nil, err
 		}
 	}

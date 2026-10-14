@@ -250,28 +250,29 @@ type Stats struct {
 
 // Project is the stored descriptor and the console API shape.
 type Project struct {
-	ID                  string   `json:"id"`
-	Name                string   `json:"name"`                   // 1–80
-	Description         string   `json:"description,omitempty"`  // ≤240
-	Goal                string   `json:"goal"`                   // 1–4000
-	Instructions        string   `json:"instructions,omitempty"` // ≤8000
-	Skills              []string `json:"skills,omitempty"`       // console skill ids whose instructions go into every work order
-	Repo                Repo     `json:"repo"`
-	Signal              Signal   `json:"signal"`
-	Session             Session  `json:"session"`
-	Review              Review   `json:"review"`
-	Notify              Notify   `json:"notify"`
-	Limits              Limits   `json:"limits"`
-	Interval            string   `json:"interval"` // Go duration 5m–24h, default "15m"
-	Enabled             bool     `json:"enabled"`
-	DisabledReason      string   `json:"disabled_reason,omitempty"`
-	ConsecutiveFailures int      `json:"consecutive_failures,omitempty"`
-	CreatedBy           string   `json:"created_by,omitempty"`
-	CreatedAt           string   `json:"created_at"`
-	UpdatedAt           string   `json:"updated_at,omitempty"`
-	LastTick            string   `json:"last_tick,omitempty"`
-	LastError           string   `json:"last_error,omitempty"`
-	Stats               Stats    `json:"stats"`
+	ID                  string      `json:"id"`
+	Name                string      `json:"name"`                   // 1–80
+	Description         string      `json:"description,omitempty"`  // ≤240
+	Goal                string      `json:"goal"`                   // 1–4000
+	Instructions        string      `json:"instructions,omitempty"` // ≤8000
+	Skills              []string    `json:"skills,omitempty"`       // console skill ids whose instructions go into every work order
+	Repo                Repo        `json:"repo"`
+	Signal              Signal      `json:"signal"`
+	Session             Session     `json:"session"`
+	Review              Review      `json:"review"`
+	Notify              Notify      `json:"notify"`
+	Conventions         Conventions `json:"conventions"`
+	Limits              Limits      `json:"limits"`
+	Interval            string      `json:"interval"` // Go duration 5m–24h, default "15m"
+	Enabled             bool        `json:"enabled"`
+	DisabledReason      string      `json:"disabled_reason,omitempty"`
+	ConsecutiveFailures int         `json:"consecutive_failures,omitempty"`
+	CreatedBy           string      `json:"created_by,omitempty"`
+	CreatedAt           string      `json:"created_at"`
+	UpdatedAt           string      `json:"updated_at,omitempty"`
+	LastTick            string      `json:"last_tick,omitempty"`
+	LastError           string      `json:"last_error,omitempty"`
+	Stats               Stats       `json:"stats"`
 }
 
 func (p *Project) summary() *Project {
@@ -688,6 +689,7 @@ func (p *Project) normalize() error {
 		p.Session.normalize(),
 		p.Review.normalize(),
 		p.Notify.normalize(),
+		p.Conventions.normalize(),
 		p.Limits.normalize(),
 	}
 	for _, err := range checks {

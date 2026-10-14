@@ -282,6 +282,14 @@ func (c *Client) FastForwardBranch(ctx context.Context, owner, repo, branch, sha
 	return nil
 }
 
+// CreateBranchAt creates branch pointing at sha.
+func (c *Client) CreateBranchAt(ctx context.Context, owner, repo, branch, sha string) error {
+	if _, _, err := c.api.Git.CreateRef(ctx, owner, repo, gh.CreateRef{Ref: "refs/heads/" + branch, SHA: sha}); err != nil {
+		return fmt.Errorf("failed to create branch %s: %w", branch, err)
+	}
+	return nil
+}
+
 // DeleteBranch removes a branch.
 func (c *Client) DeleteBranch(ctx context.Context, owner, repo, branch string) error {
 	if _, err := c.api.Git.DeleteRef(ctx, owner, repo, "heads/"+branch); err != nil {

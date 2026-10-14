@@ -345,7 +345,36 @@ func briefRules(p *Project, t *Task) string {
 	if p.Review.FollowUp {
 		rules = append(rules, "When the right fix depends on a decision only a person can make, push your best option anyway and pass the decision as `question`, naming the options so a one-line reply picks one. The pull request waits for a reviewer's answer, and a later session applies it.")
 	}
+	rules = append(rules, conventionRules(p)...)
 	return "## Rules\n\n- " + strings.Join(rules, "\n- ")
+}
+
+// conventionRules tell a session what the repository's conventions ask of its report.
+func conventionRules(p *Project) []string {
+	c := p.Conventions
+	var rules []string
+	if c.TitlePattern != "" {
+		rules = append(rules, "The pull request `title` must match the repository's convention `"+c.TitlePattern+"`; report_outcome refuses any other.")
+	}
+	if c.Branch != "" {
+		rules = append(rules, "arbetern opens the pull request from a branch named by the repository's conventions and points it at your pushed commits; you still push only your own branch.")
+	}
+	if t := c.Ticket; t != nil {
+		rule := "With status `fixed`, also pass `ticket` with a one-line `summary` and a short `description` for the " + t.Project + " issue arbetern files with the pull request."
+		if len(t.SessionFields) > 0 {
+			rule += " Its `fields` may set " + strings.Join(t.SessionFields, ", ") + " with values you have looked up; leave out any you are not sure of."
+		}
+		rules = append(rules, rule)
+	}
+	if c.Description == descriptionSession {
+		rule := "Your `summary` becomes the whole pull request description: write it in the layout the project instructions or the repository's pull request template ask for."
+		if c.Ticket != nil {
+			rule += " Write `{ticket}` where the issue key belongs; arbetern fills it in."
+		}
+		rules = append(rules, rule)
+	}
+	rules = append(rules, "Pass `headline`: one line for the team's channel naming what failed, where, and how much.")
+	return rules
 }
 
 func subject(p *Project) string {
@@ -518,9 +547,20 @@ func prBody(p *Project, t *Task, o Outcome) string {
 	if q := cleanPRText(o.Question, maxQuestionChars); q != "" {
 		b.WriteString("> [!IMPORTANT]\n> **Decision needed:** " + strings.ReplaceAll(q, "\n", "\n> ") + "\n> Reply in this pull request; it stays a draft until the answer is applied.\n\n")
 	}
-	b.WriteString(cleanPRText(o.Summary, 4000))
-	if testing := cleanPRText(o.Testing, 2000); testing != "" {
-		b.WriteString("\n\n**Testing**\n\n" + testing)
+	if p.Conventions.Description == descriptionSession {
+		summary := withTicket(cleanPRText(o.Summary, maxSessionSummary), t)
+		b.WriteString(summary)
+		if t.Ticket != "" && !strings.Contains(summary, t.Ticket) {
+			b.WriteString("\n\n**Ticket:** " + ticketMarkdown(t))
+		}
+	} else {
+		b.WriteString(withTicket(cleanPRText(o.Summary, 4000), t))
+		if t.Ticket != "" {
+			b.WriteString("\n\n**Ticket:** " + ticketMarkdown(t))
+		}
+		if testing := cleanPRText(o.Testing, 2000); testing != "" {
+			b.WriteString("\n\n**Testing**\n\n" + testing)
+		}
 	}
 	g := t.Group
 	if len(g.Tags) > 0 {
@@ -550,10 +590,6 @@ func seriesLine(p *Project, g Group) string {
 		line += " · most frequent cause " + codeSpan(cleanPRText(oneLine(g.Cause, 200), 200))
 	}
 	return line
-}
-
-func prTitle(title string) string {
-	return cleanPRText(oneLine(title, 120), 120)
 }
 
 // cleanPRText strips comment markers (a fake arbetern marker must never precede the real one), neutralises @mentions and caps the length.

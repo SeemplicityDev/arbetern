@@ -20,6 +20,7 @@ import (
 	"github.com/justmike1/arbetern/github"
 	"github.com/justmike1/arbetern/internal/httpx"
 	"github.com/justmike1/arbetern/internal/redact"
+	"github.com/justmike1/arbetern/internal/safego"
 	"github.com/justmike1/arbetern/internal/store"
 	"github.com/justmike1/arbetern/internal/text"
 )
@@ -474,24 +475,28 @@ type reportArgs struct {
 	Branch      string     `json:"branch"`
 	Testing     string     `json:"testing"`
 	Question    string     `json:"question"`
+	Headline    string     `json:"headline"`
+	Ticket      *ticketArg `json:"ticket"`
 	Replies     []replyArg `json:"replies"`
 	RerunChecks bool       `json:"rerun_checks"`
 }
 
-func (a reportArgs) common(now time.Time) (o Outcome, problem string) {
+func (a reportArgs) common(now time.Time, maxSummary int) (o Outcome, problem string) {
 	o = Outcome{
 		Status:     strings.TrimSpace(a.Status),
 		Summary:    strings.TrimSpace(stripControl(a.Summary)),
 		Testing:    strings.TrimSpace(stripControl(a.Testing)),
 		Title:      oneLine(a.Title, 4*120),
 		Question:   strings.TrimSpace(stripControl(a.Question)),
+		Headline:   oneLine(stripControl(a.Headline), 4*maxHeadlineChars),
 		ReportedAt: stamp(now),
 	}
 	for _, c := range []error{
-		checkText("summary", o.Summary, 1, 4000),
+		checkText("summary", o.Summary, 1, maxSummary),
 		checkText("testing", o.Testing, 0, 2000),
 		checkText("title", o.Title, 0, 120),
 		checkText("question", o.Question, 0, maxQuestionChars),
+		checkText("headline", o.Headline, 0, maxHeadlineChars),
 	} {
 		if c != nil {
 			return o, c.Error() + "."
@@ -505,16 +510,20 @@ func checkPushBranch(branch, base string) (string, string) {
 	switch {
 	case branch == "":
 		return "", "branch is required when status is fixed: push your work and pass the branch name."
-	case !strings.HasPrefix(branch, BranchPrefix) || !validBranchName(branch):
-		return "", fmt.Sprintf("branch %q is not a valid %s branch name.", oneLine(branch, 200), BranchPrefix)
+	case !validBranchName(branch):
+		return "", fmt.Sprintf("branch %q is not a valid branch name.", oneLine(branch, 200))
 	case branch == base:
 		return "", "branch must not be the base branch."
 	}
 	return branch, ""
 }
 
-func (a reportArgs) outcome(base string, now time.Time) (o Outcome, problem string) {
-	o, problem = a.common(now)
+func (a reportArgs) outcome(p *Project, now time.Time) (o Outcome, problem string) {
+	maxSummary := 4000
+	if p.Conventions.Description == descriptionSession {
+		maxSummary = maxSessionSummary
+	}
+	o, problem = a.common(now, maxSummary)
 	switch {
 	case problem != "":
 		return o, problem
@@ -535,9 +544,14 @@ func (a reportArgs) outcome(base string, now time.Time) (o Outcome, problem stri
 	if o.Title == "" {
 		return o, "title is required when status is fixed."
 	}
-	o.Branch, problem = checkPushBranch(a.Branch, base)
+	if pattern := p.Conventions.TitlePattern; pattern != "" && !regexp.MustCompile(pattern).MatchString(o.Title) {
+		return o, "title " + strconvQuote(o.Title) + " does not follow the repository's convention: it must match " + pattern + "."
+	}
+	o.Branch, problem = checkPushBranch(a.Branch, p.Repo.BaseBranch)
 	return o, problem
 }
+
+func strconvQuote(s string) string { return strconv.Quote(oneLine(s, 200)) }
 
 func reported(t *Task) (string, bool) {
 	switch {
@@ -561,10 +575,19 @@ func (g *gateway) reportOutcome(ctx context.Context, s *session, raw json.RawMes
 		return reply, false, nil
 	}
 	now := time.Now().UTC()
-	o, problem := a.outcome(s.project.Repo.BaseBranch, now)
+	o, problem := a.outcome(s.project, now)
+	var ticket *TicketRequest
 	if problem == "" && o.Status == OutcomeFixed {
 		if err := s.pushAllowed(o.Branch); err != nil {
 			problem = "Report the branch your work order named: " + err.Error() + "."
+		}
+		if tc := s.project.Conventions.Ticket; problem == "" && tc != nil {
+			var summary, description string
+			var fields map[string]any
+			if summary, description, fields, problem = a.Ticket.check(tc); problem == "" {
+				ticket = &TicketRequest{Project: tc.Project, IssueType: tc.IssueType, Summary: summary, Description: description,
+					AssigneeID: tc.AssigneeID, Labels: tc.Labels, Fields: ticketFields(tc, taskSite(s.project, s.task.Group), fields)}
+			}
 		}
 	}
 	if problem != "" {
@@ -576,7 +599,7 @@ func (g *gateway) reportOutcome(ctx context.Context, s *session, raw json.RawMes
 	case s.task.Status != StatusRunning:
 		return "This work order is not running.", true, nil
 	case o.Status == OutcomeFixed:
-		return g.openPullRequest(ctx, s, o, now)
+		return g.openPullRequest(ctx, s, o, ticket, now)
 	}
 	taskID, limits := s.task.ID, s.project.Limits.effective()
 	changed, err := g.apply(ctx, s, func(l *Ledger) bool { return l.reportNoFix(taskID, o, limits, now) })
@@ -595,7 +618,7 @@ func (g *gateway) reportOutcome(ctx context.Context, s *session, raw json.RawMes
 	return "Recorded. You can stop now.", false, nil
 }
 
-func (g *gateway) openPullRequest(ctx context.Context, s *session, o Outcome, now time.Time) (string, bool, error) {
+func (g *gateway) openPullRequest(ctx context.Context, s *session, o Outcome, ticket *TicketRequest, now time.Time) (string, bool, error) {
 	p, taskID := s.project, s.task.ID
 	guard := now.Format(time.RFC3339Nano)
 	if _, err := g.apply(ctx, s, func(l *Ledger) bool { return l.beginOpening(taskID, guard, now) }); err != nil {
@@ -611,18 +634,20 @@ func (g *gateway) openPullRequest(ctx context.Context, s *session, o Outcome, no
 	default:
 		return "A pull request is already being opened for this work order; call report_outcome again in a minute if it does not appear.", true, nil
 	}
-	url, problem := g.pullRequestFor(ctx, s, o)
+	url, branch, problem := g.pullRequestFor(ctx, s, o, ticket)
 	if problem != "" {
 		g.releaseOpening(s, guard)
 		return problem, true, nil
 	}
+	sessionBranch := o.Branch
+	o.Branch = branch
 	_, _, number, err := github.ParsePRURL(url)
 	if err != nil {
 		g.releaseOpening(s, guard)
 		return "", false, fmt.Errorf("GitHub returned an unexpected pull request URL: %w", err)
 	}
 	opened := time.Now().UTC()
-	pr := PR{Number: number, URL: url, Title: prTitle(o.Title), State: prStateOpen, CreatedAt: stamp(opened)}
+	pr := PR{Number: number, URL: url, Title: prTitle(p, s.task, o.Title), State: prStateOpen, CreatedAt: stamp(opened)}
 	follow, draft := p.Review.FollowUp, opensDraft(p, o)
 	changed, err := g.apply(ctx, s, func(l *Ledger) bool { return l.openPR(taskID, o, pr, follow, draft, opened) })
 	if err != nil {
@@ -639,7 +664,28 @@ func (g *gateway) openPullRequest(ctx context.Context, s *session, o Outcome, no
 	log.Printf("[projects] %s task %s opened %s", p.ID, taskID, url)
 	g.r.refreshStats(p.ID, s.ledger)
 	g.r.notify(p, noteOpened(s.task, o))
+	repo, key := p.Repo, s.task.Ticket
+	safego.Go("projects: after opening "+taskID, func() { g.afterOpening(p.ID, repo, taskID, key, sessionBranch, branch, url) })
 	return "Opened pull request " + url + ". You can stop now.", false, nil
+}
+
+// afterOpening links the pull request from its ticket and drops the session's own branch once the pull request has a branch of its own.
+func (g *gateway) afterOpening(projectID string, repo Repo, taskID, ticket, sessionBranch, branch, url string) {
+	ctx, cancel := context.WithTimeout(context.Background(), persistTimeout)
+	defer cancel()
+	if ticket != "" && g.r.deps.Tickets != nil {
+		if err := g.r.deps.Tickets.CommentTicket(ctx, ticket, "Pull request: "+url); err != nil {
+			log.Printf("[projects] %s task %s: linking %s from %s: %v", projectID, taskID, url, ticket, err)
+		}
+	}
+	if sessionBranch == branch || g.r.gh == nil {
+		return
+	}
+	if other, err := g.r.gh.FindOpenPullRequestByHead(ctx, repo.Owner, repo.Name, sessionBranch); err == nil && other == nil {
+		if err := g.r.gh.DeleteBranch(ctx, repo.Owner, repo.Name, sessionBranch); err != nil {
+			log.Printf("[projects] %s task %s: deleting the session branch %s: %v", projectID, taskID, sessionBranch, err)
+		}
+	}
 }
 
 func opensDraft(p *Project, o Outcome) bool { return p.Review.Draft || o.Question != "" }
@@ -657,43 +703,112 @@ func githubProblem(err error) string {
 	return oneLine(redact.Text(err.Error()), 300)
 }
 
-func (g *gateway) pullRequestFor(ctx context.Context, s *session, o Outcome) (url, problem string) {
+func (g *gateway) pullRequestFor(ctx context.Context, s *session, o Outcome, ticket *TicketRequest) (url, branch, problem string) {
 	gh := g.r.gh
 	if gh == nil {
-		return "", "GitHub is not configured in this deployment, so no pull request can be opened."
+		return "", "", "GitHub is not configured in this deployment, so no pull request can be opened."
 	}
 	p := s.project
 	owner, repo, base := p.Repo.Owner, p.Repo.Name, p.Repo.BaseBranch
 	exists, err := gh.BranchExists(ctx, owner, repo, o.Branch)
 	if err != nil {
-		return "", "Could not check branch " + o.Branch + " on GitHub (" + githubProblem(err) + "); call report_outcome again in a minute."
+		return "", "", "Could not check branch " + o.Branch + " on GitHub (" + githubProblem(err) + "); call report_outcome again in a minute."
 	}
 	if !exists {
-		return "", "Branch " + o.Branch + " is not on GitHub yet — push it and call report_outcome again."
+		return "", "", "Branch " + o.Branch + " is not on GitHub yet — push it and call report_outcome again."
 	}
 	ahead, err := gh.CommitsAhead(ctx, owner, repo, base, o.Branch)
 	if err != nil {
-		return "", "Could not compare " + o.Branch + " with " + base + " on GitHub (" + githubProblem(err) + "); call report_outcome again in a minute."
+		return "", "", "Could not compare " + o.Branch + " with " + base + " on GitHub (" + githubProblem(err) + "); call report_outcome again in a minute."
 	}
 	if ahead == 0 {
-		return "", "Branch " + o.Branch + " has no commits ahead of base " + base + " — commit and push your change, then call report_outcome again."
+		return "", "", "Branch " + o.Branch + " has no commits ahead of base " + base + " — commit and push your change, then call report_outcome again."
 	}
-	existing, err := gh.FindOpenPullRequestByHead(ctx, owner, repo, o.Branch)
+	if ticket != nil {
+		if problem = g.fileTaskTicket(ctx, s, *ticket); problem != "" {
+			return "", "", problem
+		}
+	}
+	branch = prBranch(p, s.task, o)
+	if branch != o.Branch {
+		if problem = g.placeBranch(ctx, s, o.Branch, branch); problem != "" {
+			return "", "", problem
+		}
+	}
+	existing, err := gh.FindOpenPullRequestByHead(ctx, owner, repo, branch)
 	if err != nil {
-		return "", "Could not look for an open pull request on GitHub (" + githubProblem(err) + "); call report_outcome again in a minute."
+		return "", "", "Could not look for an open pull request on GitHub (" + githubProblem(err) + "); call report_outcome again in a minute."
 	}
 	if existing != nil && existing.URL != "" {
-		return existing.URL, ""
+		return existing.URL, branch, ""
 	}
 	create := gh.CreatePullRequest
 	if opensDraft(p, o) {
 		create = gh.CreateDraftPullRequest
 	}
-	url, err = create(ctx, owner, repo, base, o.Branch, prTitle(o.Title), prBody(p, s.task, o))
+	url, err = create(ctx, owner, repo, base, branch, prTitle(p, s.task, o.Title), prBody(p, s.task, o))
 	if err != nil {
-		return "", "GitHub did not open the pull request (" + githubProblem(err) + ")."
+		return "", "", "GitHub did not open the pull request (" + githubProblem(err) + ")."
 	}
-	return url, ""
+	return url, branch, ""
+}
+
+// fileTaskTicket files the task's issue once; a report that is retried reuses the issue already recorded.
+func (g *gateway) fileTaskTicket(ctx context.Context, s *session, req TicketRequest) string {
+	if s.task.Ticket != "" {
+		return ""
+	}
+	if g.r.deps.Tickets == nil {
+		return "This deployment has no Jira connection, so the ticket this project files with every pull request cannot be created. Report cannot_fix and say so."
+	}
+	if req.Description == "" {
+		req.Description = req.Summary
+	}
+	req.Description += "\n\nFiled by the arbetern project \"" + oneLine(s.project.Name, 80) + "\" (task " + s.task.ID + ")."
+	key, url, dropped, err := fileTicket(ctx, g.r.deps.Tickets, req)
+	if err != nil {
+		log.Printf("[projects] %s task %s: filing the ticket: %v", s.project.ID, s.task.ID, err)
+		return "Could not file the ticket in Jira (" + oneLine(redact.Text(err.Error()), 300) + "); call report_outcome again in a minute."
+	}
+	if len(dropped) > 0 {
+		log.Printf("[projects] %s task %s: filed %s without the fields Jira refused: %s", s.project.ID, s.task.ID, key, strings.Join(dropped, ", "))
+	}
+	taskID := s.task.ID
+	if _, err := g.apply(ctx, s, func(l *Ledger) bool { return l.setTicket(taskID, key, url) }); err != nil {
+		log.Printf("[projects] %s task %s: recording ticket %s: %v", s.project.ID, taskID, key, err)
+		return "Filed " + key + " but could not record it; call report_outcome again in a minute."
+	}
+	if s.task.Ticket != key {
+		return "Another report filed the ticket for this work order first; call report_outcome again."
+	}
+	return ""
+}
+
+// placeBranch points the pull request branch the conventions name at the head the session pushed.
+func (g *gateway) placeBranch(ctx context.Context, s *session, from, to string) string {
+	p := s.project
+	owner, repo := p.Repo.Owner, p.Repo.Name
+	if !validBranchName(to) || to == p.Repo.BaseBranch {
+		return "The pull request branch the conventions name, " + strconvQuote(to) + ", is not usable; adjust the title and call report_outcome again."
+	}
+	sha, err := g.r.gh.BranchHead(ctx, owner, repo, from)
+	if err != nil {
+		return "Could not read branch " + from + " on GitHub (" + githubProblem(err) + "); call report_outcome again in a minute."
+	}
+	current, err := g.r.gh.BranchHead(ctx, owner, repo, to)
+	switch {
+	case github.IsNotFound(err):
+		if err := g.r.gh.CreateBranchAt(ctx, owner, repo, to, sha); err != nil {
+			return "Could not create branch " + to + " on GitHub (" + githubProblem(err) + "); call report_outcome again in a minute."
+		}
+	case err != nil:
+		return "Could not read branch " + to + " on GitHub (" + githubProblem(err) + "); call report_outcome again in a minute."
+	case current != sha:
+		if err := g.r.gh.FastForwardBranch(ctx, owner, repo, to, sha); err != nil {
+			return "Could not move " + to + " to the head of " + from + " (" + githubProblem(err) + "); call report_outcome again in a minute."
+		}
+	}
+	return ""
 }
 
 func (g *gateway) recordLearning(ctx context.Context, s *session, raw json.RawMessage) (string, bool, error) {

@@ -731,11 +731,27 @@ function pjdGroupDetailHtml(g) {
   ]) + (g.pattern ? `<div class="proj-label">Message pattern</div><div class="run-result">${escapeHtml(g.pattern)}</div>` : '') + samples;
 }
 
+function pjdTicketLink(t) {
+  const url = safeExternalUrl(t.ticket_url);
+  return url ? `<a href="${escapeHtml(url)}" target="_blank" rel="noopener">${escapeHtml(t.ticket)}</a>` : escapeHtml(t.ticket);
+}
+
+function pjdConventionsText(c) {
+  if (!c) return '';
+  const parts = [];
+  if (c.ticket) parts.push(`tickets in ${c.ticket.project} (${c.ticket.issue_type || 'Task'})`);
+  if (c.branch) parts.push(`branch ${c.branch}`);
+  if (c.title) parts.push(`title ${c.title}`);
+  if (c.title_pattern) parts.push(`titles match ${c.title_pattern}`);
+  if (c.description === 'session') parts.push('description written by the session');
+  return parts.join(' · ');
+}
+
 function pjdTaskDetailHtml(t) {
   const o = t.outcome;
   const pr = t.pr || {};
   let html = pjdChips([
-    ['task', t.id], ['branch', t.branch || (o && o.branch)], ['session', t.session_id], ['exit', t.exit_reason], ['turns', t.turns ? fmtInt(t.turns) : ''],
+    ['task', t.id], ['branch', t.branch || (o && o.branch)], ['ticket', t.ticket], ['session', t.session_id], ['exit', t.exit_reason], ['turns', t.turns ? fmtInt(t.turns) : ''],
     ['dispatched', t.dispatched_at && fmtDateTime(t.dispatched_at)], ['finished', t.finished_at && fmtDateTime(t.finished_at)],
     ['lines', t.pr && (pr.additions || pr.deletions) ? `+${fmtInt(pr.additions)} −${fmtInt(pr.deletions)}` : ''],
     ['learnings', t.learnings ? fmtInt(t.learnings) : ''],
@@ -784,6 +800,7 @@ function pjdTaskRowsHtml(p, t, manage) {
     const text = n ? '#' + n : 'PR';
     prCell = `${url ? `<a href="${escapeHtml(url)}" target="_blank" rel="noopener" title="${escapeHtml(t.pr.title || '')}">${text}</a>` : text} <span class="tag">${escapeHtml(t.pr.state || '')}</span>`;
   }
+  if (t.ticket) prCell += ' ' + pjdTicketLink(t);
   return `<tr>
       <td><span class="status-pill ${cls}" title="${escapeHtml(title)}">${escapeHtml(label)}</span></td>
       <td>${pjdGroupCell(g, key)}</td>
@@ -896,6 +913,7 @@ function pjdMetaHtml(p) {
       ${metaItemHtml('Created', fmtDateTime(p.created_at))}
       ${metaItemHtml('Last tick', p.last_tick ? fmtDateTime(p.last_tick) : '—')}
       ${wide('Skills', skills.length ? `<div class="chip-row">${skills.map(n => `<span class="chip">${escapeHtml(n)}</span>`).join('')}</div>` : '<span class="muted">none</span>')}
+      ${pjdConventionsText(p.conventions) ? wide('Conventions', `<code>${escapeHtml(pjdConventionsText(p.conventions))}</code>`) : ''}
       ${pjdSignalMetaHtml(sig, wide)}
       ${wide('Limits', `<div class="chip-row">${PJD_LIMITS.map(([k, label]) => `<span class="chip">${escapeHtml(label)} <b>${fmtInt(l[k])}</b></span>`).join('')}</div>`)}
     </div>`;

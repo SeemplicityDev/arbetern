@@ -55,12 +55,18 @@ var workOrderTools = []toolDef{
 		Description: "Report the result of the work order exactly once. For status fixed, commit and push first; arbetern checks the branch and opens the pull request, or in a follow-up round adds your commits to it and posts your replies. Otherwise report why no change was made.",
 		InputSchema: objectSchema(map[string]any{
 			"status":  map[string]any{"type": "string", "enum": []string{OutcomeFixed, OutcomeNotReproducible, OutcomeCannotFix, OutcomeAlreadyFixed, OutcomeAnswered}, "description": "answered is for follow-up rounds only; not_reproducible and already_fixed are for first sessions only."},
-			"summary": map[string]any{"type": "string", "maxLength": 4000, "description": "What you found and, for fixed, what you changed and why. In a follow-up round it is posted on the pull request."},
+			"summary": map[string]any{"type": "string", "maxLength": maxSessionSummary, "description": "What you found and, for fixed, what you changed and why; 4000 characters unless the work order makes it the whole pull request description. In a follow-up round it is posted on the pull request."},
 			"title":   map[string]any{"type": "string", "maxLength": 120, "description": "Pull request title; required for fixed in a first session."},
 			"branch":  map[string]any{"type": "string", "maxLength": 200, "description": "The " + BranchPrefix + " branch you pushed; required for fixed."},
 			"testing": map[string]any{"type": "string", "maxLength": 2000, "description": "How you verified the change."},
 			"question": map[string]any{"type": "string", "maxLength": maxQuestionChars,
 				"description": "A decision only a person can make, with the options named so a one-line reply picks one. The pull request stays a draft until a reviewer answers in it."},
+			"headline": map[string]any{"type": "string", "maxLength": maxHeadlineChars, "description": "One line for the team's channel naming what failed, where, and how much."},
+			"ticket": json.RawMessage(objectSchema(map[string]any{
+				"summary":     map[string]any{"type": "string", "minLength": 1, "maxLength": maxTicketSummary},
+				"description": map[string]any{"type": "string", "maxLength": maxTicketText},
+				"fields":      map[string]any{"type": "object", "description": "Only the fields the work order names."},
+			}, "summary")),
 			"replies": map[string]any{
 				"type": "array", "maxItems": maxReplies,
 				"description": "Follow-up rounds: one entry per review comment in the work order, saying what you changed and why, or why you changed nothing. Each is posted as a reply to its comment.",

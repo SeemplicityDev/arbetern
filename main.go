@@ -2720,6 +2720,7 @@ func main() {
 			Slack:   slackClient,
 			Usage:   billingStore.Record,
 			Tools:   projectsRouter.ReadOnlyToolkit(),
+			Tickets: projects.JiraTickets(jiraClient),
 			Cluster: projectsCluster(cfg),
 		})
 		projRegistry.UseQueue(tasks)
