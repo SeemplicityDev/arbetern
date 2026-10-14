@@ -273,7 +273,7 @@ be set to zero.
 |---|---|---|---|
 | `max_open_prs` | 3 | 1–20 | Open pull requests plus active sessions |
 | `max_active_sessions` | 1 | 1–5 | Sessions dispatching or running at once, follow-up rounds included |
-| `max_sessions_per_day` | 6 | 1–48 | Sessions started per UTC day, follow-up rounds included |
+| `max_sessions_per_day` | 6 | 1–48 | New-work sessions started per UTC day. Follow-up rounds count toward it but are never held back by it |
 | `max_attempts` | 2 | 1–5 | Sessions per error group. A fix whose error recurs gets a fresh budget |
 | `cooldown_hours` | 72 | 1–720 | Wait after a closed pull request or a no-fix report before the group is tried again. A failed session waits one hour |
 | `session_timeout_minutes` | 240 | 30–600 | A running session with no report is failed this long plus 30 minutes after dispatch, and its Job is deleted. The Job's own deadline is this plus 10 minutes |
@@ -412,11 +412,14 @@ requests it already has open.
 A round starts when there are unanswered review comments, failing checks not
 yet taken on at the current head, or a conflict. It waits until no round is
 running, the checks have finished (or an hour has passed since the head
-appeared) and the limits allow: a round counts against `max_active_sessions`
-and `max_sessions_per_day` but needs no pull request slot of its own, and rounds
-are dispatched before new work. Its work order lists up to 15 comments, every
-failing check with its annotations and the end of its GitHub Actions job log,
-and the conflict, ahead of the original problem.
+appeared) and a session slot is free: a round counts against
+`max_active_sessions` but needs no pull request slot of its own, and rounds are
+dispatched before new work. It counts toward `max_sessions_per_day` without
+being held back by it, because new work spends the day's budget before review
+feedback arrives; `max_rounds` bounds a pull request's rounds instead. Its work
+order lists up to 15 comments, every failing check with its annotations and the
+end of its GitHub Actions job log, and the conflict, ahead of the original
+problem.
 
 A round's Job resumes the task's stored Claude Code transcript, so Claude
 starts with everything the earlier sessions saw and did. It checks out the pull
@@ -486,7 +489,7 @@ as a slug of up to 50 characters.
 | `labels` | Up to 10 labels |
 | `fields` | Further create fields, sent as given, such as `{"customfield_10001": {"value": "Team"}}` |
 | `site_fields` | Fields merged in for the series' Datadog site, such as a region option: `{"us": {...}, "eu": {...}}` |
-| `session_fields` | Fields the session may set in its report, up to 10, for values it looks up itself, such as a customer option it finds on earlier tickets with the read-only Jira tools |
+| `session_fields` | Fields the session may set in its report, up to 10, for values it looks up itself, such as a customer option it reads on earlier tickets with `search_jira_issues` and its `fields` argument |
 
 When a session reports `fixed`, arbetern files the issue with the summary and
 description the session passes in `ticket`, the configured fields, the site's

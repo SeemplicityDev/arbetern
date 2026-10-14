@@ -315,10 +315,10 @@ func (r *Registry) dispatchRounds(ctx context.Context, p *Project, limits Limits
 	led := out.ledger
 	maxRounds := p.Review.effective().MaxRounds
 	for _, want := range out.rounds {
-		now := time.Now().UTC()
-		if !led.roundCapacity(limits, now) {
+		if !led.roundCapacity(limits) {
 			break
 		}
+		now := time.Now().UTC()
 		rd := r.buildRound(ctx, want)
 		next, added, err := r.mergeLedger(ctx, p.ID, led, func(l *Ledger) bool { return l.addRound(want.watch.taskID, rd, maxRounds, now) })
 		if err != nil {

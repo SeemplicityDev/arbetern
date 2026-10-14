@@ -1473,12 +1473,16 @@ func (c *Client) ResolveUserViaIssues(displayName string) ([]JiraUser, error) {
 // SearchIssuesJQL searches for issues using JQL and returns a formatted summary.
 // Paginates through results using startAt/maxResults until all issues up to
 // maxResults are fetched (Jira caps each page at 100).
-func (c *Client) SearchIssuesJQL(jql string, maxResults int) ([]IssueSummary, error) {
+func (c *Client) SearchIssuesJQL(jql string, maxResults int, extra ...string) ([]IssueSummary, error) {
 	if maxResults <= 0 {
 		maxResults = 20
 	}
+	extras, err := extraFieldList(extra)
+	if err != nil {
+		return nil, err
+	}
 	fields := "summary,status,assignee,reporter,priority,issuetype,project,labels,created,updated,description"
-	for _, id := range c.extraFieldIDs() {
+	for _, id := range append(c.extraFieldIDs(), extras...) {
 		fields += "," + id
 	}
 
@@ -1576,6 +1580,7 @@ func (c *Client) SearchIssuesJQL(jql string, maxResults int) ([]IssueSummary, er
 				Browse:      fmt.Sprintf("%s/browse/%s", c.siteURL, i.Key),
 				Team:        team,
 				Sprint:      sprint,
+				Extra:       fieldValues(i.Fields, extras),
 			})
 		}
 
@@ -1606,9 +1611,13 @@ func (c *Client) AssignedIssues(maxResults int) ([]IssueSummary, error) {
 }
 
 // GetIssue fetches a single Jira issue by key with full details.
-func (c *Client) GetIssue(issueKey string) (*IssueSummary, error) {
+func (c *Client) GetIssue(issueKey string, extra ...string) (*IssueSummary, error) {
+	extras, err := extraFieldList(extra)
+	if err != nil {
+		return nil, err
+	}
 	fieldList := "summary,status,assignee,priority,issuetype,updated,description,labels,reporter"
-	for _, id := range c.extraFieldIDs() {
+	for _, id := range append(c.extraFieldIDs(), extras...) {
 		fieldList += "," + id
 	}
 	reqURL := fmt.Sprintf("%s/rest/api/3/issue/%s?fields=%s",
@@ -1690,6 +1699,7 @@ func (c *Client) GetIssue(issueKey string) (*IssueSummary, error) {
 		Browse:      fmt.Sprintf("%s/browse/%s", c.siteURL, raw.Key),
 		Team:        team,
 		Sprint:      sprint,
+		Extra:       fieldValues(raw.Fields, extras),
 	}, nil
 }
 
@@ -1864,21 +1874,106 @@ func (c *Client) UpdateIssueDescription(issueKey, description string) error {
 
 // IssueSummary represents a Jira issue with common fields.
 type IssueSummary struct {
-	Key         string   `json:"key"`
-	Summary     string   `json:"summary"`
-	Status      string   `json:"status"`
-	Assignee    string   `json:"assignee,omitempty"`
-	Reporter    string   `json:"reporter,omitempty"`
-	Priority    string   `json:"priority,omitempty"`
-	IssueType   string   `json:"issue_type"`
-	Project     string   `json:"project,omitempty"`
-	Created     string   `json:"created,omitempty"`
-	Updated     string   `json:"updated"`
-	Labels      []string `json:"labels,omitempty"`
-	Description string   `json:"description,omitempty"`
-	Browse      string   `json:"browse"`
-	Team        string   `json:"team,omitempty"`
-	Sprint      string   `json:"sprint,omitempty"`
+	Key         string       `json:"key"`
+	Summary     string       `json:"summary"`
+	Status      string       `json:"status"`
+	Assignee    string       `json:"assignee,omitempty"`
+	Reporter    string       `json:"reporter,omitempty"`
+	Priority    string       `json:"priority,omitempty"`
+	IssueType   string       `json:"issue_type"`
+	Project     string       `json:"project,omitempty"`
+	Created     string       `json:"created,omitempty"`
+	Updated     string       `json:"updated"`
+	Labels      []string     `json:"labels,omitempty"`
+	Description string       `json:"description,omitempty"`
+	Browse      string       `json:"browse"`
+	Team        string       `json:"team,omitempty"`
+	Sprint      string       `json:"sprint,omitempty"`
+	Extra       []FieldValue `json:"extra,omitempty"`
+}
+
+// FieldValue is one requested issue field rendered as text; Text is empty when the issue has no value.
+type FieldValue struct {
+	ID   string `json:"id"`
+	Text string `json:"text"`
+}
+
+const maxExtraFields = 10
+
+var fieldIDPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,64}$`)
+
+func extraFieldList(extra []string) ([]string, error) {
+	var ids []string
+	seen := make(map[string]bool, len(extra))
+	for _, f := range extra {
+		f = strings.TrimSpace(f)
+		if f == "" || seen[f] {
+			continue
+		}
+		if !fieldIDPattern.MatchString(f) {
+			return nil, fmt.Errorf("invalid field id %q", f)
+		}
+		seen[f] = true
+		ids = append(ids, f)
+	}
+	if len(ids) > maxExtraFields {
+		return nil, fmt.Errorf("at most %d extra fields per request", maxExtraFields)
+	}
+	return ids, nil
+}
+
+func fieldValues(raw json.RawMessage, ids []string) []FieldValue {
+	if len(ids) == 0 {
+		return nil
+	}
+	var all map[string]any
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	_ = dec.Decode(&all)
+	out := make([]FieldValue, 0, len(ids))
+	for _, id := range ids {
+		out = append(out, FieldValue{ID: id, Text: fieldText(all[id])})
+	}
+	return out
+}
+
+func fieldText(v any) string {
+	switch t := v.(type) {
+	case nil:
+		return ""
+	case string:
+		return t
+	case json.Number:
+		return t.String()
+	case bool:
+		return fmt.Sprint(t)
+	case []any:
+		parts := make([]string, 0, len(t))
+		for _, e := range t {
+			if s := fieldText(e); s != "" {
+				parts = append(parts, s)
+			}
+		}
+		return strings.Join(parts, ", ")
+	case map[string]any:
+		if t["type"] == "doc" {
+			raw, _ := json.Marshal(t)
+			return adfToPlainText(raw)
+		}
+		for _, k := range []string{"value", "displayName", "name", "key"} {
+			s, ok := t[k].(string)
+			if !ok || s == "" {
+				continue
+			}
+			if child := fieldText(t["child"]); child != "" {
+				return s + " / " + child
+			}
+			return s
+		}
+		raw, _ := json.Marshal(t)
+		return string(raw)
+	}
+	return ""
 }
 
 // adfToPlainText extracts plain text from an ADF document (json.RawMessage).

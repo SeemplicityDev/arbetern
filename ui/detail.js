@@ -665,7 +665,7 @@ const PJD_NOTE_SOURCES = ['admin', 'session', 'review'];
 const PJD_LIMITS = [
   ['max_open_prs', 'Open pull requests', 1, 20, 3, 'Counts running sessions too'],
   ['max_active_sessions', 'Sessions at once', 1, 5, 1],
-  ['max_sessions_per_day', 'Sessions per day', 1, 48, 6, 'UTC day'],
+  ['max_sessions_per_day', 'Sessions per day', 1, 48, 6, 'New work per UTC day; follow-up rounds are not held back'],
   ['max_attempts', 'Attempts per error', 1, 5, 2],
   ['cooldown_hours', 'Cooldown, hours', 1, 720, 72, 'After a closed PR or no fix'],
   ['session_timeout_minutes', 'Session timeout, minutes', 30, 600, 240],

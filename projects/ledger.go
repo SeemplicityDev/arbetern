@@ -320,20 +320,25 @@ func (l *Ledger) sessionsToday(now time.Time) int {
 	return 0
 }
 
-func (l *Ledger) roundCapacity(limits Limits, now time.Time) bool {
+func (l *Ledger) roundCapacity(limits Limits) bool {
 	_, active, rounds := l.counts()
-	return active+rounds < limits.MaxActiveSessions && l.sessionsToday(now) < limits.MaxSessionsPerDay
+	// The daily cap does not hold rounds back: new work spends it before review feedback arrives, and max_rounds bounds them.
+	return active+rounds < limits.MaxActiveSessions
+}
+
+func (l *Ledger) workCapacity(limits Limits, now time.Time) bool {
+	return l.roundCapacity(limits) && l.sessionsToday(now) < limits.MaxSessionsPerDay
 }
 
 func (l *Ledger) hasCapacity(limits Limits, now time.Time) bool {
 	open, active, _ := l.counts()
-	return open+active < limits.MaxOpenPRs && l.roundCapacity(limits, now)
+	return open+active < limits.MaxOpenPRs && l.workCapacity(limits, now)
 }
 
 func (l *Ledger) fillCapacity(limits Limits, now time.Time) bool {
 	open, active, _ := l.counts()
 	// The last free slot stays for a series that breaches.
-	return open+active+1 < limits.MaxOpenPRs && l.roundCapacity(limits, now)
+	return open+active+1 < limits.MaxOpenPRs && l.workCapacity(limits, now)
 }
 
 func (l *Ledger) eligible(fp string, limits Limits, now time.Time) bool {

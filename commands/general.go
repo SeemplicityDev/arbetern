@@ -29,6 +29,7 @@ import (
 	"github.com/justmike1/arbetern/github"
 	"github.com/justmike1/arbetern/google"
 	"github.com/justmike1/arbetern/internal/progress"
+	"github.com/justmike1/arbetern/internal/text"
 	"github.com/justmike1/arbetern/llm"
 	"github.com/justmike1/arbetern/mcp"
 	"github.com/justmike1/arbetern/nvd"
@@ -1377,7 +1378,8 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 					"type":"object",
 					"properties":{
 						"jql":{"type":"string","description":"JQL query string (e.g. 'assignee = \"John Doe\" AND status = \"In Progress\" ORDER BY updated DESC')"},
-						"max_results":{"type":"integer","description":"Maximum number of results to return (default: 20, max: 50)"}
+						"max_results":{"type":"integer","description":"Maximum number of results to return (default: 20, max: 50)"},
+						"fields":{"type":"array","items":{"type":"string"},"description":"Up to 10 extra fields to show for each issue, by field id (e.g. 'customfield_10001', 'duedate'). Select, user and multi-value fields show their display values."}
 					},
 					"required":["jql"]
 				}`),
@@ -1390,7 +1392,8 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 				Parameters: json.RawMessage(`{
 					"type":"object",
 					"properties":{
-						"issue_key":{"type":"string","description":"Jira issue key (e.g. 'ENG-123', 'PROJ-456')"}
+						"issue_key":{"type":"string","description":"Jira issue key (e.g. 'ENG-123', 'PROJ-456')"},
+						"fields":{"type":"array","items":{"type":"string"},"description":"Up to 10 extra fields to show, by field id (e.g. 'customfield_10001', 'duedate'). Select, user and multi-value fields show their display values."}
 					},
 					"required":["issue_key"]
 				}`),
@@ -3952,13 +3955,14 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 			return errMsg
 		}
 		args, errMsg := parseToolArgs[struct {
-			JQL        string `json:"jql"`
-			MaxResults int    `json:"max_results"`
+			JQL        string   `json:"jql"`
+			MaxResults int      `json:"max_results"`
+			Fields     []string `json:"fields"`
 		}](argsJSON)
 		if errMsg != "" {
 			return errMsg
 		}
-		issues, err := h.jiraClient.SearchIssuesJQL(args.JQL, args.MaxResults)
+		issues, err := h.jiraClient.SearchIssuesJQL(args.JQL, args.MaxResults, args.Fields...)
 		if err != nil {
 			return fmt.Sprintf("Error searching Jira issues: %v", err)
 		}
@@ -3976,6 +3980,9 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 				fmt.Fprintf(&sb, " | Sprint: %s", i.Sprint)
 			}
 			fmt.Fprintf(&sb, " | Updated: %s\n  URL: %s\n", i.Updated, i.Browse)
+			for _, f := range i.Extra {
+				fmt.Fprintf(&sb, "  %s: %s\n", f.ID, jiraFieldText(f.Text))
+			}
 			if i.Description != "" {
 				desc := i.Description
 				if len(desc) > 500 {
@@ -3993,12 +4000,13 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 			return errMsg
 		}
 		args, errMsg := parseToolArgs[struct {
-			IssueKey string `json:"issue_key"`
+			IssueKey string   `json:"issue_key"`
+			Fields   []string `json:"fields"`
 		}](argsJSON)
 		if errMsg != "" {
 			return errMsg
 		}
-		issue, err := h.jiraClient.GetIssue(args.IssueKey)
+		issue, err := h.jiraClient.GetIssue(args.IssueKey, args.Fields...)
 		if err != nil {
 			return fmt.Sprintf("Error getting Jira issue: %v", err)
 		}
@@ -4015,6 +4023,9 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		fmt.Fprintf(&sb, "Updated: %s\n", issue.Updated)
 		if len(issue.Labels) > 0 {
 			fmt.Fprintf(&sb, "Labels: %s\n", strings.Join(issue.Labels, ", "))
+		}
+		for _, f := range issue.Extra {
+			fmt.Fprintf(&sb, "%s: %s\n", f.ID, jiraFieldText(f.Text))
 		}
 		fmt.Fprintf(&sb, "URL: %s\n", issue.Browse)
 		if issue.Description != "" {
@@ -6333,4 +6344,12 @@ func splitTruncatedToolCalls(finishReason string, calls []llm.ToolCall) ([]llm.T
 	}
 	last := calls[len(calls)-1]
 	return calls[:len(calls)-1], &last
+}
+
+func jiraFieldText(s string) string {
+	s = strings.Join(strings.Fields(s), " ")
+	if s == "" {
+		return "(empty)"
+	}
+	return text.Truncate(s, 300)
 }
