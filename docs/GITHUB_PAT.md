@@ -37,6 +37,8 @@ Grant the following **repository permissions**:
 | **Commit statuses** | Read-only | Read the statuses a [project](PROJECTS.md#following-the-pull-request) waits on before it marks a pull request ready |
 | **Metadata** | Read-only | Required by GitHub for all fine-grained tokens (auto-selected) |
 
+Leave **Workflows** unset. Without it GitHub refuses any push or commit that adds or changes a file under `.github/workflows`, which keeps [project](PROJECTS.md#security) sessions, whose pushes use this token, from altering CI.
+
 If arbetern should discover repositories across an organization, also grant this **organization permission**:
 
 | Permission | Access | Why arbetern needs it |

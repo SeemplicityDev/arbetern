@@ -1,4 +1,4 @@
-{{- if and .Values.projects .Values.projects.enabled .Values.projects.runners.namespace.create (ne (include "arbetern.projects.namespace" .) .Release.Namespace) }}
+{{- if and .Values.projects .Values.projects.enabled .Values.projects.sessions.namespace.create (ne (include "arbetern.projects.namespace" .) .Release.Namespace) }}
 apiVersion: v1
 kind: Namespace
 metadata:

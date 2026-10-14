@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"net/http"
 	"strings"
 	"time"
 
@@ -23,7 +22,6 @@ type tickOutcome struct {
 	groups         int
 	dispatched     int
 	dispatchFailed bool
-	nextDispatch   time.Time
 	interrupted    bool
 	watches        []prWatch
 	rounds         []roundWant
@@ -37,13 +35,13 @@ func (o *tickOutcome) lastError() string {
 	return oneLine(redact.Text(strings.Join(o.errs, "; ")), maxErrorChars)
 }
 
-func (r *Registry) tick(ctx context.Context, agent, id, trigger string) {
-	k := key(agent, id)
-	p, err := r.fetchProject(ctx, agent, id)
+func (r *Registry) tick(ctx context.Context, id, trigger string) {
+	k := id
+	p, err := r.fetchProject(ctx, id)
 	switch {
 	case errors.Is(err, store.ErrNotFound):
 		log.Printf("[projects] skip %s (%s): the project no longer exists", k, trigger)
-		r.stopRunner(agent, id)
+		r.stopRunner(id)
 		return
 	case err != nil:
 		log.Printf("[projects] skip %s (%s): reading the project: %v", k, trigger, err)
@@ -89,7 +87,7 @@ func (r *Registry) tick(ctx context.Context, agent, id, trigger string) {
 func (r *Registry) runTick(ctx context.Context, p *Project, trigger string) *tickOutcome {
 	out := &tickOutcome{}
 	limits := p.Limits.effective()
-	led, err := r.readLedger(ctx, p.Agent, p.ID)
+	led, err := r.readLedger(ctx, p.ID)
 	if err != nil {
 		out.fail("reading the ledger: %v", err)
 		return out
@@ -98,12 +96,16 @@ func (r *Registry) runTick(ctx context.Context, p *Project, trigger string) *tic
 	if led, err = r.reconcileTasks(ctx, p, led, limits); err != nil {
 		out.fail("reconciling tasks: %v", err)
 		healthy = false
+	} else if len(led.Tasks) >= maxTasks {
+		r.pruneTranscripts(ctx, p.ID, led)
 	}
 	if led, err = r.syncPRs(ctx, p, led, limits, out); err != nil {
 		out.fail("syncing pull requests: %v", err)
 		healthy = false
 	}
-	if p.Signal.metric() {
+	if r.deps.Datadog == nil {
+		err = errors.New("nothing can be scanned: this deployment has no Datadog credentials")
+	} else if p.Signal.metric() {
 		led, err = r.scanMetrics(ctx, p, led, limits, out, trigger == "manual")
 	} else {
 		led, err = r.scan(ctx, p, led, limits, out)
@@ -112,7 +114,7 @@ func (r *Registry) runTick(ctx context.Context, p *Project, trigger string) *tic
 		out.fail("%v", err)
 		healthy = false
 	}
-	if led, _, err = r.mergeLedger(ctx, p.Agent, p.ID, led, func(l *Ledger) bool { return l.resolveDue(limits) }); err != nil {
+	if led, _, err = r.mergeLedger(ctx, p.ID, led, func(l *Ledger) bool { return l.resolveDue(limits) }); err != nil {
 		out.fail("resolving merged fixes: %v", err)
 		healthy = false
 	}
@@ -126,27 +128,68 @@ func (r *Registry) runTick(ctx context.Context, p *Project, trigger string) *tic
 
 func (r *Registry) reconcileTasks(ctx context.Context, p *Project, led *Ledger, limits Limits) (*Ledger, error) {
 	now := time.Now().UTC()
-	led, _, err := r.mergeLedger(ctx, p.Agent, p.ID, led, func(l *Ledger) bool { return l.reconcile(limits, now) })
+	led, _, err := r.mergeLedger(ctx, p.ID, led, func(l *Ledger) bool { return l.reconcile(limits, now) })
 	if err != nil {
 		return led, err
 	}
+	if present, finished, ok := r.cluster.sessionJobs(ctx, p.ID); ok {
+		if led, _, err = r.mergeLedger(ctx, p.ID, led, func(l *Ledger) bool { return l.reconcileJobs(present, finished, now) }); err != nil {
+			return led, err
+		}
+	}
 	var unbound []string
-	for _, t := range led.Tasks {
-		if t.Bound && isTerminal(t.Status) && r.deleteBinding(ctx, t.SessionID) {
+	for i := range led.Tasks {
+		t := &led.Tasks[i]
+		if r.lostDispatch(t, now) {
+			r.cluster.stopTask(ctx, t.ID)
+		}
+		if !t.Bound {
+			continue
+		}
+		if _, running := sessionFinished(t, 0); running {
+			continue
+		}
+		// The Job stops as soon as the work order failed; the binding stays until the pod has reported or the wrap-up passed.
+		if t.Status == StatusFailed {
+			r.cluster.stopSession(ctx, t.SessionID)
+		}
+		if !sessionDone(t, 0, t.ExitReason, now) {
+			continue
+		}
+		if r.deleteBinding(ctx, t.SessionID) {
 			unbound = append(unbound, t.ID)
 		}
 	}
 	if len(unbound) > 0 {
-		if led, _, err = r.mergeLedger(ctx, p.Agent, p.ID, led, func(l *Ledger) bool { return l.unbind(unbound) }); err != nil {
+		if led, _, err = r.mergeLedger(ctx, p.ID, led, func(l *Ledger) bool { return l.unbind(unbound) }); err != nil {
 			return led, err
 		}
 	}
-	rounds := r.deleteRoundBindings(ctx, led, led.finishedRoundSessions())
+	rounds := r.deleteRoundBindings(ctx, led, led.boundRoundSessions(), now)
 	if len(rounds) == 0 {
 		return led, nil
 	}
-	led, _, err = r.mergeLedger(ctx, p.Agent, p.ID, led, func(l *Ledger) bool { return l.unbindRounds(rounds) })
+	led, _, err = r.mergeLedger(ctx, p.ID, led, func(l *Ledger) bool { return l.unbindRounds(rounds) })
 	return led, err
+}
+
+// lostDispatch tells whether a task, or one of its rounds, was just failed for never recording its session; its Job, if any, is then still unknown to the ledger.
+func (r *Registry) lostDispatch(t *Task, now time.Time) bool {
+	recent := func(status, sessionID, finishedAt string) bool {
+		return status == StatusFailed && sessionID == "" && now.Sub(parseTime(finishedAt)) < sessionWrapUp
+	}
+	if recent(t.Status, t.SessionID, t.FinishedAt) {
+		return true
+	}
+	if t.Review == nil {
+		return false
+	}
+	for _, rd := range t.Review.Rounds {
+		if recent(rd.Status, rd.SessionID, rd.FinishedAt) {
+			return true
+		}
+	}
+	return false
 }
 
 func prCoordinates(p *Project, pr *PR) (owner, repo string, number int) {
@@ -177,7 +220,7 @@ func (r *Registry) syncPRs(ctx context.Context, p *Project, led *Ledger, limits 
 			continue
 		}
 		if t.PR.UnreadableSince != "" {
-			if next, _, err := r.mergeLedger(ctx, p.Agent, p.ID, led, func(l *Ledger) bool { return l.clearUnreadable(t.ID) }); err == nil {
+			if next, _, err := r.mergeLedger(ctx, p.ID, led, func(l *Ledger) bool { return l.clearUnreadable(t.ID) }); err == nil {
 				led = next
 			}
 		}
@@ -197,7 +240,7 @@ func (r *Registry) syncPRs(ctx context.Context, p *Project, led *Ledger, limits 
 		if st.Merged {
 			transition = func(l *Ledger) bool { return l.mergePR(t.ID, snap, now) }
 		}
-		next, changed, err := r.mergeLedger(ctx, p.Agent, p.ID, led, transition)
+		next, changed, err := r.mergeLedger(ctx, p.ID, led, transition)
 		if err != nil {
 			errs = append(errs, err)
 			continue
@@ -206,10 +249,10 @@ func (r *Registry) syncPRs(ctx context.Context, p *Project, led *Ledger, limits 
 		switch {
 		case !changed:
 		case st.Merged:
-			log.Printf("[projects] %s/%s task %s: pull request #%d merged", p.Agent, p.ID, t.ID, number)
+			log.Printf("[projects] %s task %s: pull request #%d merged", p.ID, t.ID, number)
 			r.notify(p, noteClosed(&t, true))
 		default:
-			log.Printf("[projects] %s/%s task %s: pull request #%d closed without merging", p.Agent, p.ID, t.ID, number)
+			log.Printf("[projects] %s task %s: pull request #%d closed without merging", p.ID, t.ID, number)
 			r.noteReviewFeedback(ctx, p, t.ID, owner, repo, number)
 			r.notify(p, noteClosed(&t, false))
 		}
@@ -226,13 +269,13 @@ func (r *Registry) unreadablePR(ctx context.Context, p *Project, led *Ledger, t 
 		reason := fmt.Sprintf("pull request #%d has not been readable on GitHub since %s", number, t.PR.UnreadableSince)
 		transition = func(l *Ledger) bool { return l.failTask(t.ID, []string{StatusPROpen}, reason, now) }
 	}
-	next, changed, err := r.mergeLedger(ctx, p.Agent, p.ID, led, transition)
+	next, changed, err := r.mergeLedger(ctx, p.ID, led, transition)
 	if err != nil {
-		log.Printf("[projects] %s/%s task %s: recording unreadable pull request #%d: %v", p.Agent, p.ID, t.ID, number, err)
+		log.Printf("[projects] %s task %s: recording unreadable pull request #%d: %v", p.ID, t.ID, number, err)
 		return led
 	}
 	if changed {
-		log.Printf("[projects] %s/%s task %s: pull request #%d is not readable on GitHub", p.Agent, p.ID, t.ID, number)
+		log.Printf("[projects] %s task %s: pull request #%d is not readable on GitHub", p.ID, t.ID, number)
 	}
 	return next
 }
@@ -240,7 +283,7 @@ func (r *Registry) unreadablePR(ctx context.Context, p *Project, led *Ledger, t 
 func (r *Registry) noteReviewFeedback(ctx context.Context, p *Project, taskID, owner, repo string, number int) {
 	fb, err := r.gh.PullRequestFeedback(ctx, owner, repo, number, r.tokenLogin(ctx))
 	if err != nil {
-		log.Printf("[projects] %s/%s reading feedback on pull request #%d: %v", p.Agent, p.ID, number, err)
+		log.Printf("[projects] %s reading feedback on pull request #%d: %v", p.ID, number, err)
 		return
 	}
 	body := feedbackNote(number, fb)
@@ -248,8 +291,8 @@ func (r *Registry) noteReviewFeedback(ctx context.Context, p *Project, taskID, o
 		return
 	}
 	n := Note{ID: "review-" + taskID, Text: body, Source: noteReview, Task: taskID, At: stamp(time.Now())}
-	if _, _, err := r.mergeMemory(ctx, p.Agent, p.ID, func(m *Memory) bool { return m.add(n) }); err != nil {
-		log.Printf("[projects] %s/%s saving review feedback: %v", p.Agent, p.ID, err)
+	if _, _, err := r.mergeMemory(ctx, p.ID, func(m *Memory) bool { return m.add(n) }); err != nil {
+		log.Printf("[projects] %s saving review feedback: %v", p.ID, err)
 	}
 }
 
@@ -296,12 +339,9 @@ func (r *Registry) scan(ctx context.Context, p *Project, led *Ledger, limits Lim
 	if !since.Before(until) {
 		return led, nil
 	}
-	if r.deps.AgentAllowed != nil && !r.deps.AgentAllowed(p.Agent) {
-		return led, fmt.Errorf("agent %s may not use Datadog", p.Agent)
-	}
-	client := r.datadogFor(p.Agent, p.Signal.Site)
+	client := r.datadogFor(p.Signal.Site)
 	if client == nil {
-		return led, fmt.Errorf("agent %s has no Datadog credentials for site %s", p.Agent, p.Signal.Site)
+		return led, fmt.Errorf("this deployment has no Datadog credentials for site %s", p.Signal.Site)
 	}
 	res, err := client.ErrorGroups(ctx, p.Signal.Query, since, until, scanMaxEvents, scanMaxSamples)
 	if err != nil {
@@ -316,7 +356,7 @@ func (r *Registry) scan(ctx context.Context, p *Project, led *Ledger, limits Lim
 		groups = append(groups, groupFromDatadog(g))
 	}
 	if res.Partial {
-		log.Printf("[projects] %s/%s: Datadog reported a partial result for %s to %s", p.Agent, p.ID, since.Format(time.RFC3339), until.Format(time.RFC3339))
+		log.Printf("[projects] %s: Datadog reported a partial result for %s to %s", p.ID, since.Format(time.RFC3339), until.Format(time.RFC3339))
 	}
 	out.scanned, out.groups = res.Scanned, len(groups)
 	next := res.Next
@@ -324,11 +364,11 @@ func (r *Registry) scan(ctx context.Context, p *Project, led *Ledger, limits Lim
 		next = until
 	}
 	if res.Truncated && !catchesUp(since, next, until, p.interval()) {
-		log.Printf("[projects] %s/%s: the scan stopped after %d events, so the logs from %s to %s are skipped", p.Agent, p.ID, res.Scanned, next.Format(time.RFC3339), until.Format(time.RFC3339))
+		log.Printf("[projects] %s: the scan stopped after %d events, so the logs from %s to %s are skipped", p.ID, res.Scanned, next.Format(time.RFC3339), until.Format(time.RFC3339))
 		next = until
 	}
 	from, signal := led.Cursor, p.Signal.key()
-	updated, _, err := r.mergeLedger(ctx, p.Agent, p.ID, led, func(l *Ledger) bool { return l.applyScan(from, signal, groups, next, limits, now) })
+	updated, _, err := r.mergeLedger(ctx, p.ID, led, func(l *Ledger) bool { return l.applyScan(from, signal, groups, next, limits, now) })
 	if err != nil {
 		return led, fmt.Errorf("recording the scan: %w", err)
 	}
@@ -336,27 +376,18 @@ func (r *Registry) scan(ctx context.Context, p *Project, led *Ledger, limits Lim
 }
 
 func (r *Registry) dispatch(ctx context.Context, p *Project, limits Limits, out *tickOutcome, newWork bool) {
-	if parseTime(p.NextDispatchAfter).After(time.Now()) || (!newWork && len(out.rounds) == 0) {
+	if !newWork && len(out.rounds) == 0 {
 		return
 	}
 	if r.gh == nil {
 		out.fail("GitHub is not configured, so no sessions are dispatched")
 		return
 	}
-	token := routineToken(p.Dispatch.Token)
-	switch {
-	case p.Dispatch.RoutineID == "":
-		out.fail("no routine is configured")
-		return
-	case token == "":
-		out.fail("the trigger token %q is not configured (set %s)", p.Dispatch.Token, TokenEnv(p.Dispatch.Token))
-		return
-	}
 	// An open pull request is closer to done than new work, so its rounds go first.
 	if len(out.rounds) > 0 {
-		r.dispatchRounds(ctx, p, limits, token, out)
+		r.dispatchRounds(ctx, p, limits, out)
 	}
-	if !newWork || out.dispatchFailed || !out.nextDispatch.IsZero() {
+	if !newWork || out.dispatchFailed {
 		return
 	}
 	led, signal := out.ledger, p.Signal.key()
@@ -380,7 +411,7 @@ func (r *Registry) dispatch(ctx context.Context, p *Project, limits Limits, out 
 			break
 		}
 		draft := Task{ID: taskID, Fingerprint: cand.Group.Fingerprint, Group: group}
-		next, _, err := r.mergeLedger(ctx, p.Agent, p.ID, led, func(l *Ledger) bool { return l.addTask(draft, limits, now) })
+		next, _, err := r.mergeLedger(ctx, p.ID, led, func(l *Ledger) bool { return l.addTask(draft, limits, now) })
 		if err != nil {
 			out.fail("recording a task: %v", err)
 			break
@@ -390,7 +421,7 @@ func (r *Registry) dispatch(ctx context.Context, p *Project, limits Limits, out 
 			break
 		}
 		var fired bool
-		led, fired = r.fireTask(ctx, p, led, taskID, token, out)
+		led, fired = r.fireTask(ctx, p, led, taskID, out)
 		if !fired {
 			break
 		}
@@ -398,69 +429,50 @@ func (r *Registry) dispatch(ctx context.Context, p *Project, limits Limits, out 
 	out.ledger = led
 }
 
-func classifyFire(err error) (reason string, rateLimited bool, retryAfter time.Duration) {
-	var fe *FireError
-	if errors.As(err, &fe) {
-		if fe.Status == http.StatusTooManyRequests {
-			return "rate limited", true, fe.RetryAfter
-		}
-		return text.Truncate(fe.Error(), maxErrorChars), false, 0
-	}
-	return text.Truncate("routine fire failed: "+err.Error(), maxErrorChars), false, 0
-}
-
 // fireTask reports whether dispatching may continue.
-func (r *Registry) fireTask(ctx context.Context, p *Project, led *Ledger, taskID, token string, out *tickOutcome) (*Ledger, bool) {
-	fired, ferr := r.fire.Fire(ctx, p.Dispatch.RoutineID, token, fireText(p.Agent, p.ID, taskID, 0))
-	// The fire has happened either way; its result is recorded even when the tick is being cancelled.
+func (r *Registry) fireTask(ctx context.Context, p *Project, led *Ledger, taskID string, out *tickOutcome) (*Ledger, bool) {
+	var st *started
+	err := errors.New("the task is no longer in the ledger")
+	if t := led.task(taskID); t != nil {
+		st, err = r.launch(ctx, p, t, 0)
+	}
+	// The Job may have started either way; its result is recorded even when the tick is being cancelled.
 	pctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), persistTimeout)
 	defer cancel()
 	now := time.Now().UTC()
-	fail := func(from, reason string) {
-		next, _, err := r.mergeLedger(pctx, p.Agent, p.ID, led, func(l *Ledger) bool { return l.failTask(taskID, []string{from}, reason, now) })
-		if err != nil {
-			log.Printf("[projects] %s/%s recording the failure of task %s: %v", p.Agent, p.ID, taskID, err)
-			return
+	if err != nil {
+		reason := text.Truncate(err.Error(), maxErrorChars)
+		if next, _, merr := r.mergeLedger(pctx, p.ID, led, func(l *Ledger) bool { return l.failTask(taskID, []string{StatusDispatching}, reason, now) }); merr != nil {
+			log.Printf("[projects] %s recording the failure of task %s: %v", p.ID, taskID, merr)
+		} else {
+			led = next
 		}
-		led = next
-	}
-	if ferr != nil && ctx.Err() != nil {
-		fail(StatusDispatching, "dispatch interrupted before the routine answered")
-		return led, false
-	}
-	if ferr != nil {
-		reason, rateLimited, retryAfter := classifyFire(ferr)
-		fail(StatusDispatching, reason)
-		if rateLimited {
-			out.nextDispatch = now.Add(max(retryAfter, minRetryAfter))
-			log.Printf("[projects] %s/%s routine fire rate limited; dispatching resumes after %s", p.Agent, p.ID, out.nextDispatch.Format(time.RFC3339))
-			return led, false
+		if ctx.Err() == nil {
+			out.dispatchFailed = true
+			out.fail("%s", reason)
 		}
-		out.dispatchFailed = true
-		out.fail("%s", reason)
 		return led, false
 	}
 	out.dispatched++
-	next, applied, err := r.mergeLedger(pctx, p.Agent, p.ID, led, func(l *Ledger) bool {
-		return l.markRunning(taskID, fired.SessionID, fired.SessionURL, now)
-	})
-	if err != nil {
-		out.fail("recording the session of task %s: %v", taskID, err)
-		return led, false
+	next, applied, err := r.mergeLedger(pctx, p.ID, led, func(l *Ledger) bool { return l.markRunning(taskID, st, now) })
+	if err == nil && !applied {
+		// The pod checked in first and the gateway recorded the session.
+		if t := next.task(taskID); t != nil && t.SessionID == st.SessionID {
+			applied = true
+		}
 	}
-	led = next
-	if !applied {
-		log.Printf("[projects] %s/%s task %s was no longer dispatching when its session started", p.Agent, p.ID, taskID)
-		return led, true
+	if err != nil || !applied {
+		r.cluster.stopSession(pctx, st.SessionID)
+		r.deleteBinding(pctx, st.SessionID)
+		if err != nil {
+			out.fail("recording the session of task %s: %v", taskID, err)
+			return led, false
+		}
+		log.Printf("[projects] %s task %s was no longer dispatching when its session started", p.ID, taskID)
+		return next, true
 	}
-	b := binding{Agent: p.Agent, Project: p.ID, Task: taskID, CreatedAt: stamp(now)}
-	if err := r.writeBinding(pctx, fired.SessionID, b); err != nil {
-		fail(StatusRunning, "the session binding could not be stored")
-		out.fail("storing the binding of task %s: %v", taskID, err)
-		return led, false
-	}
-	log.Printf("[projects] %s/%s dispatched task %s (session %s)", p.Agent, p.ID, taskID, fired.SessionID)
-	return led, true
+	log.Printf("[projects] %s dispatched task %s (session %s)", p.ID, taskID, st.SessionID)
+	return next, true
 }
 
 func (r *Registry) recordTick(p *Project, out *tickOutcome) {
@@ -474,7 +486,7 @@ func (r *Registry) recordTick(p *Project, out *tickOutcome) {
 		stats = &s
 	}
 	autoDisabled, reason := false, ""
-	_, err := r.updateDescriptor(ctx, p.Agent, p.ID, func(d *Project) error {
+	_, err := r.updateDescriptor(ctx, p.ID, func(d *Project) error {
 		d.LastTick = stamp(now)
 		if !out.interrupted {
 			d.LastError = lastErr
@@ -488,12 +500,6 @@ func (r *Registry) recordTick(p *Project, out *tickOutcome) {
 		case out.dispatched > 0:
 			d.ConsecutiveFailures = 0
 		}
-		switch {
-		case !out.nextDispatch.IsZero():
-			d.NextDispatchAfter = stamp(out.nextDispatch)
-		case d.NextDispatchAfter != "" && !parseTime(d.NextDispatchAfter).After(now):
-			d.NextDispatchAfter = ""
-		}
 		autoDisabled = d.Enabled && d.ConsecutiveFailures >= MaxConsecutiveFailures
 		if autoDisabled {
 			d.Enabled = false
@@ -505,13 +511,13 @@ func (r *Registry) recordTick(p *Project, out *tickOutcome) {
 	switch {
 	case errors.Is(err, store.ErrNotFound):
 		// Deleted while this tick ran; its ledger writes may have recreated state nobody owns.
-		r.deleteState(ctx, p.Agent, p.ID)
+		r.deleteState(ctx, p.ID)
 	case err != nil:
-		log.Printf("[projects] persisting the tick of %s/%s: %v", p.Agent, p.ID, err)
+		log.Printf("[projects] persisting the tick of %s: %v", p.ID, err)
 	case autoDisabled:
-		log.Printf("[projects] AUTO-DISABLED %s/%s after %d consecutive failed dispatches: %s", p.Agent, p.ID, MaxConsecutiveFailures, lastErr)
-		r.stopRunner(p.Agent, p.ID)
+		log.Printf("[projects] AUTO-DISABLED %s after %d consecutive failed dispatches: %s", p.ID, MaxConsecutiveFailures, lastErr)
+		r.stopRunner(p.ID)
 		r.notify(p, notePaused(p, reason))
 	}
-	r.touch(p.Agent, p.ID)
+	r.touch(p.ID)
 }

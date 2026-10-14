@@ -258,18 +258,19 @@ See [docs/GITOPS.md](docs/GITOPS.md). All variables reuse `GITHUB_TOKEN`.
 </details>
 
 <details>
-<summary><b>Projects</b> — Claude Code sessions on self-hosted runners that fix what Datadog finds and follow their pull requests through review</summary>
+<summary><b>Projects</b> — Claude Code sessions in sandboxed Jobs that fix what Datadog finds and follow their pull requests through review</summary>
 
 See [docs/PROJECTS.md](docs/PROJECTS.md). The chart sets all of these from its `projects` block.
 
 | Variable | Description |
 |---|---|
-| `PROJECTS_ENABLED` | `true` turns on the projects registry, their console API and the runner gateway (default `false`) |
-| `PROJECTS_ENVIRONMENT_ID` | **Required when enabled.** `ccpool_…` ID of the self-hosted environment; session tokens must carry it as their audience |
-| `PROJECTS_RUNNER_ACCOUNT_ID` | Optional `user_…` ID of the automation account that owns the routines. Session tokens of any other account are refused |
-| `PROJECTS_GATEWAY_PORT` | Port of the runner-facing listener (default `8081`); must differ from `PORT` |
-| `PROJECTS_ADMIN_TEAMS` / `PROJECTS_ADMIN_EMAILS` | Who may create, change, run or delete projects: Slack user group IDs, and emails or domains matched like `MCP_ADMIN_EMAILS`. **Both empty means nobody**; reads stay open to console users |
-| `PROJECT_TRIGGER_<NAME>` | Routine trigger token (`sk-ant-oat01-…`) for the token name in a project's `dispatch.token`. `<NAME>` is that name upper-cased with `-` turned into `_`. Set by the chart from `secretValues.project-trigger-<name>` for each entry of `projects.triggers` |
+| `PROJECTS_ENABLED` | `true` turns on the projects registry, their console API and the session gateway (default `false`). Needs `ANTHROPIC_API_KEY` and `GITHUB_TOKEN` |
+| `PROJECTS_GATEWAY_PORT` | Port of the session-facing listener (default `8081`); must differ from `PORT` |
+| `PROJECTS_GATEWAY_URL` | **Required when enabled.** The gateway as session pods reach it |
+| `PROJECTS_NAMESPACE` | **Required when enabled.** Where session Jobs run |
+| `PROJECTS_JOB_TEMPLATE` | **Required when enabled.** File holding the session Job template as JSON |
+| `PROJECTS_MODEL` | Model for projects that name none; a label or an Anthropic model ID |
+| `PROJECTS_ADMIN_TEAMS` / `PROJECTS_ADMIN_EMAILS` | Who may create, change, run or delete projects and read session transcripts: Slack user group IDs, and emails or domains matched like `MCP_ADMIN_EMAILS`. **Both empty means nobody**; reads stay open to console users |
 
 </details>
 
@@ -311,7 +312,7 @@ URL:
 | Agents | `/ui/agents` | The roster — open a card for its prompts (read-only), or chat where `chat_enabled` |
 | Chats | `/ui/chats` | Conversations of every chat-enabled agent: open, start, rename or delete them (same access rules as the chat itself) |
 | Skills | `/ui/skills` | Instruction blocks the agents follow: the built-in ones from the prompt files (read-only) plus custom skills written here and appended to the system prompts of the agents they target |
-| Projects | `/ui/projects` | Standing goals an agent pursues on one repository, with status, open, ready and merged PRs, merge rate and resolved problems, filterable by agent; each opens at `/ui/<agent>/project/<id>` with its statistics, 30-day chart, tasks with their follow-up rounds, backlog, project memory and editor. Shown only when projects are enabled, and only project admins who may use the agent can change one — see [docs/PROJECTS.md](docs/PROJECTS.md) |
+| Projects | `/ui/projects` | Standing goals arbetern pursues on one repository each, with status, open, ready and merged PRs, merge rate and resolved problems; each opens at `/ui/project/<id>` with its statistics, 30-day chart, tasks with their follow-up rounds and session transcripts, backlog, project memory and editor. Shown only when projects are enabled, and only project admins can change one — see [docs/PROJECTS.md](docs/PROJECTS.md) |
 | Workflows | `/ui/workflows` | Every workflow across agents with schedule, status, last run, run / delete actions and GitOps sync state; each opens at `/ui/<agent>/workflow/<id>` with its flow diagram, prompt or tasks, run history and editor. "Run now" and "Sync now" both return immediately and report through the shared state the page polls, so neither holds a browser request open for the minutes they take |
 | Dashboards | `/ui/dashboards` | Every dashboard across agents (source dashboards, prompt templates, rendered reports) with sync state; each opens at `/ui/<agent>/dashboard/<id>` |
 | Pull requests | `/ui/pulls` | Open pull requests the agents authored, found by the marker every arbetern-written PR body carries: agent, requester, entry source (Slack / chat / workflow / project) and age, filterable by agent; ready-for-review PRs are listed first, drafts last with a draft label |
@@ -1077,23 +1078,25 @@ round-trip, no LLM call.
 
 ## Projects
 
-A **project** gives an agent a standing goal on one GitHub repository, pursued
-by Claude Code sessions instead of the agent's own tool loop. It follows the
-error log groups a Datadog query finds, or the Datadog metric series that cross
-a threshold, and for each one fires a Claude Code routine whose session runs on
-self-hosted runners the chart deploys as locked-down, single-use Jobs (in
-arbetern's namespace by default). The session fixes the problem on a `claude/…`
-branch and reports back through an MCP server arbetern serves only to its own
-sessions; arbetern checks the branch, opens the pull request with its own token,
-and then follows the pull request and the problem to measure merge rate, time to
-merge and whether each fix held. With follow-through on, follow-up sessions
+A **project** gives arbetern a standing goal on one GitHub repository, pursued
+by Claude Code sessions that arbetern itself runs as sandboxed, single-use Jobs
+in its cluster. It follows the error log groups a Datadog query finds, or the
+Datadog metric series that cross a threshold, and for each one starts a session
+that clones the repository through arbetern's git proxy, fixes the problem on a
+`claude/…` branch, runs what it can offline and pushes. The session reaches the
+model, GitHub and arbetern's integrations only through a gateway arbetern
+serves to its own sessions, with arbetern's credentials never leaving arbetern;
+it is given the goal, the skills the project names, the project's memory and the
+production evidence. arbetern opens the pull request with its own token, stores
+every session's transcript in the state bucket, and then follows the pull
+request and the problem to measure merge rate, time to merge and whether each
+fix held. With follow-through on, follow-up sessions resume the transcript to
 answer failing checks and review comments, reply to each comment with what
 changed and why, and the pull request is marked ready once nothing is left.
 
-Projects are off by default, and every runner resource exists only when
-`projects.enabled` is on. They need a Team or Enterprise plan with self-hosted
-environments turned on, a dedicated automation account, one routine per
-repository, and a runner image built from `runner/Dockerfile`. See
+Projects are off by default, and every session resource exists only when
+`projects.enabled` is on. They need an Anthropic API key, a GitHub token and a
+session image built from `runner/Dockerfile`. See
 [docs/PROJECTS.md](docs/PROJECTS.md) for setup, configuration, the statistics
 and the security model.
 
@@ -1127,6 +1130,7 @@ config/              # env var loading
 internal/store/      # S3 state backend: cached documents, conditional writes, leases
 internal/queue/      # durable work queue in the same bucket (claims by conditional write)
 internal/vectors/    # S3 Vectors index client (semantic user context)
+internal/kube/       # in-cluster Kubernetes API client for the session Jobs (stdlib only)
 github/              # GitHub REST API client (repos, PRs, files, workflows)
 llm/                 # LLM inference client + tool types (Anthropic API, AWS Bedrock, Azure OpenAI, GitHub Models), model labels, model router client
 atlassian/           # Atlassian Cloud REST API client (Jira + Confluence)
@@ -1139,9 +1143,8 @@ slack/               # Slack webhook handler + response helpers
 prompts/             # YAML prompt loader + agent discovery
 dashboards/          # dashboard registry, sync runner, executor + CRUD API
 workflows/           # workflow engine (monoflow / subflows / event-triggered) + CRUD API
-projects/            # projects: Datadog error groups and metric series fixed by Claude Code sessions, PR follow-through, runner gateway + MCP server, CRUD API
-cmd/runner-spawn/    # spawn-runner hook: one Kubernetes Job and work-order Secret per session (stdlib only)
-runner/              # self-hosted runner image: Dockerfile, session wrapper, auth header helper, hooks
+projects/            # projects: Datadog error groups and metric series fixed by Claude Code sessions in Jobs, PR follow-through, session gateway (MCP, model and git proxies, transcripts), CRUD API
+runner/              # session image: Dockerfile, the session entrypoint and the Stop hook
 billing/             # usage & billing ledger (per agent / model / source / user / workflow) + summary API
 metrics/             # performance series (turn / model-call / tool latency, outcomes) + summary API
 skills/              # custom skill registry (instruction blocks appended to agent prompts) + API
@@ -1240,7 +1243,7 @@ transport, limits and roadmap.
 | Google Drive / Sheets | [docs/GOOGLE.md](docs/GOOGLE.md) | pulse only |
 | Headroom (LLM compression) | [docs/HEADROOM.md](docs/HEADROOM.md) | Optional infra — all backends |
 | Model router (Qwen3-4B on llama.cpp) | [docs/MODEL_ROUTER.md](docs/MODEL_ROUTER.md) | Optional infra — all backends |
-| Claude Code self-hosted runners + routines | [docs/PROJECTS.md](docs/PROJECTS.md) | Projects (agents that may use Datadog) |
+| Claude Code sessions in sandboxed Jobs | [docs/PROJECTS.md](docs/PROJECTS.md) | Projects |
 
 ## Contributing
 

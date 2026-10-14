@@ -1,4 +1,4 @@
-// Package projects gives agents standing goals on a GitHub repository, pursued by Claude Code sessions on self-hosted runners.
+// Package projects gives arbetern standing goals on GitHub repositories, pursued by Claude Code sessions it runs as Jobs in its own cluster.
 package projects
 
 import (
@@ -7,13 +7,15 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"os"
 	"regexp"
 	"slices"
 	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/justmike1/arbetern/internal/store"
+	"github.com/justmike1/arbetern/llm"
 )
 
 const (
@@ -62,10 +64,12 @@ const (
 	maxStagger         = 60 * time.Second
 	dispatchLostAfter  = 15 * time.Minute
 	runningGrace       = 30 * time.Minute
+	jobGoneAfter       = 10 * time.Minute
+	lostDispatch       = "dispatch outcome unknown"
+	jobFinished        = "session ended without a report (the Job finished)"
 	failedCooldown     = time.Hour
 	unreadablePRGrace  = 72 * time.Hour
 	openingStaleAfter  = 2 * time.Minute
-	minRetryAfter      = time.Minute
 	ingestionLag       = 2 * time.Minute
 	maxTasks           = 200
 	maxCandidates      = 50
@@ -86,11 +90,11 @@ const (
 	sampleStackChars   = 4096
 	maxBriefChars      = 40000
 	maxSkillsChars     = 16000
-	maxFireText        = 300
 	maxErrorChars      = 500
 	backlogViewSize    = 20
 	recentOutcomeCount = 10
 	maxBodyBytes       = 64 << 10
+	maxSkills          = 20
 
 	metricRescan        = time.Hour
 	maxSeriesPerSite    = 5000
@@ -123,6 +127,10 @@ const (
 	minInterval     = 5 * time.Minute
 	maxInterval     = 24 * time.Hour
 
+	defaultMaxTurns = 200
+	minMaxTurns     = 10
+	maxMaxTurns     = 500
+
 	defaultRounds        = 5
 	minRounds            = 1
 	maxRounds            = 10
@@ -135,14 +143,13 @@ var (
 	ownerRe      = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$`)
 	repoNameRe   = regexp.MustCompile(`^[A-Za-z0-9._-]{1,100}$`)
 	branchRe     = regexp.MustCompile(`^[A-Za-z0-9._/-]{1,200}$`)
-	routineIDRe  = regexp.MustCompile(`^trig_[A-Za-z0-9]{8,64}$`)
-	tokenNameRe  = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,31}$`)
 	sessionKeyRe = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
 	noteIDRe     = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,63}$`)
 	groupedRe    = regexp.MustCompile(`(?i)\bby\s*\{\s*[^{}\s][^{}]*\}`)
 	tagKeyRe     = regexp.MustCompile(`^[a-z][a-z0-9_./-]{0,199}$`)
 	attributeRe  = regexp.MustCompile(`^@?[A-Za-z_][A-Za-z0-9_.-]{0,199}$`)
 	channelIDRe  = regexp.MustCompile(`^[CG][A-Z0-9]{8,12}$`)
+	modelRe      = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:\[\]-]{0,99}$`)
 )
 
 // Repo is the GitHub repository a project works on.
@@ -176,9 +183,10 @@ type Evidence struct {
 	Fields     []string          `json:"fields,omitempty"`   // log attributes kept in samples; empty keeps them all
 }
 
-// Notify names where a project reports what it does.
-type Notify struct {
-	SlackChannel string `json:"slack_channel,omitempty"` // channel id, such as C0123456789; empty sends nothing
+// Session configures the Claude Code session each task runs in.
+type Session struct {
+	Model    string `json:"model,omitempty"`     // model label or ID; empty uses the deployment's default
+	MaxTurns int    `json:"max_turns,omitempty"` // 10–500, default 200
 }
 
 // Review controls how a project follows the pull requests it opens.
@@ -189,11 +197,9 @@ type Review struct {
 	SettleMinutes int  `json:"settle_minutes,omitempty"` // 5–240, default 15, quiet time before a pull request counts as ready
 }
 
-// Dispatch names the routine a project fires and the trigger token it fires with.
-type Dispatch struct {
-	RoutineID       string `json:"routine_id"`                 // trig_…
-	Token           string `json:"token"`                      // token name → env PROJECT_TRIGGER_<NAME>
-	TokenConfigured bool   `json:"token_configured,omitempty"` // transient, filled on read
+// Notify names where a project reports what it does.
+type Notify struct {
+	SlackChannel string `json:"slack_channel,omitempty"` // channel id, such as C0123456789; empty sends nothing
 }
 
 // Limits bound how much work a project starts.
@@ -245,14 +251,14 @@ type Stats struct {
 // Project is the stored descriptor and the console API shape.
 type Project struct {
 	ID                  string   `json:"id"`
-	Agent               string   `json:"agent"`
 	Name                string   `json:"name"`                   // 1–80
 	Description         string   `json:"description,omitempty"`  // ≤240
 	Goal                string   `json:"goal"`                   // 1–4000
 	Instructions        string   `json:"instructions,omitempty"` // ≤8000
+	Skills              []string `json:"skills,omitempty"`       // console skill ids whose instructions go into every work order
 	Repo                Repo     `json:"repo"`
 	Signal              Signal   `json:"signal"`
-	Dispatch            Dispatch `json:"dispatch"`
+	Session             Session  `json:"session"`
 	Review              Review   `json:"review"`
 	Notify              Notify   `json:"notify"`
 	Limits              Limits   `json:"limits"`
@@ -265,7 +271,6 @@ type Project struct {
 	UpdatedAt           string   `json:"updated_at,omitempty"`
 	LastTick            string   `json:"last_tick,omitempty"`
 	LastError           string   `json:"last_error,omitempty"`
-	NextDispatchAfter   string   `json:"next_dispatch_after,omitempty"` // set from a 429 Retry-After
 	Stats               Stats    `json:"stats"`
 }
 
@@ -306,24 +311,19 @@ func (s Signal) key() string {
 	return hex.EncodeToString(sum[:8])
 }
 
+func (s Session) maxTurns() int {
+	if s.MaxTurns < minMaxTurns || s.MaxTurns > maxMaxTurns {
+		return defaultMaxTurns
+	}
+	return s.MaxTurns
+}
+
 func durationOr(v string, def, lo, hi time.Duration) time.Duration {
 	d, err := time.ParseDuration(v)
 	if err != nil || d < lo || d > hi {
 		return def
 	}
 	return d
-}
-
-// TokenEnv names the environment variable that holds the routine trigger token called name.
-func TokenEnv(name string) string {
-	return "PROJECT_TRIGGER_" + strings.ToUpper(strings.ReplaceAll(name, "-", "_"))
-}
-
-func routineToken(name string) string {
-	if !tokenNameRe.MatchString(name) {
-		return ""
-	}
-	return strings.TrimSpace(os.Getenv(TokenEnv(name)))
 }
 
 type inputError struct{ msg string }
@@ -555,17 +555,47 @@ func (e *Evidence) normalize() error {
 	return nil
 }
 
-func (d *Dispatch) normalize() error {
-	d.RoutineID = strings.TrimSpace(d.RoutineID)
-	d.Token = strings.TrimSpace(d.Token)
-	d.TokenConfigured = false
-	if !routineIDRe.MatchString(d.RoutineID) {
-		return invalidf("dispatch.routine_id must look like trig_0123456789abcdef")
+func (s *Session) normalize() error {
+	s.Model = strings.TrimSpace(s.Model)
+	if s.Model != "" && (!modelRe.MatchString(s.Model) || !llm.KnownModel(s.Model)) {
+		return invalidf("session.model %q is not a model label such as sonnet or an Anthropic model ID such as claude-sonnet-5-5", s.Model)
 	}
-	if !tokenNameRe.MatchString(d.Token) {
-		return invalidf("dispatch.token must be a token name of up to 32 lowercase letters, digits and dashes")
+	switch {
+	case s.MaxTurns == 0:
+		s.MaxTurns = defaultMaxTurns
+	case s.MaxTurns < minMaxTurns || s.MaxTurns > maxMaxTurns:
+		return invalidf("session.max_turns must be between %d and %d", minMaxTurns, maxMaxTurns)
 	}
 	return nil
+}
+
+func (n *Notify) normalize() error {
+	n.SlackChannel = strings.TrimSpace(n.SlackChannel)
+	if n.SlackChannel != "" && !channelIDRe.MatchString(n.SlackChannel) {
+		return invalidf("notify.slack_channel must be a Slack channel id such as C0123456789")
+	}
+	return nil
+}
+
+func (r *Review) normalize() error {
+	if r.MaxRounds != 0 && (r.MaxRounds < minRounds || r.MaxRounds > maxRounds) {
+		return invalidf("review.max_rounds must be between %d and %d", minRounds, maxRounds)
+	}
+	if r.SettleMinutes != 0 && (r.SettleMinutes < minSettleMinutes || r.SettleMinutes > maxSettleMinutes) {
+		return invalidf("review.settle_minutes must be between %d and %d", minSettleMinutes, maxSettleMinutes)
+	}
+	*r = r.effective()
+	return nil
+}
+
+func (r Review) effective() Review {
+	if r.MaxRounds < minRounds || r.MaxRounds > maxRounds {
+		r.MaxRounds = defaultRounds
+	}
+	if r.SettleMinutes < minSettleMinutes || r.SettleMinutes > maxSettleMinutes {
+		r.SettleMinutes = defaultSettleMinutes
+	}
+	return r
 }
 
 type limitBound struct {
@@ -615,35 +645,6 @@ func (l Limits) effective() Limits {
 	return l
 }
 
-func (n *Notify) normalize() error {
-	n.SlackChannel = strings.TrimSpace(n.SlackChannel)
-	if n.SlackChannel != "" && !channelIDRe.MatchString(n.SlackChannel) {
-		return invalidf("notify.slack_channel must be a Slack channel id such as C0123456789")
-	}
-	return nil
-}
-
-func (r *Review) normalize() error {
-	if r.MaxRounds != 0 && (r.MaxRounds < minRounds || r.MaxRounds > maxRounds) {
-		return invalidf("review.max_rounds must be between %d and %d", minRounds, maxRounds)
-	}
-	if r.SettleMinutes != 0 && (r.SettleMinutes < minSettleMinutes || r.SettleMinutes > maxSettleMinutes) {
-		return invalidf("review.settle_minutes must be between %d and %d", minSettleMinutes, maxSettleMinutes)
-	}
-	*r = r.effective()
-	return nil
-}
-
-func (r Review) effective() Review {
-	if r.MaxRounds < minRounds || r.MaxRounds > maxRounds {
-		r.MaxRounds = defaultRounds
-	}
-	if r.SettleMinutes < minSettleMinutes || r.SettleMinutes > maxSettleMinutes {
-		r.SettleMinutes = defaultSettleMinutes
-	}
-	return r
-}
-
 func normalizeInterval(v string) (string, error) {
 	v = strings.TrimSpace(v)
 	if v == "" {
@@ -653,6 +654,23 @@ func normalizeInterval(v string) (string, error) {
 		return "", err
 	}
 	return v, nil
+}
+
+func normalizeSkills(in []string) ([]string, error) {
+	var out []string
+	for _, id := range in {
+		id = strings.TrimSpace(id)
+		if !store.IDRe.MatchString(id) {
+			return nil, invalidf("skills: %q is not a skill id", id)
+		}
+		if !slices.Contains(out, id) {
+			out = append(out, id)
+		}
+	}
+	if len(out) > maxSkills {
+		return nil, invalidf("a project uses at most %d skills", maxSkills)
+	}
+	return out, nil
 }
 
 func (p *Project) normalize() error {
@@ -667,7 +685,7 @@ func (p *Project) normalize() error {
 		checkText("instructions", p.Instructions, 0, 8000),
 		p.Repo.normalize(),
 		p.Signal.normalize(),
-		p.Dispatch.normalize(),
+		p.Session.normalize(),
 		p.Review.normalize(),
 		p.Notify.normalize(),
 		p.Limits.normalize(),
@@ -677,6 +695,11 @@ func (p *Project) normalize() error {
 			return err
 		}
 	}
+	skills, err := normalizeSkills(p.Skills)
+	if err != nil {
+		return err
+	}
+	p.Skills = skills
 	iv, err := normalizeInterval(p.Interval)
 	if err != nil {
 		return err

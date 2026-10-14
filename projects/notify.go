@@ -22,10 +22,9 @@ func (r *Registry) notify(p *Project, text string) {
 	if channel == "" || r.deps.Slack == nil || text == "" {
 		return
 	}
-	k := key(p.Agent, p.ID)
-	safego.Go("projects: notify "+k, func() {
+	safego.Go("projects: notify "+p.ID, func() {
 		if _, err := r.deps.Slack.PostMessage(channel, text); err != nil {
-			log.Printf("[projects] %s: posting to Slack: %v", k, err)
+			log.Printf("[projects] %s: posting to Slack: %v", p.ID, err)
 		}
 	})
 }
@@ -92,5 +91,5 @@ func noteClosed(t *Task, merged bool) string {
 }
 
 func notePaused(p *Project, reason string) string {
-	return fmt.Sprintf(":rotating_light: Project *%s* (%s/%s) paused itself: %s", slackText(p.Name, 80), p.Agent, p.ID, slackText(reason, 500))
+	return fmt.Sprintf(":rotating_light: Project *%s* (%s) paused itself: %s", slackText(p.Name, 80), p.ID, slackText(reason, 500))
 }

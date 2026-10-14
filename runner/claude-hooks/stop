@@ -3,12 +3,8 @@
 
 [ "$(jq -r '.stop_hook_active // false' 2>/dev/null)" = false ] || exit 0
 [ -n "${ARBETERN_GATEWAY_URL:-}" ] || exit 0
-
-token=
-if [ -n "${CLAUDE_SESSION_INGRESS_TOKEN_FILE:-}" ] && [ -r "$CLAUDE_SESSION_INGRESS_TOKEN_FILE" ]; then
-	token=$(tr -d '[:space:]' 2>/dev/null <"$CLAUDE_SESSION_INGRESS_TOKEN_FILE")
-fi
-[ -n "$token" ] || token=$(printf '%s' "${CLAUDE_CODE_SESSION_ACCESS_TOKEN:-}" | tr -d '[:space:]')
+[ -r "${ARBETERN_SESSION_TOKEN_FILE:-}" ] || exit 0
+token=$(tr -d '[:space:]' <"$ARBETERN_SESSION_TOKEN_FILE")
 [ -n "$token" ] || exit 0
 
 reported=$(printf 'Authorization: Bearer %s\n' "$token" |

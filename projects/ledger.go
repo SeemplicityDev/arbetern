@@ -89,28 +89,31 @@ type Outcome struct {
 
 // Task is one dispatched attempt at one error group.
 type Task struct {
-	ID           string       `json:"id"`
-	Fingerprint  string       `json:"fingerprint"`
-	Group        Group        `json:"group"`
-	Status       string       `json:"status"`
-	Attempt      int          `json:"attempt"`
-	SessionID    string       `json:"session_id,omitempty"` // as returned by /fire (session_…)
-	SessionURL   string       `json:"session_url,omitempty"`
-	Branch       string       `json:"branch,omitempty"`
-	PR           *PR          `json:"pr,omitempty"`
-	Outcome      *Outcome     `json:"outcome,omitempty"`
-	ExitReason   string       `json:"exit_reason,omitempty"` // runner post-session reason
-	Recurrence   string       `json:"recurrence,omitempty"`  // "" | resolved | recurred (merged tasks only)
-	Learnings    int          `json:"learnings,omitempty"`
-	OpenAttempts int          `json:"open_attempts,omitempty"`
-	Opening      string       `json:"opening,omitempty"` // guard while a PR is being opened; stale after 2m
-	Bound        bool         `json:"bound,omitempty"`   // a session binding may still exist
-	Review       *ReviewState `json:"review,omitempty"`  // follow-through of the pull request
-	Error        string       `json:"error,omitempty"`
-	CreatedAt    string       `json:"created_at"`
-	DispatchedAt string       `json:"dispatched_at,omitempty"`
-	UpdatedAt    string       `json:"updated_at"`
-	FinishedAt   string       `json:"finished_at,omitempty"`
+	ID             string       `json:"id"`
+	Fingerprint    string       `json:"fingerprint"`
+	Group          Group        `json:"group"`
+	Status         string       `json:"status"`
+	Attempt        int          `json:"attempt"`
+	SessionID      string       `json:"session_id,omitempty"`
+	Branch         string       `json:"branch,omitempty"`
+	PR             *PR          `json:"pr,omitempty"`
+	Outcome        *Outcome     `json:"outcome,omitempty"`
+	ExitReason     string       `json:"exit_reason,omitempty"` // how the session process ended
+	Recurrence     string       `json:"recurrence,omitempty"`  // "" | resolved | recurred (merged tasks only)
+	Learnings      int          `json:"learnings,omitempty"`
+	OpenAttempts   int          `json:"open_attempts,omitempty"`
+	Opening        string       `json:"opening,omitempty"`        // guard while a PR is being opened; stale after 2m
+	Bound          bool         `json:"bound,omitempty"`          // a session binding may still exist
+	Review         *ReviewState `json:"review,omitempty"`         // follow-through of the pull request
+	ClaudeSession  string       `json:"claude_session,omitempty"` // the Claude Code session id every round resumes
+	Transcript     string       `json:"transcript,omitempty"`     // when the session transcript was last stored
+	TranscriptSize int          `json:"transcript_size,omitempty"`
+	Turns          int          `json:"turns,omitempty"`
+	Error          string       `json:"error,omitempty"`
+	CreatedAt      string       `json:"created_at"`
+	DispatchedAt   string       `json:"dispatched_at,omitempty"`
+	UpdatedAt      string       `json:"updated_at"`
+	FinishedAt     string       `json:"finished_at,omitempty"`
 }
 
 // Candidate is an error group or metric series waiting for a session.
@@ -173,16 +176,18 @@ type Memory struct {
 }
 
 type binding struct {
-	Agent     string `json:"agent"`
-	Project   string `json:"project"`
-	Task      string `json:"task"`
-	Round     int    `json:"round,omitempty"`
-	CreatedAt string `json:"created_at"`
+	Project       string `json:"project"`
+	Task          string `json:"task"`
+	Round         int    `json:"round,omitempty"`
+	TokenHash     string `json:"token_hash"` // SHA-256 of the token arbetern issued; the token itself is never stored
+	ClaudeSession string `json:"claude_session,omitempty"`
+	Branch        string `json:"branch,omitempty"`
+	CreatedAt     string `json:"created_at"`
 }
 
-func ledgerKey(agent, id string) string { return StatePrefix + agent + "/" + id + "/ledger.json" }
+func ledgerKey(id string) string { return StatePrefix + id + "/ledger.json" }
 
-func memoryKey(agent, id string) string { return StatePrefix + agent + "/" + id + "/memory.json" }
+func memoryKey(id string) string { return StatePrefix + id + "/memory.json" }
 
 func bindingKey(session string) string { return SessionPrefix + session + ".json" }
 
@@ -442,14 +447,17 @@ func (l *Ledger) addTask(t Task, limits Limits, now time.Time) bool {
 	return true
 }
 
-func (l *Ledger) markRunning(id, sessionID, sessionURL string, now time.Time) bool {
+func (l *Ledger) markRunning(id string, st *started, now time.Time) bool {
 	t := l.task(id)
 	if t == nil || t.Status != StatusDispatching {
 		return false
 	}
 	t.Status = StatusRunning
-	t.SessionID = sessionID
-	t.SessionURL = sessionURL
+	t.SessionID = st.SessionID
+	t.ClaudeSession = st.ClaudeSession
+	if t.Branch == "" {
+		t.Branch = st.Branch
+	}
 	t.DispatchedAt = stamp(now)
 	t.UpdatedAt = t.DispatchedAt
 	t.Bound = true
@@ -643,23 +651,61 @@ func (l *Ledger) resolveDue(limits Limits) bool {
 
 func (l *Ledger) reconcile(limits Limits, now time.Time) bool {
 	timeout := time.Duration(limits.SessionTimeoutMinutes)*time.Minute + runningGrace
-	var lost, expired []string
+	var lost, ended, expired []string
 	for _, t := range l.Tasks {
 		switch {
 		case t.Status == StatusDispatching && t.SessionID == "" && now.Sub(parseTime(t.CreatedAt)) > dispatchLostAfter:
 			lost = append(lost, t.ID)
+		case t.Status == StatusRunning && t.Outcome == nil && t.ExitReason != "" && !openingFresh(&t, now):
+			ended = append(ended, t.ID)
 		case t.Status == StatusRunning && t.Outcome == nil && now.Sub(parseTime(cmp.Or(t.DispatchedAt, t.CreatedAt))) > timeout:
 			expired = append(expired, t.ID)
 		}
 	}
 	for _, id := range lost {
-		l.failTask(id, []string{StatusDispatching}, "dispatch outcome unknown", now)
+		l.failTask(id, []string{StatusDispatching}, lostDispatch, now)
+	}
+	for _, id := range ended {
+		l.failTask(id, []string{StatusRunning}, "session ended without a report (exit: "+l.task(id).ExitReason+")", now)
 	}
 	for _, id := range expired {
 		l.failTask(id, []string{StatusRunning}, "session timed out", now)
 	}
 	rounds := l.reconcileRounds(timeout, now)
-	return len(lost)+len(expired) > 0 || rounds
+	return len(lost)+len(ended)+len(expired) > 0 || rounds
+}
+
+// reconcileJobs fails the running sessions whose Job finished, or has been gone for a while, without an end report.
+func (l *Ledger) reconcileJobs(present, finished map[string]bool, now time.Time) bool {
+	gone := func(id, since string) bool {
+		return finished[id] || (!present[id] && now.Sub(parseTime(since)) > jobGoneAfter)
+	}
+	type ref struct {
+		task string
+		n    int
+	}
+	var tasks []string
+	var rounds []ref
+	for _, t := range l.Tasks {
+		if t.Status == StatusRunning && t.Outcome == nil && t.ExitReason == "" && t.SessionID != "" && !openingFresh(&t, now) && gone(t.SessionID, cmp.Or(t.DispatchedAt, t.CreatedAt)) {
+			tasks = append(tasks, t.ID)
+		}
+		if t.Status != StatusPROpen || t.Review == nil {
+			continue
+		}
+		for _, rd := range t.Review.Rounds {
+			if rd.Status == StatusRunning && rd.Outcome == nil && rd.ExitReason == "" && rd.SessionID != "" && !roundReportFresh(&rd, now) && gone(rd.SessionID, cmp.Or(rd.DispatchedAt, rd.CreatedAt)) {
+				rounds = append(rounds, ref{t.ID, rd.N})
+			}
+		}
+	}
+	for _, id := range tasks {
+		l.failTask(id, []string{StatusRunning}, jobFinished, now)
+	}
+	for _, r := range rounds {
+		l.failRound(r.task, r.n, []string{StatusRunning}, jobFinished, now)
+	}
+	return len(tasks)+len(rounds) > 0
 }
 
 func (l *Ledger) unbind(ids []string) bool {
@@ -673,9 +719,43 @@ func (l *Ledger) unbind(ids []string) bool {
 	return changed
 }
 
-func (l *Ledger) sessionEnded(id, reason, branch string, now time.Time) bool {
+// sessionFinished tells whether the session of a task (round 0) or of one of its follow-up rounds still works its work order, else when the work order ended.
+func sessionFinished(t *Task, round int) (finishedAt string, running bool) {
+	ended := cmp.Or(t.FinishedAt, t.UpdatedAt)
+	if round > 0 {
+		var rd *Round
+		if t.Review != nil {
+			rd = t.Review.round(round)
+		}
+		switch {
+		case rd == nil || isTerminal(t.Status):
+			return ended, false
+		case isActiveRound(rd.Status):
+			return "", true
+		}
+		return cmp.Or(rd.FinishedAt, ended), false
+	}
+	switch {
+	case t.Status == StatusDispatching || t.Status == StatusRunning:
+		return "", true
+	case t.Outcome != nil && t.Outcome.ReportedAt != "":
+		return t.Outcome.ReportedAt, false
+	}
+	return ended, false
+}
+
+// sessionDone reports whether a session's binding may go: its work order ended, and the pod reported its end or the wrap-up window passed.
+func sessionDone(t *Task, round int, exitReason string, now time.Time) bool {
+	finished, running := sessionFinished(t, round)
+	if running {
+		return false
+	}
+	return exitReason != "" || now.Sub(parseTime(finished)) > sessionWrapUp
+}
+
+func (l *Ledger) sessionEnded(id, reason, branch string, turns int, now time.Time) bool {
 	t := l.task(id)
-	if t == nil || isTerminal(t.Status) {
+	if t == nil {
 		return false
 	}
 	changed := false
@@ -683,8 +763,13 @@ func (l *Ledger) sessionEnded(id, reason, branch string, now time.Time) bool {
 		t.ExitReason = reason
 		changed = true
 	}
+	if turns > 0 && t.Turns != turns {
+		t.Turns = turns
+		changed = true
+	}
 	if t.Status == StatusRunning && t.Outcome == nil && !openingFresh(t, now) {
-		if t.Branch == "" {
+		// The work a session left behind is on the branch it was on, which the gateway checked is its own or derived from it.
+		if branch != "" {
 			t.Branch = branch
 		}
 		l.failTask(id, []string{StatusRunning}, "session ended without a report (exit: "+cmp.Or(reason, "unknown")+")", now)
@@ -709,6 +794,15 @@ func (l *Ledger) setLearnings(id string, round, n int) bool {
 		return false
 	}
 	*count = n
+	return true
+}
+
+func (l *Ledger) setTranscript(id string, size int, now time.Time) bool {
+	t := l.task(id)
+	if t == nil {
+		return false
+	}
+	t.Transcript, t.TranscriptSize = stamp(now), size
 	return true
 }
 

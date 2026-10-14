@@ -1,0 +1,204 @@
+#!/bin/sh
+# Runs one Claude Code session for an arbetern work order, then reports back to the gateway.
+set -u
+
+gateway=${ARBETERN_GATEWAY_URL%/}
+token_file=${ARBETERN_SESSION_TOKEN_FILE:-/run/work-order/token}
+workspace=${ARBETERN_WORKSPACE:-/workspace/repo}
+result_file=${TMPDIR:-/tmp}/arbetern-result.json
+# Claude Code keeps transcripts under the working directory's slug: every character but letters and digits becomes a dash.
+transcript_dir=$HOME/.claude/projects/$(printf '%s' "$workspace" | sed 's/[^A-Za-z0-9]/-/g')
+exit_reason=error
+turns=0
+claude_pid=
+launching=
+launched=
+stopping=
+reporting=
+
+fail() {
+	echo "session: $*" >&2
+	report
+	exit 0
+}
+
+auth() {
+	printf 'Authorization: Bearer %s\n' "$token"
+}
+
+# A header file keeps the token out of argv; curl -q ignores ~/.curlrc.
+call() {
+	auth | curl -q -sS --noproxy '*' -H @- "$@"
+}
+
+# send makes one gateway request, retried up to $1 times while the gateway is unreachable or busy, and prints the final status.
+send() {
+	tries=$1
+	shift
+	while :; do
+		code=$(call -o /dev/null -w '%{http_code}' "$@") || code=000
+		case $code in
+		000 | 408 | 429 | 5??) ;;
+		*) break ;;
+		esac
+		tries=$((tries - 1))
+		[ "$tries" -gt 0 ] || break
+		sleep 3
+	done
+	echo "$code"
+}
+
+report() {
+	reporting=1
+	branches='[]'
+	if [ -d "$workspace/.git" ]; then
+		ref=$(git -C "$workspace" symbolic-ref -q --short HEAD 2>/dev/null) || ref=
+		[ -z "$ref" ] || branches=$(jq -nc --arg name "$ref" '[{name: $name}]')
+	fi
+	transcript=$transcript_dir/$ARBETERN_CLAUDE_SESSION.jsonl
+	[ -s "$transcript" ] || transcript=$(find "$HOME/.claude/projects" -name "$ARBETERN_CLAUDE_SESSION.jsonl" 2>/dev/null | head -n 1)
+	# Only a session Claude Code worked in has a transcript to store; anything else would overwrite the stored one.
+	if [ -n "$launched" ] && [ -n "$transcript" ] && [ -s "$transcript" ]; then
+		# A stopped pod has the grace period for both calls, so the upload gets one try with the smaller share.
+		max=120 tries=3
+		[ -z "$stopping" ] || { max=50; tries=1; }
+		[ "$(send "$tries" --max-time "$max" -X PUT -H 'Content-Type: application/x-ndjson' --data-binary "@$transcript" "$gateway/v1/session/transcript")" = 204 ] \
+			|| echo "session: the transcript was not stored" >&2
+	fi
+	body=$(jq -nc --arg reason "$exit_reason" --argjson branches "$branches" --argjson turns "$turns" '{exit_reason: $reason, branches: $branches, turns: $turns}')
+	[ "$(send 3 --max-time 10 -H 'Content-Type: application/json' --data-raw "$body" "$gateway/v1/session/ended")" = 204 ] \
+		|| echo "session: the end of the session was not recorded" >&2
+}
+
+# Kubernetes stops the pod with SIGTERM. While Claude Code runs it gets the same and the grace period covers the
+# report; before it has started, the script reports and leaves once the step it is in returns.
+stop() {
+	stopping=1
+	[ -z "$reporting" ] || return 0
+	if [ -n "$claude_pid" ]; then
+		kill -TERM "$claude_pid" 2>/dev/null
+	elif [ -z "$launching" ]; then
+		exit_reason=stopped
+		report
+		exit 0
+	fi
+}
+trap stop TERM INT
+
+[ -n "$gateway" ] || { echo "session: ARBETERN_GATEWAY_URL is not set" >&2; exit 1; }
+[ -r "$token_file" ] || { echo "session: no session token at $token_file" >&2; exit 1; }
+token=$(tr -d '[:space:]' <"$token_file")
+[ -n "$token" ] || { echo "session: the session token is empty" >&2; exit 1; }
+: "${ARBETERN_WORK_ORDER:?}" "${ARBETERN_REPO:?}" "${ARBETERN_BASE_BRANCH:?}" "${ARBETERN_BRANCH:?}" "${ARBETERN_CLAUDE_SESSION:?}"
+
+retries=0
+while :; do
+	code=$(call --max-time 10 -o /dev/null -w '%{http_code}' "$gateway/v1/session") || code=000
+	case $code in
+	200) break ;;
+	401 | 403) echo "session: this session was not dispatched by an arbetern project (HTTP $code)" >&2; exit 1 ;;
+	esac
+	[ "$retries" -lt 30 ] || { echo "session: the gateway did not admit this session (HTTP $code) after $((retries + 1)) attempts" >&2; exit 1; }
+	retries=$((retries + 1))
+	sleep 10
+done
+
+# git talks to GitHub only through the gateway, which adds the real credential and refuses anything but this work order's claude/ branch.
+export GIT_TERMINAL_PROMPT=0
+export GIT_CONFIG_COUNT=4
+export GIT_CONFIG_KEY_0="http.$gateway/.extraHeader" GIT_CONFIG_VALUE_0="Authorization: Bearer $token"
+export GIT_CONFIG_KEY_1="url.$gateway/git/$ARBETERN_REPO.git.insteadOf" GIT_CONFIG_VALUE_1="https://github.com/$ARBETERN_REPO.git"
+export GIT_CONFIG_KEY_2="url.$gateway/git/$ARBETERN_REPO.git.insteadOf" GIT_CONFIG_VALUE_2="https://github.com/$ARBETERN_REPO"
+export GIT_CONFIG_KEY_3=credential.helper GIT_CONFIG_VALUE_3=
+git config --global user.name "${ARBETERN_GIT_NAME:-arbetern}"
+git config --global user.email "${ARBETERN_GIT_EMAIL:-arbetern@users.noreply.github.com}"
+mkdir -p "$HOME/.claude" "$transcript_dir"
+[ -z "${ARBETERN_CLAUDE_MD:-}" ] || [ ! -r "$ARBETERN_CLAUDE_MD" ] || cp "$ARBETERN_CLAUDE_MD" "$HOME/.claude/CLAUDE.md"
+
+checkout=$ARBETERN_BRANCH
+[ "${ARBETERN_CHECKOUT:-new}" = existing ] || checkout=$ARBETERN_BASE_BRANCH
+git clone --quiet --no-tags --filter=blob:none --branch "$checkout" "$gateway/git/$ARBETERN_REPO.git" "$workspace" || fail "the repository could not be cloned"
+cd "$workspace" || fail "the workspace is missing"
+if [ "${ARBETERN_CHECKOUT:-new}" = existing ]; then
+	git fetch --quiet origin "$ARBETERN_BASE_BRANCH:refs/remotes/origin/$ARBETERN_BASE_BRANCH" || echo "session: the base branch could not be fetched" >&2
+else
+	git checkout --quiet -b "$ARBETERN_BRANCH" || fail "the branch could not be created"
+fi
+
+mcp_config=${TMPDIR:-/tmp}/arbetern-mcp.json
+jq -n --arg url "$gateway/mcp" --arg auth "Bearer $token" \
+	'{mcpServers: {arbetern: {type: "http", url: $url, headers: {Authorization: $auth}}}}' >"$mcp_config"
+
+export ANTHROPIC_BASE_URL="$gateway/anthropic"
+export ANTHROPIC_AUTH_TOKEN="$token"
+unset ANTHROPIC_API_KEY
+export ARBETERN_SESSION_TOKEN_FILE="$token_file"
+
+set -- -p "Work order $ARBETERN_WORK_ORDER. Call the get_task tool of the arbetern MCP server first and follow the work order it returns; finish by calling report_outcome exactly once." \
+	--output-format json \
+	--permission-mode "${ARBETERN_PERMISSION_MODE:-bypassPermissions}" \
+	--mcp-config "$mcp_config" --strict-mcp-config \
+	--allowedTools 'mcp__arbetern__*' \
+	--max-turns "${ARBETERN_MAX_TURNS:-200}"
+[ -z "${ARBETERN_MODEL:-}" ] || set -- "$@" --model "$ARBETERN_MODEL"
+[ -z "${ARBETERN_SETTINGS:-}" ] || set -- "$@" --settings "$ARBETERN_SETTINGS"
+
+# A round continues the stored transcript: placed where Claude Code keeps it, the session resumes by id and appends in place.
+resumed=
+if [ -n "${ARBETERN_RESUME:-}" ]; then
+	saved=$transcript_dir/$ARBETERN_CLAUDE_SESSION.jsonl
+	# The download lands beside the transcript and moves into place only when complete, so a failed one is never taken for it.
+	part=${TMPDIR:-/tmp}/arbetern-transcript.part
+	attempt=0
+	while :; do
+		code=$(call --max-time 120 -o "$part" -w '%{http_code}' "$gateway/v1/session/transcript") || code=000
+		if [ "$code" = 200 ] && [ -s "$part" ]; then
+			mv "$part" "$saved"
+			break
+		fi
+		rm -f "$part"
+		[ "$code" != 404 ] || break
+		[ "$attempt" -lt 5 ] || fail "the stored transcript could not be downloaded (HTTP $code)"
+		attempt=$((attempt + 1))
+		sleep 10
+	done
+	if [ -s "$saved" ]; then
+		resumed=1
+		set -- "$@" --resume "$ARBETERN_CLAUDE_SESSION"
+	else
+		echo "session: no transcript is stored yet; starting a new session" >&2
+	fi
+fi
+[ -n "$resumed" ] || set -- "$@" --session-id "$ARBETERN_CLAUDE_SESSION"
+
+# Only stdout is the result; Claude Code's stderr goes to the pod log.
+launching=1
+"${ARBETERN_CLAUDE_BIN:-claude}" "$@" >"$result_file" &
+claude_pid=$!
+launched=1
+launching=
+[ -z "$stopping" ] || kill -TERM "$claude_pid" 2>/dev/null
+status=0
+wait "$claude_pid" || status=$?
+# A signal returns from the first wait before Claude Code has stopped; the second one collects its exit.
+[ -z "$stopping" ] || wait "$claude_pid" 2>/dev/null || true
+claude_pid=
+if [ -s "$result_file" ]; then
+	turns=$(jq -r '.num_turns // 0' "$result_file" 2>/dev/null) || turns=0
+	subtype=$(jq -r '.subtype // ""' "$result_file" 2>/dev/null) || subtype=
+	is_error=$(jq -r '.is_error // false' "$result_file" 2>/dev/null) || is_error=true
+	case $subtype in
+	error_max_turns) exit_reason=max_turns ;;
+	success) [ "$is_error" = true ] && exit_reason=error || exit_reason=completed ;;
+	*) exit_reason=error ;;
+	esac
+	jq -r '[.terminal_reason, .api_error_status] | map(select(. != null) | tostring) | join(" ")' "$result_file" 2>/dev/null | grep . | sed 's/^/session: claude ended: /' >&2
+	resumed_id=$(jq -r '.session_id // ""' "$result_file" 2>/dev/null) || resumed_id=
+	[ -z "$resumed_id" ] || ARBETERN_CLAUDE_SESSION=$resumed_id
+	tail -c 4000 "$result_file" >&2
+fi
+[ -z "$stopping" ] || [ "$exit_reason" != error ] || exit_reason=stopped
+[ "$status" -eq 0 ] || echo "session: claude exited with status $status" >&2
+case $turns in '' | *[!0-9]*) turns=0 ;; esac
+report
+exit 0

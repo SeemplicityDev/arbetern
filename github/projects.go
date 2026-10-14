@@ -124,9 +124,8 @@ func (c *Client) CommitsAhead(ctx context.Context, owner, repo, base, head strin
 }
 
 // ProjectPRMarker renders the hidden body marker for a pull request opened by a project task.
-func ProjectPRMarker(agent, project, task string) string {
+func ProjectPRMarker(project, task string) string {
 	return renderPRMarker([][2]string{
-		{"agent", markerValue(agent)},
 		{"source", projectPRSource},
 		{"project", markerValue(project)},
 		{"task", markerValue(task)},

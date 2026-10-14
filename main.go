@@ -42,7 +42,6 @@ import (
 	"github.com/justmike1/arbetern/internal/progress"
 	"github.com/justmike1/arbetern/internal/queue"
 	"github.com/justmike1/arbetern/internal/safego"
-	"github.com/justmike1/arbetern/internal/sessiontoken"
 	"github.com/justmike1/arbetern/internal/store"
 	"github.com/justmike1/arbetern/internal/ttlcache"
 	"github.com/justmike1/arbetern/internal/vectors"
@@ -2509,7 +2508,6 @@ func main() {
 		log.Printf("RBAC: MCP connector changes restricted to emails %v / teams %v", cfg.MCPAdminEmails, cfg.MCPAdminTeams)
 	}
 
-	agentDatadog := make(map[string]*datadog.MultiClient, len(agents))
 	for _, agent := range agents {
 		ap, err := prompts.LoadAgent(agent.ID)
 		if err != nil {
@@ -2539,8 +2537,6 @@ func main() {
 			google:      googleClient,
 			document360: document360Client,
 		})
-		agentDatadog[agentID] = agentClients.datadog
-
 		router := commands.NewRouter(slackClient, ghClient, modelsClient, codeModelsClient, agentClients.jira, agentClients.nvd, agentClients.sf, agentClients.chorus, agentClients.datadog, agentClients.aws, agentClients.azure, agentClients.databricks, agentClients.clickhouse, agentClients.freshworks, agentClients.google, agentClients.document360, dashRegistry, wfRegistry, ap, agent.ID, cfg.AppURL, sessions, cfg.MaxToolRounds, userContextStore, billingStore)
 		router.SetMCP(mcpRegistry)
 		router.SetCatalog(catalogIndex)
@@ -2689,13 +2685,13 @@ func main() {
 		}
 		return uiRBACAllowed(r, cfg.ProjectsAdminEmails, cfg.ProjectsAdminTeams, slackClient, emailUserCache, rbacCache)
 	}
-	authorizeProject := func(r *http.Request, agentID string) bool {
+	authorizeProject := func(r *http.Request) bool {
 		if !canManageProjects(r) {
-			log.Printf("[rbac] DENIED email=%q scope=projects/%s (admin_emails=%v admin_teams=%v)",
-				redactEmail(clientEmail(r)), agentID, cfg.ProjectsAdminEmails, cfg.ProjectsAdminTeams)
+			log.Printf("[rbac] DENIED email=%q scope=projects (admin_emails=%v admin_teams=%v)",
+				redactEmail(clientEmail(r)), cfg.ProjectsAdminEmails, cfg.ProjectsAdminTeams)
 			return false
 		}
-		return canManageAgent(r, agentID)
+		return true
 	}
 
 	// Attribute chat messages to the OAuth-proxy-verified sender. When a proxy is
@@ -2710,16 +2706,21 @@ func main() {
 
 	var projRegistry *projects.Registry
 	if cfg.ProjectsEnabled {
+		// Sessions reach every configured integration read-only, with arbetern's own credentials, through the gateway.
+		projectsRouter := commands.NewRouter(slackClient, ghClient, modelsClient, codeModelsClient, jiraClient, nvdClient, sfClient, chorusClient, datadogClients, awsClient, azureClient, databricksClient, clickhouseClient, freshworksClient, googleClient, document360Client, nil, nil, nil, "projects", cfg.AppURL, nil, 0, nil, nil)
 		projRegistry = projects.New(projects.Deps{
 			Backend: backend,
 			GitHub:  ghClient,
-			Datadog: func(agent string) *datadog.MultiClient { return agentDatadog[agent] },
-			Skills:  skillRegistry.Instructions,
-			AgentAllowed: func(agent string) bool {
-				return commands.AgentCanUseIntegration(agent, commands.IntegrationDatadog)
+			Datadog: datadogClients,
+			Skills:  skillRegistry.InstructionsFor,
+			SkillKnown: func(id string) bool {
+				_, ok := skillRegistry.Get(id)
+				return ok
 			},
-			KnownAgents: knownAgents,
-			Slack:       slackClient,
+			Slack:   slackClient,
+			Usage:   billingStore.Record,
+			Tools:   projectsRouter.ReadOnlyToolkit(),
+			Cluster: projectsCluster(cfg),
 		})
 		projRegistry.UseQueue(tasks)
 		if err := projRegistry.Load(bootCtx); err != nil {
@@ -2727,15 +2728,23 @@ func main() {
 		}
 		defer projRegistry.StopAll()
 		uiPages["projects"] = true
-		log.Printf("Projects: %s%s (%d project(s), gateway :%s)", backend, projects.Prefix, projRegistry.Count(), cfg.ProjectsGatewayPort)
+		log.Printf("Projects: %s%s (%d project(s), gateway :%s, sessions in %s)", backend, projects.Prefix, projRegistry.Count(), cfg.ProjectsGatewayPort, cfg.ProjectsNamespace)
 		if len(cfg.ProjectsAdminTeams) == 0 && len(cfg.ProjectsAdminEmails) == 0 {
 			log.Printf("WARNING: PROJECTS_ADMIN_TEAMS and PROJECTS_ADMIN_EMAILS are empty, so nobody may create, change, run or delete projects")
 		} else {
 			log.Printf("RBAC: project changes restricted to emails %v / teams %v", cfg.ProjectsAdminEmails, cfg.ProjectsAdminTeams)
 		}
-		if ghClient == nil {
-			log.Printf("warn: PROJECTS_ENABLED is set but GITHUB_TOKEN is not — projects cannot be created or open pull requests")
-		}
+	}
+
+	usageCtx, cancelUsage := context.WithCancel(context.Background())
+	usageDone := make(chan struct{})
+	if projRegistry != nil {
+		safego.Go("projects: usage meter", func() {
+			defer close(usageDone)
+			projRegistry.RunUsageMeter(usageCtx)
+		})
+	} else {
+		close(usageDone)
 	}
 
 	// Deep-link route for the full-screen chat: /ui/<agent>/chat. Serves the
@@ -2753,13 +2762,17 @@ func main() {
 			w.Header().Set("Cache-Control", "no-store")
 			_, _ = w.Write(indexHTML)
 		}
-		http.HandleFunc("/ui/{agent}/chat", func(w http.ResponseWriter, r *http.Request) {
-			agent := r.PathValue("agent")
-			if !chatRegistry.IsEnabled(agent) {
-				http.NotFound(w, r)
-				return
+		// One handler for every two-segment page: the mux would refuse "/ui/project/{id}" next to "/ui/{agent}/chat" as ambiguous.
+		http.HandleFunc("/ui/{first}/{second}", func(w http.ResponseWriter, r *http.Request) {
+			first, second := r.PathValue("first"), r.PathValue("second")
+			switch {
+			case first == "project" && projRegistry != nil && store.IDRe.MatchString(second):
+				serveShell(w)
+			case second == "chat" && chatRegistry.IsEnabled(first):
+				serveShell(w)
+			default:
+				uiStatic.ServeHTTP(w, r)
 			}
-			serveShell(w)
 		})
 		// Detail pages of one workflow, dashboard or project: the shell renders
 		// them from /api/<kind>s/<agent>/<id>, which answers 404 for unknown ids.
@@ -2772,9 +2785,6 @@ func main() {
 		}
 		http.HandleFunc("/ui/{agent}/workflow/{id}", detailPage)
 		http.HandleFunc("/ui/{agent}/dashboard/{id}", detailPage)
-		if projRegistry != nil {
-			http.HandleFunc("/ui/{agent}/project/{id}", detailPage)
-		}
 		// Client-routed pages of the management UI share the SPA shell; any
 		// other single-segment path under /ui/ is a static asset.
 		http.HandleFunc("/ui/{page}", func(w http.ResponseWriter, r *http.Request) {
@@ -3154,7 +3164,7 @@ func main() {
 	skillRegistry.RegisterRoutes(apiMux, clientEmail)
 	mcpRegistry.RegisterRoutes(apiMux, clientEmail)
 	if projRegistry != nil {
-		projRegistry.RegisterRoutes(http.DefaultServeMux, apiMux, knownAgents, authorizeProject, clientEmail)
+		projRegistry.RegisterRoutes(apiMux, authorizeProject, clientEmail)
 	} else {
 		projects.RegisterDisabledRoutes(apiMux)
 	}
@@ -3358,7 +3368,7 @@ func main() {
 	if projRegistry != nil {
 		gatewaySrv = &http.Server{
 			Addr:              ":" + cfg.ProjectsGatewayPort,
-			Handler:           projects.NewGateway(projRegistry, sessiontoken.NewVerifier(cfg.ProjectsEnvironmentID, nil), cfg.ProjectsRunnerAccountID),
+			Handler:           projects.NewGateway(projRegistry),
 			ReadHeaderTimeout: 5 * time.Second,
 			ReadTimeout:       15 * time.Second,
 			WriteTimeout:      60 * time.Second,
@@ -3417,6 +3427,11 @@ func main() {
 	drainCtx, cancelDrain := context.WithTimeout(context.Background(), 20*time.Second)
 	tasks.Drain(drainCtx)
 	cancelDrain()
+	cancelUsage()
+	select {
+	case <-usageDone:
+	case <-time.After(5 * time.Second):
+	}
 	// Both final flushes start as soon as their stop channel closes, so they
 	// share one deadline rather than queueing two.
 	close(billingStop)

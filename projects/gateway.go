@@ -9,37 +9,45 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/http/httputil"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/justmike1/arbetern/github"
 	"github.com/justmike1/arbetern/internal/httpx"
 	"github.com/justmike1/arbetern/internal/redact"
-	"github.com/justmike1/arbetern/internal/sessiontoken"
 	"github.com/justmike1/arbetern/internal/store"
 	"github.com/justmike1/arbetern/internal/text"
 )
 
-const gatewayTimeout = 45 * time.Second
+const (
+	gatewayTimeout  = 45 * time.Second
+	transferTimeout = 30 * time.Minute
+	sessionCacheTTL = 15 * time.Second
+	maxCachedTokens = 4096
+	sessionWrapUp   = 10 * time.Minute
+)
 
-var exitReasonRe = regexp.MustCompile(`^[A-Za-z0-9_-]{1,32}$`)
-
-// TokenVerifier checks the session token a runner presents.
-type TokenVerifier interface {
-	Verify(ctx context.Context, token string) (*sessiontoken.Claims, error)
-}
+var (
+	exitReasonRe    = regexp.MustCompile(`^[A-Za-z0-9_-]{1,32}$`)
+	modelProbePaths = []string{modelPathPrefix, modelPathPrefix + "/", modelPathPrefix + "/api/hello"}
+)
 
 type gateway struct {
-	r         *Registry
-	verifier  TokenVerifier
-	accountID string
-	resolve   func(ctx context.Context, claims *sessiontoken.Claims) (*session, int, error)
+	r       *Registry
+	resolve func(ctx context.Context, id, token string) (*session, int, error)
+	models  *httputil.ReverseProxy
+	git     *httputil.ReverseProxy
+	tools   []toolDef
+	cache   sessionCache
 }
 
 type session struct {
-	claims  *sessiontoken.Claims
+	id      string
 	project *Project
 	ledger  *Ledger
 	task    *Task
@@ -60,138 +68,237 @@ func (s *session) learningKey() string {
 	return s.task.ID
 }
 
+// live reports whether the session's work order still runs, or finished only moments ago and the session is wrapping up.
+func (s *session) live() bool {
+	finished, running := sessionFinished(s.task, s.roundN)
+	return running || time.Since(parseTime(finished)) < sessionWrapUp
+}
+
+type cachedSession struct {
+	s     *session
+	until time.Time
+}
+
+type sessionCache struct {
+	mu sync.Mutex
+	m  map[string]cachedSession
+}
+
+func (c *sessionCache) get(key string) *session {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if e, ok := c.m[key]; ok && time.Now().Before(e.until) {
+		return e.s
+	}
+	return nil
+}
+
+func (c *sessionCache) put(key string, s *session) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	now := time.Now()
+	if c.m == nil || len(c.m) >= maxCachedTokens {
+		fresh := map[string]cachedSession{}
+		for k, e := range c.m {
+			if now.Before(e.until) {
+				fresh[k] = e
+			}
+		}
+		c.m = fresh
+	}
+	if len(c.m) < maxCachedTokens {
+		c.m[key] = cachedSession{s: s, until: now.Add(sessionCacheTTL)}
+	}
+}
+
 type sessionKey struct{}
 
-// NewGateway returns the runner-facing API; it authenticates with session tokens only.
-func NewGateway(r *Registry, v TokenVerifier, accountID string) http.Handler {
-	g := &gateway{r: r, verifier: v, accountID: strings.TrimSpace(accountID)}
+// NewGateway returns the session-facing API; it authenticates with the tokens arbetern issues to its own Jobs.
+func NewGateway(r *Registry) http.Handler {
+	g := &gateway{r: r, tools: workOrderTools}
 	g.resolve = g.resolveSession
+	if key := r.cluster.cfg.APIKey; key != "" {
+		g.models = newModelProxy(anthropicAPI, key, r.usage)
+	}
+	if token := r.cluster.cfg.GitHubToken; token != "" {
+		g.git = newGitProxy(githubWeb, token)
+	}
+	if r.deps.Tools != nil {
+		g.tools = append(slices.Clone(workOrderTools), integrationTools(r.deps.Tools.Tools())...)
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/session", g.handleSession)
 	mux.HandleFunc("POST /v1/session/ended", g.handleEnded)
+	mux.HandleFunc("GET /v1/session/transcript", g.handleGetTranscript)
+	mux.HandleFunc("PUT /v1/session/transcript", g.handlePutTranscript)
 	mux.HandleFunc("POST /mcp", g.handleMCP)
 	mux.HandleFunc("GET /mcp", mcpOnlyPost)
 	mux.HandleFunc("DELETE /mcp", mcpOnlyPost)
+	mux.HandleFunc("POST /anthropic/v1/messages", g.handleModel)
+	mux.HandleFunc("POST /anthropic/v1/messages/count_tokens", g.handleModel)
+	mux.HandleFunc("GET /anthropic/v1/models", g.handleModel)
+	mux.HandleFunc("GET /anthropic/v1/models/{model}", g.handleModel)
+	mux.HandleFunc("GET /git/{owner}/{repo}/info/refs", g.handleGit)
+	mux.HandleFunc("POST /git/{owner}/{repo}/git-upload-pack", g.handleGit)
+	mux.HandleFunc("POST /git/{owner}/{repo}/git-receive-pack", g.handleGit)
 	return g.authenticate(mux)
 }
 
 func mcpOnlyPost(w http.ResponseWriter, _ *http.Request) { methodNotAllowed(w, http.MethodPost) }
 
-func bearerToken(h http.Header) (string, bool) {
-	vals := h.Values("Authorization")
-	if len(vals) != 1 {
-		return "", false
+// sessionToken reads the token from the Bearer header, or from X-Api-Key, which is how Claude Code sends an API key.
+func sessionToken(h http.Header) (string, bool) {
+	if vals := h.Values("Authorization"); len(vals) == 1 {
+		scheme, token, ok := strings.Cut(strings.TrimSpace(vals[0]), " ")
+		token = strings.TrimSpace(token)
+		if ok && strings.EqualFold(scheme, "Bearer") && token != "" {
+			return token, true
+		}
 	}
-	scheme, token, ok := strings.Cut(strings.TrimSpace(vals[0]), " ")
-	token = strings.TrimSpace(token)
-	return token, ok && strings.EqualFold(scheme, "Bearer") && token != ""
+	if vals := h.Values("X-Api-Key"); len(vals) == 1 && strings.TrimSpace(vals[0]) != "" {
+		return strings.TrimSpace(vals[0]), true
+	}
+	return "", false
 }
 
 func (g *gateway) authenticate(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
+		if req.Method == http.MethodHead && slices.Contains(modelProbePaths, req.URL.Path) {
+			// Claude Code probes its API base URL before it has sent any credential; the answer carries nothing.
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
 		for _, h := range []string{"Origin", "Sec-Fetch-Site", "Cookie"} {
 			if _, browser := req.Header[h]; browser {
 				writeError(w, http.StatusForbidden, "forbidden")
 				return
 			}
 		}
-		token, ok := bearerToken(req.Header)
+		token, ok := sessionToken(req.Header)
 		if !ok {
-			log.Printf("[projects] gateway: %s %q from %s has no bearer token", req.Method, req.URL.Path, req.RemoteAddr)
+			log.Printf("[projects] gateway: %s %q from %s carries no session token", req.Method, req.URL.Path, req.RemoteAddr)
 			writeError(w, http.StatusUnauthorized, "unauthorized")
 			return
 		}
-		ctx, cancel := context.WithTimeout(context.WithoutCancel(req.Context()), gatewayTimeout)
+		proxied := strings.HasPrefix(req.URL.Path, modelPathPrefix+"/") || strings.HasPrefix(req.URL.Path, gitPathPrefix)
+		var ctx context.Context
+		var cancel context.CancelFunc
+		if proxied || strings.HasSuffix(req.URL.Path, "/transcript") {
+			// Model streams, clones and transcripts outlast the listener's timeouts; a client that leaves cancels the upstream call.
+			ctx, cancel = context.WithTimeout(req.Context(), transferTimeout)
+			rc := http.NewResponseController(w)
+			_ = rc.SetReadDeadline(time.Now().Add(transferTimeout))
+			_ = rc.SetWriteDeadline(time.Now().Add(transferTimeout))
+		} else {
+			ctx, cancel = context.WithTimeout(context.WithoutCancel(req.Context()), gatewayTimeout)
+		}
 		defer cancel()
-		claims, err := g.verifier.Verify(ctx, token)
-		if errors.Is(err, sessiontoken.ErrUnavailable) {
-			log.Printf("[projects] gateway: cannot verify session tokens yet: %v", err)
-			writeError(w, http.StatusServiceUnavailable, "temporarily unavailable")
-			return
-		}
-		if err != nil || claims == nil {
-			log.Printf("[projects] gateway: rejected a session token from %s: %v", req.RemoteAddr, err)
-			writeError(w, http.StatusUnauthorized, "unauthorized")
-			return
-		}
-		if g.accountID != "" && claims.AccountID != g.accountID {
-			log.Printf("[projects] gateway: session %s was not started by the project automation account", claims.SessionID)
-			writeError(w, http.StatusForbidden, "forbidden")
-			return
-		}
-		s, status, err := g.resolve(ctx, claims)
-		if err != nil {
-			log.Printf("[projects] gateway: session %s: %v", claims.SessionID, err)
-			msg := "forbidden"
-			if status != http.StatusForbidden {
-				msg = "temporarily unavailable"
+		key := tokenHash(token)
+		s := g.cache.get(key)
+		if s == nil || !proxied {
+			var status int
+			var err error
+			if s, status, err = g.authorize(ctx, token, req.RemoteAddr); err != nil {
+				msg := "forbidden"
+				switch status {
+				case http.StatusUnauthorized:
+					msg = "unauthorized"
+				case http.StatusServiceUnavailable:
+					msg = "temporarily unavailable"
+				}
+				writeError(w, status, msg)
+				return
 			}
-			writeError(w, status, msg)
-			return
+			if proxied {
+				g.cache.put(key, s)
+			}
 		}
 		next.ServeHTTP(w, req.WithContext(context.WithValue(ctx, sessionKey{}, s)))
 	})
 }
 
-func (g *gateway) resolveSession(ctx context.Context, claims *sessiontoken.Claims) (*session, int, error) {
-	sk := claims.SessionID
-	if !sessionKeyRe.MatchString(sk) {
-		return nil, http.StatusForbidden, errors.New("the token carries no usable session id")
+func (g *gateway) authorize(ctx context.Context, token, remote string) (*session, int, error) {
+	id, ok := localSessionID(token)
+	if !ok {
+		log.Printf("[projects] gateway: rejected a token from %s that arbetern did not issue", remote)
+		return nil, http.StatusUnauthorized, errors.New("invalid session token")
 	}
-	b, err := g.lookupBinding(ctx, sk)
+	s, status, err := g.resolve(ctx, id, token)
+	if err != nil {
+		log.Printf("[projects] gateway: session %s: %v", id, err)
+		return nil, status, err
+	}
+	return s, http.StatusOK, nil
+}
+
+func (g *gateway) resolveSession(ctx context.Context, id, token string) (*session, int, error) {
+	b, err := g.lookupBinding(ctx, id)
 	switch {
 	case errors.Is(err, store.ErrNotFound):
 		return nil, http.StatusForbidden, errors.New("no project dispatched this session")
 	case err != nil:
 		return nil, http.StatusServiceUnavailable, fmt.Errorf("reading the session binding: %w", err)
-	}
-	if !store.AgentRe.MatchString(b.Agent) || !store.IDRe.MatchString(b.Project) {
+	case !store.IDRe.MatchString(b.Project):
 		return nil, http.StatusForbidden, errors.New("the session binding is malformed")
+	case !tokenMatches(token, b.TokenHash):
+		return nil, http.StatusUnauthorized, errors.New("the token does not belong to this session")
 	}
-	p, err := g.r.project(ctx, b.Agent, b.Project)
+	p, err := g.r.project(ctx, b.Project)
 	switch {
 	case errors.Is(err, store.ErrNotFound):
-		return nil, http.StatusForbidden, fmt.Errorf("project %s/%s no longer exists", b.Agent, b.Project)
+		return nil, http.StatusForbidden, fmt.Errorf("project %s no longer exists", b.Project)
 	case err != nil:
-		return nil, http.StatusServiceUnavailable, fmt.Errorf("reading project %s/%s: %w", b.Agent, b.Project, err)
+		return nil, http.StatusServiceUnavailable, fmt.Errorf("reading project %s: %w", b.Project, err)
 	}
-	led, err := g.r.readLedger(ctx, b.Agent, b.Project)
+	led, err := g.r.readLedger(ctx, b.Project)
 	if err != nil {
-		return nil, http.StatusServiceUnavailable, fmt.Errorf("reading the ledger of %s/%s: %w", b.Agent, b.Project, err)
+		return nil, http.StatusServiceUnavailable, fmt.Errorf("reading the ledger of %s: %w", b.Project, err)
 	}
 	t := led.task(b.Task)
 	if t == nil {
-		return nil, http.StatusForbidden, fmt.Errorf("task %s is no longer in the ledger of %s/%s", b.Task, b.Agent, b.Project)
+		return nil, http.StatusForbidden, fmt.Errorf("task %s is no longer in the ledger of %s", b.Task, b.Project)
 	}
-	s := &session{claims: claims, project: p, ledger: led, task: t, roundN: b.Round}
-	owner := t.SessionID
+	s := &session{id: id, project: p, ledger: led, task: t, roundN: b.Round}
+	owner, status := t.SessionID, t.Status
 	if b.Round > 0 {
 		rd := s.round()
 		if rd == nil {
 			return nil, http.StatusForbidden, fmt.Errorf("round %d of task %s is no longer in the ledger", b.Round, t.ID)
 		}
-		owner = rd.SessionID
+		owner, status = rd.SessionID, rd.Status
 	}
-	if sessiontoken.NormalizeSessionID(owner) != sk {
+	switch {
+	case owner == id:
+		return s, http.StatusOK, nil
+	case owner != "" || status != StatusDispatching:
+		return nil, http.StatusForbidden, fmt.Errorf("task %s belongs to another session", t.ID)
+	}
+	// The binding is stored before the Job starts and the tick names the session once it has. A pod that checks in first
+	// completes the dispatch itself, so a tick lost between the two strands nothing.
+	st, now := &started{SessionID: id, ClaudeSession: b.ClaudeSession, Branch: b.Branch}, time.Now().UTC()
+	transition := func(l *Ledger) bool { return l.markRunning(t.ID, st, now) }
+	if b.Round > 0 {
+		transition = func(l *Ledger) bool { return l.roundRunning(t.ID, b.Round, st, now) }
+	}
+	if _, err := g.apply(ctx, s, transition); err != nil {
+		return nil, http.StatusServiceUnavailable, fmt.Errorf("recording the session of task %s: %w", t.ID, err)
+	}
+	owner = s.task.SessionID
+	if b.Round > 0 {
+		if rd := s.round(); rd != nil {
+			owner = rd.SessionID
+		}
+	}
+	if owner != id {
 		return nil, http.StatusForbidden, fmt.Errorf("task %s belongs to another session", t.ID)
 	}
 	return s, http.StatusOK, nil
 }
 
-// bindingWaits covers a session that calls in before the tick that fired it has stored its binding.
-var bindingWaits = []time.Duration{time.Second, 2 * time.Second}
-
-func (g *gateway) lookupBinding(ctx context.Context, sk string) (*binding, error) {
-	for i := 0; ; i++ {
-		b, _, err := store.GetJSON[binding](ctx, g.r.b, bindingKey(sk))
-		if !errors.Is(err, store.ErrNotFound) || i == len(bindingWaits) {
-			return b, err
-		}
-		if httpx.SleepCtx(ctx, bindingWaits[i]) != nil {
-			return nil, store.ErrNotFound
-		}
-	}
+func (g *gateway) lookupBinding(ctx context.Context, id string) (*binding, error) {
+	b, _, err := store.GetJSON[binding](ctx, g.r.b, bindingKey(id))
+	return b, err
 }
 
 func sessionFrom(req *http.Request) *session {
@@ -211,33 +318,18 @@ func readBody(w http.ResponseWriter, req *http.Request) ([]byte, int, error) {
 	return body, 0, nil
 }
 
+// handleSession admits a pod only while its work order runs; the Stop hook reads the same answer to let a reported session stop.
 func (g *gateway) handleSession(w http.ResponseWriter, req *http.Request) {
 	s := sessionFrom(req)
-	if isTerminal(s.task.Status) {
+	if _, running := sessionFinished(s.task, s.roundN); !running {
 		writeError(w, http.StatusForbidden, "forbidden")
 		return
 	}
-	if s.roundN > 0 {
-		rd := s.round()
-		if rd == nil || !isActiveRound(rd.Status) {
-			writeError(w, http.StatusForbidden, "forbidden")
-			return
-		}
-		httpx.WriteJSON(w, http.StatusOK, map[string]any{
-			"project":  s.project.Agent + "/" + s.project.ID,
-			"task":     s.task.ID,
-			"round":    rd.N,
-			"status":   rd.Status,
-			"reported": rd.Outcome != nil,
-		})
-		return
+	status := s.task.Status
+	if rd := s.round(); rd != nil {
+		status = rd.Status
 	}
-	httpx.WriteJSON(w, http.StatusOK, map[string]any{
-		"project":  s.project.Agent + "/" + s.project.ID,
-		"task":     s.task.ID,
-		"status":   s.task.Status,
-		"reported": s.task.Outcome != nil,
-	})
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"project": s.project.ID, "task": s.task.ID, "round": s.roundN, "status": status, "reported": false})
 }
 
 func exitReason(v string) string {
@@ -260,38 +352,39 @@ func (g *gateway) handleEnded(w http.ResponseWriter, req *http.Request) {
 	}
 	var in struct {
 		ExitReason string `json:"exit_reason"`
+		Turns      int    `json:"turns"`
 		Branches   []struct {
 			Name string `json:"name"`
-			Head string `json:"head"`
 		} `json:"branches"`
 	}
 	if len(bytes.TrimSpace(body)) > 0 && json.Unmarshal(body, &in) != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
-	reason := exitReason(in.ExitReason)
+	reason, turns := exitReason(in.ExitReason), max(in.Turns, 0)
 	branch := ""
 	for _, b := range in.Branches {
-		if name := strings.TrimSpace(b.Name); strings.HasPrefix(name, BranchPrefix) && validBranchName(name) {
+		if name := strings.TrimSpace(b.Name); strings.HasPrefix(name, BranchPrefix) && validBranchName(name) && s.pushAllowed(name) == nil {
 			branch = name
 			break
 		}
 	}
 	now := time.Now().UTC()
 	taskID, n := s.task.ID, s.roundN
-	transition := func(l *Ledger) bool { return l.sessionEnded(taskID, reason, branch, now) }
+	transition := func(l *Ledger) bool { return l.sessionEnded(taskID, reason, branch, turns, now) }
 	if n > 0 {
-		transition = func(l *Ledger) bool { return l.roundEnded(taskID, n, reason, now) }
+		transition = func(l *Ledger) bool { return l.roundEnded(taskID, n, reason, turns, now) }
 	}
 	changed, err := g.apply(req.Context(), s, transition)
 	if err != nil {
-		log.Printf("[projects] gateway: recording the end of session %s: %v", s.claims.SessionID, err)
+		log.Printf("[projects] gateway: recording the end of session %s: %v", s.id, err)
 		writeError(w, http.StatusServiceUnavailable, "temporarily unavailable")
 		return
 	}
-	log.Printf("[projects] %s/%s task %s round %d: session ended (exit %s, status %s, account %s)", s.project.Agent, s.project.ID, taskID, n, reason, s.task.Status, s.claims.AccountID)
+	log.Printf("[projects] %s task %s round %d: session ended (exit %s, %d turns, status %s)", s.project.ID, taskID, n, reason, turns, s.task.Status)
+	g.r.usage.flushSession(s.id)
 	if changed {
-		g.r.refreshStats(s.project.Agent, s.project.ID, s.ledger)
+		g.r.refreshStats(s.project.ID, s.ledger)
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -303,7 +396,7 @@ func (g *gateway) handleMCP(w http.ResponseWriter, req *http.Request) {
 		writeError(w, status, err.Error())
 		return
 	}
-	code, resp := serveRPC(req.Context(), body, g.tools(s))
+	code, resp := serveRPC(req.Context(), body, g.tools, g.toolCall(s))
 	if code == http.StatusAccepted {
 		w.WriteHeader(http.StatusAccepted)
 		return
@@ -314,7 +407,7 @@ func (g *gateway) handleMCP(w http.ResponseWriter, req *http.Request) {
 	_, _ = w.Write(resp)
 }
 
-func (g *gateway) tools(s *session) toolCaller {
+func (g *gateway) toolCall(s *session) toolCaller {
 	return func(ctx context.Context, name string, args json.RawMessage) (string, bool, error) {
 		switch name {
 		case "get_task":
@@ -324,13 +417,20 @@ func (g *gateway) tools(s *session) toolCaller {
 		case "record_learning":
 			return g.recordLearning(ctx, s, args)
 		}
-		return "", false, fmt.Errorf("no handler for tool %q", name)
+		if g.r.deps.Tools == nil {
+			return "", false, fmt.Errorf("no handler for tool %q", name)
+		}
+		if !s.live() {
+			return "This work order is finished, so its tools are closed.", true, nil
+		}
+		out := g.r.deps.Tools.Call(ctx, "project:"+s.project.ID+"/"+s.task.ID, name, string(args))
+		return out, strings.HasPrefix(out, "Error"), nil
 	}
 }
 
 // apply keeps s current, so later calls in the same MCP batch see the transition.
 func (g *gateway) apply(ctx context.Context, s *session, fn func(*Ledger) bool) (bool, error) {
-	led, changed, err := g.r.mergeLedger(ctx, s.project.Agent, s.project.ID, s.ledger, fn)
+	led, changed, err := g.r.mergeLedger(ctx, s.project.ID, s.ledger, fn)
 	if err != nil {
 		return false, err
 	}
@@ -345,20 +445,21 @@ func (g *gateway) getTask(ctx context.Context, s *session, raw json.RawMessage) 
 	if err := decodeStrict(raw, &struct{}{}); err != nil {
 		return "get_task takes no arguments.", true, nil
 	}
-	mem, err := g.r.readMemory(ctx, s.project.Agent, s.project.ID)
+	mem, err := g.r.readMemory(ctx, s.project.ID)
 	if err != nil {
 		return "", false, fmt.Errorf("reading project memory: %w", err)
 	}
+	skills := g.r.skillsFor(s.project.Skills)
 	if s.roundN > 0 {
 		rd := s.round()
 		if rd == nil {
 			return "This follow-up round is no longer in the ledger.", true, nil
 		}
-		return renderRoundBrief(s.project, s.task, rd, mem.Notes, g.r.skillsFor(s.project.Agent)), false, nil
+		return renderRoundBrief(s.project, s.task, rd, mem.Notes, skills), false, nil
 	}
 	recent := s.ledger.recentOutcomes(s.task.ID, recentOutcomeCount)
 	inflight := s.ledger.inFlight(s.task.ID)
-	return renderBrief(s.project, s.task, mem.Notes, recent, inflight, g.r.skillsFor(s.project.Agent)), false, nil
+	return renderBrief(s.project, s.task, mem.Notes, recent, inflight, skills), false, nil
 }
 
 type replyArg struct {
@@ -456,13 +557,18 @@ func (g *gateway) reportOutcome(ctx context.Context, s *session, raw json.RawMes
 	if s.roundN > 0 {
 		return g.reportRound(ctx, s, a)
 	}
-	now := time.Now().UTC()
-	o, problem := a.outcome(s.project.Repo.BaseBranch, now)
-	if problem != "" {
-		return problem, true, nil
-	}
 	if reply, done := reported(s.task); done {
 		return reply, false, nil
+	}
+	now := time.Now().UTC()
+	o, problem := a.outcome(s.project.Repo.BaseBranch, now)
+	if problem == "" && o.Status == OutcomeFixed {
+		if err := s.pushAllowed(o.Branch); err != nil {
+			problem = "Report the branch your work order named: " + err.Error() + "."
+		}
+	}
+	if problem != "" {
+		return problem, true, nil
 	}
 	switch {
 	case isTerminal(s.task.Status):
@@ -483,8 +589,8 @@ func (g *gateway) reportOutcome(ctx context.Context, s *session, raw json.RawMes
 		}
 		return "A pull request is being opened for this work order; call report_outcome again in a minute.", true, nil
 	}
-	log.Printf("[projects] %s/%s task %s reported %s", s.project.Agent, s.project.ID, taskID, o.Status)
-	g.r.refreshStats(s.project.Agent, s.project.ID, s.ledger)
+	log.Printf("[projects] %s task %s reported %s", s.project.ID, taskID, o.Status)
+	g.r.refreshStats(s.project.ID, s.ledger)
 	g.r.notify(s.project, noteNoFix(s.task, o))
 	return "Recorded. You can stop now.", false, nil
 }
@@ -516,12 +622,12 @@ func (g *gateway) openPullRequest(ctx context.Context, s *session, o Outcome, no
 		return "", false, fmt.Errorf("GitHub returned an unexpected pull request URL: %w", err)
 	}
 	opened := time.Now().UTC()
-	pr := PR{Number: number, URL: url, Title: prTitle(p.Agent, o.Title), State: prStateOpen, CreatedAt: stamp(opened)}
+	pr := PR{Number: number, URL: url, Title: prTitle(o.Title), State: prStateOpen, CreatedAt: stamp(opened)}
 	follow, draft := p.Review.FollowUp, opensDraft(p, o)
 	changed, err := g.apply(ctx, s, func(l *Ledger) bool { return l.openPR(taskID, o, pr, follow, draft, opened) })
 	if err != nil {
 		g.releaseOpening(s, guard)
-		log.Printf("[projects] %s/%s task %s: recording pull request %s: %v", p.Agent, p.ID, taskID, url, err)
+		log.Printf("[projects] %s task %s: recording pull request %s: %v", p.ID, taskID, url, err)
 		return "Opened pull request " + url + " but could not record it; call report_outcome again with the same arguments.", true, nil
 	}
 	if !changed {
@@ -530,8 +636,8 @@ func (g *gateway) openPullRequest(ctx context.Context, s *session, o Outcome, no
 		}
 		return "The work order changed while the pull request was being opened (it is now " + s.task.Status + ").", true, nil
 	}
-	log.Printf("[projects] %s/%s task %s opened %s", p.Agent, p.ID, taskID, url)
-	g.r.refreshStats(p.Agent, p.ID, s.ledger)
+	log.Printf("[projects] %s task %s opened %s", p.ID, taskID, url)
+	g.r.refreshStats(p.ID, s.ledger)
 	g.r.notify(p, noteOpened(s.task, o))
 	return "Opened pull request " + url + ". You can stop now.", false, nil
 }
@@ -543,7 +649,7 @@ func (g *gateway) releaseOpening(s *session, guard string) {
 	defer cancel()
 	taskID := s.task.ID
 	if _, err := g.apply(ctx, s, func(l *Ledger) bool { return l.clearOpening(taskID, guard) }); err != nil {
-		log.Printf("[projects] %s/%s task %s: clearing the pull request guard: %v", s.project.Agent, s.project.ID, taskID, err)
+		log.Printf("[projects] %s task %s: clearing the pull request guard: %v", s.project.ID, taskID, err)
 	}
 }
 
@@ -583,7 +689,7 @@ func (g *gateway) pullRequestFor(ctx context.Context, s *session, o Outcome) (ur
 	if opensDraft(p, o) {
 		create = gh.CreateDraftPullRequest
 	}
-	url, err = create(ctx, owner, repo, base, o.Branch, prTitle(p.Agent, o.Title), prBody(p, s.task, o))
+	url, err = create(ctx, owner, repo, base, o.Branch, prTitle(o.Title), prBody(p, s.task, o))
 	if err != nil {
 		return "", "GitHub did not open the pull request (" + githubProblem(err) + ")."
 	}
@@ -619,7 +725,7 @@ func (g *gateway) recordLearning(ctx context.Context, s *session, raw json.RawMe
 	taskID, noteKey, roundN := s.task.ID, s.learningKey(), s.roundN
 	n := Note{ID: id, Text: note, Source: noteSession, Task: noteKey, At: stamp(time.Now())}
 	count := 0
-	_, added, err := g.r.mergeMemory(ctx, s.project.Agent, s.project.ID, func(m *Memory) bool {
+	_, added, err := g.r.mergeMemory(ctx, s.project.ID, func(m *Memory) bool {
 		count = m.count(noteSession, noteKey)
 		return count < maxLearnings && m.add(n)
 	})
@@ -633,7 +739,7 @@ func (g *gateway) recordLearning(ctx context.Context, s *session, raw json.RawMe
 		return "Project memory is full of admin notes; the note was not saved.", true, nil
 	}
 	if _, err := g.apply(ctx, s, func(l *Ledger) bool { return l.setLearnings(taskID, roundN, count+1) }); err != nil {
-		log.Printf("[projects] %s/%s task %s: counting a learning: %v", s.project.Agent, s.project.ID, taskID, err)
+		log.Printf("[projects] %s task %s: counting a learning: %v", s.project.ID, taskID, err)
 	}
 	return "Saved.", false, nil
 }

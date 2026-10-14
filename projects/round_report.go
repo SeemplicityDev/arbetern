@@ -83,13 +83,19 @@ func (g *gateway) reportRound(ctx context.Context, s *session, a reportArgs) (st
 	if rd == nil {
 		return "This follow-up round is no longer in the ledger.", true, nil
 	}
+	if rd.Outcome != nil {
+		return "An outcome (" + rd.Outcome.Status + ") was already recorded for this round. You can stop now.", false, nil
+	}
 	now := time.Now().UTC()
 	o, replies, problem := a.roundOutcome(rd, s.project.Repo.BaseBranch, now)
+	if problem == "" && o.Status == OutcomeFixed && o.Branch != "" {
+		if err := s.pushAllowed(o.Branch); err != nil {
+			problem = "Report the pull request's branch or a name derived from it: " + err.Error() + "."
+		}
+	}
 	switch {
 	case problem != "":
 		return problem, true, nil
-	case rd.Outcome != nil:
-		return "An outcome (" + rd.Outcome.Status + ") was already recorded for this round. You can stop now.", false, nil
 	case rd.Status != StatusRunning:
 		return "This follow-up round is not running (" + rd.Status + ").", true, nil
 	case g.r.gh == nil:
@@ -118,17 +124,29 @@ func (g *gateway) reportRound(ctx context.Context, s *session, a reportArgs) (st
 	posted := g.postReplies(ctx, owner, repo, number, replies)
 	rerun := a.RerunChecks && head == rd.HeadBefore && g.rerunChecks(ctx, s, rd, owner, repo)
 	if _, err := g.r.gh.CommentOnPullRequest(ctx, owner, repo, number, roundComment(s.project, rd, o, owner, repo, head, posted, rerun)); err != nil {
-		log.Printf("[projects] %s/%s task %s round %d: posting the round summary: %v", s.project.Agent, s.project.ID, taskID, n, err)
+		log.Printf("[projects] %s task %s round %d: posting the round summary: %v", s.project.ID, taskID, n, err)
 	}
 	res := roundResult{outcome: o, head: head, replies: posted, rerun: rerun}
 	pctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), persistTimeout)
 	defer cancel()
-	if _, err := g.apply(pctx, s, func(l *Ledger) bool { return l.finishRound(taskID, n, res, now) }); err != nil {
-		log.Printf("[projects] %s/%s task %s round %d: recording the report: %v", s.project.Agent, s.project.ID, taskID, n, err)
+	changed, err := g.apply(pctx, s, func(l *Ledger) bool { return l.finishRound(taskID, n, res, now) })
+	if err != nil {
+		log.Printf("[projects] %s task %s round %d: recording the report: %v", s.project.ID, taskID, n, err)
 		return "Your replies and summary are posted, but arbetern could not record the round. Do not report again; you can stop now.", false, nil
 	}
-	log.Printf("[projects] %s/%s task %s round %d reported %s (%d of %d replies posted)", s.project.Agent, s.project.ID, taskID, n, o.Status, posted, len(replies))
-	g.r.refreshStats(s.project.Agent, s.project.ID, s.ledger)
+	if !changed {
+		status := "ended"
+		if rd = s.round(); rd != nil {
+			status = rd.Status
+		}
+		log.Printf("[projects] %s task %s round %d was %s before its report landed; its replies stay posted", s.project.ID, taskID, n, status)
+		if _, err := g.apply(pctx, s, func(l *Ledger) bool { return l.recordRoundReplies(taskID, n, res, now) }); err != nil {
+			log.Printf("[projects] %s task %s round %d: recording the replies: %v", s.project.ID, taskID, n, err)
+		}
+		return "Your replies and summary are posted, but arbetern had already ended this round (" + status + "). Do not report again; you can stop now.", false, nil
+	}
+	log.Printf("[projects] %s task %s round %d reported %s (%d of %d replies posted)", s.project.ID, taskID, n, o.Status, posted, len(replies))
+	g.r.refreshStats(s.project.ID, s.ledger)
 	g.r.notify(s.project, noteRound(s.task, o))
 	return "Recorded. You can stop now.", false, nil
 }
@@ -138,7 +156,7 @@ func (g *gateway) releaseRoundReport(s *session, guard string) {
 	defer cancel()
 	taskID, n := s.task.ID, s.roundN
 	if _, err := g.apply(ctx, s, func(l *Ledger) bool { return l.clearRoundReport(taskID, n, guard) }); err != nil {
-		log.Printf("[projects] %s/%s task %s round %d: clearing the report guard: %v", s.project.Agent, s.project.ID, taskID, n, err)
+		log.Printf("[projects] %s task %s round %d: clearing the report guard: %v", s.project.ID, taskID, n, err)
 	}
 }
 
@@ -173,7 +191,7 @@ func (g *gateway) landRound(ctx context.Context, rd *Round, owner, repo string, 
 	}
 	if err := gh.FastForwardBranch(ctx, owner, repo, pr.HeadRef, sha); err != nil {
 		if github.IsRefused(err) {
-			return "", "arbetern may not move " + pr.HeadRef + ". Push your commits to it directly with `git push origin HEAD:" + pr.HeadRef + "` and call report_outcome again with branch " + pr.HeadRef + "."
+			return "", "A branch rule of the repository refuses updates to " + pr.HeadRef + " by arbetern's token, which your pushes use too. Report cannot_fix and say so; an admin has to let the token's account update " + BranchPrefix + "** branches."
 		}
 		return "", "Could not move " + pr.HeadRef + " onto " + branch + " (" + githubProblem(err) + "); call report_outcome again in a minute."
 	}

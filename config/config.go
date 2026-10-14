@@ -5,10 +5,11 @@ import (
 	"fmt"
 	"net/url"
 	"os"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/justmike1/arbetern/llm"
 )
 
 // extensions.json is generated during the Docker build from github-linguist.
@@ -37,11 +38,6 @@ const (
 
 	defaultProjectsGatewayPort = "8081"
 	defaultModelRouterSlots    = 2
-)
-
-var (
-	projectsEnvironmentRe = regexp.MustCompile(`^ccpool_[A-Za-z0-9]{1,64}$`)
-	projectsAccountRe     = regexp.MustCompile(`^user_[A-Za-z0-9]{1,64}$`)
 )
 
 // Credentials holds every value that ships to the app as a Kubernetes
@@ -272,13 +268,15 @@ type Config struct {
 	DashboardsGitOpsInterval time.Duration
 	DashboardsGitOpsPrune    bool
 
-	// Projects: agents fixing Datadog error groups through self-hosted Claude Code sessions.
-	ProjectsEnabled         bool
-	ProjectsEnvironmentID   string // ccpool_… id, the audience every session token must carry
-	ProjectsRunnerAccountID string // optional user_… id every session token must carry
-	ProjectsGatewayPort     string
-	ProjectsAdminTeams      []string
-	ProjectsAdminEmails     []string // with ProjectsAdminTeams also empty, nobody may change projects
+	// Projects: standing goals pursued by Claude Code sessions arbetern runs as Jobs.
+	ProjectsEnabled     bool
+	ProjectsGatewayPort string
+	ProjectsAdminTeams  []string
+	ProjectsAdminEmails []string // with ProjectsAdminTeams also empty, nobody may change projects
+	ProjectsNamespace   string   // where session Jobs run
+	ProjectsJobTemplate string   // file holding the session Job template
+	ProjectsGatewayURL  string   // the gateway as session pods reach it
+	ProjectsModel       string   // model for sessions whose project names none
 }
 
 // UseAzure returns true when Azure OpenAI credentials are configured.
@@ -556,12 +554,14 @@ func Load() (*Config, error) {
 		DashboardsGitOpsBasePath: os.Getenv("DASHBOARDS_GITOPS_BASE_PATH"),
 		DashboardsGitOpsPrune:    strings.EqualFold(strings.TrimSpace(os.Getenv("DASHBOARDS_GITOPS_PRUNE")), "true"),
 
-		ProjectsEnabled:         strings.EqualFold(strings.TrimSpace(os.Getenv("PROJECTS_ENABLED")), "true"),
-		ProjectsEnvironmentID:   strings.TrimSpace(os.Getenv("PROJECTS_ENVIRONMENT_ID")),
-		ProjectsRunnerAccountID: strings.TrimSpace(os.Getenv("PROJECTS_RUNNER_ACCOUNT_ID")),
-		ProjectsGatewayPort:     strings.TrimSpace(os.Getenv("PROJECTS_GATEWAY_PORT")),
-		ProjectsAdminTeams:      splitList(os.Getenv("PROJECTS_ADMIN_TEAMS")),
-		ProjectsAdminEmails:     splitList(os.Getenv("PROJECTS_ADMIN_EMAILS")),
+		ProjectsEnabled:     strings.EqualFold(strings.TrimSpace(os.Getenv("PROJECTS_ENABLED")), "true"),
+		ProjectsGatewayPort: strings.TrimSpace(os.Getenv("PROJECTS_GATEWAY_PORT")),
+		ProjectsAdminTeams:  splitList(os.Getenv("PROJECTS_ADMIN_TEAMS")),
+		ProjectsAdminEmails: splitList(os.Getenv("PROJECTS_ADMIN_EMAILS")),
+		ProjectsNamespace:   strings.TrimSpace(os.Getenv("PROJECTS_NAMESPACE")),
+		ProjectsJobTemplate: strings.TrimSpace(os.Getenv("PROJECTS_JOB_TEMPLATE")),
+		ProjectsGatewayURL:  strings.TrimSpace(os.Getenv("PROJECTS_GATEWAY_URL")),
+		ProjectsModel:       strings.TrimSpace(os.Getenv("PROJECTS_MODEL")),
 	}
 	if s := strings.TrimSpace(os.Getenv("WORKFLOWS_GITOPS_INTERVAL")); s != "" {
 		if d, err := time.ParseDuration(s); err == nil {
@@ -704,12 +704,15 @@ func Load() (*Config, error) {
 
 func (c *Config) validateProjects() error {
 	switch {
-	case c.ProjectsEnvironmentID == "":
-		return fmt.Errorf("PROJECTS_ENVIRONMENT_ID is required when PROJECTS_ENABLED is true")
-	case !projectsEnvironmentRe.MatchString(c.ProjectsEnvironmentID):
-		return fmt.Errorf("invalid PROJECTS_ENVIRONMENT_ID: must be a self-hosted environment id (ccpool_ followed by 1-64 letters or digits)")
-	case c.ProjectsRunnerAccountID != "" && !projectsAccountRe.MatchString(c.ProjectsRunnerAccountID):
-		return fmt.Errorf("invalid PROJECTS_RUNNER_ACCOUNT_ID: must be an account id (user_ followed by 1-64 letters or digits)")
+	case c.ProjectsNamespace == "" || c.ProjectsJobTemplate == "" || c.ProjectsGatewayURL == "":
+		return fmt.Errorf("PROJECTS_ENABLED needs PROJECTS_NAMESPACE, PROJECTS_JOB_TEMPLATE and PROJECTS_GATEWAY_URL")
+	case !strings.HasPrefix(c.ProjectsGatewayURL, "http://") && !strings.HasPrefix(c.ProjectsGatewayURL, "https://"):
+		return fmt.Errorf("invalid PROJECTS_GATEWAY_URL %q: must be an http(s) URL", c.ProjectsGatewayURL)
+	case c.AnthropicAPIKey == "" || c.GitHubToken == "":
+		return fmt.Errorf("PROJECTS_ENABLED needs ANTHROPIC_API_KEY and GITHUB_TOKEN, which arbetern adds to the sessions' model and git calls")
+	}
+	if c.ProjectsModel != "" && !llm.KnownModel(c.ProjectsModel) {
+		return fmt.Errorf("invalid PROJECTS_MODEL %q: use a label (sonnet, opus, haiku, fable) or an Anthropic model ID", c.ProjectsModel)
 	}
 	port, err := strconv.Atoi(c.ProjectsGatewayPort)
 	if err != nil || port < 1 || port > 65535 {

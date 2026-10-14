@@ -62,20 +62,20 @@ Create the name of the service account to use
 {{- end }}
 
 {{/*
-Runner app name. It must differ from arbetern.name so arbetern's Service and PDB never select runner pods.
+Session app name. It must differ from arbetern.name so arbetern's Service and PDB never select session pods.
 */}}
 {{- define "arbetern.projects.name" -}}
-{{- printf "%s-runner" (include "arbetern.name" . | trunc 56 | trimSuffix "-") }}
+{{- printf "%s-session" (include "arbetern.name" . | trunc 56 | trimSuffix "-") }}
 {{- end }}
 
 {{- define "arbetern.projects.namespace" -}}
-{{- .Values.projects.runners.namespace.name | default .Release.Namespace }}
+{{- .Values.projects.sessions.namespace.name | default .Release.Namespace }}
 {{- end }}
 
 {{- define "arbetern.projects.selectorLabels" -}}
 app.kubernetes.io/name: {{ include "arbetern.projects.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
-app.kubernetes.io/part-of: claude-code-self-hosted-runner
+app.kubernetes.io/component: session
 {{- end }}
 
 {{- define "arbetern.projects.labels" -}}
@@ -87,50 +87,36 @@ app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- end }}
 
-{{- define "arbetern.projects.orchestratorSelectorLabels" -}}
-{{ include "arbetern.projects.selectorLabels" . }}
-app.kubernetes.io/component: orchestrator
-{{- end }}
-
-{{- define "arbetern.projects.sessionRunnerSelectorLabels" -}}
-{{ include "arbetern.projects.selectorLabels" . }}
-app.kubernetes.io/component: session-runner
-{{- end }}
-
-{{- define "arbetern.projects.orchestratorName" -}}
-{{- printf "%s-orchestrator" (include "arbetern.fullname" .) }}
-{{- end }}
-
-{{- define "arbetern.projects.sessionRunnerName" -}}
-{{- printf "%s-session-runner" (include "arbetern.fullname" .) }}
+{{- define "arbetern.projects.sessionName" -}}
+{{- printf "%s-session" (include "arbetern.fullname" .) }}
 {{- end }}
 
 {{- define "arbetern.projects.hostConfigName" -}}
-{{- printf "%s-runner-host-config" (include "arbetern.fullname" .) }}
+{{- printf "%s-session-host-config" (include "arbetern.fullname" .) }}
 {{- end }}
 
 {{- define "arbetern.projects.jobTemplateName" -}}
-{{- printf "%s-runner-job" (include "arbetern.fullname" .) }}
-{{- end }}
-
-{{- define "arbetern.projects.environmentSecretName" -}}
-{{- .Values.projects.runners.existingEnvironmentSecret | default (printf "%s-runner-environment" (include "arbetern.fullname" .)) }}
+{{- printf "%s-session-job" (include "arbetern.fullname" .) }}
 {{- end }}
 
 {{- define "arbetern.projects.gatewayName" -}}
 {{- printf "%s-projects-gateway" (include "arbetern.fullname" . | trunc 46 | trimSuffix "-") }}
 {{- end }}
 
+{{- define "arbetern.projects.gatewayHost" -}}
+{{- printf "%s.%s.svc.cluster.local" (include "arbetern.projects.gatewayName" .) .Release.Namespace }}
+{{- end }}
+
 {{- define "arbetern.projects.gatewayURL" -}}
-{{- printf "http://%s.%s.svc.cluster.local:%d" (include "arbetern.projects.gatewayName" .) .Release.Namespace (int .Values.projects.gateway.port) }}
+{{- printf "http://%s:%d" (include "arbetern.projects.gatewayHost" .) (int .Values.projects.gateway.port) }}
 {{- end }}
 
 {{- define "arbetern.projects.imageRepository" -}}
-{{- .Values.projects.runners.image.repository | default .Values.image.repository }}
+{{- .Values.projects.sessions.image.repository | default .Values.image.repository }}
 {{- end }}
 
 {{- define "arbetern.projects.image" -}}
-{{- printf "%s:%s" (include "arbetern.projects.imageRepository" .) (.Values.projects.runners.image.tag | default "runner") }}
+{{- printf "%s:%s" (include "arbetern.projects.imageRepository" .) (.Values.projects.sessions.image.tag | default "runner") }}
 {{- end }}
 
 {{- define "arbetern.projects.podSecurityContext" -}}
@@ -151,36 +137,22 @@ capabilities:
 {{- end }}
 
 {{/*
-Fails the render on projects values that arbetern or the runners would reject at startup.
+Fails the render on projects values that arbetern would reject at startup.
 */}}
 {{- define "arbetern.projects.validate" -}}
 {{- $p := .Values.projects }}
-{{- $id := required "projects.environmentId is required when projects.enabled is true (the ccpool_… id of the self-hosted environment)" $p.environmentId }}
-{{- if not (regexMatch "^ccpool_[A-Za-z0-9]{1,64}$" (toString $id)) }}
-{{- fail "projects.environmentId must match ^ccpool_[A-Za-z0-9]{1,64}$" }}
-{{- end }}
-{{- with $p.runnerAccountId }}
-{{- if not (regexMatch "^user_[A-Za-z0-9]{1,64}$" (toString .)) }}
-{{- fail "projects.runnerAccountId must match ^user_[A-Za-z0-9]{1,64}$" }}
-{{- end }}
-{{- end }}
-{{- if not (or $p.runners.existingEnvironmentSecret (and .Values.createSecret $p.runners.environmentKey)) }}
-{{- fail "projects.runners.environmentKey (with createSecret: true) or projects.runners.existingEnvironmentSecret is required when projects.enabled is true" }}
-{{- end }}
 {{- $port := int $p.gateway.port }}
 {{- if or (eq $port (int .Values.containerPort)) (eq $port (int (index (.Values.env | default dict) "PORT"))) (and .Values.headroom.enabled (eq $port (int .Values.headroom.port))) (and .Values.modelRouter.enabled (eq $port (int .Values.modelRouter.port))) }}
 {{- fail "projects.gateway.port must differ from containerPort, env.PORT, headroom.port and modelRouter.port" }}
 {{- end }}
-{{- if and (eq (include "arbetern.projects.namespace" .) .Release.Namespace) (not (and $p.runners.admissionPolicy.enabled (.Capabilities.APIVersions.Has "admissionregistration.k8s.io/v1/ValidatingAdmissionPolicy"))) }}
-{{- fail "runners in the release namespace need projects.runners.admissionPolicy.enabled and a cluster serving admissionregistration.k8s.io/v1 ValidatingAdmissionPolicy (helm template: pass --api-versions admissionregistration.k8s.io/v1/ValidatingAdmissionPolicy)" }}
+{{- if and (eq (include "arbetern.projects.namespace" .) .Release.Namespace) (not (and $p.sessions.admissionPolicy.enabled (.Capabilities.APIVersions.Has "admissionregistration.k8s.io/v1/ValidatingAdmissionPolicy"))) }}
+{{- fail "sessions in the release namespace need projects.sessions.admissionPolicy.enabled and a cluster serving admissionregistration.k8s.io/v1 ValidatingAdmissionPolicy (helm template: pass --api-versions admissionregistration.k8s.io/v1/ValidatingAdmissionPolicy)" }}
 {{- end }}
-{{- range $p.triggers }}
-{{- if not (regexMatch "^[a-z0-9][a-z0-9-]{0,31}$" (toString .)) }}
-{{- fail (printf "projects.triggers entry %q must match ^[a-z0-9][a-z0-9-]{0,31}$" (toString .)) }}
+{{- if not (regexMatch "^(acceptEdits|auto|bypassPermissions|dontAsk|manual)$" (toString $p.sessions.permissionMode)) }}
+{{- fail "projects.sessions.permissionMode must be bypassPermissions, acceptEdits, dontAsk, auto or manual" }}
 {{- end }}
-{{- if and $.Values.createSecret (not (index ($.Values.secretValues | default dict) (printf "project-trigger-%s" .))) }}
-{{- fail (printf "secretValues.project-trigger-%s is required for projects.triggers entry %q when createSecret is true" . .) }}
-{{- end }}
+{{- if not (regexMatch "^(sonnet|opus|haiku|fable|claude-[A-Za-z0-9.-]+)?$" (toString $p.sessions.model)) }}
+{{- fail "projects.sessions.model must be a label (sonnet, opus, haiku, fable) or an Anthropic model ID such as claude-sonnet-5-5" }}
 {{- end }}
 {{- end }}
 

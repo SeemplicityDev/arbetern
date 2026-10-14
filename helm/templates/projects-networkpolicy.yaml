@@ -1,12 +1,10 @@
 {{- if and .Values.projects .Values.projects.enabled .Values.projects.networkPolicy.enabled }}
 {{- $ns := include "arbetern.projects.namespace" . }}
-{{- $egress := .Values.projects.runners.egress }}
-{{- $sessionCIDRs := concat ($egress.anthropicCIDRs | default list) ($egress.extraCIDRs | default list) }}
-{{- /* An egress rule with an empty "to" allows every destination, so CIDR rules render only for non-empty lists. */}}
+{{- $egress := .Values.projects.sessions.egress }}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: {{ include "arbetern.fullname" . }}-runner-default-deny
+  name: {{ include "arbetern.fullname" . }}-session-default-deny
   namespace: {{ $ns }}
   labels:
     {{- include "arbetern.projects.labels" . | nindent 4 }}
@@ -22,18 +20,18 @@ spec:
     - Ingress
     - Egress
 ---
+{{- /* Sessions reach the model and GitHub only through the gateway; an egress rule with an empty "to" allows every destination, so CIDR rules render only for non-empty lists. */}}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: {{ include "arbetern.fullname" . }}-session-runner-egress
+  name: {{ include "arbetern.fullname" . }}-session-egress
   namespace: {{ $ns }}
   labels:
     {{- include "arbetern.projects.labels" . | nindent 4 }}
-    app.kubernetes.io/component: session-runner
 spec:
   podSelector:
     matchLabels:
-      {{- include "arbetern.projects.sessionRunnerSelectorLabels" . | nindent 6 }}
+      {{- include "arbetern.projects.selectorLabels" . | nindent 6 }}
   policyTypes:
     - Egress
   egress:
@@ -59,7 +57,7 @@ spec:
       ports:
         - protocol: TCP
           port: {{ .Values.projects.gateway.port }}
-    {{- with $sessionCIDRs }}
+    {{- with $egress.extraCIDRs }}
     - to:
         {{- range . }}
         - ipBlock:
@@ -68,59 +66,6 @@ spec:
       ports:
         - protocol: TCP
           port: 443
-    {{- end }}
-    {{- with $egress.extraRules }}
-    {{- toYaml . | nindent 4 }}
-    {{- end }}
----
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: {{ include "arbetern.fullname" . }}-orchestrator-egress
-  namespace: {{ $ns }}
-  labels:
-    {{- include "arbetern.projects.labels" . | nindent 4 }}
-    app.kubernetes.io/component: orchestrator
-spec:
-  podSelector:
-    matchLabels:
-      {{- include "arbetern.projects.orchestratorSelectorLabels" . | nindent 6 }}
-  policyTypes:
-    - Egress
-  egress:
-    - to:
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: kube-system
-          podSelector:
-            matchLabels:
-              k8s-app: kube-dns
-      ports:
-        - protocol: UDP
-          port: 53
-        - protocol: TCP
-          port: 53
-    {{- with $egress.anthropicCIDRs }}
-    - to:
-        {{- range . }}
-        - ipBlock:
-            cidr: {{ . | quote }}
-        {{- end }}
-      ports:
-        - protocol: TCP
-          port: 443
-    {{- end }}
-    {{- with .Values.projects.runners.orchestrator.apiServerCIDRs }}
-    - to:
-        {{- range . }}
-        - ipBlock:
-            cidr: {{ . | quote }}
-        {{- end }}
-      ports:
-        - protocol: TCP
-          port: 443
-        - protocol: TCP
-          port: 6443
     {{- end }}
     {{- with $egress.extraRules }}
     {{- toYaml . | nindent 4 }}
@@ -148,7 +93,7 @@ spec:
               kubernetes.io/metadata.name: {{ $ns }}
           podSelector:
             matchLabels:
-              {{- include "arbetern.projects.sessionRunnerSelectorLabels" . | nindent 14 }}
+              {{- include "arbetern.projects.selectorLabels" . | nindent 14 }}
       ports:
         - protocol: TCP
           port: {{ .Values.projects.gateway.port }}

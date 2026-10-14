@@ -142,7 +142,6 @@ let ticketFilter = 'all';
 let ticketQuery = '';
 let projectsState = { list: null, error: null };
 let projectsEnabled = null;
-let projFilter = 'all';
 let projQuery = '';
 let backendState = { summary: null, objects: null, truncated: false, error: null, tab: 'state', path: '', query: '', file: null, vectors: null };
 let contextState = { profile: null, error: null, agent: 'all', query: '', open: new Set(), tab: 'summary' };
@@ -432,7 +431,12 @@ function applyRoute() {
     if (!agentsData.length) { if (!currentPage) showPage('agents'); return; }
   }
   if (chatFull) hideFullChat();
-  m = path.match(/^\/ui\/([^/]+)\/(workflow|dashboard|project)\/([^/]+)\/?$/);
+  m = path.match(/^\/ui\/project\/([^/]+)\/?$/);
+  if (m) {
+    const id = safeId(decodeURIComponent(m[1]));
+    if (id) { openDetail('project', '', id); return; }
+  }
+  m = path.match(/^\/ui\/([^/]+)\/(workflow|dashboard)\/([^/]+)\/?$/);
   if (m) {
     const agent = safeId(decodeURIComponent(m[1]));
     const id = safeId(decodeURIComponent(m[3]));
@@ -1336,13 +1340,6 @@ async function deleteDashboard(agentId, id) {
 }
 
 /* Projects page */
-document.getElementById('proj-filter').addEventListener('click', e => {
-  const b = e.target.closest('.pill');
-  if (!b) return;
-  projFilter = b.dataset.agent;
-  renderProjectsPage();
-});
-
 (() => {
   const input = document.getElementById('proj-search');
   input.addEventListener('input', () => { projQuery = input.value.trim().toLowerCase(); renderProjectsPage(); });
@@ -1386,17 +1383,16 @@ function projSummaryHtml(list) {
 }
 
 function projRowHtml(p) {
-  const aid = safeId(p.agent), pid = safeId(p.id);
-  if (!aid || !pid) return '';
+  const pid = safeId(p.id);
+  if (!pid) return '';
   const [cls, label, title] = projStatus(p);
   const s = p.stats || {};
   const r = p.repo || {};
-  const url = detailPath('project', aid, pid);
+  const url = detailPath('project', '', pid);
   const sub = [r.owner && r.name ? `${r.owner}/${r.name}` : '', p.description || ''].filter(Boolean).join(' · ');
   return `<tr>
       <td><a href="${url}" data-link>${escapeHtml(p.name || p.id)}</a>
         <span class="sub" title="${escapeHtml(sub)}">${escapeHtml(sub)}</span></td>
-      <td>${agentChip(aid)}</td>
       <td><span class="status-pill ${cls}" title="${escapeHtml(title)}">${label}</span></td>
       <td class="n">${fmtInt(s.prs_open)}</td>
       <td class="n">${fmtInt(s.prs_merged)}</td>
@@ -1422,26 +1418,23 @@ function renderProjectsPage() {
   }
   const list = projectsState.list;
   if (!list) return;
-  if (projFilter !== 'all' && !list.some(p => p.agent === projFilter)) projFilter = 'all';
-  filterPills(document.getElementById('proj-filter'), list, projFilter, 'data-agent');
-  const scoped = list.filter(p => projFilter === 'all' || p.agent === projFilter);
-  summary.innerHTML = projSummaryHtml(scoped);
+  summary.innerHTML = projSummaryHtml(list);
   const words = projQuery.split(/\s+/).filter(Boolean);
-  const rows = scoped.filter(p => {
+  const rows = list.filter(p => {
     if (!words.length) return true;
     const r = p.repo || {};
-    const hay = [p.name, p.id, p.description, `${r.owner}/${r.name}`, (p.signal || {}).query, agentLabel(p.agent)].join('\n').toLowerCase();
+    const hay = [p.name, p.id, p.description, `${r.owner}/${r.name}`, (p.signal || {}).query].join('\n').toLowerCase();
     return words.every(w => hay.includes(w));
-  }).sort((a, b) => agentLabel(a.agent).localeCompare(agentLabel(b.agent)) || (a.name || '').localeCompare(b.name || ''));
+  }).sort((a, b) => (a.name || '').localeCompare(b.name || ''));
   note.hidden = !words.length;
   if (words.length) note.textContent = `${fmtInt(rows.length)} ${rows.length === 1 ? 'match' : 'matches'} for “${projQuery}”`;
   if (!rows.length) {
-    const none = canCreateProject() ? 'No projects yet. Create one to have an agent keep fixing what a Datadog query finds in a repository.' : 'No projects yet.';
-    el.innerHTML = emptyHtml(words.length ? 'No project matches this filter.' : list.length ? 'No projects for this agent.' : none, true);
+    const none = canCreateProject() ? 'No projects yet. Create one to keep fixing what a Datadog query finds in a repository.' : 'No projects yet.';
+    el.innerHTML = emptyHtml(words.length ? 'No project matches this filter.' : none, true);
     return;
   }
   el.innerHTML = `<table class="data-table"><thead><tr>
-      <th>Project</th><th>Agent</th><th>Status</th><th class="n">Open PRs</th><th class="n">Merged</th><th class="n">Merge rate</th><th class="n">Resolved</th><th>Last tick</th><th></th>
+      <th>Project</th><th>Status</th><th class="n">Open PRs</th><th class="n">Merged</th><th class="n">Merge rate</th><th class="n">Resolved</th><th>Last tick</th><th></th>
     </tr></thead><tbody>${rows.map(projRowHtml).join('')}</tbody></table>`;
 }
 
@@ -3101,11 +3094,8 @@ function canManageAgentUI(agentId) {
 
 // Like canManageMCP: optimistic until the identity says otherwise; the API decides.
 function isProjectAdmin() { return !(identityData && identityData.project_admin === false); }
-function canManageProject(agentId) { return isProjectAdmin() && canManageAgentUI(agentId); }
-function canCreateProject() {
-  const allowed = skillAgentsAllowed();
-  return isProjectAdmin() && !(allowed && allowed.size === 0);
-}
+function canManageProject() { return isProjectAdmin(); }
+function canCreateProject() { return isProjectAdmin(); }
 
 function skillCard(s) {
   const custom = s.kind === 'custom';

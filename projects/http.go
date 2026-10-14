@@ -12,7 +12,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/justmike1/arbetern/internal/crud"
 	"github.com/justmike1/arbetern/internal/httpx"
 	"github.com/justmike1/arbetern/internal/store"
 )
@@ -21,29 +20,22 @@ const apiTimeout = 30 * time.Second
 
 type consoleAPI struct {
 	r         *Registry
-	authorize func(*http.Request, string) bool
+	authorize func(*http.Request) bool
 	userFor   func(*http.Request) string
 }
 
-// RegisterRoutes mounts the projects console API and the per-agent data routes.
-func (r *Registry) RegisterRoutes(mux, apiMux *http.ServeMux, knownAgents map[string]bool, authorize func(*http.Request, string) bool, userFor func(*http.Request) string) {
+// RegisterRoutes mounts the projects console API; authorize gates every change and the session transcripts.
+func (r *Registry) RegisterRoutes(apiMux *http.ServeMux, authorize func(*http.Request) bool, userFor func(*http.Request) string) {
 	api := &consoleAPI{r: r, authorize: authorize, userFor: userFor}
-	crud.Mount(mux, apiMux, knownAgents, crud.Spec{
-		Kind:       "project",
-		KindPlural: "projects",
-		Get: func(agent, id string) (any, string, bool) {
-			v, ok := r.view(agent, id)
-			if !ok {
-				return nil, "", false
-			}
-			return v, "", true
-		},
-		List:      func(agent string) any { return r.list(agent) },
-		Delete:    r.remove,
-		Custom:    api.custom,
-		Authorize: authorize,
-	})
+	apiMux.HandleFunc("GET /api/projects", api.list)
 	apiMux.HandleFunc("POST /api/projects", api.create)
+	apiMux.HandleFunc("GET /api/projects/{id}", api.get)
+	apiMux.HandleFunc("PATCH /api/projects/{id}", api.update)
+	apiMux.HandleFunc("DELETE /api/projects/{id}", api.remove)
+	apiMux.HandleFunc("POST /api/projects/{id}/run", api.run)
+	apiMux.HandleFunc("POST /api/projects/{id}/memory", api.addNote)
+	apiMux.HandleFunc("DELETE /api/projects/{id}/memory/{note}", api.deleteNote)
+	apiMux.HandleFunc("GET /api/projects/{id}/transcripts/{task}", api.transcript)
 }
 
 // RegisterDisabledRoutes answers the projects API with 503 on deployments without the feature.
@@ -101,8 +93,32 @@ func (a *consoleAPI) user(req *http.Request) string {
 	return a.userFor(req)
 }
 
-func (a *consoleAPI) exists(ctx context.Context, w http.ResponseWriter, agent, id, action string) bool {
-	_, err := a.r.project(ctx, agent, id)
+// permit applies the admin list to a request that changes state or reads a transcript, and the same-origin check to the former.
+func (a *consoleAPI) permit(w http.ResponseWriter, req *http.Request) bool {
+	if req.Method != http.MethodGet {
+		if err := httpx.CheckSameOrigin(req); err != nil {
+			writeError(w, http.StatusForbidden, err.Error())
+			return false
+		}
+	}
+	if a.authorize != nil && !a.authorize(req) {
+		writeError(w, http.StatusForbidden, "forbidden")
+		return false
+	}
+	return true
+}
+
+func projectID(w http.ResponseWriter, req *http.Request) (string, bool) {
+	id := req.PathValue("id")
+	if !store.IDRe.MatchString(id) {
+		writeError(w, http.StatusBadRequest, "invalid project id")
+		return "", false
+	}
+	return id, true
+}
+
+func (a *consoleAPI) exists(ctx context.Context, w http.ResponseWriter, id, action string) bool {
+	_, err := a.r.project(ctx, id)
 	if errors.Is(err, store.ErrNotFound) {
 		err = errNotFound
 	}
@@ -119,6 +135,8 @@ func (a *consoleAPI) fail(w http.ResponseWriter, action string, err error) {
 		writeError(w, http.StatusBadRequest, err.Error())
 	case errors.Is(err, errNotFound):
 		writeError(w, http.StatusNotFound, "project not found")
+	case errors.Is(err, errBusy):
+		writeError(w, http.StatusConflict, "a run of this project is in progress; try again in a moment")
 	case errors.Is(err, store.ErrConflict):
 		writeError(w, http.StatusConflict, "the project changed while it was being saved; try again")
 	default:
@@ -127,15 +145,33 @@ func (a *consoleAPI) fail(w http.ResponseWriter, action string, err error) {
 	}
 }
 
+func (a *consoleAPI) list(w http.ResponseWriter, _ *http.Request) {
+	httpx.WriteJSON(w, http.StatusOK, a.r.list())
+}
+
+func (a *consoleAPI) get(w http.ResponseWriter, req *http.Request) {
+	id, ok := projectID(w, req)
+	if !ok {
+		return
+	}
+	v, ok := a.r.view(id)
+	if !ok {
+		writeError(w, http.StatusNotFound, "project not found")
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	httpx.WriteJSON(w, http.StatusOK, v)
+}
+
 type createRequest struct {
-	Agent        string   `json:"agent"`
 	Name         string   `json:"name"`
 	Description  string   `json:"description"`
 	Goal         string   `json:"goal"`
 	Instructions string   `json:"instructions"`
+	Skills       []string `json:"skills"`
 	Repo         Repo     `json:"repo"`
 	Signal       Signal   `json:"signal"`
-	Dispatch     Dispatch `json:"dispatch"`
+	Session      Session  `json:"session"`
 	Review       Review   `json:"review"`
 	Notify       Notify   `json:"notify"`
 	Limits       Limits   `json:"limits"`
@@ -144,8 +180,7 @@ type createRequest struct {
 }
 
 func (a *consoleAPI) create(w http.ResponseWriter, req *http.Request) {
-	if err := httpx.CheckSameOrigin(req); err != nil {
-		writeError(w, http.StatusForbidden, err.Error())
+	if !a.permit(w, req) {
 		return
 	}
 	var body createRequest
@@ -153,24 +188,15 @@ func (a *consoleAPI) create(w http.ResponseWriter, req *http.Request) {
 		writeError(w, status, err.Error())
 		return
 	}
-	agent := strings.TrimSpace(body.Agent)
-	if !a.r.knownAgent(agent) {
-		writeError(w, http.StatusBadRequest, fmt.Sprintf("unknown agent %q", agent))
-		return
-	}
-	if a.authorize != nil && !a.authorize(req, agent) {
-		writeError(w, http.StatusForbidden, "forbidden")
-		return
-	}
 	draft := Project{
-		Agent:        agent,
 		Name:         body.Name,
 		Description:  body.Description,
 		Goal:         body.Goal,
 		Instructions: body.Instructions,
+		Skills:       body.Skills,
 		Repo:         body.Repo,
 		Signal:       body.Signal,
-		Dispatch:     body.Dispatch,
+		Session:      body.Session,
 		Review:       body.Review,
 		Notify:       body.Notify,
 		Limits:       body.Limits,
@@ -183,38 +209,14 @@ func (a *consoleAPI) create(w http.ResponseWriter, req *http.Request) {
 		a.fail(w, "create the project", err)
 		return
 	}
-	httpx.WriteJSON(w, http.StatusCreated, output(p))
+	httpx.WriteJSON(w, http.StatusCreated, p)
 }
 
-func (a *consoleAPI) custom(w http.ResponseWriter, req *http.Request, agent, id string, sub []string) bool {
-	switch {
-	case len(sub) == 0 && req.Method == http.MethodPatch:
-		a.update(w, req, agent, id)
-	case len(sub) == 1 && sub[0] == "run":
-		if req.Method != http.MethodPost {
-			methodNotAllowed(w, http.MethodPost)
-			return true
-		}
-		a.run(w, req, agent, id)
-	case len(sub) == 1 && sub[0] == "memory":
-		if req.Method != http.MethodPost {
-			methodNotAllowed(w, http.MethodPost)
-			return true
-		}
-		a.addNote(w, req, agent, id)
-	case len(sub) == 2 && sub[0] == "memory" && sub[1] != "":
-		if req.Method != http.MethodDelete {
-			methodNotAllowed(w, http.MethodDelete)
-			return true
-		}
-		a.deleteNote(w, agent, id, sub[1])
-	default:
-		return false
+func (a *consoleAPI) update(w http.ResponseWriter, req *http.Request) {
+	id, ok := projectID(w, req)
+	if !ok || !a.permit(w, req) {
+		return
 	}
-	return true
-}
-
-func (a *consoleAPI) update(w http.ResponseWriter, req *http.Request, agent, id string) {
 	var raw map[string]json.RawMessage
 	if status, err := decodeBody(w, req, &raw); err != nil {
 		writeError(w, status, err.Error())
@@ -249,15 +251,20 @@ func (a *consoleAPI) update(w http.ResponseWriter, req *http.Request, agent, id 
 			pt.Instructions, err = text(v)
 		case "interval":
 			pt.Interval, err = text(v)
+		case "skills":
+			pt.Skills = new([]string)
+			if json.Unmarshal(v, pt.Skills) != nil {
+				err = errors.New("must be a list of skill ids")
+			}
 		case "repo":
 			pt.Repo = new(Repo)
 			err = decodeStrict(v, pt.Repo)
 		case "signal":
 			pt.Signal = new(Signal)
 			err = decodeStrict(v, pt.Signal)
-		case "dispatch":
-			pt.Dispatch = new(Dispatch)
-			err = decodeStrict(v, pt.Dispatch)
+		case "session":
+			pt.Session = new(Session)
+			err = decodeStrict(v, pt.Session)
 		case "review":
 			pt.Review = new(Review)
 			err = decodeStrict(v, pt.Review)
@@ -283,18 +290,34 @@ func (a *consoleAPI) update(w http.ResponseWriter, req *http.Request, agent, id 
 	}
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(req.Context()), apiTimeout)
 	defer cancel()
-	p, err := a.r.update(ctx, agent, id, pt)
+	p, err := a.r.update(ctx, id, pt)
 	if err != nil {
 		a.fail(w, "update the project", err)
 		return
 	}
-	httpx.WriteJSON(w, http.StatusOK, output(p))
+	httpx.WriteJSON(w, http.StatusOK, p)
 }
 
-func (a *consoleAPI) run(w http.ResponseWriter, req *http.Request, agent, id string) {
+func (a *consoleAPI) remove(w http.ResponseWriter, req *http.Request) {
+	id, ok := projectID(w, req)
+	if !ok || !a.permit(w, req) {
+		return
+	}
+	if err := a.r.remove(id); err != nil {
+		a.fail(w, "delete the project", err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (a *consoleAPI) run(w http.ResponseWriter, req *http.Request) {
+	id, ok := projectID(w, req)
+	if !ok || !a.permit(w, req) {
+		return
+	}
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(req.Context()), viewTimeout)
 	defer cancel()
-	p, err := a.r.fetchProject(ctx, agent, id)
+	p, err := a.r.fetchProject(ctx, id)
 	if errors.Is(err, store.ErrNotFound) {
 		err = errNotFound
 	}
@@ -306,14 +329,18 @@ func (a *consoleAPI) run(w http.ResponseWriter, req *http.Request, agent, id str
 		writeError(w, http.StatusConflict, "the project is paused; resume it before running it")
 		return
 	}
-	if err := a.r.trigger(ctx, agent, id); err != nil {
+	if err := a.r.trigger(ctx, id); err != nil {
 		a.fail(w, "start a run", err)
 		return
 	}
 	httpx.WriteJSON(w, http.StatusAccepted, map[string]bool{"accepted": true})
 }
 
-func (a *consoleAPI) addNote(w http.ResponseWriter, req *http.Request, agent, id string) {
+func (a *consoleAPI) addNote(w http.ResponseWriter, req *http.Request) {
+	id, ok := projectID(w, req)
+	if !ok || !a.permit(w, req) {
+		return
+	}
 	var body struct {
 		Text string `json:"text"`
 	}
@@ -328,7 +355,7 @@ func (a *consoleAPI) addNote(w http.ResponseWriter, req *http.Request, agent, id
 	}
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(req.Context()), viewTimeout)
 	defer cancel()
-	if !a.exists(ctx, w, agent, id, "add the note") {
+	if !a.exists(ctx, w, id, "add the note") {
 		return
 	}
 	noteID, err := store.NewID()
@@ -337,24 +364,29 @@ func (a *consoleAPI) addNote(w http.ResponseWriter, req *http.Request, agent, id
 		return
 	}
 	n := Note{ID: noteID, Text: note, Source: noteAdmin, By: a.user(req), At: stamp(time.Now())}
-	if err := a.r.addAdminNote(ctx, agent, id, n); err != nil {
+	if err := a.r.addAdminNote(ctx, id, n); err != nil {
 		a.fail(w, "add the note", err)
 		return
 	}
 	httpx.WriteJSON(w, http.StatusCreated, n)
 }
 
-func (a *consoleAPI) deleteNote(w http.ResponseWriter, agent, id, noteID string) {
+func (a *consoleAPI) deleteNote(w http.ResponseWriter, req *http.Request) {
+	id, ok := projectID(w, req)
+	if !ok || !a.permit(w, req) {
+		return
+	}
+	noteID := req.PathValue("note")
 	if !noteIDRe.MatchString(noteID) {
 		writeError(w, http.StatusBadRequest, "invalid note id")
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), viewTimeout)
 	defer cancel()
-	if !a.exists(ctx, w, agent, id, "delete the note") {
+	if !a.exists(ctx, w, id, "delete the note") {
 		return
 	}
-	removed, err := a.r.removeNote(ctx, agent, id, noteID)
+	removed, err := a.r.removeNote(ctx, id, noteID)
 	switch {
 	case err != nil:
 		a.fail(w, "delete the note", err)
@@ -363,4 +395,20 @@ func (a *consoleAPI) deleteNote(w http.ResponseWriter, agent, id, noteID string)
 	default:
 		w.WriteHeader(http.StatusNoContent)
 	}
+}
+
+func (a *consoleAPI) transcript(w http.ResponseWriter, req *http.Request) {
+	id, ok := projectID(w, req)
+	if !ok {
+		return
+	}
+	task := req.PathValue("task")
+	if !store.IDRe.MatchString(task) {
+		writeError(w, http.StatusBadRequest, "invalid task id")
+		return
+	}
+	if !a.permit(w, req) {
+		return
+	}
+	a.r.serveTranscript(w, req, id, task)
 }

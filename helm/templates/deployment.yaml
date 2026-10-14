@@ -515,12 +515,16 @@ spec:
             {{- include "arbetern.projects.validate" . }}
             - name: PROJECTS_ENABLED
               value: "true"
-            - name: PROJECTS_ENVIRONMENT_ID
-              value: {{ .Values.projects.environmentId | quote }}
             - name: PROJECTS_GATEWAY_PORT
               value: {{ .Values.projects.gateway.port | int | quote }}
-            {{- with .Values.projects.runnerAccountId }}
-            - name: PROJECTS_RUNNER_ACCOUNT_ID
+            - name: PROJECTS_GATEWAY_URL
+              value: {{ include "arbetern.projects.gatewayURL" . | quote }}
+            - name: PROJECTS_NAMESPACE
+              value: {{ include "arbetern.projects.namespace" . | quote }}
+            - name: PROJECTS_JOB_TEMPLATE
+              value: /etc/arbetern/projects/job.json
+            {{- with .Values.projects.sessions.model }}
+            - name: PROJECTS_MODEL
               value: {{ . | quote }}
             {{- end }}
             {{- with .Values.projects.adminTeams }}
@@ -530,13 +534,6 @@ spec:
             {{- with .Values.projects.adminEmails }}
             - name: PROJECTS_ADMIN_EMAILS
               value: {{ join "," . | quote }}
-            {{- end }}
-            {{- range .Values.projects.triggers | default list | uniq }}
-            - name: {{ printf "PROJECT_TRIGGER_%s" (replace "-" "_" .) | upper }}
-              valueFrom:
-                secretKeyRef:
-                  name: {{ $.Values.secretName }}
-                  key: project-trigger-{{ . }}
             {{- end }}
             {{- end }}
           {{- with .Values.livenessProbe }}
@@ -574,6 +571,14 @@ spec:
               readOnly: true
           {{- end }}
           {{- end }}
+          {{- end }}
+          {{- if and .Values.projects .Values.projects.enabled }}
+          {{- if and (not .Values.volumeMounts) (not .Values.customConfigs) (not .Values.customCredentials) }}
+          volumeMounts:
+          {{- end }}
+            - name: projects-job
+              mountPath: /etc/arbetern/projects
+              readOnly: true
           {{- end }}
         {{- if .Values.headroom.enabled }}
         # Headroom compression sidecar — the app POSTs conversations to its
@@ -742,8 +747,16 @@ spec:
       {{- end }}
       {{- end }}
       {{- end }}
-      {{- if .Values.modelRouter.enabled }}
+      {{- if and .Values.projects .Values.projects.enabled }}
       {{- if and (not .Values.volumes) (not .Values.customConfigs) (not .Values.customCredentials) }}
+      volumes:
+      {{- end }}
+        - name: projects-job
+          configMap:
+            name: {{ include "arbetern.projects.jobTemplateName" . }}
+      {{- end }}
+      {{- if .Values.modelRouter.enabled }}
+      {{- if and (not .Values.volumes) (not .Values.customConfigs) (not .Values.customCredentials) (not (and .Values.projects .Values.projects.enabled)) }}
       volumes:
       {{- end }}
         - name: model-router-cache

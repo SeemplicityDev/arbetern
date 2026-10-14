@@ -49,12 +49,12 @@ func renderBrief(p *Project, t *Task, notes []Note, recent, inflight []Task, ski
 		optionalSection("## Instructions from the project", p.Instructions),
 		facts,
 		samples,
-		briefRules(p),
+		briefRules(p, t),
 		briefInFlight(inflight),
 		briefNotes("## Notes from the project admins", "", admin, false),
 		briefNotes("## Notes from earlier sessions and reviews", sessionNotesPreface, other, true),
 		briefOutcomes(recent),
-		optionalSection("## Organization context", text.Truncate(strings.TrimSpace(strings.Join(skills, "\n\n")), maxSkillsChars)),
+		optionalSection("## Skills", text.Truncate(strings.TrimSpace(strings.Join(skills, "\n\n")), maxSkillsChars)),
 	}
 	// The sections never cut (header, goal, group facts, rules) stay far below the budget at their maximum sizes.
 	return fitSections(sections, []int{10, 9, 8, 6, 7, 4, 2}, maxBriefChars)
@@ -80,7 +80,7 @@ func renderRoundBrief(p *Project, t *Task, rd *Round, notes []Note, skills []str
 		samples,
 		briefNotes("## Notes from the project admins", "", admin, false),
 		briefNotes("## Notes from earlier sessions and reviews", sessionNotesPreface, other, true),
-		optionalSection("## Organization context", text.Truncate(strings.TrimSpace(strings.Join(skills, "\n\n")), maxSkillsChars)),
+		optionalSection("## Skills", text.Truncate(strings.TrimSpace(strings.Join(skills, "\n\n")), maxSkillsChars)),
 	}
 	// The header, pull request, feedback and rules stay well under the budget: items are capped in number and length.
 	return fitSections(sections, []int{13, 12, 8, 10, 11, 4, 9, 2}, maxBriefChars)
@@ -94,8 +94,7 @@ func roundHeader(p *Project, t *Task, rd *Round) string {
 	lines := []string{
 		fmt.Sprintf("# Work order %s, follow-up round %d", t.ID, rd.N),
 		"",
-		"- Project: " + oneLine(p.Name, 200) + " (" + p.Agent + "/" + p.ID + ")",
-		"- Agent: " + p.Agent,
+		"- Project: " + oneLine(p.Name, 200) + " (" + p.ID + ")",
 		"- Repository: " + p.Repo.Owner + "/" + p.Repo.Name,
 		"- Pull request: " + cmp.Or(pr, "unknown"),
 		"- Pull request branch: " + t.Branch,
@@ -227,12 +226,12 @@ func roundRules(p *Project, t *Task, rd *Round) string {
 	rules := []string{
 		"Start from the pull request branch, not the default branch: `git fetch origin " + branch + " && git checkout -B " + branch + " origin/" + branch + "`.",
 		"Fix what the failing checks and review comments ask for, within this pull request's scope. Keep each change minimal and in the repository's style.",
-		"Commit, then push to the pull request branch with `git push origin HEAD:" + branch + "`. Never force-push or rewrite its history. If that push is refused, push your current `" + BranchPrefix + "` branch instead and pass its name as `branch`; arbetern moves the pull request onto it when it contains the head commit.",
+		"Commit, then push to the pull request branch with `git push origin HEAD:" + branch + "`. Never force-push or rewrite its history: if the push is refused because the branch moved, run `git pull --rebase origin " + branch + "` and push again. If it is refused for another reason, report `cannot_fix` with what git answered. The gateway refuses pushes to any other branch than this one and names starting with `" + branch + "-`.",
 		"Call `report_outcome` exactly once: `fixed` when you pushed commits (with `branch`), `answered` when nothing needed changing, `cannot_fix` when what is left needs a person.",
 		"Put what you changed and why in `summary`; it is posted on the pull request.",
 		"When a check failed for reasons unrelated to this change, such as a flaky test or an outage, explain it and pass `rerun_checks: true` instead of changing code.",
 		"When what is left is a decision only a person can make, pass it as `question` with the options named.",
-		"Never push to the base branch `" + base + "`. Never start other sessions or schedule routines.",
+		"Never push to the base branch `" + base + "`. Never start other sessions.",
 		fmt.Sprintf("Use `record_learning` for durable facts future sessions on this project need (at most %d).", maxLearnings),
 	}
 	if len(rd.Items) > 0 {
@@ -286,8 +285,7 @@ func briefHeader(p *Project, t *Task) string {
 	lines := []string{
 		"# Work order " + t.ID,
 		"",
-		"- Project: " + oneLine(p.Name, 200) + " (" + p.Agent + "/" + p.ID + ")",
-		"- Agent: " + p.Agent,
+		"- Project: " + oneLine(p.Name, 200) + " (" + p.ID + ")",
 		"- Repository: " + p.Repo.Owner + "/" + p.Repo.Name,
 		"- Base branch: " + p.Repo.BaseBranch,
 		fmt.Sprintf("- Attempt: %d of %d", t.Attempt, p.Limits.effective().MaxAttempts),
@@ -328,17 +326,20 @@ func briefSamples(samples []Sample) string {
 	return b.String()
 }
 
-func briefRules(p *Project) string {
-	base := p.Repo.BaseBranch
+func briefRules(p *Project, t *Task) string {
+	base, branch := p.Repo.BaseBranch, t.Branch
+	if branch == "" {
+		branch = taskBranch(p, t)
+	}
 	rules := []string{
 		"Work only on this " + subject(p) + "; leave unrelated problems alone.",
 		"Keep the change minimal and in the repository's existing style.",
 		"Follow the repository's own CLAUDE.md and contributing rules.",
 		"Run the relevant linters and tests when they work offline.",
-		"Commit on the current branch (its name starts with `" + BranchPrefix + "`), push it, then call `report_outcome` exactly once with status `fixed`, a pull request title and a summary.",
+		"Commit on the current branch `" + branch + "`, push it with `git push -u origin HEAD`, then call `report_outcome` exactly once with status `fixed`, that branch name, a pull request title and a summary. The gateway refuses pushes to any other branch name.",
 		"If the cause is not in this repository, cannot be reproduced, or is already fixed on the base branch, call `report_outcome` with status `cannot_fix`, `not_reproducible` or `already_fixed` instead of changing code.",
 		"Never push to the base branch `" + base + "`.",
-		"Never start other sessions or schedule routines.",
+		"Never start other sessions.",
 		fmt.Sprintf("Use `record_learning` for durable facts future sessions on this project need (at most %d).", maxLearnings),
 	}
 	if p.Review.FollowUp {
@@ -531,11 +532,8 @@ func prBody(p *Project, t *Task, o Outcome) string {
 			codeSpan(cleanPRText(oneLine(g.Kind, 200), 200)),
 			g.Count, cmp.Or(g.FirstSeen, "unknown"), cmp.Or(g.LastSeen, "unknown"))
 	}
-	if u := cleanPRText(oneLine(t.SessionURL, 300), 300); strings.HasPrefix(u, "https://") {
-		b.WriteString("Session: " + u + "\n")
-	}
 	b.WriteString("_Opened by the arbetern project \"" + cleanPRText(oneLine(p.Name, 80), 80) + "\"._\n\n")
-	b.WriteString(github.ProjectPRMarker(p.Agent, p.ID, t.ID))
+	b.WriteString(github.ProjectPRMarker(p.ID, t.ID))
 	return b.String()
 }
 
@@ -554,8 +552,8 @@ func seriesLine(p *Project, g Group) string {
 	return line
 }
 
-func prTitle(agent, title string) string {
-	return agent + ": " + cleanPRText(oneLine(title, 120), 120)
+func prTitle(title string) string {
+	return cleanPRText(oneLine(title, 120), 120)
 }
 
 // cleanPRText strips comment markers (a fake arbetern marker must never precede the real one), neutralises @mentions and caps the length.

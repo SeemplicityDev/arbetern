@@ -7,11 +7,13 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+
+	"github.com/justmike1/arbetern/llm"
 )
 
 const (
 	mcpProtocolVersion = "2025-06-18"
-	mcpInstructions    = "Call get_task first; it returns your work order. Finish with report_outcome."
+	mcpInstructions    = "Call get_task first; it returns your work order. The other tools read arbetern's integrations, such as Datadog, GitHub and Jira, with arbetern's own access. Finish with report_outcome."
 
 	rpcParseError     = -32700
 	rpcInvalidRequest = -32600
@@ -25,12 +27,12 @@ const (
 var mcpProtocols = map[string]bool{"2025-06-18": true, "2025-03-26": true}
 
 type toolDef struct {
-	Name        string         `json:"name"`
-	Description string         `json:"description"`
-	InputSchema map[string]any `json:"inputSchema"`
+	Name        string          `json:"name"`
+	Description string          `json:"description"`
+	InputSchema json.RawMessage `json:"inputSchema"`
 }
 
-func objectSchema(props map[string]any, required ...string) map[string]any {
+func objectSchema(props map[string]any, required ...string) json.RawMessage {
 	if props == nil {
 		props = map[string]any{}
 	}
@@ -38,10 +40,11 @@ func objectSchema(props map[string]any, required ...string) map[string]any {
 	if len(required) > 0 {
 		s["required"] = required
 	}
-	return s
+	raw, _ := json.Marshal(s)
+	return raw
 }
 
-var mcpTools = []toolDef{
+var workOrderTools = []toolDef{
 	{
 		Name:        "get_task",
 		Description: "Return your work order: the goal, the problem with its production evidence, the rules, project notes and recent outcomes; in a follow-up round, the failing checks and the review comments to answer. Call it first.",
@@ -61,10 +64,10 @@ var mcpTools = []toolDef{
 			"replies": map[string]any{
 				"type": "array", "maxItems": maxReplies,
 				"description": "Follow-up rounds: one entry per review comment in the work order, saying what you changed and why, or why you changed nothing. Each is posted as a reply to its comment.",
-				"items": objectSchema(map[string]any{
+				"items": json.RawMessage(objectSchema(map[string]any{
 					"id":   map[string]any{"type": "string", "maxLength": 64},
 					"body": map[string]any{"type": "string", "minLength": 1, "maxLength": maxReplyChars},
-				}, "id", "body"),
+				}, "id", "body")),
 			},
 			"rerun_checks": map[string]any{"type": "boolean", "description": "Follow-up rounds: the failing checks are unrelated to this change, so arbetern re-runs their failed jobs once."},
 		}, "status", "summary"),
@@ -78,13 +81,25 @@ var mcpTools = []toolDef{
 	},
 }
 
-func knownTool(name string) bool {
-	for _, t := range mcpTools {
+func integrationTools(tools []llm.Tool) []toolDef {
+	out := make([]toolDef, 0, len(tools))
+	for _, t := range tools {
+		schema := t.Function.Parameters
+		if len(bytes.TrimSpace(schema)) == 0 || !json.Valid(schema) {
+			schema = objectSchema(nil)
+		}
+		out = append(out, toolDef{Name: t.Function.Name, Description: t.Function.Description, InputSchema: schema})
+	}
+	return out
+}
+
+func findTool(tools []toolDef, name string) (toolDef, bool) {
+	for _, t := range tools {
 		if t.Name == name {
-			return true
+			return t, true
 		}
 	}
-	return false
+	return toolDef{}, false
 }
 
 type rpcError struct {
@@ -127,7 +142,7 @@ func encodeRPC(v any) []byte {
 }
 
 // serveRPC answers one MCP POST body; 202 with no body means it held only notifications or responses.
-func serveRPC(ctx context.Context, body []byte, call toolCaller) (int, []byte) {
+func serveRPC(ctx context.Context, body []byte, tools []toolDef, call toolCaller) (int, []byte) {
 	body = bytes.TrimSpace(body)
 	if len(body) > 0 && body[0] == '[' {
 		var batch []json.RawMessage
@@ -139,7 +154,7 @@ func serveRPC(ctx context.Context, body []byte, call toolCaller) (int, []byte) {
 		}
 		var out []*rpcResponse
 		for _, msg := range batch {
-			if resp := handleRPC(ctx, msg, call); resp != nil {
+			if resp := handleRPC(ctx, msg, tools, call); resp != nil {
 				out = append(out, resp)
 			}
 		}
@@ -151,7 +166,7 @@ func serveRPC(ctx context.Context, body []byte, call toolCaller) (int, []byte) {
 	if !json.Valid(body) {
 		return http.StatusOK, encodeRPC(rpcFailure(nullID, rpcParseError, "Parse error"))
 	}
-	resp := handleRPC(ctx, body, call)
+	resp := handleRPC(ctx, body, tools, call)
 	if resp == nil {
 		return http.StatusAccepted, nil
 	}
@@ -170,7 +185,7 @@ func validID(id json.RawMessage) bool {
 	return false
 }
 
-func handleRPC(ctx context.Context, raw json.RawMessage, call toolCaller) *rpcResponse {
+func handleRPC(ctx context.Context, raw json.RawMessage, tools []toolDef, call toolCaller) *rpcResponse {
 	var m struct {
 		JSONRPC string          `json:"jsonrpc"`
 		ID      json.RawMessage `json:"id"`
@@ -198,14 +213,14 @@ func handleRPC(ctx context.Context, raw json.RawMessage, call toolCaller) *rpcRe
 	if m.JSONRPC != "2.0" || !validID(m.ID) {
 		return rpcFailure(id, rpcInvalidRequest, "Invalid Request")
 	}
-	result, rerr := dispatchRPC(ctx, *m.Method, m.Params, call)
+	result, rerr := dispatchRPC(ctx, *m.Method, m.Params, tools, call)
 	if rerr != nil {
 		return &rpcResponse{JSONRPC: "2.0", ID: id, Error: rerr}
 	}
 	return &rpcResponse{JSONRPC: "2.0", ID: id, Result: result}
 }
 
-func dispatchRPC(ctx context.Context, method string, params json.RawMessage, call toolCaller) (any, *rpcError) {
+func dispatchRPC(ctx context.Context, method string, params json.RawMessage, tools []toolDef, call toolCaller) (any, *rpcError) {
 	switch method {
 	case "initialize":
 		var p struct {
@@ -227,7 +242,7 @@ func dispatchRPC(ctx context.Context, method string, params json.RawMessage, cal
 	case "ping":
 		return map[string]any{}, nil
 	case "tools/list":
-		return map[string]any{"tools": mcpTools}, nil
+		return map[string]any{"tools": tools}, nil
 	case "tools/call":
 		var p struct {
 			Name      string          `json:"name"`
@@ -236,7 +251,7 @@ func dispatchRPC(ctx context.Context, method string, params json.RawMessage, cal
 		if json.Unmarshal(params, &p) != nil || p.Name == "" {
 			return nil, &rpcError{Code: rpcInvalidParams, Message: "Invalid params: tools/call needs a tool name"}
 		}
-		if !knownTool(p.Name) {
+		if _, ok := findTool(tools, p.Name); !ok {
 			return nil, &rpcError{Code: rpcInvalidParams, Message: "Invalid params: unknown tool " + oneLine(p.Name, 64)}
 		}
 		args := bytes.TrimSpace(p.Arguments)

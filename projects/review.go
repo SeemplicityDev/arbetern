@@ -138,7 +138,7 @@ func (r *Registry) observePR(ctx context.Context, p *Project, led *Ledger, t Tas
 		lastFeedback: last,
 	}
 	now := time.Now().UTC()
-	next, _, err := r.mergeLedger(ctx, p.Agent, p.ID, led, func(l *Ledger) bool { return l.observe(t.ID, obs, now) })
+	next, _, err := r.mergeLedger(ctx, p.ID, led, func(l *Ledger) bool { return l.observe(t.ID, obs, now) })
 	if err != nil {
 		return led, err
 	}
@@ -207,7 +207,7 @@ func (r *Registry) advanceReviews(ctx context.Context, p *Project, led *Ledger, 
 }
 
 func (r *Registry) finishReview(ctx context.Context, p *Project, led *Ledger, w prWatch, now time.Time) *Ledger {
-	k := key(p.Agent, p.ID)
+	k := p.ID
 	_, rv := led.review(w.taskID)
 	if takeOutOfDraft(rv, w) {
 		if err := r.gh.MarkReadyForReview(ctx, w.pr.NodeID); err != nil {
@@ -215,7 +215,7 @@ func (r *Registry) finishReview(ctx context.Context, p *Project, led *Ledger, w 
 			return led
 		}
 		r.gh.RequestCopilotReview(ctx, w.owner, w.repo, w.number)
-		next, _, err := r.mergeLedger(ctx, p.Agent, p.ID, led, func(l *Ledger) bool { return l.markReady(w.taskID, now) })
+		next, _, err := r.mergeLedger(ctx, p.ID, led, func(l *Ledger) bool { return l.markReady(w.taskID, now) })
 		if err != nil {
 			log.Printf("[projects] %s task %s: recording pull request #%d as ready: %v", k, w.taskID, w.number, err)
 			return led
@@ -227,7 +227,7 @@ func (r *Registry) finishReview(ctx context.Context, p *Project, led *Ledger, w 
 		log.Printf("[projects] %s task %s: posting the ready note on pull request #%d: %v", k, w.taskID, w.number, err)
 		return led
 	}
-	next, _, err := r.mergeLedger(ctx, p.Agent, p.ID, led, func(l *Ledger) bool { return l.markDone(w.taskID, w.pr.HeadSHA, now) })
+	next, _, err := r.mergeLedger(ctx, p.ID, led, func(l *Ledger) bool { return l.markDone(w.taskID, w.pr.HeadSHA, now) })
 	if err != nil {
 		log.Printf("[projects] %s task %s: recording pull request #%d as done: %v", k, w.taskID, w.number, err)
 		return led
@@ -240,12 +240,12 @@ func (r *Registry) finishReview(ctx context.Context, p *Project, led *Ledger, w 
 }
 
 func (r *Registry) stopFollowing(ctx context.Context, p *Project, led *Ledger, w prWatch, rv *ReviewState, need []string) *Ledger {
-	k := key(p.Agent, p.ID)
+	k := p.ID
 	if _, err := r.gh.CommentOnPullRequest(ctx, w.owner, w.repo, w.number, exhaustedComment(p, rv, w, need)); err != nil {
 		log.Printf("[projects] %s task %s: posting the stop note on pull request #%d: %v", k, w.taskID, w.number, err)
 		return led
 	}
-	next, _, err := r.mergeLedger(ctx, p.Agent, p.ID, led, func(l *Ledger) bool { return l.exhaust(w.taskID) })
+	next, _, err := r.mergeLedger(ctx, p.ID, led, func(l *Ledger) bool { return l.exhaust(w.taskID) })
 	if err != nil {
 		log.Printf("[projects] %s task %s: recording that pull request #%d ran out of rounds: %v", k, w.taskID, w.number, err)
 		return led
@@ -311,7 +311,7 @@ func (r *Registry) buildRound(ctx context.Context, want roundWant) Round {
 	return rd
 }
 
-func (r *Registry) dispatchRounds(ctx context.Context, p *Project, limits Limits, token string, out *tickOutcome) {
+func (r *Registry) dispatchRounds(ctx context.Context, p *Project, limits Limits, out *tickOutcome) {
 	led := out.ledger
 	maxRounds := p.Review.effective().MaxRounds
 	for _, want := range out.rounds {
@@ -320,7 +320,7 @@ func (r *Registry) dispatchRounds(ctx context.Context, p *Project, limits Limits
 			break
 		}
 		rd := r.buildRound(ctx, want)
-		next, added, err := r.mergeLedger(ctx, p.Agent, p.ID, led, func(l *Ledger) bool { return l.addRound(want.watch.taskID, rd, maxRounds, now) })
+		next, added, err := r.mergeLedger(ctx, p.ID, led, func(l *Ledger) bool { return l.addRound(want.watch.taskID, rd, maxRounds, now) })
 		if err != nil {
 			out.fail("recording a follow-up round: %v", err)
 			break
@@ -331,7 +331,7 @@ func (r *Registry) dispatchRounds(ctx context.Context, p *Project, limits Limits
 			continue
 		}
 		var fired bool
-		led, fired = r.fireRound(ctx, p, led, want.watch.taskID, rv.active().N, token, out)
+		led, fired = r.fireRound(ctx, p, led, want.watch.taskID, rv.active().N, out)
 		if !fired {
 			break
 		}
@@ -340,55 +340,50 @@ func (r *Registry) dispatchRounds(ctx context.Context, p *Project, limits Limits
 }
 
 // fireRound reports whether dispatching may continue.
-func (r *Registry) fireRound(ctx context.Context, p *Project, led *Ledger, taskID string, n int, token string, out *tickOutcome) (*Ledger, bool) {
-	fired, ferr := r.fire.Fire(ctx, p.Dispatch.RoutineID, token, fireText(p.Agent, p.ID, taskID, n))
-	// The fire has happened either way; its result is recorded even when the tick is being cancelled.
+func (r *Registry) fireRound(ctx context.Context, p *Project, led *Ledger, taskID string, n int, out *tickOutcome) (*Ledger, bool) {
+	var st *started
+	err := errors.New("the task is no longer in the ledger")
+	if t := led.task(taskID); t != nil {
+		st, err = r.launch(ctx, p, t, n)
+	}
+	// The Job may have started either way; its result is recorded even when the tick is being cancelled.
 	pctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), persistTimeout)
 	defer cancel()
 	now := time.Now().UTC()
-	fail := func(from, reason string) {
-		next, _, err := r.mergeLedger(pctx, p.Agent, p.ID, led, func(l *Ledger) bool { return l.failRound(taskID, n, []string{from}, reason, now) })
-		if err != nil {
-			log.Printf("[projects] %s/%s recording the failure of task %s round %d: %v", p.Agent, p.ID, taskID, n, err)
-			return
+	if err != nil {
+		reason := text.Truncate(err.Error(), maxErrorChars)
+		if next, _, merr := r.mergeLedger(pctx, p.ID, led, func(l *Ledger) bool { return l.failRound(taskID, n, []string{StatusDispatching}, reason, now) }); merr != nil {
+			log.Printf("[projects] %s recording the failure of task %s round %d: %v", p.ID, taskID, n, merr)
+		} else {
+			led = next
 		}
-		led = next
-	}
-	if ferr != nil && ctx.Err() != nil {
-		fail(StatusDispatching, "dispatch interrupted before the routine answered")
-		return led, false
-	}
-	if ferr != nil {
-		reason, rateLimited, retryAfter := classifyFire(ferr)
-		fail(StatusDispatching, reason)
-		if rateLimited {
-			out.nextDispatch = now.Add(max(retryAfter, minRetryAfter))
-			return led, false
+		if ctx.Err() == nil {
+			out.dispatchFailed = true
+			out.fail("%s", reason)
 		}
-		out.dispatchFailed = true
-		out.fail("%s", reason)
 		return led, false
 	}
 	out.dispatched++
-	next, applied, err := r.mergeLedger(pctx, p.Agent, p.ID, led, func(l *Ledger) bool {
-		return l.roundRunning(taskID, n, fired.SessionID, fired.SessionURL, now)
-	})
-	if err != nil {
-		out.fail("recording the session of task %s round %d: %v", taskID, n, err)
-		return led, false
+	next, applied, err := r.mergeLedger(pctx, p.ID, led, func(l *Ledger) bool { return l.roundRunning(taskID, n, st, now) })
+	if err == nil && !applied {
+		// The pod checked in first and the gateway recorded the session.
+		if t := next.task(taskID); t != nil && t.Review != nil {
+			if rd := t.Review.round(n); rd != nil && rd.SessionID == st.SessionID {
+				applied = true
+			}
+		}
 	}
-	led = next
-	if !applied {
-		return led, true
+	if err != nil || !applied {
+		r.cluster.stopSession(pctx, st.SessionID)
+		r.deleteBinding(pctx, st.SessionID)
+		if err != nil {
+			out.fail("recording the session of task %s round %d: %v", taskID, n, err)
+			return led, false
+		}
+		return next, true
 	}
-	b := binding{Agent: p.Agent, Project: p.ID, Task: taskID, Round: n, CreatedAt: stamp(now)}
-	if err := r.writeBinding(pctx, fired.SessionID, b); err != nil {
-		fail(StatusRunning, "the session binding could not be stored")
-		out.fail("storing the binding of task %s round %d: %v", taskID, n, err)
-		return led, false
-	}
-	log.Printf("[projects] %s/%s dispatched follow-up round %d of task %s (session %s)", p.Agent, p.ID, n, taskID, fired.SessionID)
-	return led, true
+	log.Printf("[projects] %s dispatched follow-up round %d of task %s (session %s)", p.ID, n, taskID, st.SessionID)
+	return next, true
 }
 
 func shortSHA(sha string) string { return sha[:min(len(sha), 7)] }
@@ -446,15 +441,28 @@ func plural(n int, noun string) string {
 	return strconv.Itoa(n) + " " + noun + "s"
 }
 
-func (r *Registry) deleteRoundBindings(ctx context.Context, led *Ledger, done map[string][]int) map[string][]int {
+func (r *Registry) deleteRoundBindings(ctx context.Context, led *Ledger, bound map[string][]int, now time.Time) map[string][]int {
 	unbound := map[string][]int{}
-	for id, ns := range done {
+	for id, ns := range bound {
 		t := led.task(id)
 		if t == nil || t.Review == nil {
 			continue
 		}
 		for _, n := range ns {
-			if rd := t.Review.round(n); rd != nil && r.deleteBinding(ctx, rd.SessionID) {
+			rd := t.Review.round(n)
+			if rd == nil {
+				continue
+			}
+			if _, running := sessionFinished(t, n); running {
+				continue
+			}
+			if rd.Status == StatusFailed || isTerminal(t.Status) {
+				r.cluster.stopSession(ctx, rd.SessionID)
+			}
+			if !sessionDone(t, n, rd.ExitReason, now) {
+				continue
+			}
+			if r.deleteBinding(ctx, rd.SessionID) {
 				unbound[id] = append(unbound[id], n)
 			}
 		}

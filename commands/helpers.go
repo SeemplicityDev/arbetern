@@ -301,7 +301,7 @@ func agentCanUseIntegration(agentID, integration string) bool {
 // the named integration. Thin wrapper over agentCanUseIntegration bound to the
 // handler's agent ID, used to gate both tool registration and tool dispatch.
 func (h *GeneralHandler) canUseIntegration(integration string) bool {
-	return agentCanUseIntegration(h.agentID, integration)
+	return h.unrestricted || agentCanUseIntegration(h.agentID, integration)
 }
 
 // toolDenied reports whether the named tool must be refused for this handler's

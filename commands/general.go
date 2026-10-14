@@ -131,6 +131,8 @@ type GeneralHandler struct {
 	// tick rather than a Slack-driven command. Affects tool gating (e.g.
 	// reply_in_thread is suppressed) and suppresses audit messaging.
 	headless bool
+	// unrestricted lifts the per-agent integration allow-list; a Toolkit applies its own.
+	unrestricted bool
 	// requesterEmail is the OAuth-proxy-verified email of the web-chat user,
 	// set only for interactive chat turns (which are also headless). Empty for
 	// Slack commands and scheduled workflows. Used to attribute a created Jira

@@ -43,6 +43,18 @@ var modelIDs = map[ModelLabel]map[provider]string{
 	},
 }
 
+// AnthropicModel resolves a model label or ID to its Anthropic API ID.
+func AnthropicModel(model string) string { return resolveModel(providerAnthropic, model) }
+
+// KnownModel reports whether model is a label arbetern maps or an Anthropic model ID.
+func KnownModel(model string) bool {
+	key := strings.ToLower(strings.TrimSpace(model))
+	if _, ok := modelIDs[ModelLabel(key)]; ok {
+		return true
+	}
+	return strings.HasPrefix(key, "claude-")
+}
+
 func resolveModel(p provider, model string) string {
 	name := strings.TrimSpace(model)
 	key := strings.ToLower(name)

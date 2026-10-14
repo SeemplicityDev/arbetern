@@ -7,8 +7,14 @@ let detailTimer = null;
 let detailToken = 0;
 
 function detailRootFor(kind) { return document.getElementById({ workflow: 'wf-detail', dashboard: 'dash-detail', project: 'proj-detail' }[kind]); }
-function detailPath(kind, agent, id) { return `/ui/${encodeURIComponent(agent)}/${kind}/${encodeURIComponent(id)}`; }
-function detailApi(kind, agent, id) { return `/api/${kind}s/${encodeURIComponent(agent)}/${encodeURIComponent(id)}`; }
+function detailPath(kind, agent, id) {
+  if (kind === 'project') return `/ui/project/${encodeURIComponent(id)}`;
+  return `/ui/${encodeURIComponent(agent)}/${kind}/${encodeURIComponent(id)}`;
+}
+function detailApi(kind, agent, id) {
+  if (kind === 'project') return `/api/projects/${encodeURIComponent(id)}`;
+  return `/api/${kind}s/${encodeURIComponent(agent)}/${encodeURIComponent(id)}`;
+}
 
 function openDetail(kind, agent, id) {
   const same = detailRoute && detailRoute.kind === kind && detailRoute.agent === agent && detailRoute.id === id;
@@ -119,7 +125,7 @@ function sourceRefToURL(ref) {
 function detailHeadHtml({ parent, agent, name, description, tags, actions }) {
   return `<div class="page-head detail-head">
       <div class="detail-title">
-        <div class="crumbs"><a href="/ui/${parent}" data-page="${parent}">${PAGE_TITLES[parent]}</a><span class="crumb-sep">/</span>${agentChip(agent)}</div>
+        <div class="crumbs"><a href="/ui/${parent}" data-page="${parent}">${PAGE_TITLES[parent]}</a>${agent ? `<span class="crumb-sep">/</span>${agentChip(agent)}` : ''}</div>
         <h1 class="page-title">${escapeHtml(name)}</h1>
         ${description ? `<p class="page-desc">${escapeHtml(description)}</p>` : ''}
         <div class="detail-tags">${tags}</div>
@@ -729,7 +735,7 @@ function pjdTaskDetailHtml(t) {
   const o = t.outcome;
   const pr = t.pr || {};
   let html = pjdChips([
-    ['task', t.id], ['branch', t.branch || (o && o.branch)], ['session', t.session_id], ['exit', t.exit_reason],
+    ['task', t.id], ['branch', t.branch || (o && o.branch)], ['session', t.session_id], ['exit', t.exit_reason], ['turns', t.turns ? fmtInt(t.turns) : ''],
     ['dispatched', t.dispatched_at && fmtDateTime(t.dispatched_at)], ['finished', t.finished_at && fmtDateTime(t.finished_at)],
     ['lines', t.pr && (pr.additions || pr.deletions) ? `+${fmtInt(pr.additions)} −${fmtInt(pr.deletions)}` : ''],
     ['learnings', t.learnings ? fmtInt(t.learnings) : ''],
@@ -759,19 +765,17 @@ function pjdReviewHtml(rv) {
 
 function pjdRoundHtml(rd) {
   const o = rd.outcome;
-  const session = safeExternalUrl(rd.session_url);
   const when = rd.finished_at ? timeAgo(rd.finished_at) : rd.dispatched_at ? 'started ' + timeAgo(rd.dispatched_at) : '';
-  const facts = [(rd.trigger || []).join(' + '), rd.replies ? plural(rd.replies, 'answer') : '', when].filter(Boolean).map(escapeHtml).join(' · ');
+  const facts = [(rd.trigger || []).join(' + '), rd.replies ? plural(rd.replies, 'answer') : '', rd.turns ? plural(rd.turns, 'turn') : '', when].filter(Boolean).map(escapeHtml).join(' · ');
   return `<div class="proj-round"><span class="tag">round ${fmtInt(rd.n)}</span> <b>${escapeHtml(o ? PJD_OUTCOMES[o.status] || o.status : rd.status)}</b>
-      ${facts ? `<span class="muted">${facts}</span>` : ''}${session ? ` · <a href="${escapeHtml(session)}" target="_blank" rel="noopener">session</a>` : ''}
+      ${facts ? `<span class="muted">${facts}</span>` : ''}
       ${o && o.summary ? `<div class="run-result">${escapeHtml(o.summary)}</div>` : ''}${rd.error ? `<div class="run-error">${escapeHtml(rd.error)}</div>` : ''}</div>`;
 }
 
-function pjdTaskRowsHtml(p, t) {
+function pjdTaskRowsHtml(p, t, manage) {
   const key = 't:' + (t.id || '');
   const [cls, label, title] = pjdTaskStatus(t);
   const g = t.group || {};
-  const session = safeExternalUrl(t.session_url);
   const maxAttempts = (p.limits || {}).max_attempts;
   let prCell = '<span class="muted">—</span>';
   if (t.pr) {
@@ -785,7 +789,7 @@ function pjdTaskRowsHtml(p, t) {
       <td>${pjdGroupCell(g, key)}</td>
       <td class="n">${fmtInt(g.count)}</td>
       <td class="n">${fmtInt(t.attempt)}${maxAttempts ? ' / ' + fmtInt(maxAttempts) : ''}</td>
-      <td>${session ? `<a href="${escapeHtml(session)}" target="_blank" rel="noopener">Open</a>` : '<span class="muted">—</span>'}</td>
+      <td>${manage && t.transcript ? `<button type="button" class="link-btn" data-pjd="transcript" data-task="${escapeHtml(t.id)}">Transcript</button>` : '<span class="muted">—</span>'}</td>
       <td>${prCell}</td>
       <td class="muted" title="${escapeHtml(t.updated_at ? fmtDateTime(t.updated_at) : '')}">${t.updated_at ? timeAgo(t.updated_at) : '—'}</td>
     </tr>
@@ -863,27 +867,35 @@ function pjdSignalMetaHtml(sig, wide) {
     + (ev ? wide('Evidence', `<code>${escapeHtml(ev.query || '')}</code><div class="sub">${escapeHtml([attrs, ev.group_by ? 'cause from ' + ev.group_by : '', (ev.fields || []).length ? 'samples keep ' + ev.fields.join(', ') : ''].filter(Boolean).join(' · '))}</div>`) : '');
 }
 
+function skillNames(ids) {
+  if (!skillsData || !skillsData.list) return ids || [];
+  return (ids || []).map(id => {
+    const s = skillsData.list.find(x => x.id === id);
+    if (!s) return id + ' (deleted)';
+    return s.enabled === false ? s.name + ' (disabled)' : s.name;
+  });
+}
+
 function pjdMetaHtml(p) {
-  const r = p.repo || {}, sig = p.signal || {}, d = p.dispatch || {}, l = p.limits || {}, rv = p.review || {};
+  const r = p.repo || {}, sig = p.signal || {}, se = p.session || {}, l = p.limits || {}, rv = p.review || {};
   const repoUrl = r.owner && r.name ? safeExternalUrl(`https://github.com/${encodeURIComponent(r.owner)}/${encodeURIComponent(r.name)}`) : '';
-  const nextDispatch = p.next_dispatch_after && new Date(p.next_dispatch_after).getTime() > Date.now() ? fmtDateTime(p.next_dispatch_after) : '—';
   const wide = (label, html) => `<div class="meta-item proj-wide"><div class="label">${escapeHtml(label)}</div><div class="value">${html}</div></div>`;
   const sites = sig.type === 'datadog_metrics' ? (sig.sites || []) : [sig.site].filter(Boolean);
   const follow = rv.follow_up ? [rv.draft ? 'drafts' : '', `${fmtInt(rv.max_rounds)} rounds`, `quiet ${fmtInt(rv.settle_minutes)}m`].filter(Boolean).join(' · ') : 'off';
+  const skills = skillNames(p.skills);
   return `<div class="meta-grid proj-meta">
-      ${metaItemHtml('Agent', agentLabel(p.agent))}
       <div class="meta-item"><div class="label">Repository</div><div class="value">${repoUrl ? `<a href="${escapeHtml(repoUrl)}" target="_blank" rel="noopener">${escapeHtml(r.owner + '/' + r.name)}</a>` : '—'}</div></div>
       ${metaItemHtml('Base branch', r.base_branch || '—')}
       ${metaItemHtml('Datadog site', sites.length ? sites.map(x => x.toUpperCase()).join(' + ') : '—')}
       ${metaItemHtml('Interval', p.interval ? 'every ' + p.interval : '—')}
+      ${metaItemHtml('Model', se.model || 'deployment default')}
+      ${metaItemHtml('Max turns', fmtInt(se.max_turns || 200))}
       ${metaItemHtml('Follow-through', follow)}
       ${metaItemHtml('Slack channel', (p.notify || {}).slack_channel || 'none')}
-      ${metaItemHtml('Routine', d.routine_id || '—')}
-      ${metaItemHtml('Trigger token', d.token ? d.token + (d.token_configured === false ? ' (missing)' : '') : '—')}
       ${metaItemHtml('Created by', p.created_by || '—')}
       ${metaItemHtml('Created', fmtDateTime(p.created_at))}
       ${metaItemHtml('Last tick', p.last_tick ? fmtDateTime(p.last_tick) : '—')}
-      ${metaItemHtml('Next dispatch after', nextDispatch)}
+      ${wide('Skills', skills.length ? `<div class="chip-row">${skills.map(n => `<span class="chip">${escapeHtml(n)}</span>`).join('')}</div>` : '<span class="muted">none</span>')}
       ${pjdSignalMetaHtml(sig, wide)}
       ${wide('Limits', `<div class="chip-row">${PJD_LIMITS.map(([k, label]) => `<span class="chip">${escapeHtml(label)} <b>${fmtInt(l[k])}</b></span>`).join('')}</div>`)}
     </div>`;
@@ -909,17 +921,16 @@ function pjdMemoryHtml(p, manage) {
 }
 
 function renderProjectDetail(root, p) {
-  const key = p.agent + '/' + p.id;
+  const key = p.id;
   if (root.dataset.rendered !== key) pjdExpanded.clear();
   root.dataset.rendered = key;
   const s = p.stats || {};
   const r = p.repo || {};
-  const d = p.dispatch || {};
   const [cls, label, title] = projStatus(p);
   const tasks = p.tasks || [];
   const backlog = p.backlog || [];
   const inFlight = tasks.filter(t => t.status === 'dispatching' || t.status === 'running').length;
-  const manage = canManageProject(p.agent);
+  const manage = canManageProject();
   document.title = `${appTitle} — ${p.name || p.id}`;
 
   const tags = `<span class="status-pill ${cls}" title="${escapeHtml(title)}">${label}</span>
@@ -931,14 +942,13 @@ function renderProjectDetail(root, p) {
     <button class="btn-mini" type="button" onclick="pjdToggle(this)" title="${p.enabled ? 'Stop ticking; running sessions finish on their own.' : 'Start ticking again.'}">${p.enabled ? 'Pause' : 'Resume'}</button>
     <button class="btn-mini" type="button" onclick="pjdEdit()">Edit</button>
     <button class="btn-mini danger" type="button" onclick="pjdDelete()">Delete</button>` : '')
-    + `<a class="btn-mini" href="${detailApi('project', p.agent, p.id)}" target="_blank" rel="noopener">JSON</a>`;
+    + `<a class="btn-mini" href="${detailApi('project', '', p.id)}" target="_blank" rel="noopener">JSON</a>`;
 
   let banners = '';
   if (!p.enabled && p.disabled_reason) {
     const reason = p.disabled_reason.replace(/^auto-disabled\s+/i, '');
     banners += `<div class="detail-banner danger"><strong>Auto-disabled${reason === p.disabled_reason ? '.' : ''}</strong> ${escapeHtml(reason)}<br>Resume the project once the cause is fixed.</div>`;
   }
-  if (d.token_configured === false) banners += `<div class="detail-banner warn"><strong>Trigger token missing.</strong> This deployment holds no token named “${escapeHtml(d.token || '')}”, so no sessions are dispatched until it is added.</div>`;
   if (p.state_error) banners += `<div class="detail-banner danger"><strong>Project state could not be loaded.</strong> Tasks, backlog and memory are missing from this view: ${escapeHtml(p.state_error)}</div>`;
   if (p.last_error && !(p.disabled_reason && p.disabled_reason.includes(p.last_error))) {
     banners += `<div class="detail-banner danger"><strong>Last tick failed</strong>${p.last_tick ? ' (' + escapeHtml(fmtDateTime(p.last_tick)) + ')' : ''}: ${escapeHtml(p.last_error)}</div>`;
@@ -948,8 +958,8 @@ function renderProjectDetail(root, p) {
   const [what, count] = metric ? ['Series', 'Sum'] : ['Error group', 'Count'];
   const tasksBody = tasks.length
     ? `<div class="list-scroll" data-scroll="tasks"><table class="data-table"><thead><tr>
-        <th>Status</th><th>${what}</th><th class="n">${count}</th><th class="n">Attempt</th><th>Session</th><th>Pull request</th><th>Updated</th>
-      </tr></thead><tbody>${tasks.map(t => pjdTaskRowsHtml(p, t)).join('')}</tbody></table></div>`
+        <th>Status</th><th>${what}</th><th class="n">${count}</th><th class="n">Attempt</th><th>Transcript</th><th>Pull request</th><th>Updated</th>
+      </tr></thead><tbody>${tasks.map(t => pjdTaskRowsHtml(p, t, manage)).join('')}</tbody></table></div>`
     : emptyHtml(p.state_error ? 'Tasks could not be loaded.' : `No sessions dispatched yet. When the query finds ${metric ? 'a series over its threshold' : 'an error group'} and the limits allow, its task shows up here.`);
   const backlogBody = backlog.length
     ? `<div class="list-scroll" data-scroll="backlog"><table class="data-table"><thead><tr>
@@ -967,7 +977,7 @@ function renderProjectDetail(root, p) {
   const focused = root.contains(document.activeElement) ? document.activeElement : null;
   const focusSel = focused && ['data-key', 'data-note', 'data-pjd', 'onclick']
     .filter(a => focused.hasAttribute(a)).map(a => `[${a}="${CSS.escape(focused.getAttribute(a))}"]`)[0];
-  root.innerHTML = detailHeadHtml({ parent: 'projects', agent: p.agent, name: p.name || p.id, description: p.description, tags, actions })
+  root.innerHTML = detailHeadHtml({ parent: 'projects', name: p.name || p.id, description: p.description, tags, actions })
     + banners
     + pjdStatsHtml(s)
     + pjdChartHtml(s)
@@ -1002,16 +1012,63 @@ document.getElementById('proj-detail').addEventListener('click', e => {
   if (!act) return;
   if (act.dataset.pjd === 'add-note') pjdAddNote();
   else if (act.dataset.pjd === 'delete-note') pjdDeleteNote(act.dataset.note, act);
+  else if (act.dataset.pjd === 'transcript') pjdViewTranscript(act.dataset.task);
 });
+
+function transcriptText(content, max) {
+  if (typeof content === 'string') return content.length > max ? content.slice(0, max) + '…' : content;
+  if (!Array.isArray(content)) return '';
+  return content.map(b => {
+    if (!b || typeof b !== 'object') return '';
+    if (b.type === 'text') return b.text || '';
+    if (b.type === 'tool_use') return `▸ ${b.name || 'tool'} ${JSON.stringify(b.input || {}).slice(0, 400)}`;
+    if (b.type === 'tool_result') {
+      const inner = typeof b.content === 'string' ? b.content : transcriptText(b.content, max);
+      return `◂ result${b.is_error ? ' (error)' : ''}: ${inner}`;
+    }
+    return '';
+  }).filter(Boolean).join('\n').slice(0, max);
+}
+
+function renderTranscript(jsonl) {
+  const entries = [];
+  for (const line of jsonl.split('\n')) {
+    if (!line.trim()) continue;
+    let e;
+    try { e = JSON.parse(line); } catch (err) { continue; }
+    if (e.type !== 'user' && e.type !== 'assistant') continue;
+    const text = transcriptText(e.message && e.message.content, 4000);
+    if (!text.trim()) continue;
+    entries.push({ role: e.type, text, at: e.timestamp });
+    if (entries.length >= 600) break;
+  }
+  if (!entries.length) return emptyHtml('The transcript holds no messages.');
+  return `<div class="proj-transcript">${entries.map(e => `<div class="pt-entry pt-${e.role}"><div class="pt-role">${e.role === 'user' ? 'session input' : 'claude'}${e.at ? ` · ${escapeHtml(fmtDateTime(e.at))}` : ''}</div><pre>${escapeHtml(e.text)}</pre></div>`).join('')}</div>`;
+}
+
+async function pjdViewTranscript(taskId) {
+  const p = detailEntity;
+  if (!p || !taskId) return;
+  let text;
+  try {
+    const res = await fetch(`${detailApi('project', '', p.id)}/transcripts/${encodeURIComponent(taskId)}`, { credentials: 'same-origin' });
+    if (!res.ok) throw new Error(res.status === 403 ? 'Only project admins can read transcripts.' : `HTTP ${res.status}`);
+    text = await res.text();
+  } catch (err) {
+    await uiError('Failed to load the transcript', err);
+    return;
+  }
+  openForm({ title: 'Session transcript', subtitle: `task ${taskId}`, saveLabel: 'Close', html: renderTranscript(text), onSave: async () => {} });
+}
 
 async function pjdRun(btn) {
   const p = detailEntity;
   if (!p) return;
-  if (!(await uiConfirm('It scans Datadog, syncs the project’s pull requests and dispatches sessions if the limits allow. Sessions count toward the organization’s Claude Code usage.', { title: 'Run this project now?', okLabel: 'Run now' }))) return;
+  if (!(await uiConfirm('It scans Datadog, syncs the project’s pull requests and starts sessions if the limits allow. Each session runs as a Job in the cluster, and its model usage is metered on the Usage & Billing page.', { title: 'Run this project now?', okLabel: 'Run now' }))) return;
   btn.disabled = true;
   btn.textContent = 'Queued…';
   try {
-    await apiSend(`${detailApi('project', p.agent, p.id)}/run`, 'POST', {});
+    await apiSend(`${detailApi('project', '', p.id)}/run`, 'POST', {});
   } catch (err) {
     await uiError('Failed to start a run', err);
   }
@@ -1025,7 +1082,7 @@ async function pjdToggle(btn) {
   if (!p) return;
   btn.disabled = true;
   try {
-    await apiSend(detailApi('project', p.agent, p.id), 'PATCH', { enabled: !p.enabled });
+    await apiSend(detailApi('project', '', p.id), 'PATCH', { enabled: !p.enabled });
   } catch (err) {
     await uiError('Failed to update project', err);
   }
@@ -1039,7 +1096,7 @@ async function pjdDelete() {
   if (!p) return;
   if (!(await uiConfirm('This stops the project and removes its tasks, memory and statistics. Sessions still running can no longer report back; pull requests it opened stay on GitHub.', { title: 'Delete this project?', tone: 'danger', okLabel: 'Delete' }))) return;
   try {
-    await apiSend(detailApi('project', p.agent, p.id), 'DELETE');
+    await apiSend(detailApi('project', '', p.id), 'DELETE');
   } catch (err) {
     await uiError('Failed to delete project', err);
     return;
@@ -1064,7 +1121,7 @@ function pjdAddNote() {
     onSave: async () => {
       const text = formValue('pjn-text');
       if (!text) throw new Error('Write the note first.');
-      await apiSend(`${detailApi('project', p.agent, p.id)}/memory`, 'POST', { text });
+      await apiSend(`${detailApi('project', '', p.id)}/memory`, 'POST', { text });
       await loadDetail();
     },
   });
@@ -1076,7 +1133,7 @@ async function pjdDeleteNote(noteId, btn) {
   if (!(await uiConfirm('Work orders stop including it.', { title: 'Delete this note?', tone: 'danger', okLabel: 'Delete' }))) return;
   btn.disabled = true;
   try {
-    await apiSend(`${detailApi('project', p.agent, p.id)}/memory/${encodeURIComponent(noteId)}`, 'DELETE');
+    await apiSend(`${detailApi('project', '', p.id)}/memory/${encodeURIComponent(noteId)}`, 'DELETE');
   } catch (err) {
     await uiError('Failed to delete note', err);
   }
@@ -1084,14 +1141,12 @@ async function pjdDeleteNote(noteId, btn) {
 }
 
 /* Project editor, shared by New project and Edit */
-function projectForm(p) {
+async function projectForm(p) {
   const isNew = !p;
-  const agents = agentsData.filter(a => canManageProject(a.id));
-  if (isNew && !agents.length) {
-    uiAlert('Creating a project needs access to at least one agent.', { title: 'No agent available', tone: 'warn' });
-    return;
-  }
-  const r = (p && p.repo) || {}, sig = (p && p.signal) || {}, d = (p && p.dispatch) || {}, l = (p && p.limits) || {}, rv = (p && p.review) || {}, nt = (p && p.notify) || {};
+  // A fresh list, so a skill created since the page loaded is not taken for a deleted one.
+  delete lastFetched.skills;
+  await loadSkills();
+  const r = (p && p.repo) || {}, sig = (p && p.signal) || {}, se = (p && p.session) || {}, l = (p && p.limits) || {}, rv = (p && p.review) || {}, nt = (p && p.notify) || {};
   const input = (id, value, attrs) => `<input class="form-input" id="${id}" value="${escapeHtml(value == null ? '' : value)}"${attrs || ''}>`;
   const check = (id, on, label) => `<label class="check-row"><input type="checkbox" id="${id}"${on ? ' checked' : ''}> ${label}</label>`;
   const code = ' autocapitalize="off" spellcheck="false"';
@@ -1100,6 +1155,18 @@ function projectForm(p) {
   const sites = metric ? sig.sites || [] : ['us'];
   const ev = sig.evidence || {};
   const attrLines = Object.entries(ev.attributes || {}).map(([k, v]) => `${k} = ${v}`).join('\n');
+  const stored = (p && p.skills) || [];
+  const chosen = new Set(stored);
+  const loaded = !!(skillsData && skillsData.list);
+  const list = loaded ? skillsData.list : [];
+  // Disabled skills the project already names stay selectable, so an unrelated edit cannot drop them; without the list, its skills are kept by id.
+  const skills = loaded ? list.filter(s => s.kind !== 'builtin' && (s.enabled !== false || chosen.has(s.id))) : stored.map(id => ({ id, name: id }));
+  const missing = loaded ? stored.filter(id => !list.some(s => s.id === id)) : [];
+  const skillChips = (skills.length
+    ? `<div class="chip-select" id="pjf-skills">${skills.map(s => `<button type="button" class="chip${chosen.has(s.id) ? ' on' : ''}" data-id="${escapeHtml(s.id)}">${escapeHtml(s.name)}${s.enabled === false ? ' <span class="muted">(disabled)</span>' : ''}</button>`).join('')}</div>`
+    : '<div class="muted">No custom skills yet. Add them on the Skills page.</div>')
+    + (loaded ? '' : '<div class="form-hint">The skills list could not be loaded, so the project keeps the skills it has.</div>')
+    + (missing.length ? `<div class="form-hint">${missing.length === 1 ? 'One skill this project names no longer exists and is' : missing.length + ' skills this project names no longer exist and are'} dropped when you save.</div>` : '');
   const limits = PJD_LIMITS.map(([k, label, min, max, def, hint]) => formField(escapeHtml(label),
     `<input class="form-input" id="pjf-l-${k}" type="number" min="${min}" max="${max}" step="1" inputmode="numeric" value="${l[k] ? escapeHtml(l[k]) : ''}" placeholder="${def}">`,
     `${min}–${max}, default ${def}${hint ? '. ' + escapeHtml(hint) : ''}`)).join('');
@@ -1121,25 +1188,25 @@ function projectForm(p) {
     + '</div>';
   openForm({
     title: isNew ? 'New project' : 'Edit project',
-    subtitle: isNew ? 'An agent keeps fixing what a Datadog query finds in one repository' : (p.name || p.id),
+    subtitle: isNew ? 'Claude Code sessions keep fixing what a Datadog query finds in one repository' : (p.name || p.id),
     saveLabel: isNew ? 'Create project' : 'Save changes',
     html: formField('Name', input('pjf-name', p && p.name, ' maxlength="80" placeholder="Fix production errors"'))
-      + (isNew ? formField('Agent', `<select class="form-input" id="pjf-agent">${agents.map(a => `<option value="${escapeHtml(a.id)}">${escapeHtml(a.name)}</option>`).join('')}</select>`, 'Its skills go into every work order. It needs Datadog access.') : '')
       + formField('Description', input('pjf-desc', p && p.description, ' maxlength="240" placeholder="One line on what this project covers"'))
       + formField('Goal', `<textarea class="form-textarea proj-textarea" id="pjf-goal" maxlength="4000" placeholder="Fix the root cause of each production error with the smallest change that makes it stop.">${escapeHtml((p && p.goal) || '')}</textarea>`, 'Every work order starts with it.')
       + formField('Instructions', `<textarea class="form-textarea proj-textarea" id="pjf-instructions" maxlength="8000" placeholder="Optional. Conventions the sessions should follow in this repository.">${escapeHtml((p && p.instructions) || '')}</textarea>`)
+      + formField('Skills', skillChips, 'Their instructions go into every work order.')
       + '<div class="form-section">Repository</div>'
       + `<div class="form-grid3">${formField('Owner', input('pjf-owner', r.owner, ' placeholder="owner"' + code))}${formField('Name', input('pjf-repo', r.name, ' placeholder="repo"' + code))}${formField('Base branch', input('pjf-base', r.base_branch, ' placeholder="main"' + code), isNew ? 'Empty uses the default branch.' : '')}</div>`
       + '<div class="form-section">Datadog</div>'
       + formField('Signal', `<select class="form-input" id="pjf-type" onchange="pjfSignalType(this.value)"><option value="datadog"${metric ? '' : ' selected'}>Log errors</option><option value="datadog_metrics"${metric ? ' selected' : ''}>Metric series over a threshold</option></select>`)
       + logFields + metricFields
+      + '<div class="form-section">Sessions</div>'
+      + `<div class="form-grid3">${formField('Model', input('pjf-model', se.model, ' maxlength="100" placeholder="deployment default"' + code), 'A label such as sonnet or opus, or a model id.')}${formField('Max turns', input('pjf-turns', se.max_turns || '', ' type="number" min="10" max="500" step="1" inputmode="numeric" placeholder="200"'), '10–500 per session.')}${formField('Check every', input('pjf-interval', p && p.interval, ' placeholder="15m"' + code), '5m to 24h.')}</div>`
       + '<div class="form-section">Pull requests</div>'
       + check('pjf-follow', rv.follow_up, 'Follow each pull request: answer failing checks and review comments until it is ready')
       + check('pjf-draft', rv.draft, 'Open pull requests as drafts and mark them ready once nothing is left')
       + `<div class="form-grid2">${formField('Follow-up rounds', input('pjf-rounds', rv.max_rounds || '', ' type="number" min="1" max="10" step="1" inputmode="numeric" placeholder="5"'), 'Sessions per pull request, 1–10.')}${formField('Quiet minutes', input('pjf-settle', rv.settle_minutes || '', ' type="number" min="5" max="240" step="1" inputmode="numeric" placeholder="15"'), 'Nothing new for this long before a pull request counts as ready.')}</div>`
       + formField('Slack channel', input('pjf-slack', nt.slack_channel, ' maxlength="13" placeholder="C0123456789"' + code), 'Optional channel id. It hears about new pull requests, questions, blocked and ready ones, merges, and an automatic pause.')
-      + '<div class="form-section">Dispatch</div>'
-      + `<div class="form-grid3">${formField('Routine id', input('pjf-routine', d.routine_id, ' placeholder="trig_0123456789abcdef"' + code))}${formField('Trigger token', input('pjf-token', d.token, ' maxlength="32" placeholder="default"' + code), 'A token name this deployment holds, never the token.')}${formField('Check every', input('pjf-interval', p && p.interval, ' placeholder="15m"' + code), '5m to 24h.')}</div>`
       + `<details class="form-more"><summary>Limits</summary><div class="form-grid2">${limits}</div></details>`
       + `<label class="check-row"><input type="checkbox" id="pjf-enabled"${!p || p.enabled ? ' checked' : ''}> Enabled</label>`,
     onSave: async () => {
@@ -1148,13 +1215,13 @@ function projectForm(p) {
         const res = await apiSend('/api/projects', 'POST', body);
         delete lastFetched.projects;
         await loadProjects();
-        const aid = safeId(res && res.agent), pid = safeId(res && res.id);
-        if (aid && pid) routeTo(detailPath('project', aid, pid));
+        const pid = safeId(res && res.id);
+        if (pid) routeTo(detailPath('project', '', pid));
         return;
       }
       const changes = pjfChanges(p, body);
       if (!Object.keys(changes).length) return;
-      await apiSend(detailApi('project', p.agent, p.id), 'PATCH', changes);
+      await apiSend(detailApi('project', '', p.id), 'PATCH', changes);
       delete lastFetched.projects;
       loadProjects();
       await loadDetail();
@@ -1210,14 +1277,15 @@ function pjfBody(isNew) {
     description: formValue('pjf-desc'),
     goal: formValue('pjf-goal'),
     instructions: formValue('pjf-instructions'),
+    skills: pjfSkills(isNew ? [] : ((detailEntity && detailEntity.skills) || [])),
     repo: { owner: formValue('pjf-owner'), name: formValue('pjf-repo'), base_branch: formValue('pjf-base') },
     signal,
+    session: { model: formValue('pjf-model'), max_turns: parseInt(formValue('pjf-turns'), 10) || 0 },
     review: {
       follow_up: document.getElementById('pjf-follow').checked, draft: document.getElementById('pjf-draft').checked,
       max_rounds: parseInt(formValue('pjf-rounds'), 10) || 0, settle_minutes: parseInt(formValue('pjf-settle'), 10) || 0,
     },
     notify: { slack_channel: formValue('pjf-slack') },
-    dispatch: { routine_id: formValue('pjf-routine'), token: formValue('pjf-token') },
     limits: Object.fromEntries(PJD_LIMITS.map(([k]) => [k, parseInt(formValue('pjf-l-' + k), 10) || 0])),
     interval: formValue('pjf-interval'),
     enabled: document.getElementById('pjf-enabled').checked,
@@ -1228,19 +1296,26 @@ function pjfBody(isNew) {
   if (!isNew && !body.repo.base_branch) throw new Error('Base branch is required.');
   if (!signal.query) throw new Error('A Datadog query is required.');
   if (metric && !signal.sites.length) throw new Error('Pick at least one Datadog site.');
-  if (!body.dispatch.routine_id || !body.dispatch.token) throw new Error('Routine id and trigger token name are required.');
-  return isNew ? { agent: formValue('pjf-agent'), ...body } : body;
+  return body;
+}
+
+// The stored order is what the work order uses, so an unrelated edit keeps it and new picks go last.
+function pjfSkills(stored) {
+  const chosen = new Set([...document.querySelectorAll('#pjf-skills .chip.on')].map(b => b.dataset.id));
+  const kept = stored.filter(id => chosen.has(id));
+  return [...kept, ...[...chosen].filter(id => !kept.includes(id))];
 }
 
 function pjfChanges(p, body) {
-  const r = p.repo || {}, d = p.dispatch || {}, l = p.limits || {}, rv = p.review || {}, nt = p.notify || {};
+  const r = p.repo || {}, se = p.session || {}, l = p.limits || {}, rv = p.review || {}, nt = p.notify || {};
   const before = {
     name: p.name || '', description: p.description || '', goal: p.goal || '', instructions: p.instructions || '',
+    skills: p.skills || [],
     repo: { owner: r.owner || '', name: r.name || '', base_branch: r.base_branch || '' },
     signal: pjfSignalShape(p.signal || {}),
+    session: { model: se.model || '', max_turns: se.max_turns || 0 },
     review: { follow_up: !!rv.follow_up, draft: !!rv.draft, max_rounds: rv.max_rounds || 0, settle_minutes: rv.settle_minutes || 0 },
     notify: { slack_channel: nt.slack_channel || '' },
-    dispatch: { routine_id: d.routine_id || '', token: d.token || '' },
     limits: Object.fromEntries(PJD_LIMITS.map(([k]) => [k, l[k] || 0])),
     interval: p.interval || '',
     enabled: !!p.enabled,

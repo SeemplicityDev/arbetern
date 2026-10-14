@@ -79,16 +79,13 @@ func (r *Registry) scanMetrics(ctx context.Context, p *Project, led *Ledger, lim
 	if !force && led.Signal == signal && now.Sub(parseTime(led.Cursor)) < metricRescan {
 		return led, nil
 	}
-	if r.deps.AgentAllowed != nil && !r.deps.AgentAllowed(p.Agent) {
-		return led, fmt.Errorf("agent %s may not use Datadog", p.Agent)
-	}
 	window := p.Signal.window()
 	from := now.Add(-window)
 	var all []seriesSum
 	for _, site := range p.Signal.Sites {
-		client := r.datadogFor(p.Agent, site)
+		client := r.datadogFor(site)
 		if client == nil {
-			return led, fmt.Errorf("agent %s has no Datadog credentials for site %s", p.Agent, site)
+			return led, fmt.Errorf("this deployment has no Datadog credentials for site %s", site)
 		}
 		tags, values, err := metricSums(ctx, client, p.Signal.Query, from, now)
 		if err != nil {
@@ -113,7 +110,7 @@ func (r *Registry) scanMetrics(ctx context.Context, p *Project, led *Ledger, lim
 		return led, err
 	}
 	out.scanned, out.groups = len(all), len(groups)
-	updated, _, err := r.mergeLedger(ctx, p.Agent, p.ID, led, func(l *Ledger) bool { return l.applyMetricScan(signal, groups, window, limits, now) })
+	updated, _, err := r.mergeLedger(ctx, p.ID, led, func(l *Ledger) bool { return l.applyMetricScan(signal, groups, window, limits, now) })
 	if err != nil {
 		return led, fmt.Errorf("recording the scan: %w", err)
 	}
@@ -229,9 +226,9 @@ func (r *Registry) evidence(ctx context.Context, p *Project, g Group, now time.T
 	if ev == nil || !p.Signal.metric() {
 		return g, nil
 	}
-	client := r.datadogFor(p.Agent, g.Site)
+	client := r.datadogFor(g.Site)
 	if client == nil {
-		return g, fmt.Errorf("agent %s has no Datadog credentials for site %s", p.Agent, g.Site)
+		return g, fmt.Errorf("this deployment has no Datadog credentials for site %s", g.Site)
 	}
 	query := evidenceQuery(ev, g.Tags)
 	from, to := now.Add(-p.Signal.window()).Format(time.RFC3339), now.Format(time.RFC3339)

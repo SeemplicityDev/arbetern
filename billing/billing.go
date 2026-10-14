@@ -62,6 +62,7 @@ type Event struct {
 	WorkflowID         string    `json:"workflow_id,omitempty"`
 	WorkflowName       string    `json:"workflow_name,omitempty"`
 	Model              string    `json:"model"`
+	Requests           int       `json:"requests,omitempty"` // model calls behind an aggregated event; one when absent
 	PromptTokens       int       `json:"prompt_tokens"`
 	CachedPromptTokens int       `json:"cached_prompt_tokens,omitempty"`
 	CacheWriteTokens   int       `json:"cache_write_tokens,omitempty"`
@@ -91,7 +92,7 @@ type Counts struct {
 }
 
 func (c *Counts) add(e Event) {
-	c.Requests++
+	c.Requests += max(e.Requests, 1)
 	c.PromptTokens += int64(e.PromptTokens)
 	c.CachedPromptTokens += int64(e.CachedPromptTokens)
 	c.CacheWriteTokens += int64(e.CacheWriteTokens)

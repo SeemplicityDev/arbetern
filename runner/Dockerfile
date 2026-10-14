@@ -1,15 +1,5 @@
-# Claude Code self-hosted runner image for arbetern projects. Build from the repository root:
+# Session image for arbetern projects: Claude Code plus the session entrypoint. Build from the repository root:
 #   docker build -f runner/Dockerfile --build-arg CLAUDE_CODE_VERSION=<version> .
-
-FROM --platform=$BUILDPLATFORM golang:1.27-trixie AS spawn
-ARG TARGETOS
-ARG TARGETARCH
-WORKDIR /src
-COPY go.mod ./
-COPY cmd/runner-spawn/ cmd/runner-spawn/
-# runner-spawn is stdlib only; GOPROXY=off keeps it that way.
-RUN CGO_ENABLED=0 GOOS="$TARGETOS" GOARCH="$TARGETARCH" GOPROXY=off \
-    go build -trimpath -ldflags="-s -w" -o /out/runner-spawn ./cmd/runner-spawn
 
 FROM --platform=$BUILDPLATFORM debian:trixie-slim AS claude
 ARG CLAUDE_CODE_VERSION
@@ -48,11 +38,8 @@ RUN set -eu; \
     install -m 0555 claude /usr/local/bin/claude
 
 FROM --platform=$BUILDPLATFORM debian:trixie-slim AS layout
-COPY --from=spawn /out/runner-spawn /opt/arbetern/bin/
-COPY runner/bin/session-wrapper runner/bin/session-auth-header /opt/arbetern/bin/
+COPY runner/bin/session /opt/arbetern/bin/
 COPY runner/claude-hooks/stop /opt/arbetern/claude-hooks/
-COPY runner/runner-hooks/post-session /opt/arbetern/runner-hooks/
-COPY runner/orchestrator-hooks/spawn-runner /opt/arbetern/orchestrator-hooks/
 RUN chown -R root:root /opt/arbetern && chmod -R 0555 /opt/arbetern
 
 FROM debian:trixie-slim
@@ -69,4 +56,5 @@ COPY --from=claude /usr/local/bin/claude /usr/local/bin/claude
 # Copying /opt (not /opt/arbetern) keeps the 0555 mode on /opt/arbetern itself.
 COPY --from=layout /opt/ /opt/
 USER 10001:10001
-ENTRYPOINT ["/usr/local/bin/claude"]
+WORKDIR /workspace
+ENTRYPOINT ["/opt/arbetern/bin/session"]

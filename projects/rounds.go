@@ -46,7 +46,7 @@ type Round struct {
 	Trigger      []string       `json:"trigger"` // checks | feedback | conflict
 	Status       string         `json:"status"`  // dispatching | running | done | failed
 	SessionID    string         `json:"session_id,omitempty"`
-	SessionURL   string         `json:"session_url,omitempty"`
+	Turns        int            `json:"turns,omitempty"`
 	HeadBefore   string         `json:"head_before,omitempty"`
 	HeadAfter    string         `json:"head_after,omitempty"`
 	Items        []Feedback     `json:"items,omitempty"` // the comments to answer; bodies are dropped when the round ends
@@ -225,7 +225,7 @@ func (l *Ledger) addRound(id string, rd Round, maxRounds int, now time.Time) boo
 	return true
 }
 
-func (l *Ledger) roundRunning(id string, n int, sessionID, sessionURL string, now time.Time) bool {
+func (l *Ledger) roundRunning(id string, n int, st *started, now time.Time) bool {
 	t, rv := l.review(id)
 	if rv == nil {
 		return false
@@ -235,7 +235,10 @@ func (l *Ledger) roundRunning(id string, n int, sessionID, sessionURL string, no
 		return false
 	}
 	rd.Status = StatusRunning
-	rd.SessionID, rd.SessionURL = sessionID, sessionURL
+	rd.SessionID = st.SessionID
+	if t.ClaudeSession != st.ClaudeSession {
+		t.ClaudeSession, t.Transcript, t.TranscriptSize = st.ClaudeSession, "", 0
+	}
 	rd.DispatchedAt = stamp(now)
 	rd.Bound = true
 	t.UpdatedAt = rd.DispatchedAt
@@ -310,57 +313,30 @@ func (l *Ledger) finishRound(id string, n int, res roundResult, now time.Time) b
 	rd.Outcome = &o
 	rd.Status = RoundDone
 	rd.Reporting = ""
-	rd.Replies = res.replies
-	rd.HeadAfter = cmp.Or(res.head, rd.HeadBefore)
 	rd.FinishedAt = stamp(now)
-	ids := make([]string, 0, len(rd.Items))
-	for _, it := range rd.Items {
-		ids = append(ids, it.ID)
-	}
-	rv.markHandled(ids)
-	if rd.HeadAfter == rd.HeadBefore {
-		if slices.Contains(rd.Trigger, triggerChecks) {
-			rv.ChecksHandled = rd.HeadBefore
-		}
-		if slices.Contains(rd.Trigger, triggerConflict) {
-			rv.ConflictHandled = rd.HeadBefore
-		}
-	}
-	if res.rerun {
-		rv.RerunHead = rd.HeadAfter
-	}
-	switch {
-	case o.Question != "":
-		rv.Waiting = o.Question
-	case o.Status == OutcomeCannotFix:
-		rv.Waiting = oneLine(o.Summary, maxQuestionChars)
-	default:
-		rv.Waiting = ""
-	}
-	if rd.HeadAfter != rv.Head {
-		rv.Head, rv.HeadAt = rd.HeadAfter, rd.FinishedAt
-	}
-	dropRoundBodies(rd)
-	rv.settle()
-	t.UpdatedAt = rd.FinishedAt
+	recordRoundResult(t, rv, rd, res, now)
 	if at := parseTime(rd.DispatchedAt); !at.IsZero() && !now.Before(at) {
 		l.Totals.SessionMinutes = pushRing(l.Totals.SessionMinutes, now.Sub(at).Minutes())
 	}
 	return true
 }
 
-func (l *Ledger) roundEnded(id string, n int, reason string, now time.Time) bool {
+func (l *Ledger) roundEnded(id string, n int, reason string, turns int, now time.Time) bool {
 	_, rv := l.review(id)
 	if rv == nil {
 		return false
 	}
 	rd := rv.round(n)
-	if rd == nil || !isActiveRound(rd.Status) {
+	if rd == nil {
 		return false
 	}
 	changed := false
 	if rd.ExitReason == "" && reason != "" {
 		rd.ExitReason = reason
+		changed = true
+	}
+	if turns > 0 && rd.Turns != turns {
+		rd.Turns = turns
 		changed = true
 	}
 	if rd.Status == StatusRunning && rd.Outcome == nil && !roundReportFresh(rd, now) {
@@ -403,7 +379,7 @@ func (l *Ledger) reconcileRounds(timeout time.Duration, now time.Time) bool {
 		task string
 		n    int
 	}
-	var lost, expired []ref
+	var lost, ended, expired []ref
 	for _, t := range l.Tasks {
 		if t.Status != StatusPROpen || t.Review == nil {
 			continue
@@ -412,33 +388,90 @@ func (l *Ledger) reconcileRounds(timeout time.Duration, now time.Time) bool {
 			switch {
 			case rd.Status == StatusDispatching && rd.SessionID == "" && now.Sub(parseTime(rd.CreatedAt)) > dispatchLostAfter:
 				lost = append(lost, ref{t.ID, rd.N})
+			case rd.Status == StatusRunning && rd.Outcome == nil && rd.ExitReason != "" && !roundReportFresh(&rd, now):
+				ended = append(ended, ref{t.ID, rd.N})
 			case rd.Status == StatusRunning && rd.Outcome == nil && !roundReportFresh(&rd, now) && now.Sub(parseTime(cmp.Or(rd.DispatchedAt, rd.CreatedAt))) > timeout:
 				expired = append(expired, ref{t.ID, rd.N})
 			}
 		}
 	}
 	for _, r := range lost {
-		l.failRound(r.task, r.n, []string{StatusDispatching}, "dispatch outcome unknown", now)
+		l.failRound(r.task, r.n, []string{StatusDispatching}, lostDispatch, now)
+	}
+	for _, r := range ended {
+		_, rv := l.review(r.task)
+		l.failRound(r.task, r.n, []string{StatusRunning}, "session ended without a report (exit: "+rv.round(r.n).ExitReason+")", now)
 	}
 	for _, r := range expired {
 		l.failRound(r.task, r.n, []string{StatusRunning}, "session timed out", now)
 	}
-	return len(lost)+len(expired) > 0
+	return len(lost)+len(ended)+len(expired) > 0
 }
 
-func (l *Ledger) finishedRoundSessions() map[string][]int {
+func (l *Ledger) boundRoundSessions() map[string][]int {
 	out := map[string][]int{}
 	for _, t := range l.Tasks {
 		if t.Review == nil {
 			continue
 		}
 		for _, rd := range t.Review.Rounds {
-			if rd.Bound && (!isActiveRound(rd.Status) || isTerminal(t.Status)) {
+			if rd.Bound {
 				out[t.ID] = append(out[t.ID], rd.N)
 			}
 		}
 	}
 	return out
+}
+
+// recordRoundResult applies what a round posted: the comments answered, the head it left, and the marks that keep the same checks or conflict from starting another round.
+func recordRoundResult(t *Task, rv *ReviewState, rd *Round, res roundResult, now time.Time) {
+	o := res.outcome
+	rd.Replies = res.replies
+	rd.HeadAfter = cmp.Or(res.head, rd.HeadBefore)
+	ids := make([]string, 0, len(rd.Items))
+	for _, it := range rd.Items {
+		ids = append(ids, it.ID)
+	}
+	rv.markHandled(ids)
+	if rd.HeadAfter == rd.HeadBefore {
+		if slices.Contains(rd.Trigger, triggerChecks) {
+			rv.ChecksHandled = rd.HeadBefore
+		}
+		if slices.Contains(rd.Trigger, triggerConflict) {
+			rv.ConflictHandled = rd.HeadBefore
+		}
+	}
+	if res.rerun {
+		rv.RerunHead = rd.HeadAfter
+	}
+	switch {
+	case o.Question != "":
+		rv.Waiting = o.Question
+	case o.Status == OutcomeCannotFix:
+		rv.Waiting = oneLine(o.Summary, maxQuestionChars)
+	default:
+		rv.Waiting = ""
+	}
+	if rd.HeadAfter != rv.Head {
+		rv.Head, rv.HeadAt = rd.HeadAfter, stamp(now)
+	}
+	dropRoundBodies(rd)
+	rv.settle()
+	t.UpdatedAt = stamp(now)
+}
+
+// recordRoundReplies keeps what a round posted when arbetern had ended it before its report landed, so the next round does not answer the same comments again.
+func (l *Ledger) recordRoundReplies(id string, n int, res roundResult, now time.Time) bool {
+	t, rv := l.review(id)
+	if rv == nil {
+		return false
+	}
+	rd := rv.round(n)
+	if rd == nil || rd.Outcome != nil {
+		return false
+	}
+	recordRoundResult(t, rv, rd, res, now)
+	return true
 }
 
 func (l *Ledger) unbindRounds(done map[string][]int) bool {

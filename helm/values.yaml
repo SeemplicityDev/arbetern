@@ -295,23 +295,20 @@ workflows:
     interval: "5m"             # Go duration; minimum 30s
     prune: true                # delete locally-managed workflows that disappear from git
 
-# Projects: an agent pursues a standing goal on one GitHub repository through
-# Claude Code sessions on self-hosted runners in their own namespace. Every
-# runner resource renders only when enabled. See docs/PROJECTS.md.
+# Projects: arbetern pursues a standing goal on one GitHub repository through
+# Claude Code sessions it runs as sandboxed Jobs, in the release namespace by
+# default. Every session resource renders only when enabled. See docs/PROJECTS.md.
 projects:
   enabled: false
-  environmentId: ""        # ccpool_… of the self-hosted environment
-  runnerAccountId: ""      # optional user_… of the automation account that owns the routines
   # Slack user-group IDs and emails / @domain entries that may create, change,
-  # run or delete projects. Both empty = nobody.
+  # run or delete projects and read session transcripts. Both empty = nobody.
   adminTeams: []
   adminEmails: []
-  triggers: []             # token names; each needs secretValues["project-trigger-<name>"]
   gateway:
-    port: 8081             # runner-facing listener; must differ from containerPort
+    port: 8081             # session-facing listener; must differ from containerPort
   networkPolicy:
-    enabled: true          # also limits arbetern pod ingress to the http port plus the gateway from runners
-  runners:
+    enabled: true          # also limits arbetern pod ingress to the http port plus the gateway from sessions
+  sessions:
     namespace:
       name: ""             # default: the release namespace (needs admissionPolicy); name another for a separate, Pod Security restricted one
       create: true         # create that separate namespace
@@ -320,31 +317,13 @@ projects:
       tag: runner
       pullPolicy: Always   # the tag is reused for every build
     imagePullSecrets: []
-    environmentKey: ""               # rendered into a Secret in the runner namespace when createSecret is true
-    existingEnvironmentSecret: ""    # or an existing Secret there with key "environment-key"
-    orchestrator:
-      replicas: 1
-      expectedSpawnSeconds: 300      # p99 Job start incl. image pull; must exceed hookTimeoutSeconds + 5
-      hookTimeoutSeconds: 60
-      hookConcurrency: 4
-      apiServerCIDRs:                # narrow to the kube-apiserver endpoints
-        - "0.0.0.0/0"
-        - "::/0"
-      resources:
-        requests:
-          cpu: 50m
-          memory: 128Mi
-        limits:
-          memory: 256Mi
-      nodeSelector: {}
-      tolerations: []
-      affinity: {}
-    session:
-      killAfterMinutes: 240
-      releaseIdleMinutes: 10
-      permissionMode: auto
-      configureGit: true
-      bashSandbox: false             # Claude Code Bash sandbox; the node must allow user namespaces
+    model: sonnet                    # model for projects that name none; a label or an Anthropic model ID
+    permissionMode: bypassPermissions  # Claude Code permission mode inside the session pod
+    bashSandbox: false               # Claude Code's Bash sandbox (bubblewrap); the nodes must allow user namespaces
+    sandboxAllowedDomains: []        # hosts sandboxed commands may reach besides the gateway, such as a package mirror
+    git:
+      name: arbetern
+      email: arbetern@users.noreply.github.com
     job:
       ttlSecondsAfterFinished: 600
       terminationGracePeriodSeconds: 120
@@ -358,25 +337,19 @@ projects:
         memory: 4Gi
         ephemeral-storage: 24Gi
     workspaceSizeLimit: 20Gi
-    runtimeClassName: ""
+    runtimeClassName: ""             # e.g. gvisor for a stronger boundary around sessions
     nodeSelector: {}
     tolerations: []
     affinity: {}
     egress:
-      anthropicCIDRs:                # api.anthropic.com
-        - "160.79.104.0/23"
-        - "2607:6bc0::/48"
-      extraCIDRs: []                 # more TCP 443 destinations for session runners
-      # Raw NetworkPolicy egress rules added for session runners and the orchestrator, e.g. an egress
-      # proxy port. With NodeLocal DNSCache, also allow UDP and TCP 53 to the nameserver in the pods'
-      # /etc/resolv.conf (such as 169.254.20.10/32): the built-in DNS rule reaches only CoreDNS pods.
+      extraCIDRs: []                 # TCP 443 destinations beyond the gateway, such as a package mirror
+      # Raw NetworkPolicy egress rules added for session pods, e.g. an egress proxy port. With NodeLocal
+      # DNSCache, also allow UDP and TCP 53 to the nameserver in the pods' /etc/resolv.conf (such as
+      # 169.254.20.10/32): the built-in DNS rule reaches only CoreDNS pods.
       extraRules: []
-      httpsProxy: ""
-      noProxy: ""
     admissionPolicy:
       enabled: true                  # rendered only when the cluster serves ValidatingAdmissionPolicy v1
-    extraArgs: []                    # appended to the session runner's arguments
-    env: {}                          # extra environment for session runners
+    env: {}                          # extra environment for session pods; never secrets
 
 
 # MCP connectors. Every UI user can see them; only members of these Slack

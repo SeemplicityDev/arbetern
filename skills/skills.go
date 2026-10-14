@@ -269,6 +269,17 @@ func (r *Registry) Instructions(agentID string) []string {
 	return out
 }
 
+// InstructionsFor returns the prompt blocks of the enabled skills with these ids, in the order given.
+func (r *Registry) InstructionsFor(ids []string) []string {
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if s, ok := r.Get(id); ok && s.Enabled {
+			out = append(out, fmt.Sprintf("Skill — %s:\n%s", s.Name, s.Instructions))
+		}
+	}
+	return out
+}
+
 func appliesTo(s *Skill, agentID string) bool {
 	if len(s.Agents) == 0 {
 		return true
