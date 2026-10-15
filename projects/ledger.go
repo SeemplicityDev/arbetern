@@ -3,6 +3,7 @@ package projects
 import (
 	"cmp"
 	"encoding/json"
+	"maps"
 	"math"
 	"slices"
 	"strings"
@@ -155,13 +156,14 @@ type Totals struct {
 
 // Ledger is the durable work record of one project.
 type Ledger struct {
-	Cursor     string            `json:"cursor,omitempty"` // RFC3339Nano; next scan starts here
-	Signal     string            `json:"signal,omitempty"` // Signal.key the candidates were scanned with
-	Tasks      []Task            `json:"tasks"`            // newest first
-	Candidates []Candidate       `json:"candidates,omitempty"`
-	Tracks     map[string]*Track `json:"tracks,omitempty"`
-	Totals     Totals            `json:"totals"`
-	Daily      map[string]*Day   `json:"daily,omitempty"`
+	Cursor      string            `json:"cursor,omitempty"`       // RFC3339Nano; next scan starts here
+	SiteCursors map[string]string `json:"site_cursors,omitempty"` // a log signal on several sites: where each site's next scan starts; Cursor is the earliest
+	Signal      string            `json:"signal,omitempty"`       // Signal.key the candidates were scanned with
+	Tasks       []Task            `json:"tasks"`                  // newest first
+	Candidates  []Candidate       `json:"candidates,omitempty"`
+	Tracks      map[string]*Track `json:"tracks,omitempty"`
+	Totals      Totals            `json:"totals"`
+	Daily       map[string]*Day   `json:"daily,omitempty"`
 }
 
 // Note is one entry of project memory.
@@ -834,12 +836,37 @@ func (l *Ledger) inFlight(exclude string) []Task {
 	return out
 }
 
-// applyScan is a no-op unless the stored cursor is still from, the cursor the scan started at.
-func (l *Ledger) applyScan(from, signal string, groups []Group, next time.Time, limits Limits, now time.Time) bool {
-	if l.Cursor != from {
+func (l *Ledger) siteCursor(site string) string {
+	return cmp.Or(l.SiteCursors[site], l.Cursor)
+}
+
+func (l *Ledger) scanFrom() string {
+	parts := []string{l.Cursor}
+	for _, site := range slices.Sorted(maps.Keys(l.SiteCursors)) {
+		parts = append(parts, site+"="+l.SiteCursors[site])
+	}
+	return strings.Join(parts, " ")
+}
+
+// applyScan is a no-op unless the stored cursors are still from, those the scan started at.
+func (l *Ledger) applyScan(from, signal string, groups []Group, next map[string]time.Time, limits Limits, now time.Time) bool {
+	if l.scanFrom() != from || len(next) == 0 {
 		return false
 	}
-	l.Cursor = next.UTC().Format(time.RFC3339Nano)
+	var cursor time.Time
+	l.SiteCursors = nil
+	for site, at := range next {
+		if cursor.IsZero() || at.Before(cursor) {
+			cursor = at
+		}
+		if len(next) > 1 {
+			if l.SiteCursors == nil {
+				l.SiteCursors = map[string]string{}
+			}
+			l.SiteCursors[site] = at.UTC().Format(time.RFC3339Nano)
+		}
+	}
+	l.Cursor = cursor.UTC().Format(time.RFC3339Nano)
 	if l.Signal != signal {
 		l.Candidates, l.Signal = nil, signal
 	}
@@ -859,7 +886,7 @@ func (l *Ledger) applyScan(from, signal string, groups []Group, next time.Time, 
 }
 
 func (l *Ledger) applyMetricScan(signal string, groups []Group, window time.Duration, limits Limits, now time.Time) bool {
-	l.Cursor = now.UTC().Format(time.RFC3339Nano)
+	l.Cursor, l.SiteCursors = now.UTC().Format(time.RFC3339Nano), nil
 	if l.Signal != signal {
 		l.Candidates, l.Signal = nil, signal
 	}
@@ -918,7 +945,10 @@ func (l *Ledger) mergeCandidate(g Group) {
 	c.Count += g.Count
 	c.FirstSeen = earliest(c.FirstSeen, g.FirstSeen)
 	c.LastSeen = latest(c.LastSeen, g.LastSeen)
-	c.Service, c.Kind, c.Pattern, c.Frame = g.Service, g.Kind, g.Pattern, g.Frame
+	c.Service, c.Kind, c.Pattern, c.Frame = joinServices(c.Service, g.Service), g.Kind, g.Pattern, g.Frame
+	if c.Site != g.Site {
+		c.Site = ""
+	}
 	if len(g.Samples) > 0 {
 		c.Samples = g.Samples
 	}

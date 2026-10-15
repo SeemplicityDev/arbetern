@@ -429,6 +429,7 @@ func (r *Registry) create(ctx context.Context, draft Project, enabled bool, crea
 		Instructions: draft.Instructions,
 		Skills:       draft.Skills,
 		Connectors:   draft.Connectors,
+		Conventions:  draft.Conventions,
 		Repo:         draft.Repo,
 		Signal:       draft.Signal,
 		Session:      draft.Session,

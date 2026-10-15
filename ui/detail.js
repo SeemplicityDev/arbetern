@@ -726,7 +726,7 @@ function pjdGroupDetailHtml(g) {
   const samples = (g.samples || []).map(s => `<div class="proj-label">Sample${s.at ? ' · ' + escapeHtml(fmtDateTime(s.at)) : ''}</div>
       <pre class="run-result">${escapeHtml([s.message, s.stack].filter(Boolean).join('\n\n'))}</pre>`).join('');
   return pjdChips([
-    ['fingerprint', g.fingerprint], ['service', g.service], ['kind', g.kind], ['frame', g.frame],
+    ['fingerprint', g.fingerprint], ['site', (g.site || '').toUpperCase()], ['service', g.service], ['kind', g.kind], ['frame', g.frame],
     ['first seen', g.first_seen && fmtDateTime(g.first_seen)], ['last seen', g.last_seen && fmtDateTime(g.last_seen)],
   ]) + (g.pattern ? `<div class="proj-label">Message pattern</div><div class="run-result">${escapeHtml(g.pattern)}</div>` : '') + samples;
 }
@@ -871,7 +871,8 @@ function pjdSignalMetaHtml(sig, wide) {
   if (sig.type !== 'datadog_metrics') {
     return metaItemHtml('First scan', 'last ' + (sig.lookback || '24h'))
       + wide('Datadog query', `<code>${escapeHtml(sig.query || '—')}</code>`)
-      + (sig.pattern ? wide('Pattern', `<code>${escapeHtml(sig.pattern)}</code>`) : metaItemHtml('Pattern', 'none'));
+      + (sig.pattern ? wide('Pattern', `<code>${escapeHtml(sig.pattern)}</code>`) : metaItemHtml('Pattern', 'none'))
+      + (sig.group_pattern ? wide('Group pattern', `<code>${escapeHtml(sig.group_pattern)}</code>`) : '');
   }
   const ev = sig.evidence;
   const attrs = ev ? Object.entries(ev.attributes || {}).map(([k, v]) => `${k} → ${v}`).join(', ') : '';
@@ -906,7 +907,7 @@ function pjdMetaHtml(p) {
   const r = p.repo || {}, sig = p.signal || {}, se = p.session || {}, l = p.limits || {}, rv = p.review || {};
   const repoUrl = r.owner && r.name ? safeExternalUrl(`https://github.com/${encodeURIComponent(r.owner)}/${encodeURIComponent(r.name)}`) : '';
   const wide = (label, html) => `<div class="meta-item proj-wide"><div class="label">${escapeHtml(label)}</div><div class="value">${html}</div></div>`;
-  const sites = sig.type === 'datadog_metrics' ? (sig.sites || []) : [sig.site].filter(Boolean);
+  const sites = sig.sites && sig.sites.length ? sig.sites : [sig.site].filter(Boolean);
   const follow = rv.follow_up ? [rv.draft ? 'drafts' : '', `${fmtInt(rv.max_rounds)} rounds`, `quiet ${fmtInt(rv.settle_minutes)}m`].filter(Boolean).join(' · ') : 'off';
   const skills = skillNames(p.skills);
   const connectors = connectorNames(p.connectors);
@@ -1181,8 +1182,8 @@ async function projectForm(p) {
   const check = (id, on, label) => `<label class="check-row"><input type="checkbox" id="${id}"${on ? ' checked' : ''}> ${label}</label>`;
   const code = ' autocapitalize="off" spellcheck="false"';
   const metric = sig.type === 'datadog_metrics';
-  const site = sig.site === 'eu' ? 'eu' : 'us';
   const sites = metric ? sig.sites || [] : ['us'];
+  const logSites = !metric && pjfLogSites(sig).length ? pjfLogSites(sig) : ['us'];
   const ev = sig.evidence || {};
   const attrLines = Object.entries(ev.attributes || {}).map(([k, v]) => `${k} = ${v}`).join('\n');
   const stored = (p && p.skills) || [];
@@ -1213,9 +1214,10 @@ async function projectForm(p) {
     `<input class="form-input" id="pjf-l-${k}" type="number" min="${min}" max="${max}" step="1" inputmode="numeric" value="${l[k] ? escapeHtml(l[k]) : ''}" placeholder="${def}">`,
     `${min}–${max}, default ${def}${hint ? '. ' + escapeHtml(hint) : ''}`)).join('');
   const logFields = `<div data-signal="datadog"${metric ? ' hidden' : ''}>`
-    + `<div class="form-grid2">${formField('Site', `<select class="form-input" id="pjf-site"><option value="us"${site === 'us' ? ' selected' : ''}>US</option><option value="eu"${site === 'eu' ? ' selected' : ''}>EU</option></select>`)}${formField('First scan', input('pjf-lookback', sig.lookback, ' placeholder="24h"' + code), 'How far back the first scan looks, 1h to 168h.')}</div>`
+    + `<div class="form-grid2">${formField('Sites', `<div class="chip-row">${check('pjf-lsite-us', logSites.includes('us'), 'US')}${check('pjf-lsite-eu', logSites.includes('eu'), 'EU')}</div>`, 'Every site is searched each scan; the same group on both is one group.')}${formField('First scan', input('pjf-lookback', sig.lookback, ' placeholder="24h"' + code), 'How far back the first scan looks, 1h to 168h.')}</div>`
     + formField('Query', input('pjf-query', metric ? '' : sig.query, ' maxlength="1000" placeholder="service:example status:error"' + code), 'Log search query. Matching errors are grouped by service, error kind, message and top stack frame.')
     + formField('Pattern', input('pjf-pattern', metric ? '' : sig.pattern, ' maxlength="500" placeholder="(?i)timeout|KeyError"' + code), 'Optional regular expression. A group is kept when it matches the error kind, the message or a sample.')
+    + formField('Group pattern', input('pjf-gpattern', metric ? '' : sig.group_pattern, ' maxlength="500" placeholder="(\\w+Warning): ([^.]{1,80})"' + code), 'Optional regular expression over the message. Events it matches are grouped by the text of its capture groups, whatever the service.')
     + '</div>';
   const metricFields = `<div data-signal="datadog_metrics"${metric ? '' : ' hidden'}>`
     + `<div class="form-grid2">${formField('Sites', `<div class="chip-row">${check('pjf-site-us', sites.includes('us'), 'US')}${check('pjf-site-eu', sites.includes('eu'), 'EU')}</div>`)}${formField('Window', input('pjf-window', sig.window, ' placeholder="48h"' + code), 'Each series is summed over this window, 1h to 168h.')}</div>`
@@ -1276,9 +1278,13 @@ function pjfSignalType(type) {
   document.querySelectorAll('#form-body [data-signal]').forEach(el => { el.hidden = el.dataset.signal !== type; });
 }
 
+function pjfLogSites(sig) {
+  return sig.sites && sig.sites.length ? sig.sites : [sig.site].filter(Boolean);
+}
+
 function pjfSignalShape(sig) {
   if (sig.type !== 'datadog_metrics') {
-    return { type: 'datadog', site: sig.site || '', query: sig.query || '', pattern: sig.pattern || '', lookback: sig.lookback || '' };
+    return { type: 'datadog', sites: pjfLogSites(sig), query: sig.query || '', pattern: sig.pattern || '', group_pattern: sig.group_pattern || '', lookback: sig.lookback || '' };
   }
   const out = {
     type: 'datadog_metrics', sites: sig.sites || [], query: sig.query || '', kept_query: sig.kept_query || '', window: sig.window || '',
@@ -1314,7 +1320,10 @@ function pjfBody(isNew) {
       query: formValue('pjf-ev-query'), attributes: pjfAttributes(document.getElementById('pjf-ev-attrs').value), group_by: formValue('pjf-ev-group'),
       fields: formValue('pjf-ev-fields').split(',').map(x => x.trim()).filter(Boolean),
     },
-  } : { type, site: formValue('pjf-site'), query: formValue('pjf-query'), pattern: formValue('pjf-pattern'), lookback: formValue('pjf-lookback') });
+  } : {
+    type, sites: ['us', 'eu'].filter(x => document.getElementById('pjf-lsite-' + x).checked),
+    query: formValue('pjf-query'), pattern: formValue('pjf-pattern'), group_pattern: formValue('pjf-gpattern'), lookback: formValue('pjf-lookback'),
+  });
   const body = {
     name: formValue('pjf-name'),
     description: formValue('pjf-desc'),
@@ -1339,7 +1348,7 @@ function pjfBody(isNew) {
   if (!body.repo.owner || !body.repo.name) throw new Error('Repository owner and name are required.');
   if (!isNew && !body.repo.base_branch) throw new Error('Base branch is required.');
   if (!signal.query) throw new Error('A Datadog query is required.');
-  if (metric && !signal.sites.length) throw new Error('Pick at least one Datadog site.');
+  if (!signal.sites.length) throw new Error('Pick at least one Datadog site.');
   return body;
 }
 

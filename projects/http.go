@@ -164,20 +164,21 @@ func (a *consoleAPI) get(w http.ResponseWriter, req *http.Request) {
 }
 
 type createRequest struct {
-	Name         string   `json:"name"`
-	Description  string   `json:"description"`
-	Goal         string   `json:"goal"`
-	Instructions string   `json:"instructions"`
-	Skills       []string `json:"skills"`
-	Connectors   []string `json:"connectors"`
-	Repo         Repo     `json:"repo"`
-	Signal       Signal   `json:"signal"`
-	Session      Session  `json:"session"`
-	Review       Review   `json:"review"`
-	Notify       Notify   `json:"notify"`
-	Limits       Limits   `json:"limits"`
-	Interval     string   `json:"interval"`
-	Enabled      *bool    `json:"enabled"`
+	Name         string      `json:"name"`
+	Description  string      `json:"description"`
+	Goal         string      `json:"goal"`
+	Instructions string      `json:"instructions"`
+	Skills       []string    `json:"skills"`
+	Connectors   []string    `json:"connectors"`
+	Conventions  Conventions `json:"conventions"`
+	Repo         Repo        `json:"repo"`
+	Signal       Signal      `json:"signal"`
+	Session      Session     `json:"session"`
+	Review       Review      `json:"review"`
+	Notify       Notify      `json:"notify"`
+	Limits       Limits      `json:"limits"`
+	Interval     string      `json:"interval"`
+	Enabled      *bool       `json:"enabled"`
 }
 
 func (a *consoleAPI) create(w http.ResponseWriter, req *http.Request) {
@@ -196,6 +197,7 @@ func (a *consoleAPI) create(w http.ResponseWriter, req *http.Request) {
 		Instructions: body.Instructions,
 		Skills:       body.Skills,
 		Connectors:   body.Connectors,
+		Conventions:  body.Conventions,
 		Repo:         body.Repo,
 		Signal:       body.Signal,
 		Session:      body.Session,

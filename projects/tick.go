@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"regexp"
 	"strings"
 	"time"
 
@@ -335,44 +336,75 @@ func feedbackNote(number int, fb *github.PRFeedback) string {
 
 func (r *Registry) scan(ctx context.Context, p *Project, led *Ledger, limits Limits, out *tickOutcome) (*Ledger, error) {
 	now := time.Now().UTC()
-	since, until := scanWindow(led.Cursor, p.Signal.lookback(), now)
-	if !since.Before(until) {
-		return led, nil
+	var groupBy *regexp.Regexp
+	if p.Signal.GroupPattern != "" {
+		re, err := regexp.Compile(p.Signal.GroupPattern)
+		if err != nil {
+			return led, fmt.Errorf("signal.group_pattern: %w", err)
+		}
+		groupBy = re
 	}
-	client := r.datadogFor(p.Signal.Site)
-	if client == nil {
-		return led, fmt.Errorf("this deployment has no Datadog credentials for site %s", p.Signal.Site)
+	var groups []Group
+	seen := map[string]int{}
+	next := map[string]time.Time{}
+	var failed []error
+	read := false
+	// Each site keeps its own cursor, so a site that fails stays where it was while the others move on.
+	for _, site := range p.Signal.sites() {
+		since, until := scanWindow(led.siteCursor(site), p.Signal.lookback(), now)
+		next[site] = since
+		if !since.Before(until) {
+			continue
+		}
+		client := r.datadogFor(site)
+		if client == nil {
+			failed = append(failed, fmt.Errorf("this deployment has no Datadog credentials for site %s", site))
+			continue
+		}
+		res, err := client.ErrorGroupsBy(ctx, p.Signal.Query, since, until, scanMaxEvents, scanMaxSamples, groupBy)
+		if err != nil {
+			failed = append(failed, fmt.Errorf("scanning Datadog %s: %w", strings.ToUpper(site), err))
+			continue
+		}
+		kept, err := filterGroups(res.Groups, p.Signal.Pattern)
+		if err != nil {
+			return led, fmt.Errorf("signal.pattern: %w", err)
+		}
+		read = true
+		for _, g := range kept {
+			ng := groupFromDatadog(g)
+			ng.Site = site
+			if i, ok := seen[ng.Fingerprint]; ok {
+				groups[i] = mergeSiteGroups(groups[i], ng)
+				continue
+			}
+			seen[ng.Fingerprint] = len(groups)
+			groups = append(groups, ng)
+		}
+		if res.Partial {
+			log.Printf("[projects] %s: Datadog %s reported a partial result for %s to %s", p.ID, strings.ToUpper(site), since.Format(time.RFC3339), until.Format(time.RFC3339))
+		}
+		out.scanned += res.Scanned
+		siteNext := res.Next
+		if siteNext.IsZero() || siteNext.After(until) {
+			siteNext = until
+		}
+		if res.Truncated && !catchesUp(since, siteNext, until, p.interval()) {
+			log.Printf("[projects] %s: the %s scan stopped after %d events, so the logs from %s to %s are skipped", p.ID, strings.ToUpper(site), res.Scanned, siteNext.Format(time.RFC3339), until.Format(time.RFC3339))
+			siteNext = until
+		}
+		next[site] = siteNext
 	}
-	res, err := client.ErrorGroups(ctx, p.Signal.Query, since, until, scanMaxEvents, scanMaxSamples)
-	if err != nil {
-		return led, fmt.Errorf("scanning Datadog: %w", err)
+	if !read {
+		return led, errors.Join(failed...)
 	}
-	kept, err := filterGroups(res.Groups, p.Signal.Pattern)
-	if err != nil {
-		return led, fmt.Errorf("signal.pattern: %w", err)
-	}
-	groups := make([]Group, 0, len(kept))
-	for _, g := range kept {
-		groups = append(groups, groupFromDatadog(g))
-	}
-	if res.Partial {
-		log.Printf("[projects] %s: Datadog reported a partial result for %s to %s", p.ID, since.Format(time.RFC3339), until.Format(time.RFC3339))
-	}
-	out.scanned, out.groups = res.Scanned, len(groups)
-	next := res.Next
-	if next.IsZero() || next.After(until) {
-		next = until
-	}
-	if res.Truncated && !catchesUp(since, next, until, p.interval()) {
-		log.Printf("[projects] %s: the scan stopped after %d events, so the logs from %s to %s are skipped", p.ID, res.Scanned, next.Format(time.RFC3339), until.Format(time.RFC3339))
-		next = until
-	}
-	from, signal := led.Cursor, p.Signal.key()
+	out.groups = len(groups)
+	from, signal := led.scanFrom(), p.Signal.key()
 	updated, _, err := r.mergeLedger(ctx, p.ID, led, func(l *Ledger) bool { return l.applyScan(from, signal, groups, next, limits, now) })
 	if err != nil {
 		return led, fmt.Errorf("recording the scan: %w", err)
 	}
-	return updated, nil
+	return updated, errors.Join(failed...)
 }
 
 func (r *Registry) dispatch(ctx context.Context, p *Project, limits Limits, out *tickOutcome, newWork bool) {

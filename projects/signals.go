@@ -3,6 +3,7 @@ package projects
 import (
 	"regexp"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/justmike1/arbetern/datadog"
@@ -42,6 +43,34 @@ func filterGroups(groups []datadog.ErrorGroup, pattern string) ([]datadog.ErrorG
 		}
 		return !slices.ContainsFunc(g.Samples, func(s datadog.ErrorSample) bool { return re.MatchString(s.Message) })
 	}), nil
+}
+
+// mergeSiteGroups folds the same group seen on another Datadog site into a; a group seen on both sites has no single site.
+func mergeSiteGroups(a, b Group) Group {
+	a.Count += b.Count
+	a.FirstSeen = earliest(a.FirstSeen, b.FirstSeen)
+	a.LastSeen = latest(a.LastSeen, b.LastSeen)
+	if a.Site != b.Site {
+		a.Site = ""
+	}
+	a.Service = joinServices(a.Service, b.Service)
+	samples := append(slices.Clone(a.Samples), b.Samples...)
+	slices.SortStableFunc(samples, func(x, y Sample) int { return strings.Compare(x.At, y.At) })
+	if len(samples) > scanMaxSamples {
+		samples = append(samples[:1], samples[len(samples)-scanMaxSamples+1:]...)
+	}
+	a.Samples = samples
+	return a
+}
+
+func joinServices(a, b string) string {
+	var services []string
+	for _, s := range strings.Split(a+", "+b, ", ") {
+		if s != "" && !slices.Contains(services, s) {
+			services = append(services, s)
+		}
+	}
+	return oneLine(strings.Join(services, ", "), 200)
 }
 
 func groupFromDatadog(g datadog.ErrorGroup) Group {

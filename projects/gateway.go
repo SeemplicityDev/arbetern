@@ -619,7 +619,7 @@ func (g *gateway) reportOutcome(ctx context.Context, s *session, raw json.RawMes
 			if summary, description, fields, problem = a.Ticket.check(tc); problem == "" {
 				ticket = &TicketRequest{Project: tc.Project, IssueType: tc.IssueType, Summary: summary, Description: description,
 					AssigneeID: tc.AssigneeID, Labels: tc.Labels, Fields: ticketFields(tc, taskSite(s.project, s.task.Group), fields),
-					SessionFields: slices.Sorted(maps.Keys(fields))}
+					SessionFields: slices.Sorted(maps.Keys(fields)), ActiveSprint: tc.ActiveSprint}
 			}
 		}
 	}

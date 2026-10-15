@@ -164,9 +164,10 @@ type Repo struct {
 type Signal struct {
 	Type           string    `json:"type"`                      // "datadog" | "datadog_metrics"
 	Site           string    `json:"site,omitempty"`            // logs: "us" | "eu"
-	Sites          []string  `json:"sites,omitempty"`           // metrics: "us" and/or "eu"
+	Sites          []string  `json:"sites,omitempty"`           // "us" and/or "eu"; a log signal on one site keeps it in Site
 	Query          string    `json:"query"`                     // logs: search query; metrics: grouped query of what went wrong
 	Pattern        string    `json:"pattern,omitempty"`         // optional RE2 over kind, pattern and samples (logs) or the series tags (metrics)
+	GroupPattern   string    `json:"group_pattern,omitempty"`   // logs: optional RE2 whose capture groups name the group of each matching event, across services and sites
 	Lookback       string    `json:"lookback,omitempty"`        // logs: Go duration for the first scan, default "24h", 1h–168h
 	KeptQuery      string    `json:"kept_query,omitempty"`      // metrics: grouped query of what the same series handled correctly
 	Window         string    `json:"window,omitempty"`          // metrics: Go duration each series is summed over, default "48h", 1h–168h
@@ -298,7 +299,7 @@ func (s Signal) window() time.Duration {
 func (s Signal) metric() bool { return s.Type == SignalDatadogMetrics }
 
 func (s Signal) sites() []string {
-	if s.metric() {
+	if s.metric() || len(s.Sites) > 0 {
 		return s.Sites
 	}
 	return []string{s.Site}
@@ -306,6 +307,9 @@ func (s Signal) sites() []string {
 
 func (s Signal) key() string {
 	parts := []string{s.Site, s.Query, s.Pattern}
+	if !s.metric() && (len(s.Sites) > 0 || s.GroupPattern != "") {
+		parts = append(parts, strings.Join(s.Sites, ","), s.GroupPattern)
+	}
 	if s.metric() {
 		parts = append(parts, s.Type, strings.Join(s.Sites, ","), s.KeptQuery, s.window().String(),
 			strconv.FormatFloat(s.Threshold, 'g', -1, 64), strconv.FormatFloat(s.ShareThreshold, 'g', -1, 64), strconv.FormatBool(s.Fill))
@@ -431,42 +435,61 @@ func normalizeSite(v string) (string, error) {
 }
 
 func (s *Signal) normalizeLogs() error {
-	site, err := normalizeSite(s.Site)
+	picked, err := pickSites(s.Sites, s.Site)
 	if err != nil {
-		return invalidf("signal.site must be us or eu")
+		return err
 	}
-	s.Site = site
+	s.Site, s.Sites = "", picked
+	if len(picked) == 1 {
+		s.Site, s.Sites = picked[0], nil
+	}
 	if err := checkText("signal.query", s.Query, 1, 1000); err != nil {
 		return err
+	}
+	s.GroupPattern = strings.TrimSpace(s.GroupPattern)
+	if err := checkText("signal.group_pattern", s.GroupPattern, 0, 500); err != nil {
+		return err
+	}
+	if s.GroupPattern != "" {
+		if _, err := regexp.Compile(s.GroupPattern); err != nil {
+			return invalidf("signal.group_pattern is not a valid RE2 expression: %v", err)
+		}
 	}
 	s.Lookback = strings.TrimSpace(s.Lookback)
 	if s.Lookback == "" {
 		s.Lookback = humanDuration(defaultLookback)
 	}
-	s.Sites, s.KeptQuery, s.Window, s.Threshold, s.ShareThreshold, s.Fill, s.Evidence = nil, "", "", 0, 0, false, nil
+	s.KeptQuery, s.Window, s.Threshold, s.ShareThreshold, s.Fill, s.Evidence = "", "", 0, 0, false, nil
 	return checkDuration("signal.lookback", s.Lookback, minLookback, maxLookback)
 }
 
-func (s *Signal) normalizeMetrics() error {
-	sites := s.Sites
-	if len(sites) == 0 && strings.TrimSpace(s.Site) != "" {
-		sites = []string{s.Site}
+func pickSites(sites []string, site string) ([]string, error) {
+	if len(sites) == 0 && strings.TrimSpace(site) != "" {
+		sites = []string{site}
 	}
 	var picked []string
 	for _, v := range sites {
 		site, err := normalizeSite(v)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if !slices.Contains(picked, site) {
 			picked = append(picked, site)
 		}
 	}
 	if len(picked) == 0 {
-		return invalidf("signal.sites needs us, eu or both")
+		return nil, invalidf("signal.sites needs us, eu or both")
 	}
 	slices.SortFunc(picked, func(a, b string) int { return strings.Compare(b, a) })
-	s.Sites, s.Site, s.Lookback = picked, "", ""
+	return picked, nil
+}
+
+func (s *Signal) normalizeMetrics() error {
+	picked, err := pickSites(s.Sites, s.Site)
+	if err != nil {
+		return err
+	}
+	s.Sites, s.Site, s.Lookback, s.GroupPattern = picked, "", "", ""
 	s.KeptQuery = strings.TrimSpace(s.KeptQuery)
 	for _, q := range []struct{ field, v string }{{"signal.query", s.Query}, {"signal.kept_query", s.KeptQuery}} {
 		lo := 1

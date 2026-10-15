@@ -322,6 +322,9 @@ func briefGroup(g Group) string {
 	fmt.Fprintf(&b, "- Kind: %s\n", inlineCode(g.Kind))
 	fmt.Fprintf(&b, "- Pattern: %s\n", inlineCode(g.Pattern))
 	fmt.Fprintf(&b, "- Frame: %s\n", inlineCode(g.Frame))
+	if g.Site != "" {
+		fmt.Fprintf(&b, "- Datadog site: %s\n", strings.ToUpper(g.Site))
+	}
 	fmt.Fprintf(&b, "- Occurrences seen: %d\n", g.Count)
 	fmt.Fprintf(&b, "- First seen: %s\n", cmp.Or(g.FirstSeen, "unknown"))
 	fmt.Fprintf(&b, "- Last seen: %s", cmp.Or(g.LastSeen, "unknown"))
@@ -408,7 +411,7 @@ func groupLabel(g Group) string {
 	if len(g.Tags) > 0 {
 		return strings.ToUpper(g.Site) + " " + strings.Join(g.Tags, ", ")
 	}
-	label := cmp.Or(g.Kind, "error")
+	label := cmp.Or(g.Kind, oneLine(g.Pattern, 120), "error")
 	if g.Service != "" {
 		label += " in " + g.Service
 	}

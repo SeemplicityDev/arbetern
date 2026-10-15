@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"maps"
 	"regexp"
 	"slices"
@@ -55,6 +56,7 @@ type Ticket struct {
 	Fields        map[string]any            `json:"fields,omitempty"`         // further create fields, sent as given
 	SiteFields    map[string]map[string]any `json:"site_fields,omitempty"`    // merged into fields for the series' Datadog site
 	SessionFields []string                  `json:"session_fields,omitempty"` // fields the session may set in its report, such as an option it looked up
+	ActiveSprint  bool                      `json:"active_sprint,omitempty"`  // place each issue in the project's active sprint
 }
 
 func (c *Conventions) normalize() error {
@@ -220,6 +222,7 @@ type TicketRequest struct {
 	Labels                                               []string
 	Fields                                               map[string]any
 	SessionFields                                        []string // keys of Fields the session set, which Jira's refusal goes back to
+	ActiveSprint                                         bool
 }
 
 type refusedFieldsError struct {
@@ -255,6 +258,20 @@ func (j jiraTickets) FileTicket(_ context.Context, req TicketRequest) (string, s
 	})
 	if err != nil {
 		return "", "", err
+	}
+	if req.ActiveSprint {
+		// The issue exists either way, so a sprint that cannot be set is logged rather than failing the report into a second issue.
+		sprint, err := j.c.GetActiveSprintForProject(req.Project)
+		switch {
+		case err != nil:
+			log.Printf("[projects] %s: finding the active sprint of %s: %v", issue.Key, req.Project, err)
+		case sprint == nil:
+			log.Printf("[projects] %s: %s has no active sprint", issue.Key, req.Project)
+		default:
+			if err := j.c.SetSprintField(issue.Key, sprint.ID); err != nil {
+				log.Printf("[projects] %s: adding it to sprint %s: %v", issue.Key, sprint.Name, err)
+			}
+		}
 	}
 	return issue.Key, issue.Browse, nil
 }

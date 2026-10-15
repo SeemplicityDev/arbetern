@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"regexp"
 	"slices"
 	"strconv"
@@ -61,6 +62,8 @@ const (
 	patternMaxWords       = 24
 	fingerprintVersion    = "v1"
 	customFingerprintKind = "custom"
+	groupedKind           = "grouped"
+	maxGroupKeyBytes      = 300
 	pythonTracebackHeader = "Traceback (most recent call last):"
 )
 
@@ -92,6 +95,11 @@ type logSearchPage struct {
 
 // ErrorGroups reads the logs matching query between since and until, oldest first, and groups them by Fingerprint.
 func (c *Client) ErrorGroups(ctx context.Context, query string, since, until time.Time, maxEvents, maxSamples int) (*ErrorGroupsResult, error) {
+	return c.ErrorGroupsBy(ctx, query, since, until, maxEvents, maxSamples, nil)
+}
+
+// ErrorGroupsBy is ErrorGroups where groupBy, when set, groups every event whose message it matches by the text of its capture groups, whatever the service; such a group's Service lists every service seen.
+func (c *Client) ErrorGroupsBy(ctx context.Context, query string, since, until time.Time, maxEvents, maxSamples int, groupBy *regexp.Regexp) (*ErrorGroupsResult, error) {
 	if c == nil {
 		return nil, errors.New("no Datadog client configured")
 	}
@@ -126,22 +134,22 @@ func (c *Client) ErrorGroups(ctx context.Context, query string, since, until tim
 		var page LogSearchResponse
 		if err := c.post(ctx, "/api/v2/logs/events/search", req, &page); err != nil {
 			var syntaxErr *json.SyntaxError
-			if !errors.As(err, &syntaxErr) {
+			if !errors.As(err, &syntaxErr) && !errors.Is(err, io.ErrUnexpectedEOF) {
 				return nil, fmt.Errorf("searching error logs: %w", err)
 			}
-			// A page over maxResponseBody arrives cut short; retry the same cursor with fewer events.
+			// A page cut short, over maxResponseBody or by the connection, is retried at the same cursor with fewer events.
 			if req.Page.Limit > minErrorLogsPageLimit {
 				pageLimit = max(req.Page.Limit/2, minErrorLogsPageLimit)
 				continue
 			}
-			return nil, fmt.Errorf("searching error logs: decoding a page of %d events: %w", req.Page.Limit, syntaxErr)
+			return nil, fmt.Errorf("searching error logs: reading a page of %d events: %w", req.Page.Limit, err)
 		}
 		if page.Meta.Status == "timeout" || len(page.Meta.Warnings) > 0 {
 			res.Partial = true
 		}
 		consumed := page.Data[:min(len(page.Data), maxEvents-res.Scanned)]
 		for _, entry := range consumed {
-			if at := addErrorLog(groups, entry, maxSamples); at.After(lastConsumed) {
+			if at := addErrorLog(groups, entry, maxSamples, groupBy); at.After(lastConsumed) {
 				lastConsumed = at
 			}
 		}
@@ -190,12 +198,17 @@ type groupBuilder struct {
 	first      ErrorSample
 	recent     []ErrorSample
 	keepRecent int
+	services   []string
 }
 
-func addErrorLog(groups map[string]*groupBuilder, entry LogEntry, maxSamples int) time.Time {
+func addErrorLog(groups map[string]*groupBuilder, entry LogEntry, maxSamples int, groupBy *regexp.Regexp) time.Time {
 	at, _ := time.Parse(time.RFC3339Nano, entry.Attributes.Timestamp)
 	e := parseErrorLog(entry.Attributes)
 	fp := e.fingerprint()
+	if key := groupKey(groupBy, entry.Attributes.Message); key != "" {
+		e.kind, e.pattern, e.frame = "", key, ""
+		fp = Fingerprint("", groupedKind, key, "")
+	}
 	g := groups[fp]
 	if g == nil {
 		g = &groupBuilder{
@@ -203,6 +216,9 @@ func addErrorLog(groups map[string]*groupBuilder, entry LogEntry, maxSamples int
 			keepRecent: maxSamples - 1,
 		}
 		groups[fp] = g
+	}
+	if e.service != "" && !slices.Contains(g.services, e.service) {
+		g.services = append(g.services, e.service)
 	}
 	g.add(at, ErrorSample{
 		ID:        entry.ID,
@@ -212,6 +228,30 @@ func addErrorLog(groups map[string]*groupBuilder, entry LogEntry, maxSamples int
 		Stack:     text.TruncateStart(e.stack, sampleStackMaxBytes),
 	})
 	return at
+}
+
+func groupKey(re *regexp.Regexp, message string) string {
+	if re == nil {
+		return ""
+	}
+	m := re.FindStringSubmatch(message)
+	if m == nil {
+		return ""
+	}
+	if len(m) == 1 {
+		return oneLineKey(m[0])
+	}
+	var parts []string
+	for _, s := range m[1:] {
+		if s = strings.TrimSpace(s); s != "" {
+			parts = append(parts, s)
+		}
+	}
+	return oneLineKey(strings.Join(parts, " "))
+}
+
+func oneLineKey(s string) string {
+	return text.Truncate(strings.Join(strings.Fields(redact.Text(s)), " "), maxGroupKeyBytes)
 }
 
 func (g *groupBuilder) add(at time.Time, sample ErrorSample) {
@@ -238,6 +278,9 @@ func (g *groupBuilder) add(at time.Time, sample ErrorSample) {
 func (g *groupBuilder) build() ErrorGroup {
 	out := g.group
 	out.Samples = append([]ErrorSample{g.first}, g.recent...)
+	if len(g.services) > 0 {
+		out.Service = strings.Join(g.services, ", ")
+	}
 	return out
 }
 
