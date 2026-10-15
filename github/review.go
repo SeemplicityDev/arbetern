@@ -41,6 +41,7 @@ type DiscussionItem struct {
 	Body        string    `json:"body"`
 	URL         string    `json:"url,omitempty"`
 	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at,omitzero"` // conversation comments: CI reports are often edited in place
 }
 
 // Trusted reports whether the author owns the repository, is a member of its organization or a collaborator.
@@ -113,6 +114,7 @@ func (c *Client) PullRequestDiscussion(ctx context.Context, owner, repo string, 
 		}
 		for _, cm := range comments {
 			add(cm.GetID(), DiscussionComment, cm.GetUser(), cm.GetAuthorAssociation(), "", "", 0, 0, cm.GetBody(), cm.GetHTMLURL(), cm.GetCreatedAt())
+			items[len(items)-1].UpdatedAt = cm.GetUpdatedAt().Time
 		}
 		if resp == nil || resp.NextPage == 0 {
 			break

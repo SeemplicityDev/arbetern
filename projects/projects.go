@@ -119,11 +119,11 @@ const (
 	roundFailedCooldown = 30 * time.Minute
 	maxHandled          = 300
 	maxRoundItems       = 15
-	maxContextComments  = 3
+	maxContextComments  = 5
 	maxFailedChecks     = 3
 	checkLogChars       = 6000
 	feedbackBriefChars  = 1200
-	contextBriefChars   = 1500
+	contextBriefChars   = 4000
 	maxReplies          = 50
 	maxReplyChars       = 2000
 	maxQuestionChars    = 1000

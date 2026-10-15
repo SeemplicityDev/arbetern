@@ -3098,9 +3098,9 @@ func main() {
 		_ = json.NewEncoder(w).Encode(prs)
 	})
 
-	// API: unresolved Jira issues assigned to the integration's own account.
-	tickets := ttlcache.New(ticketsCacheTTL, func(context.Context) ([]atlassian.IssueSummary, error) {
-		return jiraClient.AssignedIssues(200)
+	// API: unresolved Jira issues assigned to or reported by the integration's own account.
+	tickets := ttlcache.New(ticketsCacheTTL, func(context.Context) ([]atlassian.OwnIssue, error) {
+		return jiraClient.OwnIssues(200)
 	})
 	jiraReady := func() bool { return jiraClient != nil && jiraClient.Ready() }
 	apiMux.HandleFunc("/api/tickets", func(w http.ResponseWriter, r *http.Request) {
@@ -3114,7 +3114,7 @@ func main() {
 			return
 		}
 		if issues == nil {
-			issues = []atlassian.IssueSummary{}
+			issues = []atlassian.OwnIssue{}
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(issues)

@@ -179,7 +179,7 @@ func roundChecks(rd *Round) string {
 			b.WriteString("\n- " + oneLine(a, 600))
 		}
 		if l := strings.TrimSpace(c.Log); l != "" {
-			b.WriteString("\n\nEnd of the job log:\n\n```text\n" + fenceSafe(stripControl(l)) + "\n```")
+			b.WriteString("\n\nThe job log up to its first error:\n\n```text\n" + fenceSafe(stripControl(l)) + "\n```")
 		}
 	}
 	return b.String()
@@ -222,7 +222,7 @@ func roundContext(rd *Round) string {
 		return ""
 	}
 	var b strings.Builder
-	b.WriteString("## Other comments, for context\n\nThese bot comments need no reply. When one names a problem with this change, deal with it and mention it in your summary.")
+	b.WriteString("## Other comments, for context\n\nThese bot and CI comments need no reply. When one names a problem with this change, such as the report of a failing check, deal with it and mention it in your summary.")
 	for _, f := range rd.Context {
 		b.WriteString("\n\n### " + feedbackHeading(f) + "\n\n")
 		b.WriteString("```text\n" + fenceSafe(stripControl(text.Truncate(f.Body, contextBriefChars))) + "\n```")
@@ -242,6 +242,7 @@ func roundRules(p *Project, t *Task, rd *Round) string {
 	rules := []string{
 		"Start from the pull request branch, not the default branch: `git fetch origin " + branch + " && git checkout -B " + branch + " origin/" + branch + "`.",
 		"Fix what the failing checks and review comments ask for, within this pull request's scope. Keep each change minimal and in the repository's style.",
+		"For every failing check, find its cause in the job log or in the CI's report among the comments below, and fix the ones this change caused. Say in `summary` which checks failed, why, and what you changed for each.",
 		"Commit, then push to the pull request branch with `git push origin HEAD:" + branch + "`. Never force-push or rewrite its history: if the push is refused because the branch moved, run `git pull --rebase origin " + branch + "` and push again. If it is refused for another reason, report `cannot_fix` with what git answered. The gateway refuses pushes to any other branch than this one and names starting with `" + branch + "-`.",
 		"Call `report_outcome` exactly once: `fixed` when you pushed commits (with `branch`), `answered` when nothing needed changing, `cannot_fix` when what is left needs a person.",
 		"Put what you changed and why in `summary`; it is posted on the pull request.",

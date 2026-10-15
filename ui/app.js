@@ -139,6 +139,7 @@ let prFilter = 'all';
 let prQuery = '';
 let ticketsState = { list: null, error: null };
 let ticketFilter = 'all';
+let ticketRole = 'all';
 let ticketQuery = '';
 let projectsState = { list: null, error: null };
 let projectsEnabled = null;
@@ -1003,7 +1004,9 @@ function renderFleet() {
   if (ticketsState.list) {
     const issues = ticketsState.list;
     const urgent = issues.filter(i => /^(highest|high|critical|blocker)$/i.test(i.priority || '')).length;
-    const sub = issues.length ? (urgent ? `${urgent} high priority` : 'assigned to the agents') : 'none open';
+    const assigned = issues.filter(i => i.assigned).length;
+    const reported = issues.filter(i => i.reported).length;
+    const sub = issues.length ? (urgent ? `${urgent} high priority` : `${assigned} assigned · ${reported} reported`) : 'none open';
     rows.push(fleetRow('/ui/tickets', 'tickets', 'Tickets', sub, fmtInt(issues.length), urgent ? 'warn' : issues.length ? '' : 'off'));
   } else if (!ticketsState.error) {
     rows.push(fleetRow('/ui/tickets', 'tickets', 'Tickets', 'loading', '—', 'off'));
@@ -1559,6 +1562,12 @@ document.getElementById('ticket-filter').addEventListener('click', e => {
   ticketFilter = b.dataset.project;
   renderTicketsPage();
 });
+document.getElementById('ticket-role').addEventListener('click', e => {
+  const b = e.target.closest('.pill');
+  if (!b) return;
+  ticketRole = b.dataset.role;
+  renderTicketsPage();
+});
 (() => {
   const input = document.getElementById('ticket-search');
   input.addEventListener('input', () => { ticketQuery = input.value.trim().toLowerCase(); renderTicketsPage(); });
@@ -1577,22 +1586,26 @@ function renderTicketsPage() {
   }
   const list = ticketsState.list;
   if (!list) return;
+  const mixed = list.some(t => t.assigned) && list.some(t => t.reported);
+  if (!mixed) ticketRole = 'all';
+  document.getElementById('ticket-role').innerHTML = mixed ? [['all', 'All tickets'], ['assigned', 'Assigned'], ['reported', 'Reported']].map(([id, label]) =>
+    `<button class="pill${ticketRole === id ? ' active' : ''}" data-role="${id}">${label}</button>`).join('') : '';
   valuePills(document.getElementById('ticket-filter'), list.map(t => t.project), ticketFilter, 'data-project', 'All projects');
   if (ticketFilter !== 'all' && !list.some(t => t.project === ticketFilter)) ticketFilter = 'all';
   const words = ticketQuery.split(/\s+/).filter(Boolean);
-  const rows = list.filter(t => ticketFilter === 'all' || t.project === ticketFilter).filter(t => {
+  const rows = list.filter(t => (ticketRole === 'all' || t[ticketRole]) && (ticketFilter === 'all' || t.project === ticketFilter)).filter(t => {
     if (!words.length) return true;
-    const hay = [t.key, t.summary, t.status, t.priority, t.issue_type, t.reporter, t.project, ...(t.labels || [])].join('\n').toLowerCase();
+    const hay = [t.key, t.summary, t.status, t.priority, t.issue_type, t.assignee, t.reporter, t.project, ...(t.labels || [])].join('\n').toLowerCase();
     return words.every(w => hay.includes(w));
   });
   note.hidden = !words.length;
   if (words.length) note.textContent = `${plural(rows.length, 'match')} for “${ticketQuery}”`;
   if (!rows.length) {
-    el.innerHTML = emptyHtml(words.length ? 'No ticket matches this filter.' : list.length ? 'No open tickets in this project.' : 'No open tickets are assigned to the agents right now.', true);
+    el.innerHTML = emptyHtml(words.length ? 'No ticket matches this filter.' : list.length ? 'No open tickets match this selection.' : 'No open tickets are assigned to or reported by the agents right now.', true);
     return;
   }
   el.innerHTML = `<table class="data-table"><thead><tr>
-      <th>Ticket</th><th>Type</th><th>Status</th><th>Priority</th><th>Reporter</th><th>Updated</th><th>Created</th><th></th>
+      <th>Ticket</th><th>Type</th><th>Status</th><th>Priority</th><th>Assignee</th><th>Reporter</th><th>Updated</th><th>Created</th><th></th>
     </tr></thead><tbody>${rows.map(t => {
       const url = escapeHtml(safeExternalUrl(t.browse) || '#');
       const labels = (t.labels || []).length ? ' · ' + t.labels.map(escapeHtml).join(', ') : '';
@@ -1602,6 +1615,7 @@ function renderTicketsPage() {
         <td>${escapeHtml(t.issue_type || '—')}</td>
         <td><span class="status-pill ${ticketStatusClass(t.status)}">${escapeHtml(t.status || 'unknown')}</span></td>
         <td>${t.priority ? escapeHtml(t.priority) : '<span class="muted">—</span>'}</td>
+        <td>${t.assignee ? escapeHtml(t.assignee) : '<span class="muted">—</span>'}</td>
         <td>${t.reporter ? escapeHtml(t.reporter) : '<span class="muted">—</span>'}</td>
         <td class="muted" title="${escapeHtml(new Date(t.updated).toLocaleString())}">${timeAgo(t.updated)}</td>
         <td class="muted" title="${t.created ? escapeHtml(new Date(t.created).toLocaleString()) : ''}">${t.created ? timeAgo(t.created) : '—'}</td>

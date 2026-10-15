@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"cmp"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,6 +13,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 )
@@ -1614,10 +1616,79 @@ func (c *Client) SearchIssuesJQL(jql string, maxResults int, extra ...string) ([
 	return allIssues, nil
 }
 
-// AssignedIssues returns the unresolved issues assigned to the account behind
-// the client's credentials, most recently updated first.
-func (c *Client) AssignedIssues(maxResults int) ([]IssueSummary, error) {
-	return c.SearchIssuesJQL("assignee = currentUser() AND statusCategory != Done ORDER BY updated DESC", maxResults)
+// OwnIssue is an unresolved issue the client's account is assigned to or reported, without its description or extra fields.
+type OwnIssue struct {
+	Key       string   `json:"key"`
+	Summary   string   `json:"summary"`
+	Status    string   `json:"status"`
+	Assignee  string   `json:"assignee,omitempty"`
+	Reporter  string   `json:"reporter,omitempty"`
+	Priority  string   `json:"priority,omitempty"`
+	IssueType string   `json:"issue_type"`
+	Project   string   `json:"project,omitempty"`
+	Labels    []string `json:"labels,omitempty"`
+	Team      string   `json:"team,omitempty"`
+	Sprint    string   `json:"sprint,omitempty"`
+	Created   string   `json:"created,omitempty"`
+	Updated   string   `json:"updated"`
+	Browse    string   `json:"browse"`
+	Assigned  bool     `json:"assigned"`
+	Reported  bool     `json:"reported"`
+}
+
+// OwnIssues returns the unresolved issues the client's account is assigned to or reported, most recently updated first.
+func (c *Client) OwnIssues(maxResults int) ([]OwnIssue, error) {
+	var assigned, reported []IssueSummary
+	var assignedErr, reportedErr error
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		assigned, assignedErr = c.SearchIssuesJQL("assignee = currentUser() AND statusCategory != Done ORDER BY updated DESC", maxResults)
+	})
+	wg.Go(func() {
+		reported, reportedErr = c.SearchIssuesJQL("reporter = currentUser() AND statusCategory != Done ORDER BY updated DESC", maxResults)
+	})
+	wg.Wait()
+	if err := errors.Join(assignedErr, reportedErr); err != nil {
+		return nil, err
+	}
+
+	var out []OwnIssue
+	at := map[string]int{}
+	for _, is := range slices.Concat(assigned, reported) {
+		if _, ok := at[is.Key]; ok {
+			continue
+		}
+		at[is.Key] = len(out)
+		out = append(out, OwnIssue{
+			Key:       is.Key,
+			Summary:   is.Summary,
+			Status:    is.Status,
+			Assignee:  is.Assignee,
+			Reporter:  is.Reporter,
+			Priority:  is.Priority,
+			IssueType: is.IssueType,
+			Project:   is.Project,
+			Labels:    is.Labels,
+			Team:      is.Team,
+			Sprint:    is.Sprint,
+			Created:   is.Created,
+			Updated:   is.Updated,
+			Browse:    is.Browse,
+		})
+	}
+	for _, is := range assigned {
+		out[at[is.Key]].Assigned = true
+	}
+	for _, is := range reported {
+		out[at[is.Key]].Reported = true
+	}
+	slices.SortStableFunc(out, func(a, b OwnIssue) int { return jiraTime(b.Updated).Compare(jiraTime(a.Updated)) })
+	return out[:min(len(out), maxResults)], nil
+}
+
+func jiraTime(s string) time.Time {
+	t, _ := time.Parse("2006-01-02T15:04:05.000-0700", s)
+	return t
 }
 
 // GetIssue fetches a single Jira issue by key with full details; extra names further fields, by id or name.

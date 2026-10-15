@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -65,8 +66,10 @@ func ciState(checks []github.Check) (string, []github.Check) {
 func feedbackID(kind string, id int64) string { return kind + ":" + strconv.FormatInt(id, 10) }
 
 func sortFeedback(items []github.DiscussionItem, self string, rv *ReviewState) (act, context []Feedback, last time.Time) {
+	var reports []Feedback
 	for _, it := range items {
-		if it.Body == "" || strings.EqualFold(it.Author, self) {
+		mine := strings.EqualFold(it.Author, self)
+		if it.Body == "" || mine && (it.Kind != github.DiscussionComment || ownComment(it.Body)) {
 			continue
 		}
 		f := Feedback{
@@ -79,6 +82,12 @@ func sortFeedback(items []github.DiscussionItem, self string, rv *ReviewState) (
 			Body:   it.Body,
 			URL:    it.URL,
 			At:     stamp(it.CreatedAt),
+		}
+		if mine {
+			// A CI that posts its reports with arbetern's own token: what a failing check found, never a comment to answer.
+			f.Bot, f.At = true, stamp(laterOf(it.CreatedAt, it.UpdatedAt))
+			reports = append(reports, f)
+			continue
 		}
 		actionable := it.Trusted() && !it.Bot
 		switch it.Kind {
@@ -95,15 +104,30 @@ func sortFeedback(items []github.DiscussionItem, self string, rv *ReviewState) (
 				last = it.CreatedAt
 			}
 		case !actionable && it.Bot:
+			f.At = stamp(laterOf(it.CreatedAt, it.UpdatedAt))
 			context = append(context, f)
 		}
 	}
 	slices.SortStableFunc(act, func(a, b Feedback) int { return parseTime(a.At).Compare(parseTime(b.At)) })
-	slices.SortStableFunc(context, func(a, b Feedback) int { return parseTime(b.At).Compare(parseTime(a.At)) })
+	newest := func(a, b Feedback) int { return parseTime(b.At).Compare(parseTime(a.At)) }
+	slices.SortStableFunc(reports, newest)
+	slices.SortStableFunc(context, newest)
+	context = append(reports, context...)
 	if len(context) > maxContextComments {
 		context = context[:maxContextComments]
 	}
 	return act, context, last
+}
+
+func laterOf(a, b time.Time) time.Time {
+	if b.After(a) {
+		return b
+	}
+	return a
+}
+
+func ownComment(body string) bool {
+	return strings.Contains(body, commentMarker) || strings.Contains(body, footerPrefix) || strings.HasPrefix(body, "> ")
 }
 
 func (r *Registry) observePR(ctx context.Context, p *Project, led *Ledger, t Task, owner, repo string, number int, pr *github.PRState, out *tickOutcome) (*Ledger, error) {
@@ -281,13 +305,28 @@ func (r *Registry) checkFailures(ctx context.Context, w prWatch) []CheckFailure 
 			}
 			if c.App == "github-actions" {
 				if logText, err := r.gh.JobLog(ctx, w.owner, w.repo, c.ID); err == nil {
-					cf.Log = text.TruncateStart(redact.Text(logText), checkLogChars)
+					cf.Log = failureExcerpt(redact.Text(logText), checkLogChars)
 				}
 			}
 		}
 		out = append(out, cf)
 	}
 	return out
+}
+
+var (
+	logStampRe = regexp.MustCompile(`(?m)^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?Z `)
+	ansiRe     = regexp.MustCompile("\x1b\\[[0-9;?]*[A-Za-z]")
+)
+
+func failureExcerpt(log string, max int) string {
+	log = ansiRe.ReplaceAllString(logStampRe.ReplaceAllString(log, ""), "")
+	if i := strings.Index(log, "##[error]"); i >= 0 {
+		if end := strings.IndexByte(log[i:], '\n'); end >= 0 {
+			log = log[:i+end]
+		}
+	}
+	return text.TruncateStart(log, max)
 }
 
 func annotationLine(a github.Annotation) string {
@@ -391,8 +430,13 @@ func (r *Registry) fireRound(ctx context.Context, p *Project, led *Ledger, taskI
 
 func shortSHA(sha string) string { return sha[:min(len(sha), 7)] }
 
+const (
+	commentMarker = "<!-- arbetern project comment -->"
+	footerPrefix  = "_Posted by the arbetern project "
+)
+
 func projectFooter(p *Project) string {
-	return "_Posted by the arbetern project \"" + cleanPRText(oneLine(p.Name, 80), 80) + "\"._"
+	return footerPrefix + "\"" + cleanPRText(oneLine(p.Name, 80), 80) + "\"._\n" + commentMarker
 }
 
 func doneComment(p *Project, rv *ReviewState, head string) string {

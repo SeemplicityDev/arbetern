@@ -313,7 +313,7 @@ func (g *gateway) landRound(ctx context.Context, rd *Round, owner, repo string, 
 func (g *gateway) postReplies(ctx context.Context, owner, repo string, number int, replies []plannedReply) int {
 	posted := 0
 	for _, rp := range replies {
-		body := cleanPRText(rp.body, maxReplyChars)
+		body := cleanPRText(rp.body, maxReplyChars) + "\n\n" + commentMarker
 		var err error
 		if strings.HasPrefix(rp.item.ID, github.DiscussionInline+":") && rp.item.Thread != 0 {
 			_, err = g.r.gh.ReplyToReviewComment(ctx, owner, repo, number, rp.item.Thread, body)
