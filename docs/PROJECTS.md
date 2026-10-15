@@ -259,7 +259,7 @@ deployment has projects enabled, and **New project** only to project admins.
 | `connectors` | no | Up to 10 ids of the console's MCP connectors whose tools the sessions may call, with the credentials stored on the connector. Only a connector open to every agent (no agent allowlist) can be named, and sessions stop getting one that is limited later. Unknown ids are refused. arbetern cannot tell which MCP tools only read, so name only connectors whose tools read |
 | `repo.owner` | yes | The GitHub user or organization, such as `acme` |
 | `repo.name` | one of the two | The repository, such as `repo` |
-| `repo.include` | one of the two | Without `repo.name`: up to 20 repository name patterns (`path.Match` globs such as `api-*`, matched case-insensitively against the owner's repositories that are not archived). Each work order's session picks the matching repository the problem lives in. See [Organization-scoped projects](#organization-scoped-projects) |
+| `repo.include` | one of the two | Without `repo.name`: up to 20 repository name patterns (`path.Match` globs such as `api-*`, matched case-insensitively against the owner's repositories that are not archived and that arbetern's token can push to). Each work order's session picks the matching repository the problem lives in. See [Organization-scoped projects](#organization-scoped-projects) |
 | `repo.base_branch` | no | With `repo.name`: where pull requests go. Empty means the repository's default branch, resolved when saved. Refused with `repo.include`: each task uses its repository's default branch |
 | `signal.type` | no | `datadog` (log error groups, the default) or `datadog_metrics` ([metric series](#metric-signals)) |
 | `signal.sites` | yes | `us`, `eu` or both. The deployment needs Datadog keys for each. A log signal on one site may name it in `signal.site` instead, which is how it is stored |
@@ -493,7 +493,8 @@ A project whose `repo` names an owner and `include` patterns instead of a
 repository fixes problems wherever they live among the owner's matching
 repositories, such as every `*-service` repository of an organization. The
 patterns are matched against the owner's repositories that are not archived or
-disabled, listed with arbetern's token and cached for ten minutes. Creating or
+disabled and that arbetern's token can push to, listed with that token and
+cached for ten minutes. Creating or
 editing such a project fails when no repository matches.
 
 - **Choosing the repository.** A first session starts in an empty working
@@ -505,16 +506,20 @@ editing such a project fails when no repository matches.
   which Claude Code did not load at start.
 - **One repository per work order.** The git proxy serves any matching
   repository for reads. The first push binds the task to that repository on the
-  stored ledger, and every replica's proxy then refuses a push to any other.
-  `report_outcome` with `fixed` must name the same repository in `repository`;
-  arbetern checks the branch there, files the ticket, and opens the pull
-  request in that repository against its default branch.
+  stored ledger, and every replica's proxy then refuses a push to any other,
+  unless the binding push never landed: when that repository holds no branch
+  of the task and no pull request is open, a push elsewhere moves the binding.
+  `report_outcome` with `fixed` names the repository in `repository`, which a
+  bound task may leave out; arbetern checks the branch there, files the ticket,
+  and opens the pull request in that repository against its default branch.
 - **Follow-up rounds** clone the task's repository at the pull request branch,
   and their pushes reach only that repository.
 - **Text.** The work order, the in-flight list and the channel lines name
   pull requests as `<repository>#<number>`.
 - **Narrowing the patterns** stops new work in the repositories they no longer
   match; a task already bound to one keeps its repository and pull request.
+  Changing `repo` on a project with unfinished tasks records the old repository
+  on them, so their sessions, rounds and pull requests stay where they are.
 - **One conventions block** (branch, title, ticket, description) applies in
   every repository; say in `instructions` how repositories differ, such as a
   repository with its own pull request template.
@@ -551,6 +556,7 @@ as a slug of up to 50 characters.
 | `assignee_id` | Jira account id of the assignee |
 | `labels` | Up to 10 labels |
 | `active_sprint` | `true` adds each issue to the active sprint of the project's first scrum board that has one, after its key is recorded on the task. A failed lookup, or no active sprint, is logged and the issue stays outside a sprint |
+| `done_on_merge` | `true` moves each issue through its transition to the status named Done once the pull request merges, unless it is already in a done status. A failure is logged and retried on later ticks for 14 days; other done steps, such as won't do, are never chosen |
 | `fields` | Further create fields, sent as given, such as `{"customfield_10001": {"value": "Team"}}` |
 | `site_fields` | Fields merged in for the series' or group's Datadog site, such as a region option: `{"us": {...}, "eu": {...}}`. A log group seen on both sites gets both: list values such as options are combined, and any other value is the first site's in `signal.sites` |
 | `session_fields` | Fields the session may set in its report, up to 10, for values it looks up itself, such as a customer option it reads on earlier tickets with `search_jira_issues` and its `fields` argument |
@@ -1107,14 +1113,14 @@ browser request.
 | arbetern exits at startup with `PROJECTS_ENABLED needs …` | The chart sets `PROJECTS_NAMESPACE`, `PROJECTS_JOB_TEMPLATE` and `PROJECTS_GATEWAY_URL`; outside the chart set them yourself, and set `ANTHROPIC_API_KEY` and `GITHUB_TOKEN` |
 | arbetern exits with `session Jobs need arbetern's service account token` | The pod runs without a mounted ServiceAccount token (`serviceAccount.automount: false`); sessions need it to create Jobs |
 | Last error `this deployment has no Datadog credentials for site <site>` | Give the deployment Datadog keys for that site |
-| Last error `scanning Datadog US: …`, `scanning Datadog EU: …`, `querying Datadog US metrics: …` or `syncing pull requests: …` | An outage or permission problem upstream. The tick skipped dispatching new work; the next one retries, and no failure is counted. With two sites, the site that answered still moves on |
+| Last error `scanning Datadog US: …`, `scanning Datadog EU: …`, `querying Datadog US metrics: …` or `syncing pull requests: …` | An outage or permission problem upstream. The tick skipped dispatching new work; the next one retries, and no failure is counted. A log signal on two sites still moves the site that answered on; a metric signal waits for both |
 | Last error `starting the session Job: create job …: 403 …` | The admission policy or RBAC refused the Job; the message names the rule. Check that the session image repository matches `sessions.image.repository` and that the Role exists in the session namespace |
 | Project **auto-paused** after three failed dispatches | Jobs could not be created three times in a row. Fix the cause, then **Resume** |
 | Job log `session: this session was not dispatched by an arbetern project (HTTP 403)` | No binding: the task had already finished, or the Job outlived its project |
 | Job log `session: the gateway did not admit this session (HTTP 000)` | The pod cannot reach the gateway: check the session egress policy, the gateway Service and port, and that the cluster domain is `cluster.local` |
 | Job log `session: the repository could not be cloned` | The git proxy refused: arbetern's token lacks access to the repository, or the project names the wrong repository |
 | A session's push answered `this work order already pushed to <owner>/<repo>` | An organization-scoped work order pushes to one repository: the first push bound it. The session should report that repository, or report `cannot_fix` |
-| A session's clone answered `<owner>/<repo> is not one of the repositories this project may change` | The repository does not match `repo.include`, is archived, or arbetern's token cannot see it |
+| A session's clone answered `<owner>/<repo> is not one of the repositories this project may change` | The repository does not match `repo.include`, is archived, or arbetern's token cannot push to it |
 | Last error `no session is dispatched: repo.include matches none of the repositories arbetern can see` | The patterns match nothing the token lists; fix `repo.include` or the token's repository access |
 | arbetern logs `refused a push: this session may push only <branch>…` | The session pushed to a branch that is not its own; the work order names the branch to use. The whole push is refused, including any of its own refs in it; its own branch pushed on its own goes through |
 | A session is told `Could not file the ticket in Jira` | Jira refused the issue for a reason that names no field, or was unreachable. The session retries; check the Atlassian connection and that its account may create issues in the conventions' project |

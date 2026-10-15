@@ -57,6 +57,7 @@ type Ticket struct {
 	SiteFields    map[string]map[string]any `json:"site_fields,omitempty"`    // merged into fields for the series' Datadog site
 	SessionFields []string                  `json:"session_fields,omitempty"` // fields the session may set in its report, such as an option it looked up
 	ActiveSprint  bool                      `json:"active_sprint,omitempty"`  // place each issue in the project's active sprint
+	DoneOnMerge   bool                      `json:"done_on_merge,omitempty"`  // move each issue to Done once its pull request merges
 }
 
 func (c *Conventions) normalize() error {
@@ -215,6 +216,7 @@ type TicketFiler interface {
 	FileTicket(ctx context.Context, req TicketRequest) (key, url string, err error)
 	CommentTicket(ctx context.Context, key, text string) error
 	AddToActiveSprint(ctx context.Context, project, key string) error
+	ResolveTicket(ctx context.Context, key string) error
 }
 
 // TicketRequest is one issue to file.
@@ -275,6 +277,23 @@ func (j jiraTickets) AddToActiveSprint(_ context.Context, project, key string) e
 		return fmt.Errorf("adding it to sprint %s: %w", sprint.Name, err)
 	}
 	return nil
+}
+
+func (j jiraTickets) ResolveTicket(_ context.Context, key string) error {
+	current, transitions, err := j.c.IssueTransitions(key)
+	switch {
+	case err != nil:
+		return err
+	case current == "done":
+		return nil
+	}
+	// Several workflow steps end in a done category, such as won't do or duplicate; only the one named Done fits a merged fix.
+	for _, t := range transitions {
+		if t.Category == "done" && strings.EqualFold(t.To, "done") {
+			return j.c.TransitionIssue(key, t.ID)
+		}
+	}
+	return fmt.Errorf("%s has no transition to Done", key)
 }
 
 func (j jiraTickets) CommentTicket(_ context.Context, key, text string) error {
@@ -375,6 +394,7 @@ func ticketFields(tc *Ticket, sites []string, session map[string]any) map[string
 			a, okA := prev.([]any)
 			b, okB := v.([]any)
 			if okA && okB {
+				a = slices.Clone(a)
 				for _, x := range b {
 					if !slices.ContainsFunc(a, func(y any) bool { return reflect.DeepEqual(x, y) }) {
 						a = append(a, x)

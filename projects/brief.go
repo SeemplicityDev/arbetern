@@ -434,10 +434,10 @@ func briefRepository(p *Project, t *Task, repos []github.OrgRepository) string {
 	}
 	return "## Repository\n\n" +
 		"This project fixes problems in whichever of these repositories of `" + p.Repo.Owner + "` holds the cause: " + list + ". " +
-		"Your working directory is empty. First find the repository that owns the code behind this " + subject(p) + "; the GitHub tools such as `search_code`, `get_file_content` and `list_directory` read any of them by name. " +
+		"Your working directory is empty. First find the repository that owns the code behind this " + subject(p) + " with arbetern's GitHub tools, such as `search_code_org`, `search_files` and `get_file_content`. " +
 		"Then clone it into the working directory and create your branch from its default branch:\n\n" +
 		"```sh\ngit clone --quiet --no-tags --filter=blob:none https://github.com/" + p.Repo.Owner + "/<repository>.git .\ngit checkout -b " + branch + "\n```\n\n" +
-		"Its CLAUDE.md files were not loaded when this session started, so read them before you edit. The gateway serves only the repositories above. " +
+		"Its CLAUDE.md files were not loaded when this session started, so read them before you edit. The gateway serves only the repositories above, and your first push binds this work order to one of them. " +
 		"Pass the repository's name as `repository` when you call `report_outcome` with status `fixed`."
 }
 

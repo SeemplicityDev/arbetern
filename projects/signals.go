@@ -68,12 +68,15 @@ const moreServices = "…"
 
 func joinServices(a, b string) string {
 	var services []string
+	cut := false
 	for _, s := range strings.Split(a+", "+b, ", ") {
-		if s = oneLine(s, maxServiceChars); s != "" && s != moreServices && !slices.Contains(services, s) {
+		s = oneLine(s, maxServiceChars)
+		cut = cut || s == moreServices
+		if s != "" && s != moreServices && !slices.Contains(services, s) {
 			services = append(services, s)
 		}
 	}
-	if joined := strings.Join(services, ", "); len(joined) <= maxServiceChars {
+	if joined := strings.Join(services, ", "); !cut && len(joined) <= maxServiceChars {
 		return joined
 	}
 	var kept []string

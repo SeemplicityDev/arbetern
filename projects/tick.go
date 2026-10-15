@@ -104,6 +104,7 @@ func (r *Registry) runTick(ctx context.Context, p *Project, trigger string) *tic
 		out.fail("syncing pull requests: %v", err)
 		healthy = false
 	}
+	led = r.closeMergedTickets(ctx, p, led)
 	if r.deps.Datadog == nil {
 		err = errors.New("nothing can be scanned: this deployment has no Datadog credentials")
 	} else if p.Signal.metric() {
@@ -265,6 +266,33 @@ func (r *Registry) syncPRs(ctx context.Context, p *Project, led *Ledger, limits 
 	return led, errors.Join(errs...)
 }
 
+func (r *Registry) closeMergedTickets(ctx context.Context, p *Project, led *Ledger) *Ledger {
+	tc := p.Conventions.Ticket
+	if tc == nil || !tc.DoneOnMerge || r.deps.Tickets == nil {
+		return led
+	}
+	now := time.Now().UTC()
+	for _, t := range led.mergedTickets(now, maxTicketCloses) {
+		cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		err := r.deps.Tickets.ResolveTicket(cctx, t.Ticket)
+		cancel()
+		if err != nil {
+			log.Printf("[projects] %s task %s: moving %s to Done: %v", p.ID, t.ID, t.Ticket, err)
+			continue
+		}
+		next, changed, err := r.mergeLedger(ctx, p.ID, led, func(l *Ledger) bool { return l.setTicketDone(t.ID, now) })
+		if err != nil {
+			log.Printf("[projects] %s task %s: recording that %s is done: %v", p.ID, t.ID, t.Ticket, err)
+			continue
+		}
+		led = next
+		if changed {
+			log.Printf("[projects] %s task %s: %s is done", p.ID, t.ID, t.Ticket)
+		}
+	}
+	return led
+}
+
 // A lapsed token authorization also answers 404, so a pull request is given up only after unreadablePRGrace.
 func (r *Registry) unreadablePR(ctx context.Context, p *Project, led *Ledger, t Task, number int) *Ledger {
 	now := time.Now().UTC()
@@ -348,7 +376,7 @@ func (r *Registry) scan(ctx context.Context, p *Project, led *Ledger, limits Lim
 		}
 		groupBy = re
 	}
-	var groups []Group
+	var groups, sightings []Group
 	seen := map[string]int{}
 	next := map[string]time.Time{}
 	var failed []error
@@ -378,6 +406,7 @@ func (r *Registry) scan(ctx context.Context, p *Project, led *Ledger, limits Lim
 		for _, g := range kept {
 			ng := groupFromDatadog(g)
 			ng.Site = site
+			sightings = append(sightings, ng)
 			if i, ok := seen[ng.Fingerprint]; ok {
 				groups[i] = mergeSiteGroups(groups[i], ng)
 				continue
@@ -404,7 +433,7 @@ func (r *Registry) scan(ctx context.Context, p *Project, led *Ledger, limits Lim
 	}
 	out.groups = len(groups)
 	from, signal := led.scanFrom(), p.Signal.key()
-	updated, _, err := r.mergeLedger(ctx, p.ID, led, func(l *Ledger) bool { return l.applyScan(from, signal, groups, next, limits, now) })
+	updated, _, err := r.mergeLedger(ctx, p.ID, led, func(l *Ledger) bool { return l.applyScan(from, signal, groups, sightings, next, limits, now) })
 	if err != nil {
 		return led, fmt.Errorf("recording the scan: %w", err)
 	}

@@ -591,18 +591,18 @@ func (a reportArgs) outcome(p *Project, base string, now time.Time) (o Outcome, 
 	return o, problem
 }
 
-func (g *gateway) boundRepo(ctx context.Context, s *session) string {
-	if !s.project.Repo.org() || s.task.Repo != "" {
-		return s.task.Repo
+func (g *gateway) boundRepo(ctx context.Context, s *session) (name, base string) {
+	if s.task.Repo != "" || !s.project.Repo.org() {
+		return s.task.Repo, s.task.BaseBranch
 	}
 	led, err := g.r.readLedger(ctx, s.project.ID)
 	if err != nil {
-		return ""
+		return "", ""
 	}
 	if t := led.task(s.task.ID); t != nil {
-		return t.Repo
+		return t.Repo, t.BaseBranch
 	}
-	return ""
+	return "", ""
 }
 
 func (g *gateway) reportRepo(ctx context.Context, s *session, named string) (Repo, string) {
@@ -613,6 +613,13 @@ func (g *gateway) reportRepo(ctx context.Context, s *session, named string) (Rep
 			return Repo{}, "repository " + strconvQuote(named) + " is not a repository of " + p.Repo.Owner + "."
 		}
 		named = name
+	}
+	// A task its first push bound keeps that repository even if the patterns changed since, so the report needs no name.
+	if bound, base := g.boundRepo(ctx, s); bound != "" {
+		if named != "" && !strings.EqualFold(named, bound) {
+			return Repo{}, "This work order pushed to " + p.Repo.Owner + "/" + bound + "; report that repository."
+		}
+		return Repo{Owner: p.Repo.Owner, Name: bound, BaseBranch: base}, ""
 	}
 	if !p.Repo.org() {
 		if named != "" && !strings.EqualFold(named, p.Repo.Name) {
@@ -662,9 +669,6 @@ func (g *gateway) reportOutcome(ctx context.Context, s *session, raw json.RawMes
 		var problem string
 		if repo, problem = g.reportRepo(ctx, s, a.Repository); problem != "" {
 			return problem, true, nil
-		}
-		if bound := g.boundRepo(ctx, s); bound != "" && !strings.EqualFold(bound, repo.Name) {
-			return "This work order pushed to " + repo.Owner + "/" + bound + "; report that repository.", true, nil
 		}
 	}
 	o, problem := a.outcome(s.project, repo.BaseBranch, now)

@@ -93,7 +93,7 @@ token=$(tr -d '[:space:]' <"$token_file")
 repo=${ARBETERN_REPO:-}
 owner=${ARBETERN_OWNER:-${repo%%/*}}
 [ -n "$owner" ] || { echo "session: neither ARBETERN_REPO nor ARBETERN_OWNER is set" >&2; exit 1; }
-[ -z "$repo" ] || : "${ARBETERN_BASE_BRANCH:?}"
+[ -z "$repo" ] || [ "${ARBETERN_CHECKOUT:-new}" = existing ] || : "${ARBETERN_BASE_BRANCH:?}"
 
 retries=0
 while :; do
@@ -129,7 +129,7 @@ else
 	git clone --quiet --no-tags --filter=blob:none --branch "$checkout" "$gateway/git/$repo.git" "$workspace" || fail "the repository could not be cloned"
 	cd "$workspace" || fail "the workspace is missing"
 	if [ "${ARBETERN_CHECKOUT:-new}" = existing ]; then
-		git fetch --quiet origin "$ARBETERN_BASE_BRANCH:refs/remotes/origin/$ARBETERN_BASE_BRANCH" || echo "session: the base branch could not be fetched" >&2
+		[ -z "${ARBETERN_BASE_BRANCH:-}" ] || git fetch --quiet origin "$ARBETERN_BASE_BRANCH:refs/remotes/origin/$ARBETERN_BASE_BRANCH" || echo "session: the base branch could not be fetched" >&2
 	else
 		git checkout --quiet -b "$ARBETERN_BRANCH" || fail "the branch could not be created"
 	fi

@@ -203,6 +203,10 @@ func (g *gateway) pushRepo(ctx context.Context, s *session, target Repo, bind bo
 	if err == nil && bind {
 		if t := led.task(taskID); t != nil && t.Repo == "" {
 			led, _, err = g.r.mergeLedger(ctx, s.project.ID, nil, func(l *Ledger) bool { return l.bindRepo(taskID, target) })
+		} else if t != nil && t.PR == nil && !strings.EqualFold(t.Repo, target.Name) && g.noBranchIn(ctx, s, t) {
+			// The push that bound it never landed there, so the work order may still choose another repository.
+			from := t.Repo
+			led, _, err = g.r.mergeLedger(ctx, s.project.ID, nil, func(l *Ledger) bool { return l.rebindRepo(taskID, from, target) })
 		}
 	}
 	if err != nil {
@@ -212,12 +216,26 @@ func (g *gateway) pushRepo(ctx context.Context, s *session, target Repo, bind bo
 	switch t := led.task(taskID); {
 	case t == nil:
 		return http.StatusForbidden, errors.New("this work order is no longer in the ledger")
-	case t.Repo == "" && !bind:
+	case t.Repo == "" && (bind || isTerminal(t.Status)):
+		return http.StatusForbidden, errors.New("this work order has finished, so nothing more can be pushed")
+	case t.Repo == "":
 		return 0, nil
 	case !strings.EqualFold(t.Repo, target.Name):
 		return http.StatusForbidden, fmt.Errorf("this work order already pushed to %s/%s; push only there", target.Owner, t.Repo)
 	}
 	return 0, nil
+}
+
+func (g *gateway) noBranchIn(ctx context.Context, s *session, t *Task) bool {
+	if g.r.gh == nil {
+		return false
+	}
+	branch := t.Branch
+	if branch == "" {
+		branch = taskBranch(s.project, t)
+	}
+	exists, err := g.r.gh.BranchExists(ctx, s.project.Repo.Owner, t.Repo, branch)
+	return err == nil && !exists
 }
 
 func (g *gateway) gitTarget(ctx context.Context, s *session, owner, name string) (Repo, int, error) {
@@ -228,11 +246,11 @@ func (g *gateway) gitTarget(ctx context.Context, s *session, owner, name string)
 	if !strings.EqualFold(owner, repo.Owner) {
 		return Repo{}, http.StatusForbidden, fmt.Errorf("this session may only reach repositories of %s", repo.Owner)
 	}
-	if repo.Name != "" {
-		if !strings.EqualFold(name, repo.Name) {
-			return Repo{}, http.StatusForbidden, fmt.Errorf("this session may only reach %s/%s", repo.Owner, repo.Name)
-		}
+	if repo.Name != "" && strings.EqualFold(name, repo.Name) {
 		return repo, 0, nil
+	}
+	if !s.project.Repo.org() {
+		return Repo{}, http.StatusForbidden, fmt.Errorf("this session may only reach %s/%s", repo.Owner, repo.Name)
 	}
 	found, ok, err := g.r.scopeRepo(ctx, s.project.Repo, name)
 	switch {

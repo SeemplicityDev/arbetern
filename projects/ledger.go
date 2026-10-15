@@ -103,6 +103,7 @@ type Task struct {
 	BaseBranch     string       `json:"base_branch,omitempty"` // that repository's base branch
 	Ticket         string       `json:"ticket,omitempty"`      // issue key filed with the pull request
 	TicketURL      string       `json:"ticket_url,omitempty"`
+	TicketDone     string       `json:"ticket_done,omitempty"` // when the issue was found or moved to Done after the merge
 	PR             *PR          `json:"pr,omitempty"`
 	Outcome        *Outcome     `json:"outcome,omitempty"`
 	ExitReason     string       `json:"exit_reason,omitempty"` // how the session process ended
@@ -535,12 +536,54 @@ func (l *Ledger) clearOpening(id, guard string) bool {
 	return true
 }
 
+func (l *Ledger) mergedTickets(now time.Time, n int) []Task {
+	var out []Task
+	for _, t := range l.Tasks {
+		if len(out) == n {
+			break
+		}
+		if t.Status == StatusMerged && t.Ticket != "" && t.TicketDone == "" && t.PR != nil && now.Sub(parseTime(t.PR.MergedAt)) < ticketDoneWindow {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+func (l *Ledger) setTicketDone(id string, now time.Time) bool {
+	t := l.task(id)
+	if t == nil || t.TicketDone != "" {
+		return false
+	}
+	t.TicketDone = stamp(now)
+	return true
+}
+
 func (l *Ledger) bindRepo(id string, repo Repo) bool {
 	t := l.task(id)
 	if t == nil || t.Repo != "" || repo.Name == "" || isTerminal(t.Status) {
 		return false
 	}
 	t.Repo, t.BaseBranch = repo.Name, repo.BaseBranch
+	return true
+}
+
+func (l *Ledger) pinRepo(old Repo) bool {
+	changed := false
+	for i := range l.Tasks {
+		if t := &l.Tasks[i]; t.Repo == "" && !isTerminal(t.Status) {
+			t.Repo, t.BaseBranch = old.Name, old.BaseBranch
+			changed = true
+		}
+	}
+	return changed
+}
+
+func (l *Ledger) rebindRepo(id, from string, to Repo) bool {
+	t := l.task(id)
+	if t == nil || t.PR != nil || isTerminal(t.Status) || !strings.EqualFold(t.Repo, from) || to.Name == "" {
+		return false
+	}
+	t.Repo, t.BaseBranch = to.Name, to.BaseBranch
 	return true
 }
 
@@ -870,7 +913,7 @@ func (l *Ledger) scanFrom() string {
 }
 
 // applyScan is a no-op unless the stored cursors are still from, those the scan started at.
-func (l *Ledger) applyScan(from, signal string, groups []Group, next map[string]time.Time, limits Limits, now time.Time) bool {
+func (l *Ledger) applyScan(from, signal string, groups, sightings []Group, next map[string]time.Time, limits Limits, now time.Time) bool {
 	if l.scanFrom() != from || len(next) == 0 {
 		return false
 	}
@@ -893,8 +936,14 @@ func (l *Ledger) applyScan(from, signal string, groups []Group, next map[string]
 	}
 	grace := time.Duration(limits.RecurrenceGraceHours) * time.Hour
 	single := len(next) == 1
-	for _, g := range groups {
+	// Verdicts read each site's own sightings: merged across sites, one site's late events would date the other's.
+	if sightings == nil {
+		sightings = groups
+	}
+	for _, g := range sightings {
 		l.sight(g, grace, limits)
+	}
+	for _, g := range groups {
 		if t := l.openTask(g.Fingerprint); t != nil {
 			t.Group.Count += g.Count
 			t.Group.FirstSeen = earliest(t.Group.FirstSeen, g.FirstSeen)

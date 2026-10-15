@@ -1002,6 +1002,8 @@ func (c *Client) discoverExtraFields() (team, sprint string) {
 	c.extraFieldsTried = time.Now()
 	fields, err := c.fetchFields()
 	if err != nil {
+		// Stamped again after the attempt, so callers queued behind a slow failure reuse it instead of retrying in turn.
+		c.extraFieldsTried = time.Now()
 		return c.teamFieldID, c.sprintFieldID
 	}
 	for _, f := range fields {
@@ -1928,6 +1930,7 @@ func (c *Client) fieldCatalog() *fieldCatalog {
 	c.catalogTried = now
 	list, err := c.fetchFields()
 	if err != nil {
+		c.catalogTried = time.Now()
 		return c.catalog
 	}
 	cat := &fieldCatalog{ids: make(map[string]string, len(list)), byName: map[string][]string{}}
@@ -2437,6 +2440,94 @@ func (e commentEnvelope) toComment() Comment {
 // AddComment posts a comment on a Jira issue. The body is converted from
 // markdown-flavoured text to ADF using the same converter used by issue
 // descriptions. Returns the created comment.
+// IssueTransition is a workflow step an issue can take now; Category is its target status category: new, indeterminate or done.
+type IssueTransition struct {
+	ID       string
+	Name     string
+	To       string
+	Category string
+}
+
+// IssueTransitions returns the category of an issue's current status and the transitions it can take now.
+func (c *Client) IssueTransitions(issueKey string) (string, []IssueTransition, error) {
+	var issue struct {
+		Fields struct {
+			Status struct {
+				StatusCategory struct {
+					Key string `json:"key"`
+				} `json:"statusCategory"`
+			} `json:"status"`
+		} `json:"fields"`
+	}
+	if err := c.jiraJSON(http.MethodGet, "/rest/api/3/issue/"+url.PathEscape(issueKey)+"?fields=status", nil, &issue); err != nil {
+		return "", nil, err
+	}
+	var list struct {
+		Transitions []struct {
+			ID   string `json:"id"`
+			Name string `json:"name"`
+			To   struct {
+				Name           string `json:"name"`
+				StatusCategory struct {
+					Key string `json:"key"`
+				} `json:"statusCategory"`
+			} `json:"to"`
+		} `json:"transitions"`
+	}
+	if err := c.jiraJSON(http.MethodGet, "/rest/api/3/issue/"+url.PathEscape(issueKey)+"/transitions", nil, &list); err != nil {
+		return "", nil, err
+	}
+	out := make([]IssueTransition, 0, len(list.Transitions))
+	for _, t := range list.Transitions {
+		out = append(out, IssueTransition{ID: t.ID, Name: t.Name, To: t.To.Name, Category: t.To.StatusCategory.Key})
+	}
+	return issue.Fields.Status.StatusCategory.Key, out, nil
+}
+
+// TransitionIssue moves an issue through the transition with the given id.
+func (c *Client) TransitionIssue(issueKey, transitionID string) error {
+	body := map[string]any{"transition": map[string]string{"id": transitionID}}
+	return c.jiraJSON(http.MethodPost, "/rest/api/3/issue/"+url.PathEscape(issueKey)+"/transitions", body, nil)
+}
+
+func (c *Client) jiraJSON(method, path string, body, out any) error {
+	var reader io.Reader
+	if body != nil {
+		raw, err := json.Marshal(body)
+		if err != nil {
+			return fmt.Errorf("marshal payload: %w", err)
+		}
+		reader = bytes.NewReader(raw)
+	}
+	req, err := http.NewRequest(method, c.baseURL+path, reader)
+	if err != nil {
+		return fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set("Accept", "application/json")
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	if err := c.authRequest(req); err != nil {
+		return fmt.Errorf("auth request: %w", err)
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("send request: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
+	if err != nil {
+		return fmt.Errorf("read response: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("jira API error (HTTP %d): %s", resp.StatusCode, string(data))
+	}
+	if out == nil || len(data) == 0 {
+		return nil
+	}
+	return json.Unmarshal(data, out)
+}
+
 func (c *Client) AddComment(issueKey, body string) (*Comment, error) {
 	if strings.TrimSpace(issueKey) == "" {
 		return nil, fmt.Errorf("issue key is required")

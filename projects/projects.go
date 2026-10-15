@@ -92,6 +92,8 @@ const (
 	maxServiceChars    = 200
 	maxRepoPatterns    = 20
 	maxBriefRepos      = 60
+	maxTicketCloses    = 5
+	ticketDoneWindow   = 14 * 24 * time.Hour
 	sampleMessageChars = 1000
 	sampleStackChars   = 4096
 	maxBriefChars      = 40000

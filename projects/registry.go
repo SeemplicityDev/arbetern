@@ -646,6 +646,12 @@ func (r *Registry) update(ctx context.Context, id string, pt projectPatch) (*Pro
 		if err := r.resolveRepo(ctx, &draft.Repo); err != nil {
 			return nil, err
 		}
+		// Unfinished tasks of the old repository keep it, so their rounds and pull requests do not follow the new one.
+		if old := cur.Repo; !old.org() && old.String() != draft.Repo.String() {
+			if _, _, err := r.mergeLedger(ctx, id, nil, func(l *Ledger) bool { return l.pinRepo(old) }); err != nil {
+				return nil, fmt.Errorf("recording the old repository on open tasks: %w", err)
+			}
+		}
 	}
 	norm := pt.normalized(&draft)
 	now := time.Now()

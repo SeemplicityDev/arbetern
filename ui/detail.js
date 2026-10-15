@@ -1286,8 +1286,10 @@ function pjfSignalType(type) {
 }
 
 function pjfRepoShape(r) {
-  const include = (r.include || []).map(x => String(x).trim().toLowerCase()).filter(Boolean);
-  return { owner: r.owner || '', name: r.name || '', base_branch: r.base_branch || '', include: [...new Set(include)] };
+  const include = [...new Set((r.include || []).map(x => String(x).trim().toLowerCase()).filter(Boolean))];
+  const out = { owner: r.owner || '', name: r.name || '', base_branch: r.base_branch || '' };
+  if (include.length) out.include = include;
+  return out;
 }
 
 function pjfLogSites(sig) {
