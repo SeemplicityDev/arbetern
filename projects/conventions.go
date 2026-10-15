@@ -4,8 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"maps"
+	"reflect"
 	"regexp"
 	"slices"
 	"sort"
@@ -214,6 +214,7 @@ func prTitle(p *Project, t *Task, title string) string {
 type TicketFiler interface {
 	FileTicket(ctx context.Context, req TicketRequest) (key, url string, err error)
 	CommentTicket(ctx context.Context, key, text string) error
+	AddToActiveSprint(ctx context.Context, project, key string) error
 }
 
 // TicketRequest is one issue to file.
@@ -259,21 +260,21 @@ func (j jiraTickets) FileTicket(_ context.Context, req TicketRequest) (string, s
 	if err != nil {
 		return "", "", err
 	}
-	if req.ActiveSprint {
-		// The issue exists either way, so a sprint that cannot be set is logged rather than failing the report into a second issue.
-		sprint, err := j.c.GetActiveSprintForProject(req.Project)
-		switch {
-		case err != nil:
-			log.Printf("[projects] %s: finding the active sprint of %s: %v", issue.Key, req.Project, err)
-		case sprint == nil:
-			log.Printf("[projects] %s: %s has no active sprint", issue.Key, req.Project)
-		default:
-			if err := j.c.SetSprintField(issue.Key, sprint.ID); err != nil {
-				log.Printf("[projects] %s: adding it to sprint %s: %v", issue.Key, sprint.Name, err)
-			}
-		}
-	}
 	return issue.Key, issue.Browse, nil
+}
+
+func (j jiraTickets) AddToActiveSprint(_ context.Context, project, key string) error {
+	sprint, err := j.c.GetActiveSprintForProject(project)
+	if err != nil {
+		return fmt.Errorf("finding the active sprint of %s: %w", project, err)
+	}
+	if sprint == nil {
+		return fmt.Errorf("%s has no active sprint", project)
+	}
+	if err := j.c.SetSprintField(key, sprint.ID); err != nil {
+		return fmt.Errorf("adding it to sprint %s: %w", sprint.Name, err)
+	}
+	return nil
 }
 
 func (j jiraTickets) CommentTicket(_ context.Context, key, text string) error {
@@ -357,21 +358,42 @@ func fileTicket(ctx context.Context, filer TicketFiler, req TicketRequest) (key,
 }
 
 // ticketFields are the create fields of a task's issue: the project's, its site's, then the session's.
-func ticketFields(tc *Ticket, site string, session map[string]any) map[string]any {
+func ticketFields(tc *Ticket, sites []string, session map[string]any) map[string]any {
 	out := maps.Clone(tc.Fields)
 	if out == nil {
 		out = map[string]any{}
 	}
-	maps.Copy(out, tc.SiteFields[site])
+	// A group seen on two sites gets both sites' list values, such as both regions; a scalar keeps the first site's.
+	bySite := map[string]any{}
+	for _, site := range sites {
+		for k, v := range tc.SiteFields[site] {
+			prev, seen := bySite[k]
+			if !seen {
+				bySite[k] = v
+				continue
+			}
+			a, okA := prev.([]any)
+			b, okB := v.([]any)
+			if okA && okB {
+				for _, x := range b {
+					if !slices.ContainsFunc(a, func(y any) bool { return reflect.DeepEqual(x, y) }) {
+						a = append(a, x)
+					}
+				}
+				bySite[k] = a
+			}
+		}
+	}
+	maps.Copy(out, bySite)
 	maps.Copy(out, session)
 	return out
 }
 
-func taskSite(p *Project, g Group) string {
+func taskSites(p *Project, g Group) []string {
 	if g.Site != "" {
-		return g.Site
+		return []string{g.Site}
 	}
-	return p.Signal.Site
+	return p.Signal.sites()
 }
 
 // withTicket fills {ticket} and {ticket_url} in the session's text with the issue filed for the task.

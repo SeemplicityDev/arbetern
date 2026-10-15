@@ -234,18 +234,19 @@ func groupKey(re *regexp.Regexp, message string) string {
 	if re == nil {
 		return ""
 	}
-	m := re.FindStringSubmatch(message)
+	// A capture can cut a secret off from the label redaction needs, so the pattern sees the redacted message.
+	m := re.FindStringSubmatch(redact.Text(message))
 	if m == nil {
 		return ""
-	}
-	if len(m) == 1 {
-		return oneLineKey(m[0])
 	}
 	var parts []string
 	for _, s := range m[1:] {
 		if s = strings.TrimSpace(s); s != "" {
 			parts = append(parts, s)
 		}
+	}
+	if len(parts) == 0 {
+		return oneLineKey(m[0])
 	}
 	return oneLineKey(strings.Join(parts, " "))
 }

@@ -25,8 +25,8 @@ IAM policy.
 |---|---|
 | `workflows/<agent>/<id>.json` | Workflow descriptors including run history |
 | `dashboards/<agent>/<id>.json` | Dashboard descriptors including the latest data / markdown |
-| `projects/<id>.json` | [Project](PROJECTS.md) descriptors: goal, skills, repository, Datadog signal, session settings, limits, status and the latest statistics |
-| `project-state/<id>/ledger.json` | A project's work record: scan cursor, tasks with their sessions, pull requests and follow-up rounds, candidate error groups or metric series with redacted samples, per-error history, totals and daily counters. Changed only by conditional read-modify-write, one transition at a time |
+| `projects/<id>.json` | [Project](PROJECTS.md) descriptors: goal, skills, repository (or owner and repository patterns), Datadog signal, session settings, limits, status and the latest statistics |
+| `project-state/<id>/ledger.json` | A project's work record: scan cursors, tasks with their sessions, pull requests and follow-up rounds (an organization-scoped task also records the repository its first push bound it to), candidate error groups or metric series with redacted samples, per-error history, totals and daily counters. Changed only by conditional read-modify-write, one transition at a time |
 | `project-state/<id>/memory.json` | Project memory: notes from admins, sessions and pull request reviews that go into every work order |
 | `project-state/<id>/transcripts/<task>.jsonl` | The Claude Code transcript of a task's sessions, uploaded when each session ends and resumed by its follow-up rounds |
 | `project-sessions/<session>.json` | Binds one session Job to its project task or round and holds the SHA-256 of the session's token; the gateway admits a session only while this object exists and the token hashes to it. It also carries the Claude Code session id and the branch, so a pod that checks in before the tick recorded its session completes the dispatch itself. Created with `If-None-Match` before the Job, deleted by the tick once the work order finished and the pod reported its end or ten minutes passed |

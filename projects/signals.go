@@ -63,20 +63,34 @@ func mergeSiteGroups(a, b Group) Group {
 	return a
 }
 
+// moreServices ends a service list cut at maxServiceChars; merging skips it.
+const moreServices = "…"
+
 func joinServices(a, b string) string {
 	var services []string
 	for _, s := range strings.Split(a+", "+b, ", ") {
-		if s != "" && !slices.Contains(services, s) {
+		if s = oneLine(s, maxServiceChars); s != "" && s != moreServices && !slices.Contains(services, s) {
 			services = append(services, s)
 		}
 	}
-	return oneLine(strings.Join(services, ", "), 200)
+	if joined := strings.Join(services, ", "); len(joined) <= maxServiceChars {
+		return joined
+	}
+	var kept []string
+	size := len(moreServices)
+	for _, s := range services {
+		if size+len(s)+2 > maxServiceChars {
+			break
+		}
+		kept, size = append(kept, s), size+len(s)+2
+	}
+	return strings.Join(append(kept, moreServices), ", ")
 }
 
 func groupFromDatadog(g datadog.ErrorGroup) Group {
 	out := Group{
 		Fingerprint: g.Fingerprint,
-		Service:     oneLine(g.Service, 200),
+		Service:     joinServices(g.Service, ""),
 		Kind:        oneLine(redact.Text(g.Kind), 200),
 		Pattern:     oneLine(redact.Text(g.Pattern), 400),
 		Frame:       oneLine(redact.Text(g.Frame), 300),

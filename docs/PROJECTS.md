@@ -1,13 +1,15 @@
 # Projects
 
-A **project** gives arbetern a standing goal on one GitHub repository and
-pursues it indefinitely with Claude Code sessions that arbetern runs as
+A **project** gives arbetern a standing goal on one GitHub repository, or on
+the repositories of one GitHub organization that its patterns match
+([Organization-scoped projects](#organization-scoped-projects)), and pursues
+it indefinitely with Claude Code sessions that arbetern runs as
 sandboxed Jobs in its own cluster. Its signal comes from Datadog in one of two
 forms: the error log groups a log query finds, optionally narrowed by a regular
 expression, or the metric series that cross a threshold
 ([Metric signals](#metric-signals)). Each group or series gets one session,
-which clones the repository, fixes the problem, runs what it can offline and
-pushes a `claude/…` branch; arbetern opens the pull request with its own token
+which clones the repository the problem lives in, fixes it, runs what it can
+offline and pushes a `claude/…` branch; arbetern opens the pull request with its own token
 and then follows both the pull request and the problem to measure how well the
 fixes land. With [follow-through](#following-the-pull-request) on, arbetern
 keeps working the pull request: follow-up sessions resume the same Claude Code
@@ -16,7 +18,8 @@ reply saying what changed and why, and the pull request is marked ready once
 nothing is left.
 
 A project belongs to no agent. It is defined by its goal, its signal, the
-skills it is given and the repository it works on, and its sessions inherit
+skills it is given and the repository or repositories it works on, and its
+sessions inherit
 arbetern's context: the console skills the project names and those that apply
 to every agent, the project's memory, every integration arbetern is connected
 to, read-only, with arbetern's own credentials, and the MCP connectors the
@@ -85,7 +88,9 @@ Usage & Billing page under the source `project`.
   proxy adds it to clones and pushes, and arbetern opens and follows the pull
   requests with it, so it needs **Contents** and **Pull requests** read and
   write, **Checks** and **Commit statuses** read, and **Actions** read and write
-  on every project repository (see [GITHUB_PAT.md](GITHUB_PAT.md)). Project
+  on every project repository (see [GITHUB_PAT.md](GITHUB_PAT.md)). An
+  organization-scoped project also lists the organization's repositories, and
+  reaches only those the token can see. Project
   pull requests are authored by that token's account and carry the arbetern
   body marker, so they also appear on the console's **Pull requests** page
   with source `project`.
@@ -252,8 +257,10 @@ deployment has projects enabled, and **New project** only to project admins.
 | `instructions` | no | Repository-specific rules for the sessions, up to 8000 characters |
 | `skills` | no | Up to 20 ids of console skills whose instructions go into every work order, in that order, followed by every enabled skill that applies to all agents, as arbetern's agents get them. Unknown ids are refused; a skill that is disabled later stays on the project and contributes nothing until it is enabled again |
 | `connectors` | no | Up to 10 ids of the console's MCP connectors whose tools the sessions may call, with the credentials stored on the connector. Only a connector open to every agent (no agent allowlist) can be named, and sessions stop getting one that is limited later. Unknown ids are refused. arbetern cannot tell which MCP tools only read, so name only connectors whose tools read |
-| `repo.owner`, `repo.name` | yes | The GitHub repository, such as `acme` / `repo` |
-| `repo.base_branch` | no | Where pull requests go. Empty means the repository's default branch, resolved when saved |
+| `repo.owner` | yes | The GitHub user or organization, such as `acme` |
+| `repo.name` | one of the two | The repository, such as `repo` |
+| `repo.include` | one of the two | Without `repo.name`: up to 20 repository name patterns (`path.Match` globs such as `api-*`, matched case-insensitively against the owner's repositories that are not archived). Each work order's session picks the matching repository the problem lives in. See [Organization-scoped projects](#organization-scoped-projects) |
+| `repo.base_branch` | no | With `repo.name`: where pull requests go. Empty means the repository's default branch, resolved when saved. Refused with `repo.include`: each task uses its repository's default branch |
 | `signal.type` | no | `datadog` (log error groups, the default) or `datadog_metrics` ([metric series](#metric-signals)) |
 | `signal.sites` | yes | `us`, `eu` or both. The deployment needs Datadog keys for each. A log signal on one site may name it in `signal.site` instead, which is how it is stored |
 | `signal.query` | yes | Datadog log search query, up to 1000 characters, such as `service:example status:error`; for a metric signal, a grouped metric query |
@@ -480,6 +487,43 @@ acts on the answer. When a round is needed but the rounds are used up, arbetern
 posts what is left and stops following that pull request (*out of rounds*).
 arbetern never approves and never merges.
 
+## Organization-scoped projects
+
+A project whose `repo` names an owner and `include` patterns instead of a
+repository fixes problems wherever they live among the owner's matching
+repositories, such as every `*-service` repository of an organization. The
+patterns are matched against the owner's repositories that are not archived or
+disabled, listed with arbetern's token and cached for ten minutes. Creating or
+editing such a project fails when no repository matches.
+
+- **Choosing the repository.** A first session starts in an empty working
+  directory. Its work order lists the matching repositories and asks the
+  session to find the one that owns the code behind the problem (the GitHub
+  read tools reach all of them), clone it through the gateway into the working
+  directory with the command the work order gives, create its branch from that
+  repository's default branch, and read the repository's own CLAUDE.md files,
+  which Claude Code did not load at start.
+- **One repository per work order.** The git proxy serves any matching
+  repository for reads. The first push binds the task to that repository on the
+  stored ledger, and every replica's proxy then refuses a push to any other.
+  `report_outcome` with `fixed` must name the same repository in `repository`;
+  arbetern checks the branch there, files the ticket, and opens the pull
+  request in that repository against its default branch.
+- **Follow-up rounds** clone the task's repository at the pull request branch,
+  and their pushes reach only that repository.
+- **Text.** The work order, the in-flight list and the channel lines name
+  pull requests as `<repository>#<number>`.
+- **Narrowing the patterns** stops new work in the repositories they no longer
+  match; a task already bound to one keeps its repository and pull request.
+- **One conventions block** (branch, title, ticket, description) applies in
+  every repository; say in `instructions` how repositories differ, such as a
+  repository with its own pull request template.
+- **Deployment.** The session image must be built from the same arbetern
+  version: an older image requires a repository at start and fails these
+  sessions. Enable an organization-scoped project only once every replica runs
+  this version, because an older replica that rewrites the descriptor drops
+  `repo.include`.
+
 ## Repository conventions and tickets
 
 Many repositories ask more of a pull request than a branch and a description:
@@ -506,9 +550,9 @@ as a slug of up to 50 characters.
 | `issue_type` | `Task` by default |
 | `assignee_id` | Jira account id of the assignee |
 | `labels` | Up to 10 labels |
-| `active_sprint` | `true` adds each issue to the active sprint of the project's first scrum board that has one. A failed lookup, or no active sprint, is logged and the issue is kept outside a sprint |
+| `active_sprint` | `true` adds each issue to the active sprint of the project's first scrum board that has one, after its key is recorded on the task. A failed lookup, or no active sprint, is logged and the issue stays outside a sprint |
 | `fields` | Further create fields, sent as given, such as `{"customfield_10001": {"value": "Team"}}` |
-| `site_fields` | Fields merged in for the series' Datadog site, such as a region option: `{"us": {...}, "eu": {...}}` |
+| `site_fields` | Fields merged in for the series' or group's Datadog site, such as a region option: `{"us": {...}, "eu": {...}}`. A log group seen on both sites gets both: list values such as options are combined, and any other value is the first site's in `signal.sites` |
 | `session_fields` | Fields the session may set in its report, up to 10, for values it looks up itself, such as a customer option it reads on earlier tickets with `search_jira_issues` and its `fields` argument |
 
 When a session reports `fixed`, arbetern files the issue with the summary and
@@ -597,10 +641,12 @@ The entrypoint, `/opt/arbetern/bin/session`:
 
 1. checks in with `GET /v1/session` and stops when the gateway does not admit
    the session;
-2. points git at the gateway for this repository (`url.<gateway>/git/….insteadOf`
-   plus the session token as a header), sets the commit identity, and clones
-   the base branch (new work) or the pull request branch (a follow-up round)
-   with a blobless clone;
+2. points git at the gateway for the repository owner
+   (`url.<gateway>/git/<owner>/.insteadOf https://github.com/<owner>/` plus the
+   session token as a header), sets the commit identity, and clones the base
+   branch (new work) or the pull request branch (a follow-up round) with a
+   blobless clone; an organization-scoped first session starts in an empty
+   working directory instead and clones the repository it chooses itself;
 3. writes an MCP configuration naming the gateway's `/mcp` as the `arbetern`
    server, and for a round downloads the stored transcript (a download that
    keeps failing fails the round rather than starting the conversation over);
@@ -641,14 +687,14 @@ model streams, git transfers and transcripts may take up to 30 minutes.
 | `GET /v1/session/transcript` | Entrypoint | Returns the stored transcript for a round to resume |
 | `POST /mcp` | Claude Code | MCP over Streamable HTTP, stateless, JSON responses only |
 | `POST /anthropic/v1/messages`, `…/count_tokens`, `GET /anthropic/v1/models` | Claude Code | Proxied to the Anthropic API with arbetern's key in place of the session token. Usage from every response, streamed or not, is metered to the project. Closed once the work order has finished for ten minutes |
-| `GET /git/<owner>/<repo>/info/refs`, `POST …/git-upload-pack`, `POST …/git-receive-pack` | git | Smart HTTP proxied to GitHub with arbetern's token, for the project's repository only. A push may only create or move the session's own branch, the `claude/` branch of a first session or the pull request's branch in a round, and names starting with it and a dash; never delete, never tags, never the base branch |
+| `GET /git/<owner>/<repo>/info/refs`, `POST …/git-upload-pack`, `POST …/git-receive-pack` | git | Smart HTTP proxied to GitHub with arbetern's token, for the project's repository only, or for an [organization-scoped project](#organization-scoped-projects) any matching repository for reads and the one repository the task is bound to for pushes. A push may only create or move the session's own branch, the `claude/` branch of a first session or the pull request's branch in a round, and names starting with it and a dash; never delete, never tags, never that repository's base branch |
 
 ### MCP tools
 
 | Tool | Arguments | What it does |
 |---|---|---|
 | `get_task` | none | Returns the work order |
-| `report_outcome` | `status`: `fixed`, `not_reproducible`, `cannot_fix` or `already_fixed` (a follow-up round takes `fixed`, `answered` or `cannot_fix`); `summary` (required, up to 4000, or 12,000 when the conventions make it the whole description); `title` (up to 120) and `branch`, both required for `fixed` in a first session, `branch` for `fixed` in a round; `testing` (up to 2000); `question` (up to 1000, a decision for reviewers, with `fixed`); `headline` (up to 300, one line for the channel); `ticket` (`summary` up to 250, `description` up to 4000, and the `fields` the conventions let the session set), required for `fixed` when the project files tickets; in a round, `replies` (`id` and `body` up to 2000, one per comment), `rerun_checks`, and `description` (up to 12,000, the whole corrected pull request description, only with `description: session`) | For `fixed`, arbetern checks the title against the conventions' pattern, checks that the branch is the one the work order named or a name derived from it (the same rule the git proxy enforces), is not the base branch, exists on GitHub and has commits ahead of the base, files the ticket, places the convention branch, then reuses an open pull request from that branch or opens one, as a draft with `review.draft` or a `question`. A problem comes back as a tool error the session can act on, such as a branch that is not pushed yet. A `fixed` report is checked at most 10 times per work order; after that the session must report another status. Any other status records the outcome and starts the group's cooldown. In a round, see [Rounds](#rounds). Calling it again returns what was recorded |
+| `report_outcome` | `status`: `fixed`, `not_reproducible`, `cannot_fix` or `already_fixed` (a follow-up round takes `fixed`, `answered` or `cannot_fix`); `summary` (required, up to 4000, or 12,000 when the conventions make it the whole description); `title` (up to 120) and `branch`, both required for `fixed` in a first session, `branch` for `fixed` in a round; `repository`, required for `fixed` in an organization-scoped first session (the repository the branch was pushed to); `testing` (up to 2000); `question` (up to 1000, a decision for reviewers, with `fixed`); `headline` (up to 300, one line for the channel); `ticket` (`summary` up to 250, `description` up to 4000, and the `fields` the conventions let the session set), required for `fixed` when the project files tickets; in a round, `replies` (`id` and `body` up to 2000, one per comment), `rerun_checks`, and `description` (up to 12,000, the whole corrected pull request description, only with `description: session`) | For `fixed`, arbetern checks the title against the conventions' pattern, checks that the branch is the one the work order named or a name derived from it (the same rule the git proxy enforces), is not the base branch, exists on GitHub and has commits ahead of the base, files the ticket, places the convention branch, then reuses an open pull request from that branch or opens one, as a draft with `review.draft` or a `question`. A problem comes back as a tool error the session can act on, such as a branch that is not pushed yet. A `fixed` report is checked at most 10 times per work order; after that the session must report another status. Any other status records the outcome and starts the group's cooldown. In a round, see [Rounds](#rounds). Calling it again returns what was recorded |
 | `record_learning` | `note`, 1–500 characters | Saves a durable fact into project memory for later sessions, at most five per work order. The note is redacted first |
 | arbetern's integration tools | as on the Integrations page | The read-only tools of every integration the deployment is connected to: Datadog logs, aggregates, metrics, monitors and dashboards; GitHub files, search, commits, pull requests and workflow runs; Jira and Confluence reads; and the rest. arbetern runs them with its own credentials and returns the text. Nothing that writes, posts or uploads is offered, and neither are the raw S3 object reads nor `http_get`: a session fetches nothing from outside but through the gateway |
 | The project's MCP connectors | as the connector lists them | The tools of the enabled connectors the project names in `connectors` that are open to every agent, named `mcp_<connector>_<tool>` as arbetern's agents see them. arbetern calls them with the connector's stored credentials and logs each call |
@@ -805,13 +851,18 @@ that carries an `error.fingerprint` attribute is grouped by that value instead,
 which is how to merge or split groups the heuristic gets wrong.
 
 `signal.group_pattern` groups the logs of a query that the fingerprint splits
-too finely, such as one warning logged from many call sites and services. An
-event whose message the pattern matches is grouped by its capture groups,
-joined with spaces, redacted and cut to 300 bytes, and nothing else: the group
-has no kind or frame, its pattern is that text, and its service lists every
-service it was seen in. For example `^.*?(\w+Warning): ([^.]{1,100})` makes one
-group per warning class and message up to its first period. Events the pattern
-does not match are grouped as usual.
+too finely, such as one warning logged from many call sites and services. The
+pattern runs over the redacted message. An event it matches is grouped by the
+text of its capture groups, joined with spaces (or by the whole match when no
+capture took part), cut to 300 bytes, and nothing else: the group has no kind
+or frame, its pattern is that text, and its service lists the services it was
+seen in, up to 200 characters, ending in `…` when some are left out. For
+example `^.*?(\w+Warning): ([^.]{1,100})` makes one group per warning class
+and message up to its first period. Events the pattern does not match are
+grouped as usual. Changing the pattern gives the groups it covers new
+fingerprints: an unfinished task keeps the old one and stops being counted,
+and a merged fix under the old one is resolved after its window, so change it
+while none of those groups has a task open.
 
 ## Statistics
 
@@ -956,7 +1007,9 @@ browser request.
   In a follow-up round it moves the pull request branch only by fast-forward,
   onto a branch derived from it that contains its head, and posts comments only
   on that pull request.
-- **The git proxy** serves the project's repository only, and reads the ref
+- **The git proxy** serves the project's repository only (for an
+  organization-scoped project: the matching repositories for reads, and pushes
+  to the one repository the task's first push bound it to), and reads the ref
   updates of every push before forwarding it: a session may create or move
   only the `claude/` branch its work order named (in a follow-up round, the
   pull request's branch) and names starting with that branch and a dash.
@@ -1054,12 +1107,15 @@ browser request.
 | arbetern exits at startup with `PROJECTS_ENABLED needs …` | The chart sets `PROJECTS_NAMESPACE`, `PROJECTS_JOB_TEMPLATE` and `PROJECTS_GATEWAY_URL`; outside the chart set them yourself, and set `ANTHROPIC_API_KEY` and `GITHUB_TOKEN` |
 | arbetern exits with `session Jobs need arbetern's service account token` | The pod runs without a mounted ServiceAccount token (`serviceAccount.automount: false`); sessions need it to create Jobs |
 | Last error `this deployment has no Datadog credentials for site <site>` | Give the deployment Datadog keys for that site |
-| Last error `scanning Datadog: …` or `syncing pull requests: …` | An outage or permission problem upstream. The tick skipped dispatching; the next one retries, and no failure is counted |
+| Last error `scanning Datadog US: …`, `scanning Datadog EU: …`, `querying Datadog US metrics: …` or `syncing pull requests: …` | An outage or permission problem upstream. The tick skipped dispatching new work; the next one retries, and no failure is counted. With two sites, the site that answered still moves on |
 | Last error `starting the session Job: create job …: 403 …` | The admission policy or RBAC refused the Job; the message names the rule. Check that the session image repository matches `sessions.image.repository` and that the Role exists in the session namespace |
 | Project **auto-paused** after three failed dispatches | Jobs could not be created three times in a row. Fix the cause, then **Resume** |
 | Job log `session: this session was not dispatched by an arbetern project (HTTP 403)` | No binding: the task had already finished, or the Job outlived its project |
 | Job log `session: the gateway did not admit this session (HTTP 000)` | The pod cannot reach the gateway: check the session egress policy, the gateway Service and port, and that the cluster domain is `cluster.local` |
 | Job log `session: the repository could not be cloned` | The git proxy refused: arbetern's token lacks access to the repository, or the project names the wrong repository |
+| A session's push answered `this work order already pushed to <owner>/<repo>` | An organization-scoped work order pushes to one repository: the first push bound it. The session should report that repository, or report `cannot_fix` |
+| A session's clone answered `<owner>/<repo> is not one of the repositories this project may change` | The repository does not match `repo.include`, is archived, or arbetern's token cannot see it |
+| Last error `no session is dispatched: repo.include matches none of the repositories arbetern can see` | The patterns match nothing the token lists; fix `repo.include` or the token's repository access |
 | arbetern logs `refused a push: this session may push only <branch>…` | The session pushed to a branch that is not its own; the work order names the branch to use. The whole push is refused, including any of its own refs in it; its own branch pushed on its own goes through |
 | A session is told `Could not file the ticket in Jira` | Jira refused the issue for a reason that names no field, or was unreachable. The session retries; check the Atlassian connection and that its account may create issues in the conventions' project |
 | A session is told `This deployment has no Jira connection` | The project's conventions file tickets, and the Atlassian integration was removed after the project was saved. Configure it again, or remove `conventions.ticket` |
@@ -1089,7 +1145,9 @@ its conversation over.
 - **Billing.** Session inference goes to the Anthropic API with arbetern's key
   and is metered on arbetern's Usage & Billing page; it cannot go through
   Amazon Bedrock or an LLM gateway.
-- **Scope.** Datadog logs or metrics, one GitHub repository per project.
+- **Scope.** Datadog logs or metrics, one GitHub repository per project, or
+  one owner's matching repositories with one repository per work order; a
+  change that spans repositories is out of scope.
   Sessions start from the base branch; follow-up rounds check out the pull
   request branch.
 - **Offline sessions.** A session reaches nothing but the gateway, so a build

@@ -317,7 +317,7 @@ URL:
 | Agents | `/ui/agents` | The roster — open a card for its prompts (read-only), or chat where `chat_enabled` |
 | Chats | `/ui/chats` | Conversations of every chat-enabled agent: open, start, rename or delete them (same access rules as the chat itself) |
 | Skills | `/ui/skills` | Instruction blocks the agents follow: the built-in ones from the prompt files (read-only) plus custom skills written here and appended to the system prompts of the agents they target |
-| Projects | `/ui/projects` | Standing goals arbetern pursues on one repository each, with status, open, ready and merged PRs, merge rate and resolved problems; each opens at `/ui/project/<id>` with its statistics, 30-day chart, tasks with their follow-up rounds and session transcripts, backlog, project memory and editor. Shown only when projects are enabled, and only project admins can change one — see [docs/PROJECTS.md](docs/PROJECTS.md) |
+| Projects | `/ui/projects` | Standing goals arbetern pursues on one repository, or across an organization's repositories, with status, open, ready and merged PRs, merge rate and resolved problems; each opens at `/ui/project/<id>` with its statistics, 30-day chart, tasks with their follow-up rounds and session transcripts, backlog, project memory and editor. Shown only when projects are enabled, and only project admins can change one — see [docs/PROJECTS.md](docs/PROJECTS.md) |
 | Workflows | `/ui/workflows` | Every workflow across agents with schedule, status, last run, run / delete actions and GitOps sync state; each opens at `/ui/<agent>/workflow/<id>` with its flow diagram, prompt or tasks, run history and editor. "Run now" and "Sync now" both return immediately and report through the shared state the page polls, so neither holds a browser request open for the minutes they take |
 | Dashboards | `/ui/dashboards` | Every dashboard across agents (source dashboards, prompt templates, rendered reports) with sync state; each opens at `/ui/<agent>/dashboard/<id>` |
 | Pull requests | `/ui/pulls` | Open pull requests the agents authored, found by the marker every arbetern-written PR body carries: agent, requester, entry source (Slack / chat / workflow / project) and age, filterable by agent; ready-for-review PRs are listed first, drafts last with a draft label |
@@ -1083,11 +1083,12 @@ round-trip, no LLM call.
 
 ## Projects
 
-A **project** gives arbetern a standing goal on one GitHub repository, pursued
-by Claude Code sessions that arbetern itself runs as sandboxed, single-use Jobs
+A **project** gives arbetern a standing goal on one GitHub repository, or on an
+organization's repositories that its patterns match, pursued by Claude Code
+sessions that arbetern itself runs as sandboxed, single-use Jobs
 in its cluster. It follows the error log groups a Datadog query finds, or the
 Datadog metric series that cross a threshold, and for each one starts a session
-that clones the repository through arbetern's git proxy, fixes the problem on a
+that clones the repository the problem lives in through arbetern's git proxy, fixes the problem on a
 `claude/…` branch, runs what it can offline and pushes. The session reaches the
 model, GitHub and arbetern's integrations only through a gateway arbetern
 serves to its own sessions, with arbetern's credentials never leaving arbetern;

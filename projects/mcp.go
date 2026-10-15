@@ -58,6 +58,8 @@ var workOrderTools = []toolDef{
 			"summary": map[string]any{"type": "string", "maxLength": maxSessionSummary, "description": "What you found and, for fixed, what you changed and why; 4000 characters unless the work order makes it the whole pull request description. In a follow-up round it is posted on the pull request."},
 			"title":   map[string]any{"type": "string", "maxLength": 120, "description": "Pull request title; required for fixed in a first session."},
 			"branch":  map[string]any{"type": "string", "maxLength": 200, "description": "The branch you pushed, as the work order names it; required for fixed."},
+			"repository": map[string]any{"type": "string", "maxLength": 140,
+				"description": "The repository your branch is in, by name; required for fixed when the work order has you choose the repository."},
 			"testing": map[string]any{"type": "string", "maxLength": 2000, "description": "How you verified the change."},
 			"question": map[string]any{"type": "string", "maxLength": maxQuestionChars,
 				"description": "A decision only a person can make, with the options named so a one-line reply picks one. A first session's pull request opens as a draft and stays one until a reviewer answers in it."},
@@ -82,7 +84,7 @@ var workOrderTools = []toolDef{
 	},
 	{
 		Name:        "record_learning",
-		Description: fmt.Sprintf("Save one durable fact about this repository that future sessions on this project need. At most %d per work order.", maxLearnings),
+		Description: fmt.Sprintf("Save one durable fact about this project's code that future sessions need; name the repository it is about when the project spans several. At most %d per work order.", maxLearnings),
 		InputSchema: objectSchema(map[string]any{
 			"note": map[string]any{"type": "string", "minLength": 1, "maxLength": maxNoteChars},
 		}, "note"),

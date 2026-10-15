@@ -338,11 +338,17 @@ func (c *cluster) renderJob(raw []byte, name string, s clusterSession) (map[stri
 	if s.resume {
 		resume = "1"
 	}
+	// An organization-scoped session that has not chosen its repository yet gets none: it clones the one it fixes itself.
+	repo, fullName := s.project.repoFor(s.task), ""
+	if repo.Name != "" {
+		fullName = repo.Owner + "/" + repo.Name
+	}
 	setEnv(container, map[string]string{
 		"ARBETERN_GATEWAY_URL":    c.cfg.GatewayURL,
 		"ARBETERN_WORK_ORDER":     s.workOrder(),
-		"ARBETERN_REPO":           s.project.Repo.Owner + "/" + s.project.Repo.Name,
-		"ARBETERN_BASE_BRANCH":    s.project.Repo.BaseBranch,
+		"ARBETERN_OWNER":          repo.Owner,
+		"ARBETERN_REPO":           fullName,
+		"ARBETERN_BASE_BRANCH":    repo.BaseBranch,
 		"ARBETERN_BRANCH":         s.branch,
 		"ARBETERN_CHECKOUT":       checkout,
 		"ARBETERN_CLAUDE_SESSION": s.claudeSession,

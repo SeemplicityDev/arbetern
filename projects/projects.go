@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"path"
 	"regexp"
 	"slices"
 	"strconv"
@@ -14,6 +15,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/justmike1/arbetern/github"
 	"github.com/justmike1/arbetern/internal/store"
 	"github.com/justmike1/arbetern/llm"
 )
@@ -61,6 +63,7 @@ const (
 	persistTimeout     = 30 * time.Second
 	viewTimeout        = 10 * time.Second
 	viewCacheTTL       = 5 * time.Second
+	orgReposTTL        = 10 * time.Minute
 	maxStagger         = 60 * time.Second
 	dispatchLostAfter  = 15 * time.Minute
 	runningGrace       = 30 * time.Minute
@@ -86,6 +89,9 @@ const (
 	scanMaxEvents      = 5000
 	maxScanCatchUp     = 24 * time.Hour
 	scanMaxSamples     = 3
+	maxServiceChars    = 200
+	maxRepoPatterns    = 20
+	maxBriefRepos      = 60
 	sampleMessageChars = 1000
 	sampleStackChars   = 4096
 	maxBriefChars      = 40000
@@ -143,6 +149,7 @@ const (
 var (
 	ownerRe      = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$`)
 	repoNameRe   = regexp.MustCompile(`^[A-Za-z0-9._-]{1,100}$`)
+	repoGlobRe   = regexp.MustCompile(`^[A-Za-z0-9._*?\[\]-]{1,100}$`)
 	branchRe     = regexp.MustCompile(`^[A-Za-z0-9._/-]{1,200}$`)
 	sessionKeyRe = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
 	noteIDRe     = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,63}$`)
@@ -155,9 +162,10 @@ var (
 
 // Repo is the GitHub repository a project works on.
 type Repo struct {
-	Owner      string `json:"owner"`
-	Name       string `json:"name"`
-	BaseBranch string `json:"base_branch"`
+	Owner      string   `json:"owner"`
+	Name       string   `json:"name,omitempty"`        // empty with Include: the project spans the owner's repositories
+	BaseBranch string   `json:"base_branch,omitempty"` // one repository; an organization-scoped task uses its repository's default branch
+	Include    []string `json:"include,omitempty"`     // organization scope: path.Match patterns of repository names, such as "*-engine"
 }
 
 // Signal is where a project finds the problems it fixes: Datadog log error groups, or Datadog metric series that cross a threshold.
@@ -391,6 +399,30 @@ func (r *Repo) normalize() error {
 	if !ownerRe.MatchString(r.Owner) {
 		return invalidf("repo.owner %q is not a GitHub user or organization name", r.Owner)
 	}
+	var include []string
+	for _, p := range r.Include {
+		if p = strings.ToLower(strings.TrimSpace(p)); p != "" && !slices.Contains(include, p) {
+			include = append(include, p)
+		}
+	}
+	r.Include = include
+	if r.Name == "" && len(include) > 0 {
+		if r.BaseBranch != "" {
+			return invalidf("repo.base_branch names one repository's branch; an organization-scoped project uses each repository's default branch")
+		}
+		if len(include) > maxRepoPatterns {
+			return invalidf("repo.include has %d patterns; at most %d", len(include), maxRepoPatterns)
+		}
+		for _, p := range include {
+			if _, err := path.Match(p, ""); err != nil || !repoGlobRe.MatchString(p) {
+				return invalidf("repo.include %q is not a repository name pattern", p)
+			}
+		}
+		return nil
+	}
+	if len(include) > 0 {
+		return invalidf("repo.include applies only to an organization-scoped project; leave repo.name empty to use it")
+	}
 	if !repoNameRe.MatchString(r.Name) || r.Name == "." || r.Name == ".." {
 		return invalidf("repo.name %q is not a GitHub repository name", r.Name)
 	}
@@ -398,6 +430,39 @@ func (r *Repo) normalize() error {
 		return invalidf("repo.base_branch %q is not a valid branch name", r.BaseBranch)
 	}
 	return nil
+}
+
+func (r Repo) org() bool { return r.Name == "" }
+
+func (r Repo) String() string {
+	if r.org() {
+		return r.Owner + "/{" + strings.Join(r.Include, ",") + "}"
+	}
+	return r.Owner + "/" + r.Name
+}
+
+func (r Repo) includes(name string) bool {
+	name = strings.ToLower(name)
+	return slices.ContainsFunc(r.Include, func(p string) bool {
+		ok, _ := path.Match(p, name)
+		return ok
+	})
+}
+
+func (p *Project) repoFor(t *Task) Repo {
+	if t != nil && t.Repo != "" {
+		return Repo{Owner: p.Repo.Owner, Name: t.Repo, BaseBranch: t.BaseBranch}
+	}
+	if !p.Repo.org() {
+		return p.Repo
+	}
+	r := Repo{Owner: p.Repo.Owner}
+	if t != nil && t.PR != nil {
+		if _, name, _, err := github.ParsePRURL(t.PR.URL); err == nil {
+			r.Name = name
+		}
+	}
+	return r
 }
 
 func (s *Signal) normalize() error {

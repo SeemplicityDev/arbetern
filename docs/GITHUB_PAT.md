@@ -22,7 +22,7 @@ Fine-grained tokens let you grant only the permissions arbetern needs, scoped to
 3. Set a descriptive name, e.g. `arbetern-bot`
 4. Choose an expiration (90 days recommended; set a reminder to rotate)
 5. Under **Resource owner**, select the user or organization that owns the target repositories
-6. Under **Repository access**, choose **All repositories** or select specific repositories arbetern should operate on
+6. Under **Repository access**, choose **All repositories** or select specific repositories arbetern should operate on. An organization-scoped project reaches only the repositories selected here, whatever its patterns match
 
 ### Step 2: Configure Permissions
 

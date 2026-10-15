@@ -1389,7 +1389,8 @@ function projRowHtml(p) {
   const s = p.stats || {};
   const r = p.repo || {};
   const url = detailPath('project', '', pid);
-  const sub = [r.owner && r.name ? `${r.owner}/${r.name}` : '', p.description || ''].filter(Boolean).join(' · ');
+  const scope = r.owner ? (r.name ? `${r.owner}/${r.name}` : `${r.owner}/{${(r.include || []).join(', ')}}`) : '';
+  const sub = [scope, p.description || ''].filter(Boolean).join(' · ');
   return `<tr>
       <td><a href="${url}" data-link>${escapeHtml(p.name || p.id)}</a>
         <span class="sub" title="${escapeHtml(sub)}">${escapeHtml(sub)}</span></td>
@@ -1423,7 +1424,7 @@ function renderProjectsPage() {
   const rows = list.filter(p => {
     if (!words.length) return true;
     const r = p.repo || {};
-    const hay = [p.name, p.id, p.description, `${r.owner}/${r.name}`, (p.signal || {}).query].join('\n').toLowerCase();
+    const hay = [p.name, p.id, p.description, `${r.owner}/${r.name || ''}`, (r.include || []).join(' '), (p.signal || {}).query].join('\n').toLowerCase();
     return words.every(w => hay.includes(w));
   }).sort((a, b) => (a.name || '').localeCompare(b.name || ''));
   note.hidden = !words.length;

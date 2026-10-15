@@ -193,11 +193,12 @@ func (r *Registry) lostDispatch(t *Task, now time.Time) bool {
 	return false
 }
 
-func prCoordinates(p *Project, pr *PR) (owner, repo string, number int) {
-	if o, n, num, err := github.ParsePRURL(pr.URL); err == nil {
+func prCoordinates(p *Project, t *Task) (owner, repo string, number int) {
+	if o, n, num, err := github.ParsePRURL(t.PR.URL); err == nil {
 		return o, n, num
 	}
-	return p.Repo.Owner, p.Repo.Name, pr.Number
+	r := p.repoFor(t)
+	return r.Owner, r.Name, t.PR.Number
 }
 
 func (r *Registry) syncPRs(ctx context.Context, p *Project, led *Ledger, limits Limits, out *tickOutcome) (*Ledger, error) {
@@ -210,7 +211,10 @@ func (r *Registry) syncPRs(ctx context.Context, p *Project, led *Ledger, limits 
 	}
 	var errs []error
 	for _, t := range open {
-		owner, repo, number := prCoordinates(p, t.PR)
+		owner, repo, number := prCoordinates(p, &t)
+		if repo == "" {
+			continue
+		}
 		st, err := r.gh.PullRequestState(ctx, owner, repo, number)
 		if github.IsNotFound(err) {
 			led = r.unreadablePR(ctx, p, led, t, number)
@@ -421,6 +425,12 @@ func (r *Registry) dispatch(ctx context.Context, p *Project, limits Limits, out 
 	}
 	if !newWork || out.dispatchFailed {
 		return
+	}
+	if p.Repo.org() {
+		if repos, err := r.scopeRepos(ctx, p.Repo); err != nil || len(repos) == 0 {
+			out.fail("no session is dispatched: %v", cmp.Or(err, errors.New("repo.include matches none of the repositories arbetern can see")))
+			return
+		}
 	}
 	led, signal := out.ledger, p.Signal.key()
 	for {

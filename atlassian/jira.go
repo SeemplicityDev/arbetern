@@ -991,43 +991,49 @@ func (c *Client) fetchFields() ([]jiraField, error) {
 	return fields, nil
 }
 
-// discoverExtraFields lazily discovers custom field IDs for Team and Sprint.
-// Called once; results are cached on the Client.
-func (c *Client) discoverExtraFields() {
-	c.extraFieldsOnce.Do(func() {
-		fields, err := c.fetchFields()
-		if err != nil {
-			return
-		}
-		for _, f := range fields {
-			nameL := strings.ToLower(f.Name)
-			if f.Schema != nil {
-				customL := strings.ToLower(f.Schema.Custom)
-				// Team field
-				if c.teamFieldID == "" && (nameL == "team" || strings.Contains(customL, "teams")) {
-					c.teamFieldID = f.ID
-				}
-				// Sprint field
-				if c.sprintFieldID == "" && nameL == "sprint" {
-					c.sprintFieldID = f.ID
-				}
+// discoverExtraFields returns the custom field IDs for Team and Sprint, found on first use.
+// A failed discovery is retried after fieldCatalogRetry, so one bad answer does not hide the fields for the process's life.
+func (c *Client) discoverExtraFields() (team, sprint string) {
+	c.fieldsMu.Lock()
+	defer c.fieldsMu.Unlock()
+	if c.extraFieldsFound || time.Since(c.extraFieldsTried) < fieldCatalogRetry {
+		return c.teamFieldID, c.sprintFieldID
+	}
+	c.extraFieldsTried = time.Now()
+	fields, err := c.fetchFields()
+	if err != nil {
+		return c.teamFieldID, c.sprintFieldID
+	}
+	for _, f := range fields {
+		nameL := strings.ToLower(f.Name)
+		if f.Schema != nil {
+			customL := strings.ToLower(f.Schema.Custom)
+			// Team field
+			if c.teamFieldID == "" && (nameL == "team" || strings.Contains(customL, "teams")) {
+				c.teamFieldID = f.ID
 			}
-			if c.teamFieldID != "" && c.sprintFieldID != "" {
-				break
+			// Sprint field
+			if c.sprintFieldID == "" && nameL == "sprint" {
+				c.sprintFieldID = f.ID
 			}
 		}
-	})
+		if c.teamFieldID != "" && c.sprintFieldID != "" {
+			break
+		}
+	}
+	c.extraFieldsFound = true
+	return c.teamFieldID, c.sprintFieldID
 }
 
 // extraFieldIDs returns the custom field IDs to append to search queries.
 func (c *Client) extraFieldIDs() []string {
-	c.discoverExtraFields()
+	team, sprint := c.discoverExtraFields()
 	var ids []string
-	if c.teamFieldID != "" {
-		ids = append(ids, c.teamFieldID)
+	if team != "" {
+		ids = append(ids, team)
 	}
-	if c.sprintFieldID != "" {
-		ids = append(ids, c.sprintFieldID)
+	if sprint != "" {
+		ids = append(ids, sprint)
 	}
 	return ids
 }
@@ -1071,13 +1077,14 @@ func (c *Client) extractCustomFields(rawFields json.RawMessage) (team, sprint st
 	if err := json.Unmarshal(rawFields, &allFields); err != nil {
 		return "", ""
 	}
-	if c.teamFieldID != "" {
-		if v, ok := allFields[c.teamFieldID]; ok {
+	teamID, sprintID := c.discoverExtraFields()
+	if teamID != "" {
+		if v, ok := allFields[teamID]; ok {
 			team = extractTeamName(v)
 		}
 	}
-	if c.sprintFieldID != "" {
-		if v, ok := allFields[c.sprintFieldID]; ok {
+	if sprintID != "" {
+		if v, ok := allFields[sprintID]; ok {
 			sprint = extractSprintName(v)
 		}
 	}
@@ -2602,8 +2609,8 @@ type Sprint struct {
 // lazy discovery on first call. Returns "" if the field could not be located
 // (e.g. instance has no Jira Software / scrum boards).
 func (c *Client) SprintFieldID() string {
-	c.discoverExtraFields()
-	return c.sprintFieldID
+	_, sprint := c.discoverExtraFields()
+	return sprint
 }
 
 // GetActiveSprintForProject locates the scrum board associated with a project
@@ -2655,30 +2662,37 @@ func (c *Client) GetActiveSprintForProject(projectKey string) (*Sprint, error) {
 	// Walk scrum boards in order; first active sprint wins. Multiple boards
 	// per project is rare but real (e.g. team-specific scrum boards under
 	// one project), and we don't have a signal to pick a "best" one.
+	// A board that cannot be read is skipped, but when no board yields a sprint its error is returned, not "no sprint".
+	var failed error
 	for _, b := range boards.Values {
 		sprintURL := fmt.Sprintf("%s/rest/agile/1.0/board/%d/sprint?state=active",
 			c.baseURL, b.ID)
 		sreq, err := http.NewRequest(http.MethodGet, sprintURL, nil)
 		if err != nil {
+			failed = cmp.Or(failed, err)
 			continue
 		}
 		sreq.Header.Set("Accept", "application/json")
 		if err := c.authRequest(sreq); err != nil {
+			failed = cmp.Or(failed, err)
 			continue
 		}
 		sresp, err := c.httpClient.Do(sreq)
 		if err != nil {
+			failed = cmp.Or(failed, err)
 			continue
 		}
 		sbody, _ := io.ReadAll(io.LimitReader(sresp.Body, maxResponseBody))
 		_ = sresp.Body.Close()
 		if sresp.StatusCode < 200 || sresp.StatusCode >= 300 {
+			failed = cmp.Or(failed, fmt.Errorf("board %d sprint lookup HTTP %d", b.ID, sresp.StatusCode))
 			continue
 		}
 		var sprints struct {
 			Values []Sprint `json:"values"`
 		}
 		if err := json.Unmarshal(sbody, &sprints); err != nil {
+			failed = cmp.Or(failed, fmt.Errorf("board %d sprints: %w", b.ID, err))
 			continue
 		}
 		if len(sprints.Values) > 0 {
@@ -2689,7 +2703,7 @@ func (c *Client) GetActiveSprintForProject(projectKey string) (*Sprint, error) {
 			return &s, nil
 		}
 	}
-	return nil, nil
+	return nil, failed
 }
 
 // SetSprintField assigns an issue to a sprint by ID. Jira Cloud's create-issue

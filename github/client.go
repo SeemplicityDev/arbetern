@@ -605,6 +605,35 @@ func (c *Client) ListOrgRepos(ctx context.Context, org string) ([]string, error)
 	return allRepos, nil
 }
 
+// OrgRepository is one of an organization's repositories and the branch its pull requests target.
+type OrgRepository struct {
+	Name          string
+	DefaultBranch string
+}
+
+// ListOrgRepositories lists an organization's repositories that are neither archived nor disabled and that the token can push to.
+func (c *Client) ListOrgRepositories(ctx context.Context, org string) ([]OrgRepository, error) {
+	var out []OrgRepository
+	opts := &gh.RepositoryListByOrgOptions{ListOptions: gh.ListOptions{PerPage: 100}}
+	for {
+		repos, resp, err := c.api.Repositories.ListByOrg(ctx, org, opts)
+		if err != nil {
+			return nil, fmt.Errorf("failed to list repositories for org %s: %w", org, err)
+		}
+		for _, r := range repos {
+			// A listing reports the caller's permissions; one it cannot push to could never get a branch or a pull request.
+			if r.GetArchived() || r.GetDisabled() || (r.Permissions != nil && r.Permissions.Push != nil && !*r.Permissions.Push) {
+				continue
+			}
+			out = append(out, OrgRepository{Name: r.GetName(), DefaultBranch: r.GetDefaultBranch()})
+		}
+		if resp.NextPage == 0 {
+			return out, nil
+		}
+		opts.Page = resp.NextPage
+	}
+}
+
 func (c *Client) ListUserRepos(ctx context.Context) ([]string, error) {
 	var allRepos []string
 	opts := &gh.RepositoryListByAuthenticatedUserOptions{

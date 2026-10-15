@@ -99,7 +99,9 @@ type Task struct {
 	Attempt        int          `json:"attempt"`
 	SessionID      string       `json:"session_id,omitempty"`
 	Branch         string       `json:"branch,omitempty"`
-	Ticket         string       `json:"ticket,omitempty"` // issue key filed with the pull request
+	Repo           string       `json:"repo,omitempty"`        // organization scope: the repository the branch and pull request live in
+	BaseBranch     string       `json:"base_branch,omitempty"` // that repository's base branch
+	Ticket         string       `json:"ticket,omitempty"`      // issue key filed with the pull request
 	TicketURL      string       `json:"ticket_url,omitempty"`
 	PR             *PR          `json:"pr,omitempty"`
 	Outcome        *Outcome     `json:"outcome,omitempty"`
@@ -533,10 +535,25 @@ func (l *Ledger) clearOpening(id, guard string) bool {
 	return true
 }
 
-func (l *Ledger) openPR(id string, o Outcome, pr PR, follow, draft bool, now time.Time) bool {
+func (l *Ledger) bindRepo(id string, repo Repo) bool {
+	t := l.task(id)
+	if t == nil || t.Repo != "" || repo.Name == "" || isTerminal(t.Status) {
+		return false
+	}
+	t.Repo, t.BaseBranch = repo.Name, repo.BaseBranch
+	return true
+}
+
+func (l *Ledger) openPR(id string, o Outcome, pr PR, chosen Repo, follow, draft bool, now time.Time) bool {
 	t := l.task(id)
 	if t == nil || t.Status != StatusRunning || t.PR != nil || t.Outcome != nil {
 		return false
+	}
+	if chosen.Name != "" {
+		if t.Repo != "" && !strings.EqualFold(t.Repo, chosen.Name) {
+			return false
+		}
+		t.Repo, t.BaseBranch = chosen.Name, chosen.BaseBranch
 	}
 	t.Outcome = &o
 	t.Branch = o.Branch
@@ -664,6 +681,10 @@ func (l *Ledger) resolveDue(limits Limits) bool {
 			continue
 		}
 		l.resolve(tr)
+		if parseTime(tr.LastSeen).After(merged.Add(window)) {
+			// A sighting after the window that sight() deferred while a site lagged is new work, as in sight().
+			tr.Attempts, tr.MergedAt, tr.Recurrence = 0, "", ""
+		}
 		changed = true
 	}
 	return changed
@@ -871,15 +892,18 @@ func (l *Ledger) applyScan(from, signal string, groups []Group, next map[string]
 		l.Candidates, l.Signal = nil, signal
 	}
 	grace := time.Duration(limits.RecurrenceGraceHours) * time.Hour
+	single := len(next) == 1
 	for _, g := range groups {
 		l.sight(g, grace, limits)
 		if t := l.openTask(g.Fingerprint); t != nil {
 			t.Group.Count += g.Count
 			t.Group.FirstSeen = earliest(t.Group.FirstSeen, g.FirstSeen)
 			t.Group.LastSeen = latest(t.Group.LastSeen, g.LastSeen)
+			t.Group.Service = joinServices(t.Group.Service, g.Service)
+			t.Group.Site = mergedSite(t.Group.Site, g.Site, single)
 			continue
 		}
-		l.mergeCandidate(g)
+		l.mergeCandidate(g, single)
 	}
 	l.compact(limits, now)
 	return true
@@ -921,7 +945,11 @@ func (l *Ledger) sight(g Group, grace time.Duration, limits Limits) {
 	tr := l.track(g.Fingerprint)
 	tr.LastSeen = latest(tr.LastSeen, g.LastSeen)
 	merged := parseTime(tr.MergedAt)
-	if tr.MergedAt != "" && tr.Recurrence == "" && first.After(merged.Add(window)) {
+	if end := merged.Add(window); tr.MergedAt != "" && tr.Recurrence == "" && first.After(end) {
+		if !parseTime(l.Cursor).After(end) {
+			// Another site is still being read inside the window; resolveDue or its own sighting decides.
+			return
+		}
 		// Seen only after the window, which the scans so far covered without a recurrence.
 		l.resolve(tr)
 	}
@@ -934,7 +962,7 @@ func (l *Ledger) sight(g Group, grace time.Duration, limits Limits) {
 	}
 }
 
-func (l *Ledger) mergeCandidate(g Group) {
+func (l *Ledger) mergeCandidate(g Group, single bool) {
 	g.Samples = slices.Clone(g.Samples)
 	i := l.candidate(g.Fingerprint)
 	if i < 0 {
@@ -946,12 +974,17 @@ func (l *Ledger) mergeCandidate(g Group) {
 	c.FirstSeen = earliest(c.FirstSeen, g.FirstSeen)
 	c.LastSeen = latest(c.LastSeen, g.LastSeen)
 	c.Service, c.Kind, c.Pattern, c.Frame = joinServices(c.Service, g.Service), g.Kind, g.Pattern, g.Frame
-	if c.Site != g.Site {
-		c.Site = ""
-	}
+	c.Site = mergedSite(c.Site, g.Site, single)
 	if len(g.Samples) > 0 {
 		c.Samples = g.Samples
 	}
+}
+
+func mergedSite(had, seen string, single bool) string {
+	if single || had == seen {
+		return seen
+	}
+	return ""
 }
 
 func sortCandidates(cs []Candidate) {

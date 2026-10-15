@@ -747,11 +747,17 @@ function pjdConventionsText(c) {
   return parts.join(' · ');
 }
 
+function pjdRepoLabel(r) {
+  if (!r.owner) return '';
+  if (r.name) return r.owner + '/' + r.name;
+  return r.owner + '/{' + (r.include || []).join(', ') + '}';
+}
+
 function pjdTaskDetailHtml(t) {
   const o = t.outcome;
   const pr = t.pr || {};
   let html = pjdChips([
-    ['task', t.id], ['branch', t.branch || (o && o.branch)], ['ticket', t.ticket], ['session', t.session_id], ['exit', t.exit_reason], ['turns', t.turns ? fmtInt(t.turns) : ''],
+    ['task', t.id], ['repository', t.repo], ['base', t.repo ? t.base_branch : ''], ['branch', t.branch || (o && o.branch)], ['ticket', t.ticket], ['session', t.session_id], ['exit', t.exit_reason], ['turns', t.turns ? fmtInt(t.turns) : ''],
     ['dispatched', t.dispatched_at && fmtDateTime(t.dispatched_at)], ['finished', t.finished_at && fmtDateTime(t.finished_at)],
     ['lines', t.pr && (pr.additions || pr.deletions) ? `+${fmtInt(pr.additions)} −${fmtInt(pr.deletions)}` : ''],
     ['learnings', t.learnings ? fmtInt(t.learnings) : ''],
@@ -797,7 +803,7 @@ function pjdTaskRowsHtml(p, t, manage) {
   if (t.pr) {
     const n = Number(t.pr.number) || 0;
     const url = safeExternalUrl(t.pr.url);
-    const text = n ? '#' + n : 'PR';
+    const text = n ? (t.repo || '') + '#' + n : 'PR';
     prCell = `${url ? `<a href="${escapeHtml(url)}" target="_blank" rel="noopener" title="${escapeHtml(t.pr.title || '')}">${text}</a>` : text} <span class="tag">${escapeHtml(t.pr.state || '')}</span>`;
   }
   if (t.ticket) prCell += ' ' + pjdTicketLink(t);
@@ -905,15 +911,15 @@ function connectorNames(ids) {
 
 function pjdMetaHtml(p) {
   const r = p.repo || {}, sig = p.signal || {}, se = p.session || {}, l = p.limits || {}, rv = p.review || {};
-  const repoUrl = r.owner && r.name ? safeExternalUrl(`https://github.com/${encodeURIComponent(r.owner)}/${encodeURIComponent(r.name)}`) : '';
+  const repoUrl = r.owner ? safeExternalUrl(`https://github.com/${encodeURIComponent(r.owner)}${r.name ? '/' + encodeURIComponent(r.name) : ''}`) : '';
   const wide = (label, html) => `<div class="meta-item proj-wide"><div class="label">${escapeHtml(label)}</div><div class="value">${html}</div></div>`;
   const sites = sig.sites && sig.sites.length ? sig.sites : [sig.site].filter(Boolean);
   const follow = rv.follow_up ? [rv.draft ? 'drafts' : '', `${fmtInt(rv.max_rounds)} rounds`, `quiet ${fmtInt(rv.settle_minutes)}m`].filter(Boolean).join(' · ') : 'off';
   const skills = skillNames(p.skills);
   const connectors = connectorNames(p.connectors);
   return `<div class="meta-grid proj-meta">
-      <div class="meta-item"><div class="label">Repository</div><div class="value">${repoUrl ? `<a href="${escapeHtml(repoUrl)}" target="_blank" rel="noopener">${escapeHtml(r.owner + '/' + r.name)}</a>` : '—'}</div></div>
-      ${metaItemHtml('Base branch', r.base_branch || '—')}
+      <div class="meta-item"><div class="label">${r.name ? 'Repository' : 'Repositories'}</div><div class="value">${repoUrl ? `<a href="${escapeHtml(repoUrl)}" target="_blank" rel="noopener">${escapeHtml(pjdRepoLabel(r))}</a>` : '—'}</div></div>
+      ${metaItemHtml('Base branch', r.name ? (r.base_branch || '—') : 'each repository’s default')}
       ${metaItemHtml('Datadog site', sites.length ? sites.map(x => x.toUpperCase()).join(' + ') : '—')}
       ${metaItemHtml('Interval', p.interval ? 'every ' + p.interval : '—')}
       ${metaItemHtml('Model', se.model || 'deployment default')}
@@ -964,7 +970,7 @@ function renderProjectDetail(root, p) {
   document.title = `${appTitle} — ${p.name || p.id}`;
 
   const tags = `<span class="status-pill ${cls}" title="${escapeHtml(title)}">${label}</span>
-    ${r.owner && r.name ? `<span class="tag" title="repository and base branch">${escapeHtml(r.owner + '/' + r.name)}${r.base_branch ? '@' + escapeHtml(r.base_branch) : ''}</span>` : ''}
+    ${r.owner ? `<span class="tag" title="${r.name ? 'repository and base branch' : 'owner and the repositories sessions may change'}">${escapeHtml(pjdRepoLabel(r))}${r.name && r.base_branch ? '@' + escapeHtml(r.base_branch) : ''}</span>` : ''}
     ${p.interval ? `<span class="tag" title="tick interval">every ${escapeHtml(p.interval)}</span>` : ''}
     <span class="tag" title="project id">${escapeHtml(p.id)}</span>`;
   const actions = (manage ? `
@@ -1232,7 +1238,7 @@ async function projectForm(p) {
     + '</div>';
   openForm({
     title: isNew ? 'New project' : 'Edit project',
-    subtitle: isNew ? 'Claude Code sessions keep fixing what a Datadog query finds in one repository' : (p.name || p.id),
+    subtitle: isNew ? 'Claude Code sessions keep fixing what a Datadog query finds, in one repository or across an organization' : (p.name || p.id),
     saveLabel: isNew ? 'Create project' : 'Save changes',
     html: formField('Name', input('pjf-name', p && p.name, ' maxlength="80" placeholder="Fix production errors"'))
       + formField('Description', input('pjf-desc', p && p.description, ' maxlength="240" placeholder="One line on what this project covers"'))
@@ -1241,7 +1247,8 @@ async function projectForm(p) {
       + formField('Skills', skillChips, 'Their instructions go into every work order, with those of the skills that apply to every agent.')
       + formField('MCP connectors', connectorChips, 'Connectors open to every agent. Sessions may call every tool of these connectors with their stored credentials, so pick only connectors whose tools read.')
       + '<div class="form-section">Repository</div>'
-      + `<div class="form-grid3">${formField('Owner', input('pjf-owner', r.owner, ' placeholder="owner"' + code))}${formField('Name', input('pjf-repo', r.name, ' placeholder="repo"' + code))}${formField('Base branch', input('pjf-base', r.base_branch, ' placeholder="main"' + code), isNew ? 'Empty uses the default branch.' : '')}</div>`
+      + `<div class="form-grid3">${formField('Owner', input('pjf-owner', r.owner, ' placeholder="owner"' + code))}${formField('Name', input('pjf-repo', r.name, ' placeholder="repo"' + code), 'Empty with repository patterns: the organization’s repositories.')}${formField('Base branch', input('pjf-base', r.base_branch, ' placeholder="main"' + code), isNew ? 'Empty uses the default branch.' : '')}</div>`
+      + formField('Repository patterns', input('pjf-include', (r.include || []).join(', '), ' maxlength="1000" placeholder="api-*, *-service"' + code), 'Leave Name and Base branch empty and list name patterns, comma-separated: each session picks the matching repository the problem lives in and works on its default branch.')
       + '<div class="form-section">Datadog</div>'
       + formField('Signal', `<select class="form-input" id="pjf-type" onchange="pjfSignalType(this.value)"><option value="datadog"${metric ? '' : ' selected'}>Log errors</option><option value="datadog_metrics"${metric ? ' selected' : ''}>Metric series over a threshold</option></select>`)
       + logFields + metricFields
@@ -1276,6 +1283,11 @@ async function projectForm(p) {
 
 function pjfSignalType(type) {
   document.querySelectorAll('#form-body [data-signal]').forEach(el => { el.hidden = el.dataset.signal !== type; });
+}
+
+function pjfRepoShape(r) {
+  const include = (r.include || []).map(x => String(x).trim().toLowerCase()).filter(Boolean);
+  return { owner: r.owner || '', name: r.name || '', base_branch: r.base_branch || '', include: [...new Set(include)] };
 }
 
 function pjfLogSites(sig) {
@@ -1331,7 +1343,7 @@ function pjfBody(isNew) {
     instructions: formValue('pjf-instructions'),
     skills: pjfChips('pjf-skills', isNew ? [] : ((detailEntity && detailEntity.skills) || [])),
     connectors: pjfChips('pjf-connectors', isNew ? [] : ((detailEntity && detailEntity.connectors) || [])),
-    repo: { owner: formValue('pjf-owner'), name: formValue('pjf-repo'), base_branch: formValue('pjf-base') },
+    repo: pjfRepoShape({ owner: formValue('pjf-owner'), name: formValue('pjf-repo'), base_branch: formValue('pjf-base'), include: formValue('pjf-include').split(',') }),
     signal,
     session: { model: formValue('pjf-model'), max_turns: parseInt(formValue('pjf-turns'), 10) || 0 },
     review: {
@@ -1345,8 +1357,9 @@ function pjfBody(isNew) {
   };
   if (!body.name) throw new Error('Name is required.');
   if (!body.goal) throw new Error('Goal is required.');
-  if (!body.repo.owner || !body.repo.name) throw new Error('Repository owner and name are required.');
-  if (!isNew && !body.repo.base_branch) throw new Error('Base branch is required.');
+  if (!body.repo.owner || !(body.repo.name || (body.repo.include || []).length)) throw new Error('Repository owner and a name or repository patterns are required.');
+  if (body.repo.name && (body.repo.include || []).length) throw new Error('Give a repository name or repository patterns, not both.');
+  if (!isNew && body.repo.name && !body.repo.base_branch) throw new Error('Base branch is required.');
   if (!signal.query) throw new Error('A Datadog query is required.');
   if (!signal.sites.length) throw new Error('Pick at least one Datadog site.');
   return body;
@@ -1365,7 +1378,7 @@ function pjfChanges(p, body) {
     name: p.name || '', description: p.description || '', goal: p.goal || '', instructions: p.instructions || '',
     skills: p.skills || [],
     connectors: p.connectors || [],
-    repo: { owner: r.owner || '', name: r.name || '', base_branch: r.base_branch || '' },
+    repo: pjfRepoShape(r),
     signal: pjfSignalShape(p.signal || {}),
     session: { model: se.model || '', max_turns: se.max_turns || 0 },
     review: { follow_up: !!rv.follow_up, draft: !!rv.draft, max_rounds: rv.max_rounds || 0, settle_minutes: rv.settle_minutes || 0 },

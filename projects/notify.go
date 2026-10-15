@@ -43,11 +43,12 @@ func subjectLabel(g Group) string {
 	return slackText(strings.Join(values, " / ")+" ("+strings.ToUpper(g.Site)+")", 200)
 }
 
-func prLink(pr *PR) string {
+func prLink(t *Task) string {
+	pr := t.PR
 	if pr == nil || !strings.HasPrefix(pr.URL, "https://") {
 		return "its pull request"
 	}
-	return fmt.Sprintf("<%s|PR #%d>", pr.URL, pr.Number)
+	return fmt.Sprintf("<%s|PR %s#%d>", pr.URL, slackText(t.Repo, 100), pr.Number)
 }
 
 // headline names the task the way its session put it for the channel, else by its series or error group.
@@ -60,7 +61,7 @@ func headline(t *Task) string {
 
 // links are the task's pull request and ticket, as the channel shows them.
 func links(t *Task) string {
-	parts := []string{prLink(t.PR)}
+	parts := []string{prLink(t)}
 	if t.Ticket != "" {
 		parts = append(parts, ticketLink(t))
 	}

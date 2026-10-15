@@ -95,12 +95,12 @@ func newGitProxy(upstream *url.URL, token string) *httputil.ReverseProxy {
 	auth := "Basic " + base64.StdEncoding.EncodeToString([]byte("x-access-token:"+token))
 	return &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
-			s, _ := pr.In.Context().Value(sessionKey{}).(*session)
+			target, _ := pr.In.Context().Value(gitTargetKey{}).(Repo)
 			op := pr.In.URL.Path[strings.LastIndex(pr.In.URL.Path, "/"):]
 			if strings.HasSuffix(pr.In.URL.Path, "/info/refs") {
 				op = "/info/refs"
 			}
-			pr.Out.URL = &url.URL{Scheme: upstream.Scheme, Host: upstream.Host, Path: "/" + s.project.Repo.Owner + "/" + s.project.Repo.Name + ".git" + op, RawQuery: pr.In.URL.RawQuery}
+			pr.Out.URL = &url.URL{Scheme: upstream.Scheme, Host: upstream.Host, Path: "/" + target.Owner + "/" + target.Name + ".git" + op, RawQuery: pr.In.URL.RawQuery}
 			pr.Out.Host = upstream.Host
 			stripCredentials(pr.Out.Header)
 			pr.Out.Header.Set("Authorization", auth)
@@ -142,21 +142,30 @@ func (g *gateway) handleGit(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, "git access is not configured", http.StatusServiceUnavailable)
 		return
 	}
-	owner, repo := req.PathValue("owner"), strings.TrimSuffix(req.PathValue("repo"), ".git")
-	if !strings.EqualFold(owner, s.project.Repo.Owner) || !strings.EqualFold(repo, s.project.Repo.Name) {
-		http.Error(w, "this session may only reach "+s.project.Repo.Owner+"/"+s.project.Repo.Name, http.StatusForbidden)
+	owner, name := req.PathValue("owner"), strings.TrimSuffix(req.PathValue("repo"), ".git")
+	target, status, err := g.gitTarget(req.Context(), s, owner, name)
+	if err != nil {
+		http.Error(w, err.Error(), status)
 		return
 	}
+	req = req.WithContext(context.WithValue(req.Context(), gitTargetKey{}, target))
 	switch {
 	case strings.HasSuffix(req.URL.Path, "/info/refs"):
-		if svc := req.URL.Query().Get("service"); svc != "git-upload-pack" && svc != "git-receive-pack" {
+		svc := req.URL.Query().Get("service")
+		if svc != "git-upload-pack" && svc != "git-receive-pack" {
 			http.Error(w, "only smart HTTP is supported", http.StatusForbidden)
 			return
+		}
+		if svc == "git-receive-pack" {
+			if status, err := g.pushRepo(req.Context(), s, target, false); err != nil {
+				http.Error(w, err.Error(), status)
+				return
+			}
 		}
 	case strings.HasSuffix(req.URL.Path, "/git-receive-pack"):
 		gzipped := strings.EqualFold(strings.TrimSpace(req.Header.Get("Content-Encoding")), "gzip")
 		allowed := func(branch string) error {
-			if branch == s.project.Repo.BaseBranch {
+			if branch == target.BaseBranch {
 				return fmt.Errorf("sessions may not push to the base branch %s", branch)
 			}
 			return s.pushAllowed(branch)
@@ -167,6 +176,11 @@ func (g *gateway) handleGit(w http.ResponseWriter, req *http.Request) {
 			http.Error(w, err.Error(), http.StatusForbidden)
 			return
 		}
+		if status, err := g.pushRepo(req.Context(), s, target, true); err != nil {
+			log.Printf("[projects] %s task %s: refused a push to %s: %v", s.project.ID, s.task.ID, target, err)
+			http.Error(w, err.Error(), status)
+			return
+		}
 		req.Body = body
 		if gzipped {
 			req.ContentLength = -1
@@ -175,6 +189,60 @@ func (g *gateway) handleGit(w http.ResponseWriter, req *http.Request) {
 		}
 	}
 	g.git.ServeHTTP(w, req)
+}
+
+type gitTargetKey struct{}
+
+func (g *gateway) pushRepo(ctx context.Context, s *session, target Repo, bind bool) (int, error) {
+	if !s.project.Repo.org() || strings.EqualFold(s.task.Repo, target.Name) {
+		return 0, nil
+	}
+	// A work order pushes to one repository: the first push binds it on the stored ledger, so every replica refuses the others.
+	taskID := s.task.ID
+	led, err := g.r.readLedger(ctx, s.project.ID)
+	if err == nil && bind {
+		if t := led.task(taskID); t != nil && t.Repo == "" {
+			led, _, err = g.r.mergeLedger(ctx, s.project.ID, nil, func(l *Ledger) bool { return l.bindRepo(taskID, target) })
+		}
+	}
+	if err != nil {
+		log.Printf("[projects] %s task %s: git proxy: reading the ledger: %v", s.project.ID, taskID, err)
+		return http.StatusBadGateway, errors.New("the push could not be checked; try again shortly")
+	}
+	switch t := led.task(taskID); {
+	case t == nil:
+		return http.StatusForbidden, errors.New("this work order is no longer in the ledger")
+	case t.Repo == "" && !bind:
+		return 0, nil
+	case !strings.EqualFold(t.Repo, target.Name):
+		return http.StatusForbidden, fmt.Errorf("this work order already pushed to %s/%s; push only there", target.Owner, t.Repo)
+	}
+	return 0, nil
+}
+
+func (g *gateway) gitTarget(ctx context.Context, s *session, owner, name string) (Repo, int, error) {
+	if !ownerRe.MatchString(owner) || !repoNameRe.MatchString(name) || name == "." || name == ".." {
+		return Repo{}, http.StatusBadRequest, errors.New("not a repository path")
+	}
+	repo := s.project.repoFor(s.task)
+	if !strings.EqualFold(owner, repo.Owner) {
+		return Repo{}, http.StatusForbidden, fmt.Errorf("this session may only reach repositories of %s", repo.Owner)
+	}
+	if repo.Name != "" {
+		if !strings.EqualFold(name, repo.Name) {
+			return Repo{}, http.StatusForbidden, fmt.Errorf("this session may only reach %s/%s", repo.Owner, repo.Name)
+		}
+		return repo, 0, nil
+	}
+	found, ok, err := g.r.scopeRepo(ctx, s.project.Repo, name)
+	switch {
+	case err != nil:
+		log.Printf("[projects] %s task %s: git proxy: %v", s.project.ID, s.task.ID, err)
+		return Repo{}, http.StatusBadGateway, errors.New("the repositories this project may change could not be listed; try again shortly")
+	case !ok:
+		return Repo{}, http.StatusForbidden, fmt.Errorf("%s/%s is not one of the repositories this project may change", repo.Owner, name)
+	}
+	return Repo{Owner: repo.Owner, Name: found.Name, BaseBranch: found.DefaultBranch}, 0, nil
 }
 
 // pushAllowed limits a session to the branch its work order named and names derived from it: the task's branch from dispatch time,

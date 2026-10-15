@@ -90,7 +90,11 @@ func (g *gateway) reportRound(ctx context.Context, s *session, a reportArgs) (st
 		return "An outcome (" + rd.Outcome.Status + ") was already recorded for this round. You can stop now.", false, nil
 	}
 	now := time.Now().UTC()
-	o, replies, problem := a.roundOutcome(rd, s.project.Repo.BaseBranch, now)
+	prRepo := s.project.repoFor(s.task)
+	if named := strings.TrimSpace(a.Repository); named != "" && !strings.EqualFold(named, prRepo.Name) && !strings.EqualFold(named, prRepo.Owner+"/"+prRepo.Name) {
+		return "In a follow-up round the repository is the pull request's, " + prRepo.Owner + "/" + prRepo.Name + "; leave repository out.", true, nil
+	}
+	o, replies, problem := a.roundOutcome(rd, prRepo.BaseBranch, now)
 	description := strings.TrimSpace(stripControl(a.Description))
 	if problem == "" && description != "" {
 		problem = checkRoundDescription(s.project, description)
@@ -119,7 +123,7 @@ func (g *gateway) reportRound(ctx context.Context, s *session, a reportArgs) (st
 		}
 		return "This round's report is already being recorded; call report_outcome again in a minute if it does not finish.", true, nil
 	}
-	owner, repo, number := prCoordinates(s.project, s.task.PR)
+	owner, repo, number := prCoordinates(s.project, s.task)
 	head := rd.HeadBefore
 	var extra []string
 	if o.Status == OutcomeFixed {

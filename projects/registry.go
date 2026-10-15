@@ -90,6 +90,7 @@ type Registry struct {
 
 	states *ttlcache.Keyed[stateKey, *projectState]
 	login  *ttlcache.Cache[string]
+	orgs   *ttlcache.Keyed[string, []github.OrgRepository]
 }
 
 type tickTask struct {
@@ -122,7 +123,44 @@ func New(deps Deps) *Registry {
 		}
 		return r.gh.GetAuthenticatedUser(ctx)
 	})
+	r.orgs = ttlcache.NewKeyed(orgReposTTL, 32, func(ctx context.Context, owner string) ([]github.OrgRepository, error) {
+		if r.gh == nil {
+			return nil, errors.New("GitHub is not configured")
+		}
+		// Every waiter shares this listing, so one caller's cancellation must not fail it for the others.
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
+		defer cancel()
+		return r.gh.ListOrgRepositories(ctx, owner)
+	})
 	return r
+}
+
+func (r *Registry) scopeRepos(ctx context.Context, repo Repo) ([]github.OrgRepository, error) {
+	all, err := r.orgs.Get(ctx, strings.ToLower(repo.Owner))
+	if err != nil {
+		return nil, fmt.Errorf("listing the repositories of %s: %w", repo.Owner, err)
+	}
+	var out []github.OrgRepository
+	for _, o := range all {
+		if repo.includes(o.Name) {
+			out = append(out, o)
+		}
+	}
+	slices.SortFunc(out, func(a, b github.OrgRepository) int { return strings.Compare(a.Name, b.Name) })
+	return out, nil
+}
+
+func (r *Registry) scopeRepo(ctx context.Context, repo Repo, name string) (github.OrgRepository, bool, error) {
+	list, err := r.scopeRepos(ctx, repo)
+	if err != nil {
+		return github.OrgRepository{}, false, err
+	}
+	for _, o := range list {
+		if strings.EqualFold(o.Name, name) {
+			return o, true, nil
+		}
+	}
+	return github.OrgRepository{}, false, nil
 }
 
 func docKey(id string) string { return id + ".json" }
@@ -133,7 +171,7 @@ func (r *Registry) Load(ctx context.Context) error {
 		return fmt.Errorf("load projects: %w", err)
 	}
 	r.docs.Range(func(_ string, p *Project) {
-		log.Printf("[projects] loaded %s (%q, repo=%s/%s, enabled=%t)", p.ID, p.Name, p.Repo.Owner, p.Repo.Name, p.Enabled)
+		log.Printf("[projects] loaded %s (%q, repo=%s, enabled=%t)", p.ID, p.Name, p.Repo, p.Enabled)
 	})
 	return nil
 }
@@ -366,6 +404,30 @@ func (r *Registry) skillsFor(ids []string) []string {
 	return r.deps.Skills(ids)
 }
 
+func (r *Registry) resolveRepo(ctx context.Context, repo *Repo) error {
+	if !repo.org() {
+		if repo.BaseBranch != "" {
+			return nil
+		}
+		base, err := r.defaultBranch(ctx, *repo)
+		repo.BaseBranch = base
+		return err
+	}
+	if r.gh == nil {
+		return invalidf("GitHub is not configured in this deployment, so repo.include cannot be resolved")
+	}
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	list, err := r.scopeRepos(ctx, *repo)
+	if err != nil {
+		return invalidf("%v", err)
+	}
+	if len(list) == 0 {
+		return invalidf("repo.include matches none of the repositories of %s that arbetern can see", repo.Owner)
+	}
+	return nil
+}
+
 func (r *Registry) defaultBranch(ctx context.Context, repo Repo) (string, error) {
 	if r.gh == nil {
 		return "", invalidf("GitHub is not configured in this deployment, so repo.base_branch cannot be resolved")
@@ -410,12 +472,8 @@ func (r *Registry) create(ctx context.Context, draft Project, enabled bool, crea
 	if r.gh == nil {
 		return nil, invalidf("GitHub is not configured in this deployment; projects need it to open pull requests")
 	}
-	if draft.Repo.BaseBranch == "" {
-		base, err := r.defaultBranch(ctx, draft.Repo)
-		if err != nil {
-			return nil, err
-		}
-		draft.Repo.BaseBranch = base
+	if err := r.resolveRepo(ctx, &draft.Repo); err != nil {
+		return nil, err
 	}
 	id, err := store.NewID()
 	if err != nil {
@@ -447,7 +505,7 @@ func (r *Registry) create(ctx context.Context, draft Project, enabled bool, crea
 	if p.Enabled {
 		r.startRunner(p)
 	}
-	log.Printf("[projects] created %s (%q, repo=%s/%s)", p.ID, p.Name, p.Repo.Owner, p.Repo.Name)
+	log.Printf("[projects] created %s (%q, repo=%s)", p.ID, p.Name, p.Repo)
 	cp := *p
 	return &cp, nil
 }
@@ -584,12 +642,10 @@ func (r *Registry) update(ctx context.Context, id string, pt projectPatch) (*Pro
 			return nil, err
 		}
 	}
-	if pt.Repo != nil && draft.Repo.BaseBranch == "" {
-		base, err := r.defaultBranch(ctx, draft.Repo)
-		if err != nil {
+	if pt.Repo != nil {
+		if err := r.resolveRepo(ctx, &draft.Repo); err != nil {
 			return nil, err
 		}
-		draft.Repo.BaseBranch = base
 	}
 	norm := pt.normalized(&draft)
 	now := time.Now()

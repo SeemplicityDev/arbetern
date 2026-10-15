@@ -62,10 +62,11 @@ type Client struct {
 	connected    bool // true once OAuth handshake + cloud ID resolution succeeds
 	tokenMu      sync.RWMutex
 
-	// Cached custom field IDs (discovered lazily).
-	extraFieldsOnce sync.Once
-	teamFieldID     string // e.g. "customfield_10001"
-	sprintFieldID   string // e.g. "customfield_10020"
+	// Cached custom field IDs (discovered lazily, under fieldsMu).
+	extraFieldsFound bool
+	extraFieldsTried time.Time
+	teamFieldID      string // e.g. "customfield_10001"
+	sprintFieldID    string // e.g. "customfield_10020"
 
 	fieldsMu     sync.Mutex
 	catalog      *fieldCatalog
