@@ -285,7 +285,9 @@ func (a *consoleAPI) update(w http.ResponseWriter, req *http.Request) {
 			err = decodeStrict(v, pt.Conventions)
 		case "limits":
 			pt.Limits = new(Limits)
-			err = decodeStrict(v, pt.Limits)
+			if err = decodeStrict(v, pt.Limits); err == nil {
+				pt.limitsJSON = v
+			}
 		case "enabled":
 			pt.Enabled = new(bool)
 			if json.Unmarshal(v, pt.Enabled) != nil {

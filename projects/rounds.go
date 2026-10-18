@@ -39,7 +39,9 @@ type ReviewState struct {
 	DoneHead        string   `json:"done_head,omitempty"`
 	DoneAt          string   `json:"done_at,omitempty"`
 
-	AutoMerge *MergeState `json:"auto_merge,omitempty"`
+	Content     string      `json:"content,omitempty"`      // fingerprint of the head's own changes over the base branch
+	DoneContent string      `json:"done_content,omitempty"` // the changes the last ready note announced
+	AutoMerge   *MergeState `json:"auto_merge,omitempty"`
 }
 
 // Round is one follow-up session on an open pull request.
@@ -99,7 +101,7 @@ type observation struct {
 	conflict     bool
 	pending      int
 	lastFeedback time.Time
-	content      string // fingerprint of the head's own changes, with auto-merge on
+	content      string // fingerprint of the head's own changes; empty when it could not be read
 }
 
 type roundResult struct {
@@ -212,16 +214,20 @@ func (l *Ledger) observe(id string, o observation, now time.Time) bool {
 	// A round that reported after the read may have moved the head on; an older read must not move it back.
 	if o.head != "" && o.head != rv.Head && (o.seenHead == "" || rv.Head == o.seenHead) {
 		if rv.AutoMerge != nil {
-			rv.AutoMerge.UpdateTriedAt = ""
+			rv.AutoMerge.headMoved(o.head)
 		}
 		rv.Head, rv.HeadAt = o.head, stamp(now)
 	}
 	seen := false
-	if o.content != "" && rv.Head == o.head {
-		m := cmp.Or(rv.AutoMerge, &MergeState{})
-		if seen = m.seen(o.content); seen {
-			rv.AutoMerge = m
+	if o.content != "" && rv.Head == o.head && rv.Content != o.content {
+		if rv.Content != "" && rv.AutoMerge != nil {
+			rv.AutoMerge.changesChanged()
 		}
+		rv.Content, seen = o.content, true
+	}
+	// A pull request marked done before changes were recorded announced its done head.
+	if o.content != "" && rv.DoneContent == "" && rv.DoneHead == o.head && rv.Head == o.head {
+		rv.DoneContent, seen = o.content, true
 	}
 	rv.CI, rv.Conflict, rv.Pending = o.ci, o.conflict, o.pending
 	rv.FailedChecks = slices.Clone(o.failed)
@@ -394,9 +400,7 @@ func (l *Ledger) markDone(id, head, content string, now time.Time) bool {
 	}
 	rv.DoneHead, rv.DoneAt = head, stamp(now)
 	if content != "" {
-		m := cmp.Or(rv.AutoMerge, &MergeState{})
-		m.DoneContent = content
-		rv.AutoMerge = m
+		rv.DoneContent = content
 	}
 	rv.settle()
 	return true

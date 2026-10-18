@@ -529,6 +529,8 @@ type projectPatch struct {
 	Conventions                                     *Conventions
 	Limits                                          *Limits
 	Enabled                                         *bool
+
+	limitsJSON json.RawMessage
 }
 
 func (pt projectPatch) applyTo(dst *Project) {
@@ -566,7 +568,11 @@ func (pt projectPatch) applyTo(dst *Project) {
 	if pt.Conventions != nil {
 		dst.Conventions = *pt.Conventions
 	}
-	if pt.Limits != nil {
+	switch {
+	case pt.limitsJSON != nil:
+		// Limits left out keep their value, so a console tab that predates a limit cannot reset it.
+		_ = json.Unmarshal(pt.limitsJSON, &dst.Limits)
+	case pt.Limits != nil:
 		dst.Limits = *pt.Limits
 	}
 }

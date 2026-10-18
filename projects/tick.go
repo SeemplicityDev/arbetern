@@ -272,7 +272,9 @@ func (r *Registry) expireTasks(ctx context.Context, p *Project, led *Ledger, lim
 	now := time.Now().UTC()
 	dropped := 0
 	next, _, err := r.mergeLedger(ctx, p.ID, led, func(l *Ledger) bool {
-		dropped = l.expireTasks(keep, now)
+		if dropped = l.expireTasks(keep, now); dropped > 0 {
+			l.Swept = ""
+		}
 		return dropped > 0
 	})
 	if err != nil {
@@ -281,9 +283,24 @@ func (r *Registry) expireTasks(ctx context.Context, p *Project, led *Ledger, lim
 	}
 	if dropped > 0 {
 		log.Printf("[projects] %s dropped %s finished more than %s ago", p.ID, plural(dropped, "task"), plural(limits.TaskRetentionDays, "day"))
-		r.pruneTranscripts(ctx, p.ID, next)
 	}
-	return next
+	// A daily sweep also catches transcripts left by a failed sweep or by the task cap.
+	today := now.Format(time.DateOnly)
+	if next.Swept == today || !r.pruneTranscripts(ctx, p.ID, next) {
+		return next
+	}
+	swept, _, err := r.mergeLedger(ctx, p.ID, next, func(l *Ledger) bool {
+		if l.Swept == today {
+			return false
+		}
+		l.Swept = today
+		return true
+	})
+	if err != nil {
+		log.Printf("[projects] %s recording the transcript sweep: %v", p.ID, err)
+		return next
+	}
+	return swept
 }
 
 func (r *Registry) closeMergedTickets(ctx context.Context, p *Project, led *Ledger) *Ledger {

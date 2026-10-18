@@ -28,17 +28,17 @@ const (
 
 // MergeState is arbetern's auto-merge progress on one pull request.
 type MergeState struct {
-	Content       string `json:"content,omitempty"`    // fingerprint of the pull request's own changes at the head last read
 	Snapshot      string `json:"snapshot,omitempty"`   // changes, checks and discussion when the delay started
 	ArmedAt       string `json:"armed_at,omitempty"`   // when the delay started
 	On            bool   `json:"on,omitempty"`         // GitHub's auto-merge was on at the last read
-	OnContent     string `json:"on_content,omitempty"` // the changes and base auto-merge went on for
+	OnContent     string `json:"on_content,omitempty"` // the changes, head and base auto-merge went on for
+	OnHead        string `json:"on_head,omitempty"`
 	OnBase        string `json:"on_base,omitempty"`
 	EnabledAt     string `json:"enabled_at,omitempty"`      // when arbetern turned it on
 	Withdrawing   bool   `json:"withdrawing,omitempty"`     // arbetern is turning it off
 	MergedAt      string `json:"merged_at,omitempty"`       // when arbetern merged the pull request itself
-	DoneContent   string `json:"done_content,omitempty"`    // the changes the last ready note announced
 	Note          string `json:"note,omitempty"`            // why auto-merge is not on
+	NoteHead      string `json:"note_head,omitempty"`       // the head a note about the branch is about; a new head clears it
 	Warned        string `json:"warned,omitempty"`          // the note the Slack channel last heard; a note goes there once it repeats
 	Held          bool   `json:"held,omitempty"`            // turned off outside arbetern, which leaves it off
 	UpdateTriedAt string `json:"update_tried_at,omitempty"` // when arbetern last asked GitHub to bring this head up to date
@@ -51,18 +51,18 @@ func (r *Registry) diffOf(ctx context.Context, owner, repo, base, sha string) (s
 	return r.diffs.Get(ctx, diffKey{owner, repo, base, sha})
 }
 
-func (m *MergeState) seen(content string) bool {
-	if content == "" || m.Content == content {
-		return false
+func (m *MergeState) changesChanged() {
+	m.Updates, m.Snapshot, m.ArmedAt, m.NoteHead = 0, "", "", ""
+	if !m.Held {
+		m.Note = ""
 	}
-	if m.Content != "" {
-		m.Updates = 0
-		if !m.Held {
-			m.Note = ""
-		}
+}
+
+func (m *MergeState) headMoved(head string) {
+	m.UpdateTriedAt = ""
+	if m.NoteHead != "" && m.NoteHead != head && !m.Held {
+		m.Note, m.NoteHead = "", ""
 	}
-	m.Content = content
-	return true
 }
 
 func (m *MergeState) disarm() {
@@ -92,8 +92,8 @@ func mergeSnapshot(pr *github.PRState, content string, checks []github.Check, di
 	var talk []string
 	for _, it := range discussion {
 		mine := strings.EqualFold(it.Author, self)
-		// An approval is what auto-merge waits for, so it does not restart the delay.
-		if mine && (it.Kind != github.DiscussionComment || ownComment(it.Body)) || it.Kind == github.DiscussionReview && it.State == "APPROVED" {
+		// An approval is what auto-merge waits for, and bots repost their conversation comments on every push, so neither restarts the delay.
+		if mine && (it.Kind != github.DiscussionComment || ownComment(it.Body)) || it.Kind == github.DiscussionReview && it.State == "APPROVED" || it.Bot && it.Kind == github.DiscussionComment {
 			continue
 		}
 		talk = append(talk, strings.Join([]string{it.Kind, strconv.FormatInt(it.ID, 10), it.State, laterOf(it.CreatedAt, it.UpdatedAt).Format(time.RFC3339Nano)}, "\x1f"))
@@ -147,15 +147,20 @@ func approvals(reviews []github.DiscussionItem) []github.DiscussionItem {
 	return out
 }
 
-func (r *Registry) approver(ctx context.Context, w prWatch) string {
+// approver returns an error only when it found no approver and a lookup failed, so the answer may change on a retry.
+func (r *Registry) approver(ctx context.Context, w prWatch) (string, error) {
+	var errs []error
 	for _, a := range approvals(w.reviews) {
 		if a.CommitID == "" {
 			continue
 		}
 		if a.CommitID != w.pr.HeadSHA {
+			if w.content == "" {
+				continue
+			}
 			diff, err := r.diffOf(ctx, w.owner, w.repo, w.pr.BaseRef, a.CommitID)
 			if err != nil {
-				log.Printf("[projects] task %s: reading what %s approved on pull request #%d: %v", w.taskID, a.Author, w.number, err)
+				errs = append(errs, err)
 				continue
 			}
 			if diff != w.content {
@@ -164,14 +169,14 @@ func (r *Registry) approver(ctx context.Context, w prWatch) string {
 		}
 		ok, err := r.gh.CanPush(ctx, w.owner, w.repo, a.Author)
 		if err != nil {
-			log.Printf("[projects] task %s: checking whether %s may approve pull request #%d: %v", w.taskID, a.Author, w.number, err)
+			errs = append(errs, err)
 			continue
 		}
 		if ok {
-			return a.Author
+			return a.Author, nil
 		}
 	}
-	return ""
+	return "", errors.Join(errs...)
 }
 
 func mergeReady(rv *ReviewState, w prWatch) bool {
@@ -183,7 +188,13 @@ func mergeHold(rv *ReviewState, w prWatch, need []string) bool {
 }
 
 func contentMoved(m *MergeState, w prWatch) bool {
-	return m.OnContent != "" && (m.OnContent != w.content || m.OnBase != w.pr.BaseRef)
+	switch {
+	case m.OnBase != "" && m.OnBase != w.pr.BaseRef:
+		return true
+	case m.OnContent != "" && w.content != "":
+		return m.OnContent != w.content
+	}
+	return m.OnHead != "" && m.OnHead != w.pr.HeadSHA
 }
 
 func (l *Ledger) armMerge(id, snapshot string, now time.Time) bool {
@@ -227,21 +238,21 @@ func (l *Ledger) mergeWaits(id, snapshot, note string, warn bool, now time.Time)
 	if rv == nil || rv.AutoMerge == nil || rv.AutoMerge.Snapshot != snapshot {
 		return false
 	}
-	rv.AutoMerge.ArmedAt = stamp(now)
+	rv.AutoMerge.ArmedAt, rv.AutoMerge.NoteHead = stamp(now), ""
 	rv.AutoMerge.setNote(note, warn)
 	return true
 }
 
-func (l *Ledger) mergeOn(id, content, base string, enabled bool, now time.Time) bool {
+func (l *Ledger) mergeOn(id, content, head, base string, enabled bool, now time.Time) bool {
 	_, rv := l.review(id)
 	if rv == nil {
 		return false
 	}
 	m := cmp.Or(rv.AutoMerge, &MergeState{})
-	if m.On && !enabled {
+	if m.On && !m.Withdrawing && !enabled {
 		return false
 	}
-	m.On, m.OnContent, m.OnBase, m.Held, m.ArmedAt = true, content, base, false, ""
+	m.On, m.OnContent, m.OnHead, m.OnBase, m.Held, m.Withdrawing, m.ArmedAt = true, content, head, base, false, false, ""
 	if enabled {
 		m.EnabledAt, m.Note = stamp(now), ""
 	}
@@ -270,11 +281,11 @@ func (l *Ledger) mergeOff(id string, held bool) bool {
 	}
 	m := rv.AutoMerge
 	changed := m.On || m.Withdrawing || m.EnabledAt != "" || m.Snapshot != "" || m.ArmedAt != "" || held && !m.Held
-	m.On, m.OnContent, m.OnBase, m.EnabledAt, m.Withdrawing, m.Snapshot, m.ArmedAt = false, "", "", "", false, "", ""
+	m.On, m.OnContent, m.OnHead, m.OnBase, m.EnabledAt, m.Withdrawing, m.Snapshot, m.ArmedAt = false, "", "", "", "", false, "", ""
 	if held {
-		m.Held, m.Note = true, heldNote
+		m.Held, m.Note, m.NoteHead = true, heldNote, ""
 	} else if !m.Held {
-		m.Note = ""
+		m.Note, m.NoteHead = "", ""
 	}
 	return changed
 }
@@ -301,12 +312,14 @@ func (l *Ledger) branchUpdated(id, head string) bool {
 	return true
 }
 
-func (l *Ledger) noteMerge(id, note string, warn bool) bool {
+func (l *Ledger) noteMerge(id, note, head string, warn bool) bool {
 	_, rv := l.review(id)
 	if rv == nil || rv.AutoMerge == nil {
 		return false
 	}
-	return rv.AutoMerge.setNote(note, warn)
+	changed := rv.AutoMerge.NoteHead != head
+	rv.AutoMerge.NoteHead = head
+	return rv.AutoMerge.setNote(note, warn) || changed
 }
 
 func (l *Ledger) mergedByArbetern(id string, now time.Time) bool {
@@ -324,18 +337,20 @@ func (r *Registry) followAutoMerge(ctx context.Context, p *Project, led *Ledger,
 	_, rv := led.review(w.taskID)
 	m := cmp.Or(rv.AutoMerge, &MergeState{})
 	// Auto-merge a person turned on stays theirs; arbetern withdraws only its own.
-	if w.pr.AutoMerge && (m.Withdrawing || w.ourAutoMerge && (!review.AutoMerge || mergeHold(rv, w, need) || contentMoved(m, w))) {
+	if w.pr.AutoMerge && w.ourAutoMerge && (m.Withdrawing || !review.AutoMerge || mergeHold(rv, w, need) || contentMoved(m, w)) {
 		return r.withdrawAutoMerge(ctx, p, led, w)
 	}
 	var change func(l *Ledger) bool
 	switch {
-	case !w.pr.AutoMerge && m.Withdrawing:
+	case !w.pr.AutoMerge && m.Withdrawing, w.pr.AutoMerge && m.Withdrawing && !review.AutoMerge:
 		change = func(l *Ledger) bool { return l.mergeOff(w.taskID, false) }
+	case w.pr.AutoMerge && m.Withdrawing:
+		change = func(l *Ledger) bool { return l.mergeOn(w.taskID, w.content, w.pr.HeadSHA, w.pr.BaseRef, false, now) }
 	case m.On && !w.pr.AutoMerge:
 		log.Printf("[projects] %s task %s: auto-merge on pull request #%d was turned off outside arbetern, which leaves it off", k, w.taskID, w.number)
 		change = func(l *Ledger) bool { return l.mergeOff(w.taskID, true) }
 	case review.AutoMerge && w.pr.AutoMerge && !m.On:
-		change = func(l *Ledger) bool { return l.mergeOn(w.taskID, w.content, w.pr.BaseRef, false, now) }
+		change = func(l *Ledger) bool { return l.mergeOn(w.taskID, w.content, w.pr.HeadSHA, w.pr.BaseRef, false, now) }
 	case m.ArmedAt != "" && (mergeHold(rv, w, need) || len(w.failed) > 0):
 		change = func(l *Ledger) bool { return l.disarmMerge(w.taskID) }
 	default:
@@ -359,7 +374,7 @@ func (r *Registry) withdrawAutoMerge(ctx context.Context, p *Project, led *Ledge
 	}
 	if err := r.gh.DisablePullRequestAutoMerge(ctx, w.pr.NodeID); err != nil {
 		log.Printf("[projects] %s task %s: turning off auto-merge on pull request #%d: %v", k, w.taskID, w.number, err)
-		return r.noteMerge(ctx, p, next, w, "arbetern could not turn off auto-merge, so nothing else happens on this pull request until it can: "+github.APIMessage(err), true), false
+		return r.noteMerge(ctx, p, next, w, "arbetern could not turn off auto-merge, so nothing else happens on this pull request until it can: "+github.APIMessage(err), "", true), false
 	}
 	log.Printf("[projects] %s task %s: auto-merge off on pull request #%d", k, w.taskID, w.number)
 	pctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), persistTimeout)
@@ -398,6 +413,11 @@ func (r *Registry) autoMerge(ctx context.Context, p *Project, led *Ledger, w prW
 	case now.Sub(parseTime(m.ArmedAt)) < time.Duration(review.AutoMergeDelayMinutes)*time.Minute:
 		return led
 	}
+	approver, err := r.approver(ctx, w)
+	if err != nil {
+		log.Printf("[projects] %s task %s: checking who approved pull request #%d: %v", k, w.taskID, w.number, err)
+		return led
+	}
 	// The stored ledger must still hold this armed state: a round or another replica may have moved on since the read.
 	next, claimed, err := r.mergeLedger(ctx, k, led, func(l *Ledger) bool { return l.claimMerge(w.taskID, w.pr.HeadSHA, w.snapshot) })
 	if err != nil || !claimed {
@@ -408,20 +428,20 @@ func (r *Registry) autoMerge(ctx context.Context, p *Project, led *Ledger, w prW
 	}
 	led = next
 	if w.pr.MergeState == mergeStateClean || w.pr.MergeState == mergeStateHasHooks {
-		return r.mergeNow(ctx, p, led, w, review, r.approver(ctx, w), now)
+		return r.mergeNow(ctx, p, led, w, review, approver, now)
 	}
 	decision, err := r.gh.ReviewDecision(ctx, w.pr.NodeID)
 	switch {
 	case err != nil:
 		log.Printf("[projects] %s task %s: reading the review decision of pull request #%d: %v", k, w.taskID, w.number, err)
 		return r.mergeWaits(ctx, p, led, w, "arbetern could not read the review decision: "+github.APIMessage(err), false, now)
-	case decision == "" && r.approver(ctx, w) == "":
+	case decision == "" && approver == "":
 		return r.mergeWaits(ctx, p, led, w, "No review is required here, so arbetern turns on auto-merge once a person with write access approves these changes and no review asks for changes.", false, now)
 	}
 	err = r.gh.EnablePullRequestAutoMerge(ctx, w.pr.NodeID, review.MergeMethod, w.pr.HeadSHA)
 	switch {
 	case errors.Is(err, github.ErrMergeableNow):
-		return r.mergeNow(ctx, p, led, w, review, r.approver(ctx, w), now)
+		return r.mergeNow(ctx, p, led, w, review, approver, now)
 	case err != nil:
 		log.Printf("[projects] %s task %s: turning on auto-merge for pull request #%d: %v", k, w.taskID, w.number, err)
 		return r.mergeWaits(ctx, p, led, w, "GitHub did not turn on auto-merge: "+github.APIMessage(err), true, now)
@@ -429,7 +449,7 @@ func (r *Registry) autoMerge(ctx context.Context, p *Project, led *Ledger, w prW
 	log.Printf("[projects] %s task %s: auto-merge on for pull request #%d (head %s, %s)", k, w.taskID, w.number, shortSHA(w.pr.HeadSHA), review.MergeMethod)
 	pctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), persistTimeout)
 	defer cancel()
-	next, _, err = r.mergeLedger(pctx, k, led, func(l *Ledger) bool { return l.mergeOn(w.taskID, w.content, w.pr.BaseRef, true, now) })
+	next, _, err = r.mergeLedger(pctx, k, led, func(l *Ledger) bool { return l.mergeOn(w.taskID, w.content, w.pr.HeadSHA, w.pr.BaseRef, true, now) })
 	if err != nil {
 		log.Printf("[projects] %s task %s: recording auto-merge on pull request #%d: %v", k, w.taskID, w.number, err)
 		next = led
@@ -478,12 +498,12 @@ func (r *Registry) mergeWaits(ctx context.Context, p *Project, led *Ledger, w pr
 	return next
 }
 
-func (r *Registry) noteMerge(ctx context.Context, p *Project, led *Ledger, w prWatch, note string, warn bool) *Ledger {
+func (r *Registry) noteMerge(ctx context.Context, p *Project, led *Ledger, w prWatch, note, head string, warn bool) *Ledger {
 	k := p.ID
 	note = oneLine(note, maxMergeNoteChars)
 	pctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), persistTimeout)
 	defer cancel()
-	next, changed, err := r.mergeLedger(pctx, k, led, func(l *Ledger) bool { return l.noteMerge(w.taskID, note, warn) })
+	next, changed, err := r.mergeLedger(pctx, k, led, func(l *Ledger) bool { return l.noteMerge(w.taskID, note, head, warn) })
 	if err != nil {
 		log.Printf("[projects] %s task %s: recording an auto-merge note on pull request #%d: %v", k, w.taskID, w.number, err)
 		return led
@@ -513,10 +533,11 @@ func (r *Registry) keepUpToDate(ctx context.Context, p *Project, led *Ledger, w 
 	}
 	switch {
 	case review.MergeMethod == "rebase":
-		return r.noteMerge(ctx, p, led, w, "The branch is behind its base. With rebase merges, a person brings it up to date.", true)
+		return r.noteMerge(ctx, p, led, w, "The branch is behind its base. With rebase merges, a person brings it up to date.", w.pr.HeadSHA, true)
 	case m.Updates >= maxBranchUpdates:
-		return r.noteMerge(ctx, p, led, w, fmt.Sprintf("The branch fell behind its base again after %s by arbetern. Over to a person.", plural(maxBranchUpdates, "update")), true)
-	case r.approver(ctx, w) == "":
+		return r.noteMerge(ctx, p, led, w, fmt.Sprintf("The branch fell behind its base again after %s by arbetern. Over to a person.", plural(maxBranchUpdates, "update")), "", true)
+	}
+	if approver, _ := r.approver(ctx, w); approver == "" {
 		return led
 	}
 	next, claimed, err := r.mergeLedger(ctx, k, led, func(l *Ledger) bool { return l.claimUpdate(w.taskID, w.pr.HeadSHA, now) })
@@ -528,7 +549,7 @@ func (r *Registry) keepUpToDate(ctx context.Context, p *Project, led *Ledger, w 
 	}
 	if err := r.gh.UpdatePullRequestBranch(ctx, w.owner, w.repo, w.number, w.pr.HeadSHA); err != nil {
 		log.Printf("[projects] %s task %s: bringing pull request #%d up to date with its base: %v", k, w.taskID, w.number, err)
-		return r.noteMerge(ctx, p, next, w, "GitHub did not bring the branch up to date with its base: "+github.APIMessage(err), true)
+		return r.noteMerge(ctx, p, next, w, "GitHub did not bring the branch up to date with its base: "+github.APIMessage(err), w.pr.HeadSHA, true)
 	}
 	log.Printf("[projects] %s task %s: asked GitHub to bring pull request #%d up to date with its base", k, w.taskID, w.number)
 	pctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), persistTimeout)

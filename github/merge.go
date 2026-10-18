@@ -17,6 +17,8 @@ var ErrMergeableNow = errors.New("the pull request can be merged now")
 
 var graphQLMergeMethods = map[string]string{"squash": "SQUASH", "rebase": "REBASE", "merge": "MERGE"}
 
+const maxCompareFiles = 300
+
 type refusal struct{ op, message string }
 
 func (e *refusal) Error() string { return e.op + ": " + e.message }
@@ -106,7 +108,7 @@ func (c *Client) CanPush(ctx context.Context, owner, repo, user string) (bool, e
 	return p == "admin" || p == "write", nil
 }
 
-// ChangeFingerprint hashes what head changes over its merge base with base: each file's name, status and changed lines, without context or line numbers, so merging base into head leaves it as it was.
+// ChangeFingerprint hashes what head changes over its merge base with base, so merging base into head keeps it while moving, adding or editing a changed line does not.
 func (c *Client) ChangeFingerprint(ctx context.Context, owner, repo, base, head string) (string, error) {
 	cmp, _, err := c.api.Repositories.CompareCommits(ctx, owner, repo, base, head, &gh.ListOptions{PerPage: 1})
 	if err != nil {
@@ -115,22 +117,53 @@ func (c *Client) ChangeFingerprint(ctx context.Context, owner, repo, base, head 
 	files := slices.Clone(cmp.Files)
 	slices.SortFunc(files, func(a, b *gh.CommitFile) int { return strings.Compare(a.GetFilename(), b.GetFilename()) })
 	var b strings.Builder
+	// GitHub lists at most this many files, so a longer change is only the same at the same head.
+	if len(files) >= maxCompareFiles {
+		b.WriteString(head + "\x00")
+	}
 	for _, f := range files {
 		fmt.Fprintf(&b, "%s\x00%s\x00%s\x00", f.GetFilename(), f.GetPreviousFilename(), f.GetStatus())
-		patch := f.GetPatch()
-		if patch == "" {
-			fmt.Fprintf(&b, "+%d-%d\x00", f.GetAdditions(), f.GetDeletions())
+		if f.GetPatch() == "" {
+			fmt.Fprintf(&b, "+%d-%d %s\x00", f.GetAdditions(), f.GetDeletions(), f.GetSHA())
 			continue
 		}
-		for line := range strings.SplitSeq(patch, "\n") {
-			if strings.HasPrefix(line, "+") || strings.HasPrefix(line, "-") {
-				b.WriteString(line + "\n")
-			}
-		}
+		writeChangeRuns(&b, f.GetPatch())
 		b.WriteByte(0)
 	}
 	sum := sha256.Sum256([]byte(b.String()))
-	return hex.EncodeToString(sum[:12]), nil
+	return hex.EncodeToString(sum[:]), nil
+}
+
+// writeChangeRuns writes every run of changed lines with its hunk's section and the unchanged lines right above and below it: a merge that changes a line next to a run conflicts, so a clean merge keeps them while a moved run gets new ones.
+func writeChangeRuns(b *strings.Builder, patch string) {
+	var section, above string
+	var run []string
+	flush := func(below string) {
+		if len(run) > 0 {
+			fmt.Fprintf(b, "%s\x1f%s\x1f%s\x1f%s\x1e", section, above, strings.Join(run, "\n"), below)
+			run = nil
+		}
+	}
+	for line := range strings.SplitSeq(patch, "\n") {
+		switch {
+		case strings.HasPrefix(line, "@@"):
+			flush("")
+			section, above = hunkSection(line), ""
+		case strings.HasPrefix(line, "+") || strings.HasPrefix(line, "-") || strings.HasPrefix(line, "\\") && len(run) > 0:
+			run = append(run, line)
+		default:
+			flush(line)
+			above = line
+		}
+	}
+	flush("")
+}
+
+func hunkSection(header string) string {
+	if _, after, ok := strings.Cut(header[2:], "@@"); ok {
+		return strings.TrimSpace(after)
+	}
+	return ""
 }
 
 func (c *Client) mutate(ctx context.Context, op, mutation string, vars map[string]any) error {

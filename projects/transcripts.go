@@ -75,21 +75,24 @@ func (r *Registry) serveTranscript(w http.ResponseWriter, req *http.Request, id,
 	_, _ = w.Write(data)
 }
 
-// pruneTranscripts deletes the transcripts of tasks the ledger no longer keeps.
-func (r *Registry) pruneTranscripts(ctx context.Context, id string, led *Ledger) {
+// pruneTranscripts deletes the transcripts of tasks the ledger no longer keeps and reports whether none is left.
+func (r *Registry) pruneTranscripts(ctx context.Context, id string, led *Ledger) bool {
 	objs, err := r.b.List(ctx, StatePrefix+id+transcriptsPath)
 	if err != nil {
 		log.Printf("[projects] listing the transcripts of %s: %v", id, err)
-		return
+		return false
 	}
+	ok := true
 	for _, o := range objs {
 		if led.task(strings.TrimSuffix(path.Base(o.Key), ".jsonl")) != nil {
 			continue
 		}
 		if err := r.b.Delete(ctx, o.Key, ""); err != nil {
 			log.Printf("[projects] deleting %s: %v", o.Key, err)
+			ok = false
 		}
 	}
+	return ok
 }
 
 func (r *Registry) deleteTranscripts(ctx context.Context, id string) {

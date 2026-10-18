@@ -167,9 +167,13 @@ func (r *Registry) observePR(ctx context.Context, p *Project, led *Ledger, t Tas
 		pending:      len(items),
 		lastFeedback: last,
 	}
-	if p.Review.effective().AutoMerge {
-		if obs.content, err = r.diffOf(ctx, owner, repo, pr.BaseRef, pr.HeadSHA); err != nil {
-			return led, err
+	switch review := p.Review.effective(); {
+	case review.AutoMerge && review.MergeMethod != defaultMergeMethod:
+		// Rebase and merge land every commit, so only the head itself is the change a person approved.
+		obs.content = "head:" + pr.HeadSHA
+	default:
+		if obs.content, err = r.gh.ChangeFingerprint(ctx, owner, repo, pr.BaseRef, pr.HeadSHA); err != nil {
+			log.Printf("[projects] %s task %s: reading the changes of pull request #%d: %v", p.ID, t.ID, number, err)
 		}
 	}
 	reviews := slices.DeleteFunc(slices.Clone(discussion), func(it github.DiscussionItem) bool {
@@ -252,7 +256,7 @@ func (r *Registry) advanceReviews(ctx context.Context, p *Project, led *Ledger, 
 			}
 		case readyFor(rv, w, review, now):
 			led = r.finishReview(ctx, p, led, w, now)
-		case review.AutoMerge && mergeReady(rv, w):
+		case review.AutoMerge && w.content != "" && mergeReady(rv, w):
 			led = r.autoMerge(ctx, p, led, w, review, now)
 		}
 	}
@@ -277,14 +281,19 @@ func (r *Registry) finishReview(ctx context.Context, p *Project, led *Ledger, w 
 		return next
 	}
 	// The earlier ready note still holds while GitHub merges this head by itself, or when only the base branch was merged in.
-	repeat := rv.DoneAt != "" && (w.pr.AutoMerge || w.content != "" && rv.AutoMerge != nil && rv.AutoMerge.DoneContent == w.content)
+	known := w.content != "" && rv.DoneContent != ""
+	repeat := rv.DoneAt != "" && (known && rv.DoneContent == w.content || !known && w.pr.AutoMerge)
 	if !repeat {
 		if _, err := r.gh.CommentOnPullRequest(ctx, w.owner, w.repo, w.number, doneComment(p, rv, w.pr.HeadSHA)); err != nil {
 			log.Printf("[projects] %s task %s: posting the ready note on pull request #%d: %v", k, w.taskID, w.number, err)
 			return led
 		}
 	}
-	next, _, err := r.mergeLedger(ctx, p.ID, led, func(l *Ledger) bool { return l.markDone(w.taskID, w.pr.HeadSHA, w.content, now) })
+	announced := w.content
+	if repeat && !known {
+		announced = ""
+	}
+	next, _, err := r.mergeLedger(ctx, p.ID, led, func(l *Ledger) bool { return l.markDone(w.taskID, w.pr.HeadSHA, announced, now) })
 	if err != nil {
 		log.Printf("[projects] %s task %s: recording pull request #%d as done: %v", k, w.taskID, w.number, err)
 		return led

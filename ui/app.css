@@ -1465,6 +1465,7 @@ details.cell pre { margin-top: 6px; background: var(--bg); border: 1px solid var
 .proj-toggle[aria-expanded="true"]::before, .proj-fold-btn[aria-expanded="true"]::before { content: '▾ '; }
 .proj-toggle:hover, .proj-fold-btn:hover { color: var(--accent); }
 .proj-finished[hidden] { display: none; }
+.data-table tr.proj-fold > td, .data-table tbody.proj-finished > tr:first-child > td { border-top: 1px solid var(--border); }
 .proj-more[hidden] { display: none; }
 .data-table tr.proj-more > td { background: var(--card-2); padding: 12px 14px 14px; }
 .data-table tbody tr:nth-last-child(2):has(+ tr.proj-more[hidden]) > td { border-bottom: none; }

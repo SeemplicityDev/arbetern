@@ -167,6 +167,7 @@ type Ledger struct {
 	Tracks      map[string]*Track `json:"tracks,omitempty"`
 	Totals      Totals            `json:"totals"`
 	Daily       map[string]*Day   `json:"daily,omitempty"`
+	Swept       string            `json:"swept,omitempty"` // UTC day the transcripts of dropped tasks were last cleared; empty while some may be left
 }
 
 // Note is one entry of project memory.
@@ -426,6 +427,9 @@ func (l *Ledger) finish(t *Task, status string, now time.Time) {
 				rd.Status, rd.Error, rd.FinishedAt = StatusFailed, "the pull request is "+status, t.FinishedAt
 			}
 			dropRoundBodies(rd)
+		}
+		if m := t.Review.AutoMerge; m != nil {
+			m.Note, m.NoteHead = "", ""
 		}
 	}
 	l.track(t.Fingerprint).LastStatus = status

@@ -964,7 +964,7 @@ function pjdMetaHtml(p) {
       ${wide('MCP connectors', connectors.length ? `<div class="chip-row">${connectors.map(n => `<span class="chip">${escapeHtml(n)}</span>`).join('')}</div>` : '<span class="muted">none</span>')}
       ${pjdConventionsText(p.conventions) ? wide('Conventions', `<code>${escapeHtml(pjdConventionsText(p.conventions))}</code>`) : ''}
       ${pjdSignalMetaHtml(sig, wide)}
-      ${wide('Limits', `<div class="chip-row">${PJD_LIMITS.map(([k, label]) => `<span class="chip">${escapeHtml(label)} <b>${fmtInt(l[k])}</b></span>`).join('')}</div>`)}
+      ${wide('Limits', `<div class="chip-row">${PJD_LIMITS.map(([k, label, min, max, def]) => `<span class="chip">${escapeHtml(label)} <b>${fmtInt(!l[k] || l[k] < min || l[k] > max ? def : l[k])}</b></span>`).join('')}</div>`)}
     </div>`;
 }
 
@@ -1028,7 +1028,9 @@ function renderProjectDetail(root, p) {
     ? `<div class="list-scroll" data-scroll="tasks"><table class="data-table"><thead><tr>
         <th>Status</th><th>${what}</th><th class="n">${count}</th><th class="n">Attempt</th><th>Transcript</th><th>Pull request</th><th>Updated</th>
       </tr></thead><tbody>${tasks.filter(t => !PJD_FINISHED.includes(t.status)).map(t => pjdTaskRowsHtml(p, t, manage)).join('')}</tbody>${pjdFinishedHtml(p, finished, manage)}</table></div>`
-    : emptyHtml(p.state_error ? 'Tasks could not be loaded.' : `No sessions dispatched yet. When the query finds ${metric ? 'a series over its threshold' : 'an error group'} and the limits allow, its task shows up here.`);
+    : emptyHtml(p.state_error ? 'Tasks could not be loaded.' : (s.sessions || 0) + (s.failed_sessions || 0) > 0
+      ? `No open or recent tasks. Finished tasks leave this list ${plural((p.limits || {}).task_retention_days || 14, 'day')} after they end; the statistics above still count them.`
+      : `No sessions dispatched yet. When the query finds ${metric ? 'a series over its threshold' : 'an error group'} and the limits allow, its task shows up here.`);
   const backlogBody = backlog.length
     ? `<div class="list-scroll" data-scroll="backlog"><table class="data-table"><thead><tr>
         <th>${what}</th><th class="n">${count}</th><th>First seen</th><th>Last seen</th>
@@ -1292,7 +1294,7 @@ async function projectForm(p) {
       + check('pjf-draft', rv.draft, 'Open pull requests as drafts and mark them ready once nothing is left')
       + `<div class="form-grid2">${formField('Follow-up rounds', input('pjf-rounds', rv.max_rounds || '', ' type="number" min="1" max="10" step="1" inputmode="numeric" placeholder="5"'), 'Sessions per pull request, 1–10.')}${formField('Quiet minutes', input('pjf-settle', rv.settle_minutes || '', ' type="number" min="5" max="240" step="1" inputmode="numeric" placeholder="15"'), 'Nothing new for this long before a pull request counts as ready.')}</div>`
       + check('pjf-automerge', rv.auto_merge, 'Turn on auto-merge once a ready pull request stays unchanged for the delay')
-      + `<div class="form-grid2">${formField('Auto-merge delay, minutes', input('pjf-merge-delay', rv.auto_merge_delay_minutes || '', ' type="number" min="5" max="1440" step="1" inputmode="numeric" placeholder="30"'), '5–1440. A push, check or comment starts it over, and arbetern checks once more before turning auto-merge on.')}${formField('Merge method', `<select class="form-input" id="pjf-merge-method">${['squash', 'rebase', 'merge'].map(m => `<option value="${m}"${(rv.merge_method || 'squash') === m ? ' selected' : ''}>${m}</option>`).join('')}</select>`, 'One the repository allows.')}</div>`
+      + `<div class="form-grid2">${formField('Auto-merge delay, minutes', input('pjf-merge-delay', rv.auto_merge_delay_minutes || '', ' type="number" min="5" max="1440" step="1" inputmode="numeric" placeholder="30"'), '5–1440. New changes, a new check result or a comment start it over, and arbetern checks once more before turning auto-merge on.')}${formField('Merge method', `<select class="form-input" id="pjf-merge-method">${['squash', 'rebase', 'merge'].map(m => `<option value="${m}"${(rv.merge_method || 'squash') === m ? ' selected' : ''}>${m}</option>`).join('')}</select>`, 'One the repository allows.')}</div>`
       + formField('Slack channel', input('pjf-slack', nt.slack_channel, ' maxlength="13" placeholder="C0123456789"' + code), 'Optional channel id. It hears about new pull requests, questions, blocked and ready ones, auto-merge, merges, and an automatic pause.')
       + `<details class="form-more"><summary>Limits</summary><div class="form-grid2">${limits}</div></details>`
       + `<label class="check-row"><input type="checkbox" id="pjf-enabled"${!p || p.enabled ? ' checked' : ''}> Enabled</label>`,
