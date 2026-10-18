@@ -824,7 +824,7 @@ function pjdTaskRowsHtml(p, t, manage) {
       <td>${pjdGroupCell(g, key)}</td>
       <td class="n">${fmtInt(g.count)}</td>
       <td class="n">${fmtInt(t.attempt)}${maxAttempts ? ' / ' + fmtInt(maxAttempts) : ''}</td>
-      <td>${manage && t.transcript ? `<button type="button" class="link-btn" data-pjd="transcript" data-task="${escapeHtml(t.id)}">Transcript</button>` : '<span class="muted">—</span>'}</td>
+      <td>${t.transcript ? `<button type="button" class="link-btn" data-pjd="transcript" data-task="${escapeHtml(t.id)}">Transcript</button>` : '<span class="muted">—</span>'}</td>
       <td>${prCell}</td>
       <td class="muted" title="${escapeHtml(t.updated_at ? fmtDateTime(t.updated_at) : '')}">${t.updated_at ? timeAgo(t.updated_at) : '—'}</td>
     </tr>
@@ -1123,7 +1123,7 @@ async function pjdViewTranscript(taskId) {
   let text;
   try {
     const res = await fetch(`${detailApi('project', '', p.id)}/transcripts/${encodeURIComponent(taskId)}`, { credentials: 'same-origin' });
-    if (!res.ok) throw new Error(res.status === 403 ? 'Only project admins can read transcripts.' : `HTTP ${res.status}`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
     text = await res.text();
   } catch (err) {
     await uiError('Failed to load the transcript', err);

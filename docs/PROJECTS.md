@@ -182,7 +182,7 @@ true.
 | Value | Default | Description |
 |---|---|---|
 | `enabled` | `false` | Turns on projects in arbetern and renders every session resource |
-| `adminTeams` / `adminEmails` | `[]` | Who may create, change, run or delete projects and read session transcripts: Slack user group IDs, and email addresses or whole domains (`example.com` or `@example.com`). **Both empty means nobody** |
+| `adminTeams` / `adminEmails` | `[]` | Who may create, change, run or delete projects: Slack user group IDs, and email addresses or whole domains (`example.com` or `@example.com`). Every console user can see the projects, their tasks and session transcripts. **Both empty means nobody can change one** |
 | `gateway.port` | `8081` | Session-facing listener, exposed by the ClusterIP Service `<fullname>-projects-gateway` with port equal to target port. Must differ from `containerPort`, `env.PORT`, `headroom.port` with Headroom enabled and `modelRouter.port` with the model router enabled |
 | `networkPolicy.enabled` | `true` | Renders the NetworkPolicies described under [Security](#security) |
 | `sessions.namespace.name` | the release namespace | Where sessions run. Sharing arbetern's namespace needs the admission policy; name another namespace to give the sessions their own, see [Isolation of the sessions](#isolation-of-the-sessions) |
@@ -295,9 +295,9 @@ The project page (`/ui/project/<id>`) shows the statistics, a 30-day chart of
 opened and merged pull requests, the configuration, the tasks with their
 follow-up rounds and pull request links (finished tasks folded into one line
 that opens them), the backlog, and the project memory.
-Admins get **Run now**, **Pause** / **Resume**, **Edit**, **Delete**, can add
-or delete memory notes, and can open the stored **Transcript** of any session
-that uploaded one. The page polls every 10 seconds while sessions are active
+Everyone can open the stored **Transcript** of any session that uploaded one.
+Admins also get **Run now**, **Pause** / **Resume**, **Edit**, **Delete**, and
+can add or delete memory notes. The page polls every 10 seconds while sessions are active
 and every 30 seconds otherwise. Banners explain an automatic pause and the last
 tick's error.
 
@@ -311,8 +311,8 @@ tick's error.
 ### Console API
 
 The page uses these routes; any client with a console session can call them.
-Writes need the same-origin check to pass and the admin list above; transcript
-reads need the admin list. Bodies are JSON of at most 64 KiB, and unknown fields are rejected.
+Writes need the same-origin check to pass and the admin list above; reads,
+transcripts included, are open to every console session. Bodies are JSON of at most 64 KiB, and unknown fields are rejected.
 
 | Method and path | Behaviour |
 |---|---|
@@ -324,7 +324,7 @@ reads need the admin list. Bodies are JSON of at most 64 KiB, and unknown fields
 | `POST /api/projects/<id>/run` | Queue a tick. 202 `{"accepted":true}`, or 409 when the project is paused |
 | `POST /api/projects/<id>/memory` | Add an admin note, `{"text":"…"}` of 1–500 characters. 201 with the note |
 | `DELETE /api/projects/<id>/memory/<note-id>` | Delete a note. 204 |
-| `GET /api/projects/<id>/transcripts/<task-id>` | The task's stored Claude Code transcript as JSON lines, for project admins |
+| `GET /api/projects/<id>/transcripts/<task-id>` | The task's stored Claude Code transcript as JSON lines |
 
 Errors come back as `{"error":"…"}`.
 
@@ -850,7 +850,7 @@ admin note makes room; admins cannot add more than 60 notes of their own.
 ### Transcripts
 
 Every session's Claude Code transcript is stored in the state bucket when the
-session ends, and the project page offers it to admins as **Transcript**: the
+session ends, and the project page offers it to everyone as **Transcript**: the
 messages, the tools Claude called and what they returned. A follow-up round
 downloads it and resumes it, which is how a round that answers a review keeps
 the context of the session that wrote the fix. A round that starts from a
@@ -995,8 +995,10 @@ request it makes.
 ### Who can start work
 
 - **Fail-closed admin list.** Only project admins can create, change, run,
-  pause or delete a project, or read a transcript. With `adminTeams` and
-  `adminEmails` both empty nobody can. The check keys on the email your SSO
+  pause or delete a project. With `adminTeams` and `adminEmails` both empty
+  nobody can. Every console user can read the projects, transcripts included,
+  so a transcript shows them whatever its session read: code, Datadog samples
+  (redacted on the way in) and ticket text. The check keys on the email your SSO
   proxy verified, so run oauth2-proxy and set `TRUSTED_PROXY_CIDRS` (see
   [Authentication](../README.md#authentication-sso)).
 - **Only arbetern starts sessions.** A Job exists only because a tick created

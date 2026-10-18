@@ -24,7 +24,7 @@ type consoleAPI struct {
 	userFor   func(*http.Request) string
 }
 
-// RegisterRoutes mounts the projects console API; authorize gates every change and the session transcripts.
+// RegisterRoutes mounts the projects console API; authorize gates every change.
 func (r *Registry) RegisterRoutes(apiMux *http.ServeMux, authorize func(*http.Request) bool, userFor func(*http.Request) string) {
 	api := &consoleAPI{r: r, authorize: authorize, userFor: userFor}
 	apiMux.HandleFunc("GET /api/projects", api.list)
@@ -93,13 +93,11 @@ func (a *consoleAPI) user(req *http.Request) string {
 	return a.userFor(req)
 }
 
-// permit applies the admin list to a request that changes state or reads a transcript, and the same-origin check to the former.
+// permit applies the same-origin check and the admin list to a request that changes state.
 func (a *consoleAPI) permit(w http.ResponseWriter, req *http.Request) bool {
-	if req.Method != http.MethodGet {
-		if err := httpx.CheckSameOrigin(req); err != nil {
-			writeError(w, http.StatusForbidden, err.Error())
-			return false
-		}
+	if err := httpx.CheckSameOrigin(req); err != nil {
+		writeError(w, http.StatusForbidden, err.Error())
+		return false
 	}
 	if a.authorize != nil && !a.authorize(req) {
 		writeError(w, http.StatusForbidden, "forbidden")
@@ -419,9 +417,6 @@ func (a *consoleAPI) transcript(w http.ResponseWriter, req *http.Request) {
 	task := req.PathValue("task")
 	if !store.IDRe.MatchString(task) {
 		writeError(w, http.StatusBadRequest, "invalid task id")
-		return
-	}
-	if !a.permit(w, req) {
 		return
 	}
 	a.r.serveTranscript(w, req, id, task)

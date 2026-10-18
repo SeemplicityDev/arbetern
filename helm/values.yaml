@@ -301,7 +301,8 @@ workflows:
 projects:
   enabled: false
   # Slack user-group IDs and emails / @domain entries that may create, change,
-  # run or delete projects and read session transcripts. Both empty = nobody.
+  # run or delete projects. Every console user sees the projects, transcripts
+  # included. Both empty = nobody can change one.
   adminTeams: []
   adminEmails: []
   gateway:
