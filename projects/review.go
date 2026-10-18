@@ -35,6 +35,7 @@ type prWatch struct {
 	ci      string
 	failed  []github.Check
 
+	content      string
 	snapshot     string
 	reviews      []github.DiscussionItem
 	ourAutoMerge bool
@@ -166,8 +167,8 @@ func (r *Registry) observePR(ctx context.Context, p *Project, led *Ledger, t Tas
 		pending:      len(items),
 		lastFeedback: last,
 	}
-	if m := rv.AutoMerge; m != nil && m.UpdatedFrom != "" && m.UpdatedFrom == rv.Head && pr.HeadSHA != rv.Head {
-		if obs.fromUpdate, err = r.mergedBase(ctx, owner, repo, pr, m.UpdatedFrom); err != nil {
+	if p.Review.effective().AutoMerge {
+		if obs.content, err = r.diffOf(ctx, owner, repo, pr.BaseRef, pr.HeadSHA); err != nil {
 			return led, err
 		}
 	}
@@ -181,7 +182,7 @@ func (r *Registry) observePR(ctx context.Context, p *Project, led *Ledger, t Tas
 	}
 	out.watches = append(out.watches, prWatch{
 		taskID: t.ID, owner: owner, repo: repo, number: number, pr: pr, items: items, context: context, ci: ci, failed: failed,
-		snapshot: mergeSnapshot(pr, checks, discussion, self, p.Review.effective().MergeMethod), reviews: reviews,
+		content: obs.content, snapshot: mergeSnapshot(pr, obs.content, checks, discussion, self, p.Review.effective().MergeMethod), reviews: reviews,
 		ourAutoMerge: pr.AutoMerge && strings.EqualFold(pr.AutoMergeBy, self),
 	})
 	return next, nil
@@ -275,15 +276,15 @@ func (r *Registry) finishReview(ctx context.Context, p *Project, led *Ledger, w 
 		log.Printf("[projects] %s task %s: pull request #%d marked ready for review", k, w.taskID, w.number)
 		return next
 	}
-	// With auto-merge on, GitHub merges this head by itself and the earlier ready note still holds.
-	repeat := w.pr.AutoMerge && rv.DoneAt != ""
+	// The earlier ready note still holds while GitHub merges this head by itself, or when only the base branch was merged in.
+	repeat := rv.DoneAt != "" && (w.pr.AutoMerge || w.content != "" && rv.AutoMerge != nil && rv.AutoMerge.DoneContent == w.content)
 	if !repeat {
 		if _, err := r.gh.CommentOnPullRequest(ctx, w.owner, w.repo, w.number, doneComment(p, rv, w.pr.HeadSHA)); err != nil {
 			log.Printf("[projects] %s task %s: posting the ready note on pull request #%d: %v", k, w.taskID, w.number, err)
 			return led
 		}
 	}
-	next, _, err := r.mergeLedger(ctx, p.ID, led, func(l *Ledger) bool { return l.markDone(w.taskID, w.pr.HeadSHA, now) })
+	next, _, err := r.mergeLedger(ctx, p.ID, led, func(l *Ledger) bool { return l.markDone(w.taskID, w.pr.HeadSHA, w.content, now) })
 	if err != nil {
 		log.Printf("[projects] %s task %s: recording pull request #%d as done: %v", k, w.taskID, w.number, err)
 		return led
@@ -516,7 +517,7 @@ func plural(n int, noun string) string {
 	switch {
 	case n == 1:
 		return "1 " + noun
-	case strings.HasSuffix(noun, "y") && !strings.HasSuffix(noun, "ey"):
+	case len(noun) > 1 && noun[len(noun)-1] == 'y' && !strings.ContainsRune("aeiou", rune(noun[len(noun)-2])):
 		return strconv.Itoa(n) + " " + strings.TrimSuffix(noun, "y") + "ies"
 	}
 	return strconv.Itoa(n) + " " + noun + "s"

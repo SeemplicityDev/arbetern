@@ -671,7 +671,9 @@ const PJD_LIMITS = [
   ['session_timeout_minutes', 'Session timeout, minutes', 30, 600, 240],
   ['recurrence_grace_hours', 'Recurrence grace, hours', 0, 168, 24, 'Deploy lag after a merge'],
   ['recurrence_window_hours', 'Recurrence window, hours', 24, 720, 168, 'Quiet this long counts as resolved'],
+  ['task_retention_days', 'Keep finished tasks, days', 1, 365, 14, 'Then a task and its transcript are deleted; the statistics keep counting it'],
 ];
+const PJD_FINISHED = ['merged', 'closed', 'no_fix', 'failed'];
 const pjdExpanded = new Set();
 
 function pjdTaskStatus(t) {
@@ -827,6 +829,24 @@ function pjdTaskRowsHtml(p, t, manage) {
       <td class="muted" title="${escapeHtml(t.updated_at ? fmtDateTime(t.updated_at) : '')}">${t.updated_at ? timeAgo(t.updated_at) : '—'}</td>
     </tr>
     <tr class="proj-more"${pjdExpanded.has(key) ? '' : ' hidden'}><td colspan="7">${pjdTaskDetailHtml(t)}</td></tr>`;
+}
+
+function pjdFinishedHtml(p, finished, manage) {
+  if (!finished.length) return '';
+  const counts = {};
+  finished.forEach(t => { const label = pjdTaskStatus(t)[1]; counts[label] = (counts[label] || 0) + 1; });
+  const summary = Object.entries(counts).map(([label, n]) => `${fmtInt(n)} ${label}`).join(' · ');
+  const open = pjdExpanded.has('finished');
+  return `<tbody><tr class="proj-fold"><td colspan="7"><button type="button" class="proj-fold-btn" data-pjd="finished" aria-expanded="${open}">${escapeHtml(plural(finished.length, 'finished task'))}</button> <span class="muted">${escapeHtml(summary)}</span></td></tr></tbody>
+    <tbody class="proj-finished"${open ? '' : ' hidden'}>${finished.map(t => pjdTaskRowsHtml(p, t, manage)).join('')}</tbody>`;
+}
+
+function pjdToggleFinished(btn) {
+  const body = document.querySelector('#proj-detail tbody.proj-finished');
+  if (!body) return;
+  body.hidden = !body.hidden;
+  btn.setAttribute('aria-expanded', String(!body.hidden));
+  if (body.hidden) pjdExpanded.delete('finished'); else pjdExpanded.add('finished');
 }
 
 function pjdBacklogRowsHtml(c) {
@@ -1003,10 +1023,11 @@ function renderProjectDetail(root, p) {
 
   const metric = (p.signal || {}).type === 'datadog_metrics';
   const [what, count] = metric ? ['Series', 'Sum'] : ['Error group', 'Count'];
+  const finished = tasks.filter(t => PJD_FINISHED.includes(t.status));
   const tasksBody = tasks.length
     ? `<div class="list-scroll" data-scroll="tasks"><table class="data-table"><thead><tr>
         <th>Status</th><th>${what}</th><th class="n">${count}</th><th class="n">Attempt</th><th>Transcript</th><th>Pull request</th><th>Updated</th>
-      </tr></thead><tbody>${tasks.map(t => pjdTaskRowsHtml(p, t, manage)).join('')}</tbody></table></div>`
+      </tr></thead><tbody>${tasks.filter(t => !PJD_FINISHED.includes(t.status)).map(t => pjdTaskRowsHtml(p, t, manage)).join('')}</tbody>${pjdFinishedHtml(p, finished, manage)}</table></div>`
     : emptyHtml(p.state_error ? 'Tasks could not be loaded.' : `No sessions dispatched yet. When the query finds ${metric ? 'a series over its threshold' : 'an error group'} and the limits allow, its task shows up here.`);
   const backlogBody = backlog.length
     ? `<div class="list-scroll" data-scroll="backlog"><table class="data-table"><thead><tr>
@@ -1057,7 +1078,8 @@ document.getElementById('proj-detail').addEventListener('click', e => {
   if (toggle) { pjdToggleRow(toggle); return; }
   const act = e.target.closest('[data-pjd]');
   if (!act) return;
-  if (act.dataset.pjd === 'add-note') pjdAddNote();
+  if (act.dataset.pjd === 'finished') pjdToggleFinished(act);
+  else if (act.dataset.pjd === 'add-note') pjdAddNote();
   else if (act.dataset.pjd === 'delete-note') pjdDeleteNote(act.dataset.note, act);
   else if (act.dataset.pjd === 'transcript') pjdViewTranscript(act.dataset.task);
 });

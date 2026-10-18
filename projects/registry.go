@@ -91,6 +91,7 @@ type Registry struct {
 	states *ttlcache.Keyed[stateKey, *projectState]
 	login  *ttlcache.Cache[string]
 	orgs   *ttlcache.Keyed[string, []github.OrgRepository]
+	diffs  *ttlcache.Keyed[diffKey, string]
 }
 
 type tickTask struct {
@@ -122,6 +123,12 @@ func New(deps Deps) *Registry {
 			return "", errors.New("GitHub is not configured")
 		}
 		return r.gh.GetAuthenticatedUser(ctx)
+	})
+	r.diffs = ttlcache.NewKeyed(diffsTTL, 512, func(ctx context.Context, k diffKey) (string, error) {
+		if r.gh == nil {
+			return "", errors.New("GitHub is not configured")
+		}
+		return r.gh.ChangeFingerprint(ctx, k.owner, k.repo, k.base, k.sha)
 	})
 	r.orgs = ttlcache.NewKeyed(orgReposTTL, 32, func(ctx context.Context, owner string) ([]github.OrgRepository, error) {
 		if r.gh == nil {

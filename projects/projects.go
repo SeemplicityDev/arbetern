@@ -64,6 +64,7 @@ const (
 	viewTimeout        = 10 * time.Second
 	viewCacheTTL       = 5 * time.Second
 	orgReposTTL        = 10 * time.Minute
+	diffsTTL           = 24 * time.Hour
 	maxStagger         = 60 * time.Second
 	dispatchLostAfter  = 15 * time.Minute
 	runningGrace       = 30 * time.Minute
@@ -235,6 +236,7 @@ type Limits struct {
 	SessionTimeoutMinutes int `json:"session_timeout_minutes"` // 30–600, default 240
 	RecurrenceGraceHours  int `json:"recurrence_grace_hours"`  // 0–168, default 24 (deploy lag after merge)
 	RecurrenceWindowHours int `json:"recurrence_window_hours"` // 24–720, default 168
+	TaskRetentionDays     int `json:"task_retention_days"`     // 1–365, default 14, how long a finished task stays in the ledger
 }
 
 // Day holds one UTC day's counters.
@@ -738,6 +740,7 @@ var limitBounds = []limitBound{
 	{"session_timeout_minutes", func(l *Limits) *int { return &l.SessionTimeoutMinutes }, 30, 600, 240},
 	{"recurrence_grace_hours", func(l *Limits) *int { return &l.RecurrenceGraceHours }, 0, 168, 24},
 	{"recurrence_window_hours", func(l *Limits) *int { return &l.RecurrenceWindowHours }, 24, 720, 168},
+	{"task_retention_days", func(l *Limits) *int { return &l.TaskRetentionDays }, 1, 365, 14},
 }
 
 func (l *Limits) normalize() error {

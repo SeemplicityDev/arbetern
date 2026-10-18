@@ -99,7 +99,7 @@ type observation struct {
 	conflict     bool
 	pending      int
 	lastFeedback time.Time
-	fromUpdate   bool // the new head is arbetern's update of the head it last saw with the base
+	content      string // fingerprint of the head's own changes, with auto-merge on
 }
 
 type roundResult struct {
@@ -211,8 +211,17 @@ func (l *Ledger) observe(id string, o observation, now time.Time) bool {
 	before := *rv
 	// A round that reported after the read may have moved the head on; an older read must not move it back.
 	if o.head != "" && o.head != rv.Head && (o.seenHead == "" || rv.Head == o.seenHead) {
-		rv.AutoMerge.headMoved(rv.Head, o.fromUpdate)
+		if rv.AutoMerge != nil {
+			rv.AutoMerge.UpdateTriedAt = ""
+		}
 		rv.Head, rv.HeadAt = o.head, stamp(now)
+	}
+	seen := false
+	if o.content != "" && rv.Head == o.head {
+		m := cmp.Or(rv.AutoMerge, &MergeState{})
+		if seen = m.seen(o.content); seen {
+			rv.AutoMerge = m
+		}
 	}
 	rv.CI, rv.Conflict, rv.Pending = o.ci, o.conflict, o.pending
 	rv.FailedChecks = slices.Clone(o.failed)
@@ -220,7 +229,7 @@ func (l *Ledger) observe(id string, o observation, now time.Time) bool {
 		rv.LastFeedbackAt = latest(rv.LastFeedbackAt, stamp(o.lastFeedback))
 	}
 	rv.settle()
-	return started || rv.Head != before.Head || rv.CI != before.CI || rv.Conflict != before.Conflict || rv.Pending != before.Pending ||
+	return started || seen || rv.Head != before.Head || rv.CI != before.CI || rv.Conflict != before.Conflict || rv.Pending != before.Pending ||
 		!slices.Equal(rv.FailedChecks, before.FailedChecks) || rv.LastFeedbackAt != before.LastFeedbackAt || rv.Phase != before.Phase
 }
 
@@ -378,12 +387,17 @@ func (l *Ledger) markReady(id string, now time.Time) bool {
 	return true
 }
 
-func (l *Ledger) markDone(id, head string, now time.Time) bool {
+func (l *Ledger) markDone(id, head, content string, now time.Time) bool {
 	_, rv := l.review(id)
 	if rv == nil || head == "" || rv.Head != head || rv.DoneHead == head {
 		return false
 	}
 	rv.DoneHead, rv.DoneAt = head, stamp(now)
+	if content != "" {
+		m := cmp.Or(rv.AutoMerge, &MergeState{})
+		m.DoneContent = content
+		rv.AutoMerge = m
+	}
 	rv.settle()
 	return true
 }
@@ -480,7 +494,6 @@ func recordRoundResult(t *Task, rv *ReviewState, rd *Round, res roundResult, now
 		rv.Waiting = ""
 	}
 	if rd.HeadAfter != rv.Head {
-		rv.AutoMerge.headMoved(rv.Head, false)
 		rv.Head, rv.HeadAt = rd.HeadAfter, stamp(now)
 	}
 	dropRoundBodies(rd)

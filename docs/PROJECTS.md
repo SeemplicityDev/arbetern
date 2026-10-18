@@ -289,10 +289,12 @@ be set to zero.
 | `session_timeout_minutes` | 240 | 30–600 | A running session with no report is failed this long plus 30 minutes after dispatch, and its Job is deleted. The Job's own deadline is this plus 10 minutes |
 | `recurrence_grace_hours` | 24 | 0–168 | Deploy lag after a merge: the error seen in this period doesn't count as recurring. Must be shorter than the window |
 | `recurrence_window_hours` | 168 | 24–720 | A merged fix whose error stays quiet this long counts as resolved |
+| `task_retention_days` | 14 | 1–365 | A finished task (merged, closed, no fix or failed) leaves the ledger, and its transcript is deleted, this many days after it finished. A merged fix stays until its recurrence verdict is in and, with a ticket, until the ticket is Done or 14 days have passed. The statistics keep counting it |
 
 The project page (`/ui/project/<id>`) shows the statistics, a 30-day chart of
 opened and merged pull requests, the configuration, the tasks with their
-follow-up rounds and pull request links, the backlog, and the project memory.
+follow-up rounds and pull request links (finished tasks folded into one line
+that opens them), the backlog, and the project memory.
 Admins get **Run now**, **Pause** / **Resume**, **Edit**, **Delete**, can add
 or delete memory notes, and can open the stored **Transcript** of any session
 that uploaded one. The page polls every 10 seconds while sessions are active
@@ -498,21 +500,27 @@ next: **Enable auto-merge**. It starts from a *ready* pull request: every check
 passed (at least one ran), nothing is unanswered, no question or conflict is
 open, and it is not a draft. Then:
 
-1. arbetern records what the pull request looks like: its head, base branch,
-   title and description, every check run and commit status with its result,
-   and every review and comment except arbetern's own and approvals.
+1. arbetern records what the pull request looks like: its changes (the lines
+   its diff over the base branch adds and removes, so merging the base branch
+   in changes nothing), base branch, title and description, the result of
+   every check run and commit status, and every review and comment except
+   arbetern's own and approvals.
 2. Every tick compares the pull request with that record. Any difference, such
-   as a push, a re-run or new check, a new or edited comment, or a dismissed
-   review, starts the delay over.
+   as new changes, a new check or result, a new or edited comment, or a
+   dismissed review, starts the delay over. A failed check stops it until every
+   check passes again.
 3. Once nothing has changed for `auto_merge_delay_minutes`, arbetern compares
    a fresh read once more and turns on GitHub's auto-merge with
    `merge_method`, for that exact head. GitHub merges once the branch rules are
    met, typically when a person approves.
 
 An approval counts for arbetern only when its author has write access to the
-repository, it approves the current changes, and no owner, member or
-collaborator asks for changes in their latest review. The Slack channel hears
-when auto-merge goes on. A few cases need more:
+repository, it approves the current changes (an approval of an earlier commit
+with the same changes counts, so merging the base branch in keeps it), and no
+owner, member or collaborator asks for changes in their latest review. A pull
+request that is ready again after the base branch was merged in, with the same
+changes, gets no second ready note. The Slack channel hears when auto-merge goes
+on. A few cases need more:
 
 - **No review required.** Where the branch rules require no review, GitHub
   would merge without one, so arbetern turns auto-merge on only after an
@@ -533,11 +541,11 @@ when auto-merge goes on. A few cases need more:
   an hour later.
 - **Something changed.** arbetern turns its auto-merge off at once, even while
   checks are still running, when a comment waits for an answer, a check failed,
-  a question or conflict is open, a round is due, or someone pushed to the pull
-  request or changed its base branch. The pull request then goes through the
-  delay again once it is ready. Auto-merge a person turned on is turned off only
-  before a round, and arbetern turns it on again afterwards; once the pull
-  request is handed over to a person, theirs stays as they set it.
+  a question or conflict is open, a round is due, or the pull request's changes
+  or base branch changed. Merging the base branch in, whether arbetern, a
+  person or CI does it, is no change. The pull request then goes through the
+  delay again once it is ready. Auto-merge a person turned on stays as they set
+  it: arbetern never turns it off.
 - **Turned off by someone else.** When auto-merge is turned off outside
   arbetern, by a person or by GitHub after a push from someone without write
   access, arbetern leaves that pull request's auto-merge off until someone
@@ -913,9 +921,11 @@ a shutdown or a lost lease keeps the previous last error and counts no failure.
 A recurred group starts over with a fresh attempt budget. A resolved group that
 shows up again after its window is treated as new work. Groups that used every
 attempt are not kept as candidates; they return once `max_attempts` is raised
-and they are seen again. The ledger keeps the 200 most recent tasks, 50
-candidates (a group unseen for seven days is dropped), the history of up to
-2000 error groups and 90 days of daily counters.
+and they are seen again. The ledger keeps finished tasks for
+`task_retention_days` and at most the 200 most recent tasks, 50 candidates (a
+group unseen for seven days is dropped), the history of up to 2000 error groups
+and 90 days of daily counters. The statistics come from running totals, so
+dropping a task changes none of them.
 
 ### How errors are grouped
 

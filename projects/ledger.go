@@ -1053,6 +1053,31 @@ func (l *Ledger) exhausted(fp string, limits Limits) bool {
 	return tr != nil && tr.MergedAt == "" && tr.Attempts >= limits.MaxAttempts
 }
 
+// expireTasks drops finished tasks older than keep once nothing waits on them: a session binding, a ticket still to close, or a merged fix's verdict.
+func (l *Ledger) expireTasks(keep time.Duration, now time.Time) int {
+	n := len(l.Tasks)
+	l.Tasks = slices.DeleteFunc(l.Tasks, func(t Task) bool { return l.expired(&t, keep, now) })
+	return n - len(l.Tasks)
+}
+
+func (l *Ledger) expired(t *Task, keep time.Duration, now time.Time) bool {
+	finished := parseTime(cmp.Or(t.FinishedAt, t.UpdatedAt))
+	if !isTerminal(t.Status) || t.Bound || finished.IsZero() || now.Sub(finished) < keep {
+		return false
+	}
+	if t.Review != nil && slices.ContainsFunc(t.Review.Rounds, func(rd Round) bool { return rd.Bound }) {
+		return false
+	}
+	if t.Status != StatusMerged {
+		return true
+	}
+	if t.Ticket != "" && t.TicketDone == "" && now.Sub(finished) < ticketDoneWindow {
+		return false
+	}
+	tr := l.Tracks[t.Fingerprint]
+	return tr == nil || tr.LastTask != t.ID || tr.MergedAt == "" || tr.Recurrence != ""
+}
+
 func (l *Ledger) compact(limits Limits, now time.Time) {
 	if l.Tasks == nil {
 		l.Tasks = []Task{}

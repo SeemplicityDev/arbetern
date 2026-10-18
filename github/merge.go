@@ -2,8 +2,11 @@ package github
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	gh "github.com/google/go-github/v91/github"
@@ -103,16 +106,31 @@ func (c *Client) CanPush(ctx context.Context, owner, repo, user string) (bool, e
 	return p == "admin" || p == "write", nil
 }
 
-// CommitParents returns a commit's parents, first parent first, and whether GitHub itself committed and signed it.
-func (c *Client) CommitParents(ctx context.Context, owner, repo, sha string) (parents []string, byGitHub bool, err error) {
-	cm, _, err := c.api.Git.GetCommit(ctx, owner, repo, sha)
+// ChangeFingerprint hashes what head changes over its merge base with base: each file's name, status and changed lines, without context or line numbers, so merging base into head leaves it as it was.
+func (c *Client) ChangeFingerprint(ctx context.Context, owner, repo, base, head string) (string, error) {
+	cmp, _, err := c.api.Repositories.CompareCommits(ctx, owner, repo, base, head, &gh.ListOptions{PerPage: 1})
 	if err != nil {
-		return nil, false, fmt.Errorf("failed to read commit %s: %w", sha, err)
+		return "", fmt.Errorf("failed to compare %s...%s: %w", base, head, err)
 	}
-	for _, p := range cm.Parents {
-		parents = append(parents, p.GetSHA())
+	files := slices.Clone(cmp.Files)
+	slices.SortFunc(files, func(a, b *gh.CommitFile) int { return strings.Compare(a.GetFilename(), b.GetFilename()) })
+	var b strings.Builder
+	for _, f := range files {
+		fmt.Fprintf(&b, "%s\x00%s\x00%s\x00", f.GetFilename(), f.GetPreviousFilename(), f.GetStatus())
+		patch := f.GetPatch()
+		if patch == "" {
+			fmt.Fprintf(&b, "+%d-%d\x00", f.GetAdditions(), f.GetDeletions())
+			continue
+		}
+		for line := range strings.SplitSeq(patch, "\n") {
+			if strings.HasPrefix(line, "+") || strings.HasPrefix(line, "-") {
+				b.WriteString(line + "\n")
+			}
+		}
+		b.WriteByte(0)
 	}
-	return parents, strings.EqualFold(cm.GetCommitter().GetEmail(), "noreply@github.com") && cm.GetVerification().GetVerified(), nil
+	sum := sha256.Sum256([]byte(b.String()))
+	return hex.EncodeToString(sum[:12]), nil
 }
 
 func (c *Client) mutate(ctx context.Context, op, mutation string, vars map[string]any) error {

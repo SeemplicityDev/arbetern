@@ -1460,10 +1460,11 @@ details.cell pre { margin-top: 6px; background: var(--bg); border: 1px solid var
 .meta-item .value a:hover { text-decoration: underline; }
 .meta-item .chip-row { margin: 2px 0 0; gap: 6px; }
 .meta-item .chip-row .chip { padding: 4px 9px; }
-.proj-toggle { background: none; border: 0; padding: 0; font: inherit; font-weight: 600; color: var(--text-bright); cursor: pointer; text-align: left; }
-.proj-toggle::before { content: '▸ '; color: var(--text-muted); font-size: 11px; }
-.proj-toggle[aria-expanded="true"]::before { content: '▾ '; }
-.proj-toggle:hover { color: var(--accent); }
+.proj-toggle, .proj-fold-btn { background: none; border: 0; padding: 0; font: inherit; font-weight: 600; color: var(--text-bright); cursor: pointer; text-align: left; }
+.proj-toggle::before, .proj-fold-btn::before { content: '▸ '; color: var(--text-muted); font-size: 11px; }
+.proj-toggle[aria-expanded="true"]::before, .proj-fold-btn[aria-expanded="true"]::before { content: '▾ '; }
+.proj-toggle:hover, .proj-fold-btn:hover { color: var(--accent); }
+.proj-finished[hidden] { display: none; }
 .proj-more[hidden] { display: none; }
 .data-table tr.proj-more > td { background: var(--card-2); padding: 12px 14px 14px; }
 .data-table tbody tr:nth-last-child(2):has(+ tr.proj-more[hidden]) > td { border-bottom: none; }

@@ -120,6 +120,7 @@ func (r *Registry) runTick(ctx context.Context, p *Project, trigger string) *tic
 		out.fail("resolving merged fixes: %v", err)
 		healthy = false
 	}
+	led = r.expireTasks(ctx, p, led, limits)
 	if p.Review.FollowUp && len(out.watches) > 0 {
 		led = r.advanceReviews(ctx, p, led, out)
 	}
@@ -264,6 +265,25 @@ func (r *Registry) syncPRs(ctx context.Context, p *Project, led *Ledger, limits 
 		}
 	}
 	return led, errors.Join(errs...)
+}
+
+func (r *Registry) expireTasks(ctx context.Context, p *Project, led *Ledger, limits Limits) *Ledger {
+	keep := time.Duration(limits.TaskRetentionDays) * 24 * time.Hour
+	now := time.Now().UTC()
+	dropped := 0
+	next, _, err := r.mergeLedger(ctx, p.ID, led, func(l *Ledger) bool {
+		dropped = l.expireTasks(keep, now)
+		return dropped > 0
+	})
+	if err != nil {
+		log.Printf("[projects] %s dropping finished tasks: %v", p.ID, err)
+		return led
+	}
+	if dropped > 0 {
+		log.Printf("[projects] %s dropped %s finished more than %s ago", p.ID, plural(dropped, "task"), plural(limits.TaskRetentionDays, "day"))
+		r.pruneTranscripts(ctx, p.ID, next)
+	}
+	return next
 }
 
 func (r *Registry) closeMergedTickets(ctx context.Context, p *Project, led *Ledger) *Ledger {
