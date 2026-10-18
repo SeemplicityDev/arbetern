@@ -384,6 +384,8 @@ func (g *gateway) handleEnded(w http.ResponseWriter, req *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "temporarily unavailable")
 		return
 	}
+	// The pod has stored its transcript, so its token stops working now instead of at the next tick.
+	g.r.deleteBinding(req.Context(), s.id)
 	log.Printf("[projects] %s task %s round %d: session ended (exit %s, %d turns, status %s)", s.project.ID, taskID, n, reason, turns, s.task.Status)
 	g.r.usage.flushSession(s.id)
 	if changed {

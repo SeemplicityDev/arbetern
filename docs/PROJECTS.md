@@ -295,7 +295,8 @@ The project page (`/ui/project/<id>`) shows the statistics, a 30-day chart of
 opened and merged pull requests, the configuration, the tasks with their
 follow-up rounds and pull request links (finished tasks folded into one line
 that opens them), the backlog, and the project memory.
-Everyone can open the stored **Transcript** of any session that uploaded one.
+Everyone can open the stored **Transcript** of any session that uploaded one,
+with credentials and personal data masked.
 Admins also get **Run now**, **Pause** / **Resume**, **Edit**, **Delete**, and
 can add or delete memory notes. The page polls every 10 seconds while sessions are active
 and every 30 seconds otherwise. Banners explain an automatic pause and the last
@@ -324,7 +325,7 @@ transcripts included, are open to every console session. Bodies are JSON of at m
 | `POST /api/projects/<id>/run` | Queue a tick. 202 `{"accepted":true}`, or 409 when the project is paused |
 | `POST /api/projects/<id>/memory` | Add an admin note, `{"text":"…"}` of 1–500 characters. 201 with the note |
 | `DELETE /api/projects/<id>/memory/<note-id>` | Delete a note. 204 |
-| `GET /api/projects/<id>/transcripts/<task-id>` | The task's stored Claude Code transcript as JSON lines |
+| `GET /api/projects/<id>/transcripts/<task-id>` | The task's stored Claude Code transcript as JSON lines, with credentials, emails, IP addresses and long numbers masked in every string. Two are read at a time; another waits up to 30 seconds, then gets 503 |
 
 Errors come back as `{"error":"…"}`.
 
@@ -499,11 +500,19 @@ pull request (*out of rounds*). arbetern never approves, and without
 A new head keeps the pull request's changes only when GitHub itself made it by
 merging the base branch in, which is what **Update branch** and the same request
 through the API do, and that merge left the changed lines, and the unchanged
-line right above and below each run of them, as they were. Several such merges
-in a row count too. Any other new head brings new changes, including a merge of
-the base branch made elsewhere and pushed, or a rebase. A head arbetern could not
-check yet, because a GitHub read failed, counts as unknown until the next tick:
-arbetern holds the ready note and turns its own auto-merge off.
+line right above and below each run of them, as they were. A conflict resolved
+in GitHub's editor is such a merge too. Up to 20 such merges between two ticks
+count, and a head that goes back to one already seen with these changes keeps
+them. Any other new head brings new changes, including a merge of the base
+branch made elsewhere and pushed, or a rebase. So does a new base branch, and
+approvals given before it changed stop counting.
+
+The lines are compared, not where they sit in the file. A file GitHub shows
+without a line diff, such as an image, counts as changed whenever its content
+does. In a pull request that changes 300 files or more, more than GitHub lists,
+every new head brings new changes. A head arbetern could not check yet, because
+a GitHub read failed, counts as unknown until the next tick: arbetern holds the
+ready note and turns its own auto-merge off.
 
 ### Auto-merge
 
@@ -781,8 +790,8 @@ model streams, git transfers and transcripts may take up to 30 minutes.
 | Route | Called by | Behaviour |
 |---|---|---|
 | `GET /v1/session` | Entrypoint, Stop hook | 200 `{"project":"<id>","task":"…","round":N,"status":"…","reported":false}` (`round` is 0 for a first session) while the work order runs; 403 once it has reported or ended, so a pod that arrives late never starts and the Stop hook lets a reported session stop. A session's first request also completes its dispatch when the pod arrives before the tick has recorded the session |
-| `POST /v1/session/ended` | Entrypoint | Records the exit reason (`completed`, `max_turns`, `error` or `stopped`) and the turns, for a task or round that has already reported too. A running work order with no report becomes failed, and a first session's task then keeps the branch the session was on, when it is the session's own or derived from it, as where its work was left. 204 |
-| `PUT /v1/session/transcript` | Entrypoint | Stores the session's transcript, up to 64 MiB, at `project-state/<id>/transcripts/<task>.jsonl`, and records it on the task. 204; 503 when either step failed, which the entrypoint retries |
+| `POST /v1/session/ended` | Entrypoint | Records the exit reason (`completed`, `max_turns`, `error` or `stopped`) and the turns, for a task or round that has already reported too. A running work order with no report becomes failed, and a first session's task then keeps the branch the session was on, when it is the session's own or derived from it, as where its work was left. 204, and the session's token stops working, for model and git requests within 15 seconds |
+| `PUT /v1/session/transcript` | Entrypoint | Stores the session's transcript, up to 64 MiB, at `project-state/<id>/transcripts/<task>.jsonl` with the session's own token masked, and records it on the task. 204; 503 when either step failed, which the entrypoint retries |
 | `GET /v1/session/transcript` | Entrypoint | Returns the stored transcript for a round to resume |
 | `POST /mcp` | Claude Code | MCP over Streamable HTTP, stateless, JSON responses only |
 | `POST /anthropic/v1/messages`, `…/count_tokens`, `GET /anthropic/v1/models` | Claude Code | Proxied to the Anthropic API with arbetern's key in place of the session token. Usage from every response, streamed or not, is metered to the project. Closed once the work order has finished for ten minutes |
@@ -865,6 +874,11 @@ the context of the session that wrote the fix. A round that starts from a
 transcript a different Claude Code version wrote may start the conversation
 over; the work order carries what the round needs either way. A transcript is
 deleted with its task once the task leaves the ledger (`task_retention_days`).
+
+The project page masks credentials, emails, IP addresses and long numbers in
+every string of the transcript, as arbetern's redaction does elsewhere. The
+stored copy keeps what the session saw, so a round resumes with all of it; only
+the session's own token is masked there too, in case the session printed it.
 
 ## Ticks and tasks
 
@@ -1005,8 +1019,9 @@ request it makes.
 - **Fail-closed admin list.** Only project admins can create, change, run,
   pause or delete a project. With `adminTeams` and `adminEmails` both empty
   nobody can. Every console user can read the projects, transcripts included,
-  so a transcript shows them whatever its session read: code, Datadog samples
-  (redacted on the way in) and ticket text. The check keys on the email your SSO
+  so a transcript shows them whatever its session read: code, Datadog samples,
+  ticket text and the output of every integration tool it called, with
+  credentials and personal data masked. The check keys on the email your SSO
   proxy verified, so run oauth2-proxy and set `TRUSTED_PROXY_CIDRS` (see
   [Authentication](../README.md#authentication-sso)).
 - **Only arbetern starts sessions.** A Job exists only because a tick created

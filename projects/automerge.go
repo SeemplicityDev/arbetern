@@ -45,28 +45,42 @@ type MergeState struct {
 	Updates       int    `json:"updates,omitempty"`         // branch updates arbetern asked for since the changes last changed
 }
 
-// readChanges reports nil when the head is the one whose changes were last confirmed. A new head keeps the changes only through GitHub's own merges of the base that leave the changed lines as they were.
+// readChanges reports nil when the head and base are the ones whose changes were last confirmed. A new head keeps the changes only through GitHub's own merges of the base that leave the changed lines as they were.
 func (r *Registry) readChanges(ctx context.Context, owner, repo string, pr *github.PRState, rv *ReviewState) (*changeRead, error) {
-	if rv.ContentHead == pr.HeadSHA {
+	if rv.ContentHead == pr.HeadSHA && rv.ContentBase == pr.BaseRef {
 		return nil, nil
 	}
 	diff, err := r.gh.ChangeFingerprint(ctx, owner, repo, pr.BaseRef, pr.HeadSHA)
 	if err != nil {
 		return nil, err
 	}
-	if rv.ContentHead != "" && diff == rv.Diff {
-		walked, ok, err := r.baseMergesSince(ctx, owner, repo, pr.BaseRef, rv.ContentHead, pr.HeadSHA)
+	// A record kept before the base was has none, and is read once more against the base it has now.
+	retarget := rv.ContentBase != "" && rv.ContentBase != pr.BaseRef
+	if rv.ContentHead != "" && !retarget && diff == rv.Diff {
+		if rv.ContentHead == pr.HeadSHA || slices.Contains(rv.Lineage, pr.HeadSHA) {
+			return &changeRead{epoch: rv.Content, diff: diff, base: pr.BaseRef}, nil
+		}
+		walked, ok, err := r.baseMergesSince(ctx, owner, repo, pr.BaseRef, rv.Lineage, pr.HeadSHA)
 		if err != nil {
 			return nil, err
 		}
 		if ok {
-			return &changeRead{epoch: rv.Content, diff: diff, walked: walked}, nil
+			// A merge in between may have changed the lines and a later one changed them back, so only matching heads join the lineage.
+			if walked, err = r.sameChanges(ctx, owner, repo, pr.BaseRef, diff, walked); err != nil {
+				return nil, err
+			}
+			return &changeRead{epoch: rv.Content, diff: diff, base: pr.BaseRef, walked: walked}, nil
 		}
 	}
-	return &changeRead{epoch: pr.HeadSHA, diff: diff}, nil
+	// GitHub may have merged the base in before arbetern read new changes, so they may have first appeared further down.
+	first, walked, err := r.firstWithChanges(ctx, owner, repo, pr.BaseRef, diff, pr.HeadSHA)
+	if err != nil {
+		return nil, err
+	}
+	return &changeRead{epoch: first, diff: diff, base: pr.BaseRef, walked: walked, fresh: true, retarget: retarget}, nil
 }
 
-func (r *Registry) baseMergesSince(ctx context.Context, owner, repo, base, from, head string) ([]string, bool, error) {
+func (r *Registry) baseMergesSince(ctx context.Context, owner, repo, base string, known []string, head string) ([]string, bool, error) {
 	var walked []string
 	for at := head; len(walked) < maxBaseMerges; {
 		parent, ok, err := r.gh.BaseMerge(ctx, owner, repo, base, at)
@@ -74,12 +88,49 @@ func (r *Registry) baseMergesSince(ctx context.Context, owner, repo, base, from,
 			return nil, false, err
 		}
 		walked = append(walked, at)
-		if parent == from {
+		if slices.Contains(known, parent) {
 			return walked, true, nil
 		}
 		at = parent
 	}
 	return nil, false, nil
+}
+
+func (r *Registry) sameChanges(ctx context.Context, owner, repo, base, diff string, walked []string) ([]string, error) {
+	kept := walked[:1:1]
+	for _, sha := range walked[1:] {
+		d, err := r.gh.ChangeFingerprint(ctx, owner, repo, base, sha)
+		if err != nil {
+			return nil, err
+		}
+		if d == diff {
+			kept = append(kept, sha)
+		}
+	}
+	return kept, nil
+}
+
+func (r *Registry) firstWithChanges(ctx context.Context, owner, repo, base, diff, head string) (string, []string, error) {
+	walked := []string{head}
+	for at := head; len(walked) <= maxBaseMerges; {
+		parent, ok, err := r.gh.BaseMerge(ctx, owner, repo, base, at)
+		if err != nil {
+			return "", nil, err
+		}
+		if !ok {
+			break
+		}
+		d, err := r.gh.ChangeFingerprint(ctx, owner, repo, base, parent)
+		if err != nil {
+			return "", nil, err
+		}
+		if d != diff {
+			break
+		}
+		walked = append(walked, parent)
+		at = parent
+	}
+	return walked[len(walked)-1], walked, nil
 }
 
 func appendLineage(lineage, walked []string, head string) []string {
@@ -197,7 +248,10 @@ func approvals(reviews []github.DiscussionItem) []github.DiscussionItem {
 func (r *Registry) approver(ctx context.Context, w prWatch) (string, error) {
 	var errs []error
 	for _, a := range approvals(w.reviews) {
-		if a.CommitID != w.pr.HeadSHA && (w.content == "" || !slices.Contains(w.lineage, a.CommitID)) {
+		switch {
+		case a.CommitID != w.pr.HeadSHA && (w.content == "" || a.CommitID != w.content && !slices.Contains(w.lineage, a.CommitID)):
+			continue
+		case a.CreatedAt.Before(w.retargetedAt):
 			continue
 		}
 		ok, err := r.gh.CanPush(ctx, w.owner, w.repo, a.Author)
@@ -454,19 +508,20 @@ func (r *Registry) autoMerge(ctx context.Context, p *Project, led *Ledger, w prW
 		}
 		return next
 	}
-	led = next
+	// A failed read keeps the delay that already passed, so the next tick tries again.
+	led, armedAt := next, parseTime(m.ArmedAt)
 	if w.pr.MergeState == mergeStateClean || w.pr.MergeState == mergeStateHasHooks {
-		return r.mergeNow(ctx, p, led, w, review, now)
+		return r.mergeNow(ctx, p, led, w, review, armedAt, now)
 	}
 	decision, err := r.gh.ReviewDecision(ctx, w.pr.NodeID)
 	if err != nil {
 		log.Printf("[projects] %s task %s: reading the review decision of pull request #%d: %v", k, w.taskID, w.number, err)
-		return r.mergeWaits(ctx, p, led, w, "arbetern could not read the review decision: "+github.APIMessage(err), false, now)
+		return r.mergeWaits(ctx, p, led, w, "arbetern could not read the review decision: "+github.APIMessage(err), true, armedAt)
 	}
 	if decision == "" {
 		switch approver, err := r.approver(ctx, w); {
 		case approver == "" && err != nil:
-			return r.mergeWaits(ctx, p, led, w, "arbetern could not check who approved these changes: "+github.APIMessage(err), true, now)
+			return r.mergeWaits(ctx, p, led, w, "arbetern could not check who approved these changes: "+github.APIMessage(err), true, armedAt)
 		case approver == "":
 			return r.mergeWaits(ctx, p, led, w, "No review is required here, so arbetern turns on auto-merge once a person with write access approves these changes and no review asks for changes.", false, now)
 		}
@@ -474,7 +529,7 @@ func (r *Registry) autoMerge(ctx context.Context, p *Project, led *Ledger, w prW
 	err = r.gh.EnablePullRequestAutoMerge(ctx, w.pr.NodeID, review.MergeMethod, w.pr.HeadSHA)
 	switch {
 	case errors.Is(err, github.ErrMergeableNow):
-		return r.mergeNow(ctx, p, led, w, review, now)
+		return r.mergeNow(ctx, p, led, w, review, armedAt, now)
 	case err != nil:
 		log.Printf("[projects] %s task %s: turning on auto-merge for pull request #%d: %v", k, w.taskID, w.number, err)
 		return r.mergeWaits(ctx, p, led, w, "GitHub did not turn on auto-merge: "+github.APIMessage(err), true, now)
@@ -493,12 +548,12 @@ func (r *Registry) autoMerge(ctx context.Context, p *Project, led *Ledger, w prW
 	return next
 }
 
-func (r *Registry) mergeNow(ctx context.Context, p *Project, led *Ledger, w prWatch, review Review, now time.Time) *Ledger {
+func (r *Registry) mergeNow(ctx context.Context, p *Project, led *Ledger, w prWatch, review Review, armedAt, now time.Time) *Ledger {
 	k := p.ID
 	approver, err := r.approver(ctx, w)
 	switch {
 	case approver == "" && err != nil:
-		return r.mergeWaits(ctx, p, led, w, "arbetern could not check who approved these changes: "+github.APIMessage(err), true, now)
+		return r.mergeWaits(ctx, p, led, w, "arbetern could not check who approved these changes: "+github.APIMessage(err), true, armedAt)
 	case approver == "":
 		return r.mergeWaits(ctx, p, led, w, "GitHub has nothing left to wait for, so auto-merge cannot be turned on. arbetern merges once a person with write access approves these changes and no review asks for changes.", false, now)
 	}

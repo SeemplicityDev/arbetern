@@ -17,6 +17,8 @@ var ErrMergeableNow = errors.New("the pull request can be merged now")
 
 var graphQLMergeMethods = map[string]string{"squash": "SQUASH", "rebase": "REBASE", "merge": "MERGE"}
 
+const maxCompareFiles = 300
+
 type refusal struct{ op, message string }
 
 func (e *refusal) Error() string { return e.op + ": " + e.message }
@@ -115,12 +117,17 @@ func (c *Client) ChangeFingerprint(ctx context.Context, owner, repo, base, head 
 	files := slices.Clone(cmp.Files)
 	slices.SortFunc(files, func(a, b *gh.CommitFile) int { return strings.Compare(a.GetFilename(), b.GetFilename()) })
 	var b strings.Builder
+	if len(files) >= maxCompareFiles {
+		// GitHub lists only the first files of a larger comparison, so what the rest change is unknown.
+		writeField(&b, head)
+	}
 	for _, f := range files {
 		writeField(&b, f.GetFilename())
 		writeField(&b, f.GetPreviousFilename())
 		writeField(&b, f.GetStatus())
 		if f.GetPatch() == "" {
 			fmt.Fprintf(&b, "+%d-%d;", f.GetAdditions(), f.GetDeletions())
+			writeField(&b, f.GetSHA())
 			continue
 		}
 		writeChangeRuns(&b, f.GetPatch())

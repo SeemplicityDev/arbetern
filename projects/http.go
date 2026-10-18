@@ -419,5 +419,5 @@ func (a *consoleAPI) transcript(w http.ResponseWriter, req *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid task id")
 		return
 	}
-	a.r.serveTranscript(w, req, id, task)
+	a.r.serveTranscriptView(w, req, id, task)
 }

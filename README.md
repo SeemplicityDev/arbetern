@@ -275,7 +275,7 @@ See [docs/PROJECTS.md](docs/PROJECTS.md). The chart sets all of these from its `
 | `PROJECTS_NAMESPACE` | **Required when enabled.** Where session Jobs run |
 | `PROJECTS_JOB_TEMPLATE` | **Required when enabled.** File holding the session Job template as JSON |
 | `PROJECTS_MODEL` | Model for projects that name none; a label or an Anthropic model ID |
-| `PROJECTS_ADMIN_TEAMS` / `PROJECTS_ADMIN_EMAILS` | Who may create, change, run or delete projects and read session transcripts: Slack user group IDs, and emails or domains matched like `MCP_ADMIN_EMAILS`. **Both empty means nobody**; reads stay open to console users |
+| `PROJECTS_ADMIN_TEAMS` / `PROJECTS_ADMIN_EMAILS` | Who may create, change, run or delete projects: Slack user group IDs, and emails or domains matched like `MCP_ADMIN_EMAILS`. Every console user can see the projects, their tasks and session transcripts. **Both empty means nobody can change one** |
 
 </details>
 

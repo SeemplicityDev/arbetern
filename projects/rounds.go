@@ -39,12 +39,14 @@ type ReviewState struct {
 	DoneHead        string   `json:"done_head,omitempty"`
 	DoneAt          string   `json:"done_at,omitempty"`
 
-	Content     string      `json:"content,omitempty"`      // the head where the pull request's current changes first appeared
-	ContentHead string      `json:"content_head,omitempty"` // the last head confirmed to carry those changes
-	Diff        string      `json:"diff,omitempty"`         // fingerprint of the changed lines at ContentHead
-	Lineage     []string    `json:"lineage,omitempty"`      // heads seen carrying those changes, oldest first
-	DoneContent string      `json:"done_content,omitempty"` // the changes the last ready note announced
-	AutoMerge   *MergeState `json:"auto_merge,omitempty"`
+	Content      string      `json:"content,omitempty"`       // the head where the pull request's current changes first appeared
+	ContentHead  string      `json:"content_head,omitempty"`  // the last head confirmed to carry those changes
+	ContentBase  string      `json:"content_base,omitempty"`  // the base branch they were read against
+	Diff         string      `json:"diff,omitempty"`          // fingerprint of the changed lines at ContentHead
+	Lineage      []string    `json:"lineage,omitempty"`       // heads seen carrying those changes, oldest first
+	RetargetedAt string      `json:"retargeted_at,omitempty"` // when a new base branch changed them; earlier approvals no longer count
+	DoneContent  string      `json:"done_content,omitempty"`  // the changes the last ready note announced
+	AutoMerge    *MergeState `json:"auto_merge,omitempty"`
 }
 
 // Round is one follow-up session on an open pull request.
@@ -108,9 +110,12 @@ type observation struct {
 }
 
 type changeRead struct {
-	epoch  string   // the head the changes first appeared at
-	diff   string   // fingerprint of the head's changed lines
-	walked []string // GitHub's merges of the base since the last confirmed head, newest first
+	epoch    string   // the head the changes first appeared at
+	diff     string   // fingerprint of the head's changed lines
+	base     string   // the base branch they were read against
+	walked   []string // heads below this one with the same changes, newest first
+	fresh    bool     // the changes are new; the epoch can still be the old one's when only the base changed
+	retarget bool
 }
 
 type roundResult struct {
@@ -228,28 +233,32 @@ func (l *Ledger) observe(id string, o observation, now time.Time) bool {
 		rv.Head, rv.HeadAt = o.head, stamp(now)
 	}
 	seen := false
-	if c := o.changes; c != nil && rv.Head == o.head && rv.ContentHead != o.head {
+	if c := o.changes; c != nil && rv.Head == o.head && (rv.ContentHead != o.head || rv.ContentBase != c.base) {
 		switch {
 		case rv.ContentHead == "":
-			// A record from before change epochs: carry its references over to the epoch that starts here.
-			if m := rv.AutoMerge; m != nil && rv.Content != "" && m.OnContent == rv.Content {
+			// A record from before change epochs keeps what it recorded at a head that carries these changes.
+			lineage := appendLineage(nil, c.walked, o.head)
+			if m := rv.AutoMerge; m != nil && m.OnContent != "" && slices.Contains(lineage, m.OnHead) {
 				m.OnContent = c.epoch
 			}
-			if rv.Content != "" && rv.DoneContent == rv.Content {
+			if rv.DoneContent != "" && slices.Contains(lineage, rv.DoneHead) {
 				rv.DoneContent = c.epoch
 			}
 			rv.Lineage = nil
-		case c.epoch != rv.Content:
+		case c.fresh:
 			if rv.AutoMerge != nil {
 				rv.AutoMerge.changesChanged()
 			}
-			rv.Lineage = nil
+			rv.Lineage, rv.RetargetedAt = nil, ""
+			if c.retarget {
+				rv.RetargetedAt = stamp(now)
+			}
 		}
-		rv.Content, rv.Diff, rv.ContentHead = c.epoch, c.diff, o.head
+		rv.Content, rv.Diff, rv.ContentHead, rv.ContentBase = c.epoch, c.diff, o.head, c.base
 		rv.Lineage = appendLineage(rv.Lineage, c.walked, o.head)
 		seen = true
 	}
-	if rv.ContentHead != "" && rv.ContentHead == rv.Head && rv.DoneContent == "" && rv.DoneHead == rv.Head {
+	if rv.ContentHead != "" && rv.ContentHead == rv.Head && rv.DoneContent == "" && slices.Contains(rv.Lineage, rv.DoneHead) {
 		rv.DoneContent, seen = rv.Content, true
 	}
 	rv.CI, rv.Conflict, rv.Pending = o.ci, o.conflict, o.pending

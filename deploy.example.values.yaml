@@ -309,7 +309,7 @@ state:
 # projects:
 #   enabled: true
 #   adminTeams: ["S0123456789"]                     # who may create, change, run or delete projects
-#   adminEmails: ["ops@example.com", "example.com"] # and read transcripts; both empty = nobody
+#   adminEmails: ["ops@example.com", "example.com"] # both empty = nobody; everyone sees projects and transcripts
 #   sessions:
 #     # namespace:
 #     #   name: "arbetern-claude-sessions"          # default: the release namespace; name one for separate, Pod Security restricted sessions

@@ -151,8 +151,8 @@ const (
 	maxMergeDelay        = 1440
 	defaultMergeMethod   = "squash"
 	maxBranchUpdates     = 3
-	maxBaseMerges        = 6
-	maxLineage           = 30
+	maxBaseMerges        = 20
+	maxLineage           = 100
 )
 
 var mergeMethods = []string{"squash", "rebase", "merge"}

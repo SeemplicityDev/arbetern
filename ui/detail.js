@@ -679,7 +679,8 @@ const PJD_FINISHED = ['merged', 'closed', 'no_fix', 'failed'];
 function pjdLimit(l, key) {
   const [, , min, max, def] = PJD_LIMITS.find(([k]) => k === key) || [];
   const v = (l || {})[key];
-  return !v || v < min || v > max ? def : v;
+  const out = !v || v < min || v > max ? def : v;
+  return key === 'recurrence_grace_hours' && out >= pjdLimit(l, 'recurrence_window_hours') ? 0 : out;
 }
 const pjdExpanded = new Set();
 
@@ -817,7 +818,7 @@ function pjdTaskRowsHtml(p, t, manage) {
   const key = 't:' + (t.id || '');
   const [cls, label, title] = pjdTaskStatus(t);
   const g = t.group || {};
-  const maxAttempts = (p.limits || {}).max_attempts;
+  const maxAttempts = pjdLimit(p.limits, 'max_attempts');
   let prCell = '<span class="muted">—</span>';
   if (t.pr) {
     const n = Number(t.pr.number) || 0;
@@ -1444,7 +1445,10 @@ function pjfChanges(p, body) {
     enabled: !!p.enabled,
   };
   const out = {};
-  for (const k of Object.keys(body)) if (JSON.stringify(body[k]) !== JSON.stringify(before[k])) out[k] = body[k];
+  for (const k of Object.keys(body)) if (k !== 'limits' && JSON.stringify(body[k]) !== JSON.stringify(before[k])) out[k] = body[k];
+  // Only the limits edited here go out, so a page opened before someone else's change does not undo it.
+  const limits = Object.fromEntries(Object.entries(body.limits || {}).filter(([k, v]) => v !== before.limits[k]));
+  if (Object.keys(limits).length) out.limits = limits;
   return out;
 }
 

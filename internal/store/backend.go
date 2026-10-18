@@ -153,6 +153,18 @@ func (b *Backend) Get(ctx context.Context, key string) ([]byte, string, error) {
 	return body, etag(out.ETag), nil
 }
 
+// Stream opens the object body for reading, bounded by ctx alone, or yields ErrNotFound. The caller closes it.
+func (b *Backend) Stream(ctx context.Context, key string) (io.ReadCloser, error) {
+	out, err := b.client.GetObject(ctx, &s3.GetObjectInput{Bucket: awsv2.String(b.bucket), Key: b.fullKey(key)})
+	if err != nil {
+		if isNotFound(err) {
+			return nil, ErrNotFound
+		}
+		return nil, fmt.Errorf("get %s: %w", key, err)
+	}
+	return out.Body, nil
+}
+
 // Put writes body and returns the new ETag. An unmet Condition yields
 // ErrConflict; an IfMatch against a missing object yields ErrNotFound.
 func (b *Backend) Put(ctx context.Context, key string, body []byte, contentType string, cond Condition) (string, error) {

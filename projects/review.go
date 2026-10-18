@@ -37,6 +37,7 @@ type prWatch struct {
 
 	content      string
 	lineage      []string
+	retargetedAt time.Time
 	snapshot     string
 	reviews      []github.DiscussionItem
 	ourAutoMerge bool
@@ -183,8 +184,8 @@ func (r *Registry) observePR(ctx context.Context, p *Project, led *Ledger, t Tas
 		taskID: t.ID, owner: owner, repo: repo, number: number, pr: pr, items: items, context: context, ci: ci, failed: failed, reviews: reviews,
 		ourAutoMerge: pr.AutoMerge && strings.EqualFold(pr.AutoMergeBy, self),
 	}
-	if _, nrv := next.review(t.ID); nrv != nil && nrv.ContentHead == pr.HeadSHA {
-		w.content, w.lineage = nrv.Content, slices.Clone(nrv.Lineage)
+	if _, nrv := next.review(t.ID); nrv != nil && nrv.ContentHead == pr.HeadSHA && nrv.ContentBase == pr.BaseRef {
+		w.content, w.lineage, w.retargetedAt = nrv.Content, slices.Clone(nrv.Lineage), parseTime(nrv.RetargetedAt)
 	}
 	w.snapshot = mergeSnapshot(pr, w.content, checks, discussion, self, p.Review.effective().MergeMethod)
 	out.watches = append(out.watches, w)
