@@ -17,8 +17,6 @@ var ErrMergeableNow = errors.New("the pull request can be merged now")
 
 var graphQLMergeMethods = map[string]string{"squash": "SQUASH", "rebase": "REBASE", "merge": "MERGE"}
 
-const maxCompareFiles = 300
-
 type refusal struct{ op, message string }
 
 func (e *refusal) Error() string { return e.op + ": " + e.message }
@@ -108,7 +106,7 @@ func (c *Client) CanPush(ctx context.Context, owner, repo, user string) (bool, e
 	return p == "admin" || p == "write", nil
 }
 
-// ChangeFingerprint hashes what head changes over its merge base with base, so merging base into head keeps it while moving, adding or editing a changed line does not.
+// ChangeFingerprint hashes each run of lines head changes over its merge base with base, with the unchanged line right above and below it; merging base in cleanly cannot touch those.
 func (c *Client) ChangeFingerprint(ctx context.Context, owner, repo, base, head string) (string, error) {
 	cmp, _, err := c.api.Repositories.CompareCommits(ctx, owner, repo, base, head, &gh.ListOptions{PerPage: 1})
 	if err != nil {
@@ -117,38 +115,42 @@ func (c *Client) ChangeFingerprint(ctx context.Context, owner, repo, base, head 
 	files := slices.Clone(cmp.Files)
 	slices.SortFunc(files, func(a, b *gh.CommitFile) int { return strings.Compare(a.GetFilename(), b.GetFilename()) })
 	var b strings.Builder
-	// GitHub lists at most this many files, so a longer change is only the same at the same head.
-	if len(files) >= maxCompareFiles {
-		b.WriteString(head + "\x00")
-	}
 	for _, f := range files {
-		fmt.Fprintf(&b, "%s\x00%s\x00%s\x00", f.GetFilename(), f.GetPreviousFilename(), f.GetStatus())
+		writeField(&b, f.GetFilename())
+		writeField(&b, f.GetPreviousFilename())
+		writeField(&b, f.GetStatus())
 		if f.GetPatch() == "" {
-			fmt.Fprintf(&b, "+%d-%d %s\x00", f.GetAdditions(), f.GetDeletions(), f.GetSHA())
+			fmt.Fprintf(&b, "+%d-%d;", f.GetAdditions(), f.GetDeletions())
 			continue
 		}
 		writeChangeRuns(&b, f.GetPatch())
-		b.WriteByte(0)
 	}
 	sum := sha256.Sum256([]byte(b.String()))
 	return hex.EncodeToString(sum[:]), nil
 }
 
-// writeChangeRuns writes every run of changed lines with its hunk's section and the unchanged lines right above and below it: a merge that changes a line next to a run conflicts, so a clean merge keeps them while a moved run gets new ones.
+func writeField(b *strings.Builder, s string) { fmt.Fprintf(b, "%d:%s", len(s), s) }
+
 func writeChangeRuns(b *strings.Builder, patch string) {
-	var section, above string
+	var above string
 	var run []string
 	flush := func(below string) {
-		if len(run) > 0 {
-			fmt.Fprintf(b, "%s\x1f%s\x1f%s\x1f%s\x1e", section, above, strings.Join(run, "\n"), below)
-			run = nil
+		if len(run) == 0 {
+			return
 		}
+		writeField(b, above)
+		fmt.Fprintf(b, "%d;", len(run))
+		for _, line := range run {
+			writeField(b, line)
+		}
+		writeField(b, below)
+		run = nil
 	}
 	for line := range strings.SplitSeq(patch, "\n") {
 		switch {
 		case strings.HasPrefix(line, "@@"):
 			flush("")
-			section, above = hunkSection(line), ""
+			above = ""
 		case strings.HasPrefix(line, "+") || strings.HasPrefix(line, "-") || strings.HasPrefix(line, "\\") && len(run) > 0:
 			run = append(run, line)
 		default:
@@ -159,11 +161,20 @@ func writeChangeRuns(b *strings.Builder, patch string) {
 	flush("")
 }
 
-func hunkSection(header string) string {
-	if _, after, ok := strings.Cut(header[2:], "@@"); ok {
-		return strings.TrimSpace(after)
+// BaseMerge reports whether sha is a merge GitHub itself made of a commit already on base into sha's first parent, which it returns.
+func (c *Client) BaseMerge(ctx context.Context, owner, repo, base, sha string) (string, bool, error) {
+	cm, _, err := c.api.Git.GetCommit(ctx, owner, repo, sha)
+	if err != nil {
+		return "", false, fmt.Errorf("failed to read commit %s: %w", sha, err)
 	}
-	return ""
+	if len(cm.Parents) != 2 || !strings.EqualFold(cm.GetCommitter().GetEmail(), "noreply@github.com") || !cm.GetVerification().GetVerified() {
+		return "", false, nil
+	}
+	ahead, err := c.CommitsAhead(ctx, owner, repo, base, cm.Parents[1].GetSHA())
+	if err != nil {
+		return "", false, err
+	}
+	return cm.Parents[0].GetSHA(), ahead == 0, nil
 }
 
 func (c *Client) mutate(ctx context.Context, op, mutation string, vars map[string]any) error {

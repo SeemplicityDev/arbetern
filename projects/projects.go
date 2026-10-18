@@ -64,7 +64,6 @@ const (
 	viewTimeout        = 10 * time.Second
 	viewCacheTTL       = 5 * time.Second
 	orgReposTTL        = 10 * time.Minute
-	diffsTTL           = 24 * time.Hour
 	maxStagger         = 60 * time.Second
 	dispatchLostAfter  = 15 * time.Minute
 	runningGrace       = 30 * time.Minute
@@ -152,6 +151,8 @@ const (
 	maxMergeDelay        = 1440
 	defaultMergeMethod   = "squash"
 	maxBranchUpdates     = 3
+	maxBaseMerges        = 6
+	maxLineage           = 30
 )
 
 var mergeMethods = []string{"squash", "rebase", "merge"}

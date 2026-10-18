@@ -36,6 +36,7 @@ type prWatch struct {
 	failed  []github.Check
 
 	content      string
+	lineage      []string
 	snapshot     string
 	reviews      []github.DiscussionItem
 	ourAutoMerge bool
@@ -167,14 +168,8 @@ func (r *Registry) observePR(ctx context.Context, p *Project, led *Ledger, t Tas
 		pending:      len(items),
 		lastFeedback: last,
 	}
-	switch review := p.Review.effective(); {
-	case review.AutoMerge && review.MergeMethod != defaultMergeMethod:
-		// Rebase and merge land every commit, so only the head itself is the change a person approved.
-		obs.content = "head:" + pr.HeadSHA
-	default:
-		if obs.content, err = r.gh.ChangeFingerprint(ctx, owner, repo, pr.BaseRef, pr.HeadSHA); err != nil {
-			log.Printf("[projects] %s task %s: reading the changes of pull request #%d: %v", p.ID, t.ID, number, err)
-		}
+	if obs.changes, err = r.readChanges(ctx, owner, repo, pr, rv); err != nil {
+		log.Printf("[projects] %s task %s: reading the changes of pull request #%d: %v", p.ID, t.ID, number, err)
 	}
 	reviews := slices.DeleteFunc(slices.Clone(discussion), func(it github.DiscussionItem) bool {
 		return it.Kind != github.DiscussionReview || strings.EqualFold(it.Author, self)
@@ -184,11 +179,15 @@ func (r *Registry) observePR(ctx context.Context, p *Project, led *Ledger, t Tas
 	if err != nil {
 		return led, err
 	}
-	out.watches = append(out.watches, prWatch{
-		taskID: t.ID, owner: owner, repo: repo, number: number, pr: pr, items: items, context: context, ci: ci, failed: failed,
-		content: obs.content, snapshot: mergeSnapshot(pr, obs.content, checks, discussion, self, p.Review.effective().MergeMethod), reviews: reviews,
+	w := prWatch{
+		taskID: t.ID, owner: owner, repo: repo, number: number, pr: pr, items: items, context: context, ci: ci, failed: failed, reviews: reviews,
 		ourAutoMerge: pr.AutoMerge && strings.EqualFold(pr.AutoMergeBy, self),
-	})
+	}
+	if _, nrv := next.review(t.ID); nrv != nil && nrv.ContentHead == pr.HeadSHA {
+		w.content, w.lineage = nrv.Content, slices.Clone(nrv.Lineage)
+	}
+	w.snapshot = mergeSnapshot(pr, w.content, checks, discussion, self, p.Review.effective().MergeMethod)
+	out.watches = append(out.watches, w)
 	return next, nil
 }
 
@@ -280,6 +279,9 @@ func (r *Registry) finishReview(ctx context.Context, p *Project, led *Ledger, w 
 		log.Printf("[projects] %s task %s: pull request #%d marked ready for review", k, w.taskID, w.number)
 		return next
 	}
+	if w.content == "" && rv.DoneContent != "" {
+		return led
+	}
 	// The earlier ready note still holds while GitHub merges this head by itself, or when only the base branch was merged in.
 	known := w.content != "" && rv.DoneContent != ""
 	repeat := rv.DoneAt != "" && (known && rv.DoneContent == w.content || !known && w.pr.AutoMerge)
@@ -289,11 +291,7 @@ func (r *Registry) finishReview(ctx context.Context, p *Project, led *Ledger, w 
 			return led
 		}
 	}
-	announced := w.content
-	if repeat && !known {
-		announced = ""
-	}
-	next, _, err := r.mergeLedger(ctx, p.ID, led, func(l *Ledger) bool { return l.markDone(w.taskID, w.pr.HeadSHA, announced, now) })
+	next, _, err := r.mergeLedger(ctx, p.ID, led, func(l *Ledger) bool { return l.markDone(w.taskID, w.pr.HeadSHA, w.content, now) })
 	if err != nil {
 		log.Printf("[projects] %s task %s: recording pull request #%d as done: %v", k, w.taskID, w.number, err)
 		return led

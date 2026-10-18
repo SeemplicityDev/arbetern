@@ -674,6 +674,13 @@ const PJD_LIMITS = [
   ['task_retention_days', 'Keep finished tasks, days', 1, 365, 14, 'Then a task and its transcript are deleted; the statistics keep counting it'],
 ];
 const PJD_FINISHED = ['merged', 'closed', 'no_fix', 'failed'];
+
+// The value a limit has in effect: an unset or out-of-range one falls back to its default, as on the server.
+function pjdLimit(l, key) {
+  const [, , min, max, def] = PJD_LIMITS.find(([k]) => k === key) || [];
+  const v = (l || {})[key];
+  return !v || v < min || v > max ? def : v;
+}
 const pjdExpanded = new Set();
 
 function pjdTaskStatus(t) {
@@ -964,7 +971,7 @@ function pjdMetaHtml(p) {
       ${wide('MCP connectors', connectors.length ? `<div class="chip-row">${connectors.map(n => `<span class="chip">${escapeHtml(n)}</span>`).join('')}</div>` : '<span class="muted">none</span>')}
       ${pjdConventionsText(p.conventions) ? wide('Conventions', `<code>${escapeHtml(pjdConventionsText(p.conventions))}</code>`) : ''}
       ${pjdSignalMetaHtml(sig, wide)}
-      ${wide('Limits', `<div class="chip-row">${PJD_LIMITS.map(([k, label, min, max, def]) => `<span class="chip">${escapeHtml(label)} <b>${fmtInt(!l[k] || l[k] < min || l[k] > max ? def : l[k])}</b></span>`).join('')}</div>`)}
+      ${wide('Limits', `<div class="chip-row">${PJD_LIMITS.map(([k, label]) => `<span class="chip">${escapeHtml(label)} <b>${fmtInt(pjdLimit(l, k))}</b></span>`).join('')}</div>`)}
     </div>`;
 }
 
@@ -1029,7 +1036,7 @@ function renderProjectDetail(root, p) {
         <th>Status</th><th>${what}</th><th class="n">${count}</th><th class="n">Attempt</th><th>Transcript</th><th>Pull request</th><th>Updated</th>
       </tr></thead><tbody>${tasks.filter(t => !PJD_FINISHED.includes(t.status)).map(t => pjdTaskRowsHtml(p, t, manage)).join('')}</tbody>${pjdFinishedHtml(p, finished, manage)}</table></div>`
     : emptyHtml(p.state_error ? 'Tasks could not be loaded.' : (s.sessions || 0) + (s.failed_sessions || 0) > 0
-      ? `No open or recent tasks. Finished tasks leave this list ${plural((p.limits || {}).task_retention_days || 14, 'day')} after they end; the statistics above still count them.`
+      ? `No open or recent tasks. Finished tasks leave this list ${plural(pjdLimit(p.limits, 'task_retention_days'), 'day')} after they end; the statistics above still count them.`
       : `No sessions dispatched yet. When the query finds ${metric ? 'a series over its threshold' : 'an error group'} and the limits allow, its task shows up here.`);
   const backlogBody = backlog.length
     ? `<div class="list-scroll" data-scroll="backlog"><table class="data-table"><thead><tr>

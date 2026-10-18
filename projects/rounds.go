@@ -39,7 +39,10 @@ type ReviewState struct {
 	DoneHead        string   `json:"done_head,omitempty"`
 	DoneAt          string   `json:"done_at,omitempty"`
 
-	Content     string      `json:"content,omitempty"`      // fingerprint of the head's own changes over the base branch
+	Content     string      `json:"content,omitempty"`      // the head where the pull request's current changes first appeared
+	ContentHead string      `json:"content_head,omitempty"` // the last head confirmed to carry those changes
+	Diff        string      `json:"diff,omitempty"`         // fingerprint of the changed lines at ContentHead
+	Lineage     []string    `json:"lineage,omitempty"`      // heads seen carrying those changes, oldest first
 	DoneContent string      `json:"done_content,omitempty"` // the changes the last ready note announced
 	AutoMerge   *MergeState `json:"auto_merge,omitempty"`
 }
@@ -101,7 +104,13 @@ type observation struct {
 	conflict     bool
 	pending      int
 	lastFeedback time.Time
-	content      string // fingerprint of the head's own changes; empty when it could not be read
+	changes      *changeRead // nil when the head kept its confirmed changes or they could not be read
+}
+
+type changeRead struct {
+	epoch  string   // the head the changes first appeared at
+	diff   string   // fingerprint of the head's changed lines
+	walked []string // GitHub's merges of the base since the last confirmed head, newest first
 }
 
 type roundResult struct {
@@ -219,15 +228,29 @@ func (l *Ledger) observe(id string, o observation, now time.Time) bool {
 		rv.Head, rv.HeadAt = o.head, stamp(now)
 	}
 	seen := false
-	if o.content != "" && rv.Head == o.head && rv.Content != o.content {
-		if rv.Content != "" && rv.AutoMerge != nil {
-			rv.AutoMerge.changesChanged()
+	if c := o.changes; c != nil && rv.Head == o.head && rv.ContentHead != o.head {
+		switch {
+		case rv.ContentHead == "":
+			// A record from before change epochs: carry its references over to the epoch that starts here.
+			if m := rv.AutoMerge; m != nil && rv.Content != "" && m.OnContent == rv.Content {
+				m.OnContent = c.epoch
+			}
+			if rv.Content != "" && rv.DoneContent == rv.Content {
+				rv.DoneContent = c.epoch
+			}
+			rv.Lineage = nil
+		case c.epoch != rv.Content:
+			if rv.AutoMerge != nil {
+				rv.AutoMerge.changesChanged()
+			}
+			rv.Lineage = nil
 		}
-		rv.Content, seen = o.content, true
+		rv.Content, rv.Diff, rv.ContentHead = c.epoch, c.diff, o.head
+		rv.Lineage = appendLineage(rv.Lineage, c.walked, o.head)
+		seen = true
 	}
-	// A pull request marked done before changes were recorded announced its done head.
-	if o.content != "" && rv.DoneContent == "" && rv.DoneHead == o.head && rv.Head == o.head {
-		rv.DoneContent, seen = o.content, true
+	if rv.ContentHead != "" && rv.ContentHead == rv.Head && rv.DoneContent == "" && rv.DoneHead == rv.Head {
+		rv.DoneContent, seen = rv.Content, true
 	}
 	rv.CI, rv.Conflict, rv.Pending = o.ci, o.conflict, o.pending
 	rv.FailedChecks = slices.Clone(o.failed)
@@ -398,10 +421,7 @@ func (l *Ledger) markDone(id, head, content string, now time.Time) bool {
 	if rv == nil || head == "" || rv.Head != head || rv.DoneHead == head {
 		return false
 	}
-	rv.DoneHead, rv.DoneAt = head, stamp(now)
-	if content != "" {
-		rv.DoneContent = content
-	}
+	rv.DoneHead, rv.DoneAt, rv.DoneContent = head, stamp(now), content
 	rv.settle()
 	return true
 }

@@ -91,7 +91,6 @@ type Registry struct {
 	states *ttlcache.Keyed[stateKey, *projectState]
 	login  *ttlcache.Cache[string]
 	orgs   *ttlcache.Keyed[string, []github.OrgRepository]
-	diffs  *ttlcache.Keyed[diffKey, string]
 }
 
 type tickTask struct {
@@ -123,12 +122,6 @@ func New(deps Deps) *Registry {
 			return "", errors.New("GitHub is not configured")
 		}
 		return r.gh.GetAuthenticatedUser(ctx)
-	})
-	r.diffs = ttlcache.NewKeyed(diffsTTL, 512, func(ctx context.Context, k diffKey) (string, error) {
-		if r.gh == nil {
-			return "", errors.New("GitHub is not configured")
-		}
-		return r.gh.ChangeFingerprint(ctx, k.owner, k.repo, k.base, k.sha)
 	})
 	r.orgs = ttlcache.NewKeyed(orgReposTTL, 32, func(ctx context.Context, owner string) ([]github.OrgRepository, error) {
 		if r.gh == nil {
@@ -617,7 +610,7 @@ func (pt projectPatch) normalized(draft *Project) projectPatch {
 		out.Conventions = &draft.Conventions
 	}
 	if pt.Limits != nil {
-		out.Limits = &draft.Limits
+		out.Limits, out.limitsJSON = &draft.Limits, pt.limitsJSON
 	}
 	return out
 }
@@ -670,6 +663,12 @@ func (r *Registry) update(ctx context.Context, id string, pt projectPatch) (*Pro
 	now := time.Now()
 	updated, err := r.updateDescriptor(ctx, id, func(p *Project) error {
 		norm.applyTo(p)
+		// The limits it names were merged onto the stored ones, which another replica may have changed since the read.
+		if norm.limitsJSON != nil {
+			if err := p.Limits.normalize(); err != nil {
+				return err
+			}
+		}
 		if norm.Enabled != nil {
 			p.Enabled = *norm.Enabled
 			if p.Enabled {
