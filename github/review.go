@@ -41,7 +41,8 @@ type DiscussionItem struct {
 	Body        string    `json:"body"`
 	URL         string    `json:"url,omitempty"`
 	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at,omitzero"` // conversation comments: CI reports are often edited in place
+	UpdatedAt   time.Time `json:"updated_at,omitzero"` // comments: CI reports are often edited in place
+	CommitID    string    `json:"commit_id,omitempty"` // reviews: the head the verdict is about
 }
 
 // Trusted reports whether the author owns the repository, is a member of its organization or a collaborator.
@@ -80,6 +81,7 @@ func (c *Client) PullRequestDiscussion(ctx context.Context, owner, repo string, 
 		}
 		for _, r := range reviews {
 			add(r.GetID(), DiscussionReview, r.GetUser(), r.GetAuthorAssociation(), r.GetState(), "", 0, 0, r.GetBody(), r.GetHTMLURL(), r.GetSubmittedAt())
+			items[len(items)-1].CommitID = r.GetCommitID()
 		}
 		if resp == nil || resp.NextPage == 0 {
 			break
@@ -99,6 +101,7 @@ func (c *Client) PullRequestDiscussion(ctx context.Context, owner, repo string, 
 				line = cm.GetOriginalLine()
 			}
 			add(cm.GetID(), DiscussionInline, cm.GetUser(), cm.GetAuthorAssociation(), "", cm.GetPath(), line, cm.GetInReplyTo(), cm.GetBody(), cm.GetHTMLURL(), cm.GetCreatedAt())
+			items[len(items)-1].UpdatedAt = cm.GetUpdatedAt().Time
 		}
 		if resp == nil || resp.NextPage == 0 {
 			break
@@ -221,22 +224,8 @@ func (c *Client) RequestCopilotReview(ctx context.Context, owner, repo string, n
 
 // MarkReadyForReview takes the draft pull request with the given GraphQL node id out of draft.
 func (c *Client) MarkReadyForReview(ctx context.Context, nodeID string) error {
-	if nodeID == "" {
-		return errors.New("the pull request has no node id")
-	}
 	mutation := `mutation($id:ID!){markPullRequestReadyForReview(input:{pullRequestId:$id}){pullRequest{isDraft}}}`
-	var resp struct {
-		Errors []struct {
-			Message string `json:"message"`
-		} `json:"errors"`
-	}
-	if err := c.graphql(ctx, mutation, map[string]any{"id": nodeID}, &resp); err != nil {
-		return fmt.Errorf("markPullRequestReadyForReview: %w", err)
-	}
-	if len(resp.Errors) > 0 {
-		return fmt.Errorf("markPullRequestReadyForReview: %s", resp.Errors[0].Message)
-	}
-	return nil
+	return c.mutate(ctx, "markPullRequestReadyForReview", mutation, map[string]any{"id": nodeID})
 }
 
 // ReplyToReviewComment answers in the thread of an inline review comment; commentID must be the thread's first comment.

@@ -146,7 +146,14 @@ const (
 	defaultSettleMinutes = 15
 	minSettleMinutes     = 5
 	maxSettleMinutes     = 240
+	defaultMergeDelay    = 30
+	minMergeDelay        = 5
+	maxMergeDelay        = 1440
+	defaultMergeMethod   = "squash"
+	maxBranchUpdates     = 3
 )
+
+var mergeMethods = []string{"squash", "rebase", "merge"}
 
 var (
 	ownerRe      = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$`)
@@ -207,6 +214,10 @@ type Review struct {
 	Draft         bool `json:"draft"`                    // open as a draft and mark it ready once checks pass and nothing is unanswered
 	MaxRounds     int  `json:"max_rounds,omitempty"`     // 1–10, default 5, follow-up sessions per pull request
 	SettleMinutes int  `json:"settle_minutes,omitempty"` // 5–240, default 15, quiet time before a pull request counts as ready
+
+	AutoMerge             bool   `json:"auto_merge,omitempty"`               // turn on GitHub auto-merge once a ready pull request stays unchanged for the delay
+	AutoMergeDelayMinutes int    `json:"auto_merge_delay_minutes,omitempty"` // 5–1440, default 30
+	MergeMethod           string `json:"merge_method,omitempty"`             // squash | rebase | merge, default squash
 }
 
 // Notify names where a project reports what it does.
@@ -677,6 +688,19 @@ func (r *Review) normalize() error {
 	if r.SettleMinutes != 0 && (r.SettleMinutes < minSettleMinutes || r.SettleMinutes > maxSettleMinutes) {
 		return invalidf("review.settle_minutes must be between %d and %d", minSettleMinutes, maxSettleMinutes)
 	}
+	if r.AutoMergeDelayMinutes != 0 && (r.AutoMergeDelayMinutes < minMergeDelay || r.AutoMergeDelayMinutes > maxMergeDelay) {
+		return invalidf("review.auto_merge_delay_minutes must be between %d and %d", minMergeDelay, maxMergeDelay)
+	}
+	r.MergeMethod = strings.ToLower(strings.TrimSpace(r.MergeMethod))
+	if r.MergeMethod != "" && !slices.Contains(mergeMethods, r.MergeMethod) {
+		return invalidf("review.merge_method must be squash, rebase or merge")
+	}
+	if r.AutoMerge && !r.FollowUp {
+		return invalidf("review.auto_merge needs review.follow_up")
+	}
+	if !r.AutoMerge {
+		r.AutoMergeDelayMinutes, r.MergeMethod = 0, ""
+	}
 	*r = r.effective()
 	return nil
 }
@@ -687,6 +711,14 @@ func (r Review) effective() Review {
 	}
 	if r.SettleMinutes < minSettleMinutes || r.SettleMinutes > maxSettleMinutes {
 		r.SettleMinutes = defaultSettleMinutes
+	}
+	if r.AutoMerge {
+		if r.AutoMergeDelayMinutes < minMergeDelay || r.AutoMergeDelayMinutes > maxMergeDelay {
+			r.AutoMergeDelayMinutes = defaultMergeDelay
+		}
+		if !slices.Contains(mergeMethods, r.MergeMethod) {
+			r.MergeMethod = defaultMergeMethod
+		}
 	}
 	return r
 }

@@ -34,6 +34,10 @@ type prWatch struct {
 	context []Feedback
 	ci      string
 	failed  []github.Check
+
+	snapshot     string
+	reviews      []github.DiscussionItem
+	ourAutoMerge bool
 }
 
 type roundWant struct {
@@ -162,12 +166,24 @@ func (r *Registry) observePR(ctx context.Context, p *Project, led *Ledger, t Tas
 		pending:      len(items),
 		lastFeedback: last,
 	}
+	if m := rv.AutoMerge; m != nil && m.UpdatedFrom != "" && m.UpdatedFrom == rv.Head && pr.HeadSHA != rv.Head {
+		if obs.fromUpdate, err = r.mergedBase(ctx, owner, repo, pr, m.UpdatedFrom); err != nil {
+			return led, err
+		}
+	}
+	reviews := slices.DeleteFunc(slices.Clone(discussion), func(it github.DiscussionItem) bool {
+		return it.Kind != github.DiscussionReview || strings.EqualFold(it.Author, self)
+	})
 	now := time.Now().UTC()
 	next, _, err := r.mergeLedger(ctx, p.ID, led, func(l *Ledger) bool { return l.observe(t.ID, obs, now) })
 	if err != nil {
 		return led, err
 	}
-	out.watches = append(out.watches, prWatch{taskID: t.ID, owner: owner, repo: repo, number: number, pr: pr, items: items, context: context, ci: ci, failed: failed})
+	out.watches = append(out.watches, prWatch{
+		taskID: t.ID, owner: owner, repo: repo, number: number, pr: pr, items: items, context: context, ci: ci, failed: failed,
+		snapshot: mergeSnapshot(pr, checks, discussion, self, p.Review.effective().MergeMethod), reviews: reviews,
+		ourAutoMerge: pr.AutoMerge && strings.EqualFold(pr.AutoMergeBy, self),
+	})
 	return next, nil
 }
 
@@ -219,6 +235,13 @@ func (r *Registry) advanceReviews(ctx context.Context, p *Project, led *Ledger, 
 		}
 		w.items = slices.DeleteFunc(slices.Clone(w.items), func(f Feedback) bool { return rv.isHandled(f.ID) })
 		need := needsRound(rv, w, now)
+		var ok bool
+		if led, ok = r.followAutoMerge(ctx, p, led, w, review, need, now); !ok {
+			continue
+		}
+		if _, rv = led.review(w.taskID); rv == nil {
+			continue
+		}
 		switch {
 		case len(need) > 0 && rv.used() >= review.MaxRounds:
 			led = r.stopFollowing(ctx, p, led, w, rv, need)
@@ -228,6 +251,8 @@ func (r *Registry) advanceReviews(ctx context.Context, p *Project, led *Ledger, 
 			}
 		case readyFor(rv, w, review, now):
 			led = r.finishReview(ctx, p, led, w, now)
+		case review.AutoMerge && mergeReady(rv, w):
+			led = r.autoMerge(ctx, p, led, w, review, now)
 		}
 	}
 	return led
@@ -250,9 +275,13 @@ func (r *Registry) finishReview(ctx context.Context, p *Project, led *Ledger, w 
 		log.Printf("[projects] %s task %s: pull request #%d marked ready for review", k, w.taskID, w.number)
 		return next
 	}
-	if _, err := r.gh.CommentOnPullRequest(ctx, w.owner, w.repo, w.number, doneComment(p, rv, w.pr.HeadSHA)); err != nil {
-		log.Printf("[projects] %s task %s: posting the ready note on pull request #%d: %v", k, w.taskID, w.number, err)
-		return led
+	// With auto-merge on, GitHub merges this head by itself and the earlier ready note still holds.
+	repeat := w.pr.AutoMerge && rv.DoneAt != ""
+	if !repeat {
+		if _, err := r.gh.CommentOnPullRequest(ctx, w.owner, w.repo, w.number, doneComment(p, rv, w.pr.HeadSHA)); err != nil {
+			log.Printf("[projects] %s task %s: posting the ready note on pull request #%d: %v", k, w.taskID, w.number, err)
+			return led
+		}
 	}
 	next, _, err := r.mergeLedger(ctx, p.ID, led, func(l *Ledger) bool { return l.markDone(w.taskID, w.pr.HeadSHA, now) })
 	if err != nil {
@@ -260,7 +289,7 @@ func (r *Registry) finishReview(ctx context.Context, p *Project, led *Ledger, w 
 		return led
 	}
 	log.Printf("[projects] %s task %s: pull request #%d is done (head %s)", k, w.taskID, w.number, shortSHA(w.pr.HeadSHA))
-	if t := next.task(w.taskID); t != nil {
+	if t := next.task(w.taskID); t != nil && !repeat {
 		r.notify(p, noteReady(t))
 	}
 	return next
@@ -455,7 +484,12 @@ func doneComment(p *Project, rv *ReviewState, head string) string {
 	} else {
 		b.WriteString(" and there are no review comments to answer")
 	}
-	b.WriteString(". This change still needs a person's review before it merges.\n\n" + projectFooter(p))
+	if review := p.Review.effective(); review.AutoMerge && (rv.AutoMerge == nil || !rv.AutoMerge.Held) {
+		fmt.Fprintf(&b, ". If nothing changes for %s, arbetern turns on auto-merge (%s), and it merges once a person approves it.\n\n", plural(review.AutoMergeDelayMinutes, "minute"), review.MergeMethod)
+	} else {
+		b.WriteString(". This change still needs a person's review before it merges.\n\n")
+	}
+	b.WriteString(projectFooter(p))
 	return b.String()
 }
 

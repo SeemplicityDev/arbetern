@@ -38,6 +38,8 @@ type ReviewState struct {
 	ReadyAt         string   `json:"ready_at,omitempty"` // when arbetern took the pull request out of draft
 	DoneHead        string   `json:"done_head,omitempty"`
 	DoneAt          string   `json:"done_at,omitempty"`
+
+	AutoMerge *MergeState `json:"auto_merge,omitempty"`
 }
 
 // Round is one follow-up session on an open pull request.
@@ -97,6 +99,7 @@ type observation struct {
 	conflict     bool
 	pending      int
 	lastFeedback time.Time
+	fromUpdate   bool // the new head is arbetern's update of the head it last saw with the base
 }
 
 type roundResult struct {
@@ -208,6 +211,7 @@ func (l *Ledger) observe(id string, o observation, now time.Time) bool {
 	before := *rv
 	// A round that reported after the read may have moved the head on; an older read must not move it back.
 	if o.head != "" && o.head != rv.Head && (o.seenHead == "" || rv.Head == o.seenHead) {
+		rv.AutoMerge.headMoved(rv.Head, o.fromUpdate)
 		rv.Head, rv.HeadAt = o.head, stamp(now)
 	}
 	rv.CI, rv.Conflict, rv.Pending = o.ci, o.conflict, o.pending
@@ -239,6 +243,7 @@ func (l *Ledger) addRound(id string, rd Round, maxRounds int, now time.Time) boo
 	rd.Status = StatusDispatching
 	rd.CreatedAt = stamp(now)
 	rv.Rounds = append(rv.Rounds, rd)
+	rv.AutoMerge.disarm()
 	rv.settle()
 	return true
 }
@@ -475,6 +480,7 @@ func recordRoundResult(t *Task, rv *ReviewState, rd *Round, res roundResult, now
 		rv.Waiting = ""
 	}
 	if rd.HeadAfter != rv.Head {
+		rv.AutoMerge.headMoved(rv.Head, false)
 		rv.Head, rv.HeadAt = rd.HeadAfter, stamp(now)
 	}
 	dropRoundBodies(rd)

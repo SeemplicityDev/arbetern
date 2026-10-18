@@ -1099,7 +1099,9 @@ every session's transcript in the state bucket, and then follows the pull
 request and the problem to measure merge rate, time to merge and whether each
 fix held. With follow-through on, follow-up sessions resume the transcript to
 answer failing checks and review comments, reply to each comment with what
-changed and why, and the pull request is marked ready once nothing is left.
+changed and why, and the pull request is marked ready once nothing is left;
+with auto-merge on, arbetern turns on GitHub's auto-merge after a ready pull
+request has stayed unchanged for a delay.
 
 Projects are off by default, and every session resource exists only when
 `projects.enabled` is on. They need an Anthropic API key, a GitHub token and a

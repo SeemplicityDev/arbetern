@@ -397,6 +397,9 @@ every check passes and every review comment has an answer.
 | `review.draft` | false | Open pull requests as drafts, and mark one ready for review once nothing is left. A session that asks a `question` always opens a draft |
 | `review.max_rounds` | 5 | Follow-up sessions per pull request, 1–10 |
 | `review.settle_minutes` | 15 | How long nothing may happen on the pull request (no push, new comment, round or ready mark) before it counts as ready, 5–240 |
+| `review.auto_merge` | false | Turn on GitHub's auto-merge once a pull request is ready and stays unchanged for the delay (see [Auto-merge](#auto-merge)). Needs `follow_up` |
+| `review.auto_merge_delay_minutes` | 30 | How long a ready pull request must stay unchanged before auto-merge goes on, 5–1440 |
+| `review.merge_method` | `squash` | `squash`, `rebase` or `merge`, one the repository allows |
 
 Turning follow-through on for an existing project also follows the pull
 requests it already has open.
@@ -485,7 +488,76 @@ A new push or comment starts over. A `question` or a `cannot_fix` report leaves
 the pull request waiting for a person, whose next comment starts the round that
 acts on the answer. When a round is needed but the rounds are used up, arbetern
 posts what is left and stops following that pull request (*out of rounds*).
-arbetern never approves and never merges.
+arbetern never approves, and without [auto-merge](#auto-merge) it never
+merges.
+
+### Auto-merge
+
+With `review.auto_merge`, arbetern also takes the step a person would take
+next: **Enable auto-merge**. It starts from a *ready* pull request: every check
+passed (at least one ran), nothing is unanswered, no question or conflict is
+open, and it is not a draft. Then:
+
+1. arbetern records what the pull request looks like: its head, base branch,
+   title and description, every check run and commit status with its result,
+   and every review and comment except arbetern's own and approvals.
+2. Every tick compares the pull request with that record. Any difference, such
+   as a push, a re-run or new check, a new or edited comment, or a dismissed
+   review, starts the delay over.
+3. Once nothing has changed for `auto_merge_delay_minutes`, arbetern compares
+   a fresh read once more and turns on GitHub's auto-merge with
+   `merge_method`, for that exact head. GitHub merges once the branch rules are
+   met, typically when a person approves.
+
+An approval counts for arbetern only when its author has write access to the
+repository, it approves the current changes, and no owner, member or
+collaborator asks for changes in their latest review. The Slack channel hears
+when auto-merge goes on. A few cases need more:
+
+- **No review required.** Where the branch rules require no review, GitHub
+  would merge without one, so arbetern turns auto-merge on only after an
+  approval.
+- **Nothing left to wait for.** GitHub offers auto-merge only while something
+  is pending. When nothing is (approvals in, checks passed, branch up to date),
+  arbetern merges the pull request itself after an approval, with the same
+  method and a guard on the head, and posts a note on it. Without one it waits
+  and tries again after the delay.
+- **Behind the base branch.** Where the branch rules require an up-to-date
+  branch, GitHub waits for someone to update it. While auto-merge is on and
+  the current changes are approved, arbetern asks GitHub to merge the base
+  branch into the pull request branch, at most three times for the same
+  changes and never for rebase merges. An approval keeps counting across those
+  updates, which change nothing of the pull request's own. GitHub refuses the
+  update while the base branch brings workflow changes the token may not write
+  (see [GitHub](#github)); arbetern then notes why on the task and tries again
+  an hour later.
+- **Something changed.** arbetern turns its auto-merge off at once, even while
+  checks are still running, when a comment waits for an answer, a check failed,
+  a question or conflict is open, a round is due, or someone pushed to the pull
+  request or changed its base branch. The pull request then goes through the
+  delay again once it is ready. Auto-merge a person turned on is turned off only
+  before a round, and arbetern turns it on again afterwards; once the pull
+  request is handed over to a person, theirs stays as they set it.
+- **Turned off by someone else.** When auto-merge is turned off outside
+  arbetern, by a person or by GitHub after a push from someone without write
+  access, arbetern leaves that pull request's auto-merge off until someone
+  turns it on again.
+- **Refused.** When GitHub refuses, for instance because the repository does
+  not allow auto-merge or the merge method, the reason shows on the task and
+  arbetern tries again after the delay.
+
+A refusal or failure that happens twice in a row goes to the Slack channel,
+once.
+
+Turning `auto_merge` off on the project turns off the auto-merge arbetern
+turned on, at the next tick. Pausing or deleting the project, turning
+`follow_up` off, or rolling arbetern back to a version without auto-merge
+leaves it on, so turn `auto_merge` off and let one tick pass first. Turn
+`auto_merge` on only once every replica runs a version that knows it: an older
+replica that saves the project drops the setting, and one that saves the ledger
+drops what arbetern knows about each pull request's auto-merge. Turn on **Allow
+auto-merge** in each repository's settings. The token needs no permission
+beyond those under [GitHub](#github).
 
 ## Organization-scoped projects
 
@@ -610,14 +682,15 @@ channel when the project:
 - finishes a follow-up round that leaves a question or a blocker;
 - marks a pull request ready for review, or stops following it because the
   rounds ran out;
+- turns on auto-merge, or GitHub refuses it;
 - sees a pull request merged or closed without merging;
 - pauses itself after failed dispatches.
 
-Each line starts with a status (green for a pull request in review, yellow for
-a decision, red for something that needs a person), then the session's
-`headline` (what failed, where and how much; the series or error group when it
-gave none), the pull request and ticket links, the question or the reason, and
-_(below threshold)_ for spare-capacity work.
+Each line starts with a status (green for a pull request in review, blue for
+auto-merge, yellow for a decision, red for something that needs a person), then
+the session's `headline` (what failed, where and how much; the series or error
+group when it gave none), the pull request and ticket links, the question or the
+reason, and _(below threshold)_ for spare-capacity work.
 
 GitHub sends no review requests for a draft, so a question on a draft pull
 request reaches people only through this channel or the project page. Invite
@@ -1022,8 +1095,14 @@ browser request.
   Nothing can be deleted, no tag can be pushed, and neither the base branch
   nor another task's branch can be touched, whatever the session runs in its
   pod.
-- **No auto-merge.** arbetern never merges. A person reviews and merges every
-  pull request, and the statistics measure exactly those decisions.
+- **Merging.** arbetern never approves a pull request, and without
+  `review.auto_merge` it never merges one: a person reviews and merges each,
+  and the statistics measure exactly those decisions. With it, arbetern turns
+  on GitHub's auto-merge only after the delay and a second look, and merges
+  by itself only changes a person with write access approved, so the base
+  branch's rules (required reviews, code owners, required checks) stay the
+  gate. Keep them on: where they require no review, arbetern waits for an
+  approval before it turns auto-merge on.
 - **Branch rules.** Protect the base branch against direct pushes. Where
   nothing else uses the project's branch names, a ruleset on them and on tags
   that only the token's account bypasses keeps everything else from creating,

@@ -118,6 +118,14 @@ func noteExhausted(t *Task, rounds int) string {
 	return fmt.Sprintf(":warning: %s — %s stopped after %s; over to a person.", headline(t), links(t), plural(rounds, "follow-up round"))
 }
 
+func noteAutoMerge(t *Task, method string) string {
+	return fmt.Sprintf(":large_blue_circle: %s — %s: auto-merge is on (%s).", headline(t), links(t), method)
+}
+
+func noteMergeWaits(t *Task, note string) string {
+	return fmt.Sprintf(":warning: %s — %s: %s", headline(t), links(t), slackText(note, maxMergeNoteChars))
+}
+
 func noteClosed(t *Task, merged bool) string {
 	if merged {
 		return fmt.Sprintf(":white_check_mark: %s — %s merged.", headline(t), links(t))

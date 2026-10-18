@@ -31,7 +31,10 @@ type PRState struct {
 	HeadSHA      string    `json:"head_sha"`
 	BaseRef      string    `json:"base_ref"`
 	Draft        bool      `json:"draft"`
-	Mergeable    *bool     `json:"mergeable,omitempty"` // nil until GitHub has computed it
+	Mergeable    *bool     `json:"mergeable,omitempty"`       // nil until GitHub has computed it
+	MergeState   string    `json:"mergeable_state,omitempty"` // clean | behind | blocked | dirty | unstable | has_hooks | unknown
+	AutoMerge    bool      `json:"auto_merge,omitempty"`
+	AutoMergeBy  string    `json:"auto_merge_by,omitempty"` // login that turned auto-merge on
 	NodeID       string    `json:"node_id,omitempty"`
 	CreatedAt    time.Time `json:"created_at"`
 	MergedAt     time.Time `json:"merged_at,omitzero"`
@@ -60,6 +63,9 @@ func (c *Client) PullRequestState(ctx context.Context, owner, repo string, numbe
 		BaseRef:      pr.GetBase().GetRef(),
 		Draft:        pr.GetDraft(),
 		Mergeable:    pr.Mergeable,
+		MergeState:   pr.GetMergeableState(),
+		AutoMerge:    pr.AutoMerge != nil,
+		AutoMergeBy:  pr.GetAutoMerge().GetEnabledBy().GetLogin(),
 		NodeID:       pr.GetNodeID(),
 		CreatedAt:    pr.GetCreatedAt().Time,
 		MergedAt:     pr.GetMergedAt().Time,

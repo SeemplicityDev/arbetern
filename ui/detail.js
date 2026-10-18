@@ -683,6 +683,7 @@ function pjdTaskStatus(t) {
   }
   if (t.status === 'no_fix') return ['paused', PJD_OUTCOMES[o.status] || 'no fix', o.summary || ''];
   const rv = t.review;
+  if (t.status === 'pr_open' && rv && rv.phase === 'done' && (rv.auto_merge || {}).on) return ['ok', 'auto-merge', 'Auto-merge is on: GitHub merges it once its branch rules are met'];
   if (t.status === 'pr_open' && rv && PJD_PHASES[rv.phase]) {
     const [cls, label, title] = PJD_PHASES[rv.phase];
     return [cls, label, (rv.phase === 'waiting' && rv.waiting) || title];
@@ -777,12 +778,21 @@ function pjdReviewHtml(rv) {
   let html = `<div class="proj-label">Follow-through</div>` + pjdChips([
     ['phase', (PJD_PHASES[rv.phase] || [])[1] || rv.phase], ['checks', PJD_CI[rv.ci] || rv.ci], ['failing', (rv.failed_checks || []).join(', ')],
     ['unanswered', rv.pending ? fmtInt(rv.pending) : ''], ['conflict', rv.conflict ? 'yes' : ''], ['head', rv.head ? rv.head.slice(0, 7) : ''],
-    ['marked ready', rv.ready_at && fmtDateTime(rv.ready_at)], ['done', rv.done_at && fmtDateTime(rv.done_at)],
+    ['marked ready', rv.ready_at && fmtDateTime(rv.ready_at)], ['done', rv.done_at && fmtDateTime(rv.done_at)], ['auto-merge', pjdMergeLabel(rv.auto_merge || {})],
   ]);
   if (rv.waiting) html += `<div class="proj-label">Waiting on a person</div><div class="run-result">${escapeHtml(rv.waiting)}</div>`;
+  if ((rv.auto_merge || {}).note) html += `<div class="proj-label">Auto-merge</div><div class="run-result">${escapeHtml(rv.auto_merge.note)}</div>`;
   const rounds = rv.rounds || [];
   if (rounds.length) html += `<div class="proj-label">Follow-up rounds</div>${rounds.map(pjdRoundHtml).join('')}`;
   return html;
+}
+
+function pjdMergeLabel(am) {
+  if (am.merged_at) return 'merged by arbetern ' + timeAgo(am.merged_at);
+  if (am.held) return 'turned off outside arbetern';
+  if (am.withdrawing) return 'turning off';
+  if (am.on) return am.enabled_at ? 'on since ' + fmtDateTime(am.enabled_at) : 'on';
+  return am.armed_at ? 'delay started ' + timeAgo(am.armed_at) : '';
 }
 
 function pjdRoundHtml(rd) {
@@ -914,7 +924,8 @@ function pjdMetaHtml(p) {
   const repoUrl = r.owner ? safeExternalUrl(`https://github.com/${encodeURIComponent(r.owner)}${r.name ? '/' + encodeURIComponent(r.name) : ''}`) : '';
   const wide = (label, html) => `<div class="meta-item proj-wide"><div class="label">${escapeHtml(label)}</div><div class="value">${html}</div></div>`;
   const sites = sig.sites && sig.sites.length ? sig.sites : [sig.site].filter(Boolean);
-  const follow = rv.follow_up ? [rv.draft ? 'drafts' : '', `${fmtInt(rv.max_rounds)} rounds`, `quiet ${fmtInt(rv.settle_minutes)}m`].filter(Boolean).join(' · ') : 'off';
+  const merge = rv.auto_merge ? `auto-merge after ${fmtInt(rv.auto_merge_delay_minutes || 30)}m (${rv.merge_method || 'squash'})` : '';
+  const follow = rv.follow_up ? [rv.draft ? 'drafts' : '', `${fmtInt(rv.max_rounds)} rounds`, `quiet ${fmtInt(rv.settle_minutes)}m`, merge].filter(Boolean).join(' · ') : 'off';
   const skills = skillNames(p.skills);
   const connectors = connectorNames(p.connectors);
   return `<div class="meta-grid proj-meta">
@@ -1258,7 +1269,9 @@ async function projectForm(p) {
       + check('pjf-follow', rv.follow_up, 'Follow each pull request: answer failing checks and review comments until it is ready')
       + check('pjf-draft', rv.draft, 'Open pull requests as drafts and mark them ready once nothing is left')
       + `<div class="form-grid2">${formField('Follow-up rounds', input('pjf-rounds', rv.max_rounds || '', ' type="number" min="1" max="10" step="1" inputmode="numeric" placeholder="5"'), 'Sessions per pull request, 1–10.')}${formField('Quiet minutes', input('pjf-settle', rv.settle_minutes || '', ' type="number" min="5" max="240" step="1" inputmode="numeric" placeholder="15"'), 'Nothing new for this long before a pull request counts as ready.')}</div>`
-      + formField('Slack channel', input('pjf-slack', nt.slack_channel, ' maxlength="13" placeholder="C0123456789"' + code), 'Optional channel id. It hears about new pull requests, questions, blocked and ready ones, merges, and an automatic pause.')
+      + check('pjf-automerge', rv.auto_merge, 'Turn on auto-merge once a ready pull request stays unchanged for the delay')
+      + `<div class="form-grid2">${formField('Auto-merge delay, minutes', input('pjf-merge-delay', rv.auto_merge_delay_minutes || '', ' type="number" min="5" max="1440" step="1" inputmode="numeric" placeholder="30"'), '5–1440. A push, check or comment starts it over, and arbetern checks once more before turning auto-merge on.')}${formField('Merge method', `<select class="form-input" id="pjf-merge-method">${['squash', 'rebase', 'merge'].map(m => `<option value="${m}"${(rv.merge_method || 'squash') === m ? ' selected' : ''}>${m}</option>`).join('')}</select>`, 'One the repository allows.')}</div>`
+      + formField('Slack channel', input('pjf-slack', nt.slack_channel, ' maxlength="13" placeholder="C0123456789"' + code), 'Optional channel id. It hears about new pull requests, questions, blocked and ready ones, auto-merge, merges, and an automatic pause.')
       + `<details class="form-more"><summary>Limits</summary><div class="form-grid2">${limits}</div></details>`
       + `<label class="check-row"><input type="checkbox" id="pjf-enabled"${!p || p.enabled ? ' checked' : ''}> Enabled</label>`,
     onSave: async () => {
@@ -1348,10 +1361,12 @@ function pjfBody(isNew) {
     repo: pjfRepoShape({ owner: formValue('pjf-owner'), name: formValue('pjf-repo'), base_branch: formValue('pjf-base'), include: formValue('pjf-include').split(',') }),
     signal,
     session: { model: formValue('pjf-model'), max_turns: parseInt(formValue('pjf-turns'), 10) || 0 },
-    review: {
+    review: pjfReviewShape({
       follow_up: document.getElementById('pjf-follow').checked, draft: document.getElementById('pjf-draft').checked,
       max_rounds: parseInt(formValue('pjf-rounds'), 10) || 0, settle_minutes: parseInt(formValue('pjf-settle'), 10) || 0,
-    },
+      auto_merge: document.getElementById('pjf-automerge').checked,
+      auto_merge_delay_minutes: parseInt(formValue('pjf-merge-delay'), 10) || 0, merge_method: formValue('pjf-merge-method'),
+    }),
     notify: { slack_channel: formValue('pjf-slack') },
     limits: Object.fromEntries(PJD_LIMITS.map(([k]) => [k, parseInt(formValue('pjf-l-' + k), 10) || 0])),
     interval: formValue('pjf-interval'),
@@ -1364,7 +1379,15 @@ function pjfBody(isNew) {
   if (!isNew && body.repo.name && !body.repo.base_branch) throw new Error('Base branch is required.');
   if (!signal.query) throw new Error('A Datadog query is required.');
   if (!signal.sites.length) throw new Error('Pick at least one Datadog site.');
+  if (body.review.auto_merge && !body.review.follow_up) throw new Error('Auto-merge needs follow-through: tick “Follow each pull request”.');
   return body;
+}
+
+// The server keeps the auto-merge fields only while auto-merge is on.
+function pjfReviewShape(rv) {
+  const out = { follow_up: !!rv.follow_up, draft: !!rv.draft, max_rounds: rv.max_rounds || 0, settle_minutes: rv.settle_minutes || 0 };
+  if (rv.auto_merge) Object.assign(out, { auto_merge: true, auto_merge_delay_minutes: rv.auto_merge_delay_minutes || 0, merge_method: rv.merge_method || 'squash' });
+  return out;
 }
 
 // The stored order is what the work order uses, so an unrelated edit keeps it and new picks go last.
@@ -1383,7 +1406,7 @@ function pjfChanges(p, body) {
     repo: pjfRepoShape(r),
     signal: pjfSignalShape(p.signal || {}),
     session: { model: se.model || '', max_turns: se.max_turns || 0 },
-    review: { follow_up: !!rv.follow_up, draft: !!rv.draft, max_rounds: rv.max_rounds || 0, settle_minutes: rv.settle_minutes || 0 },
+    review: pjfReviewShape(rv),
     notify: { slack_channel: nt.slack_channel || '' },
     limits: Object.fromEntries(PJD_LIMITS.map(([k]) => [k, l[k] || 0])),
     interval: p.interval || '',
