@@ -7,6 +7,7 @@
   <a href="https://go.dev"><img src="https://img.shields.io/badge/Go-1.26+-00ADD8?logo=go&logoColor=white" alt="Go"></a>
   <a href="LICENSE"><img src="https://img.shields.io/github/license/justmike1/arbetern" alt="License"></a>
   <a href="Dockerfile"><img src="https://img.shields.io/badge/Docker-ready-2496ED?logo=docker&logoColor=white" alt="Docker"></a>
+  <a href="https://hub.xerj.org/contributors/justmike1"><img src="https://hub.xerj.org/contributors/justmike1/badge.svg" alt="XERJ Corpus Hub contributor"></a>
 </p>
 
 <p align="center"><em>Yiddish for "workers." (with a typo, but it's cooler)</em></p>
