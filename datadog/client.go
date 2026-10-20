@@ -448,7 +448,7 @@ func (c *Client) baseURL() string {
 
 // Rate-limit / retry tuning for the Datadog transport.
 const (
-	// ddMaxRetries bounds retry attempts on 429 and 5xx responses.
+	// ddMaxRetries bounds retry attempts on 408, 429 and 5xx responses.
 	ddMaxRetries = 4
 	// ddBaseRetryWait is the initial backoff, doubled each attempt.
 	ddBaseRetryWait = 1 * time.Second
@@ -457,7 +457,7 @@ const (
 )
 
 // doRequest issues an HTTP request and returns its body and response, retrying
-// on 429 (rate limit) and 5xx with backoff. Datadog enforces per-org rate
+// on 408 (query timeout), 429 (rate limit) and 5xx with backoff. Datadog enforces per-org rate
 // limits — the smaller EU org 429s readily under the perf-baseline report's
 // burst of aggregate calls — and signals the cooldown via X-RateLimit-Reset
 // (seconds until reset); doRequest honours that header, then Retry-After, then
@@ -494,7 +494,7 @@ func (c *Client) doRequest(ctx context.Context, method, u, logPath string, bodyB
 			return nil, nil, fmt.Errorf("reading response body: %w", readErr)
 		}
 
-		retryable := resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500
+		retryable := resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusRequestTimeout || resp.StatusCode >= 500
 		if retryable && attempt < ddMaxRetries {
 			wait := ddRetryWait(resp, attempt)
 			log.Printf("[datadog:%s] %s %s -> %d, retrying in %s (attempt %d/%d)",

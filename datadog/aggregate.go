@@ -130,6 +130,16 @@ func normalizeGroupByFacets(facets []string) []string {
 	return out
 }
 
+// facetLimits[n-1] holds the per-facet bucket limits of an n-facet group_by.
+// Datadog rejects a group_by whose limits multiply past 10,000, so outer facets
+// keep more buckets than inner ones.
+var facetLimits = [][]int{
+	{100},
+	{100, 100},
+	{50, 20, 10},
+	{20, 10, 10, 5},
+}
+
 // buildPercentileGroupBy builds the request's group_by slice: one entry per
 // facet, each limited and sorted descending — by the p95 measure when a measure
 // is given, otherwise by count. Multiple entries produce nested buckets whose
@@ -141,14 +151,42 @@ func buildPercentileGroupBy(facets []string, measure string) []AggregateGroupBy 
 		sortSpec = &AggregateSort{Aggregation: "pc95", Metric: measure, Order: "desc", Type: "measure"}
 	}
 	gb := make([]AggregateGroupBy, 0, len(facets))
-	for _, f := range facets {
+	for i, f := range facets {
 		gb = append(gb, AggregateGroupBy{
 			Facet: f,
-			Limit: 100,
+			Limit: facetLimits[len(facets)-1][i],
 			Sort:  sortSpec,
 		})
 	}
 	return gb
+}
+
+func clipNote(buckets []AggregateBucket, facets []string) string {
+	if len(facets) == 0 {
+		return ""
+	}
+	limits := facetLimits[len(facets)-1]
+	var hit []string
+	for i, f := range facets {
+		children := map[string]map[string]bool{}
+		for _, b := range buckets {
+			parent := bucketKey(b.By, facets[:i])
+			if children[parent] == nil {
+				children[parent] = map[string]bool{}
+			}
+			children[parent][fmt.Sprint(b.By[f])] = true
+		}
+		for _, values := range children {
+			if len(values) >= limits[i] {
+				hit = append(hit, fmt.Sprintf("%s %d", strings.TrimPrefix(f, "@"), limits[i]))
+				break
+			}
+		}
+	}
+	if len(hit) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("\n_Truncated at the per-facet limit (%s): values past it are missing, so sums over this table undercount._", strings.Join(hit, ", "))
 }
 
 // sortComputeIndex is the computes key rows are ranked by: p95 (c2) when a
@@ -207,6 +245,9 @@ func bucketKey(by map[string]interface{}, facets []string) string {
 // quick to 429 rate-limit under the report's burst of aggregate calls.
 func (mc *MultiClient) AggregatePercentilesReport(ctx context.Context, site, query, from, to string, groupBy []string, measure string) (string, []PercentileResult, error) {
 	facets := normalizeGroupByFacets(groupBy)
+	if len(facets) > len(facetLimits) {
+		return "", nil, fmt.Errorf("group_by takes at most %d facets, got %d", len(facetLimits), len(facets))
+	}
 	cs := mc.clients(site)
 	if len(cs) == 0 {
 		return "", nil, fmt.Errorf("no Datadog client configured for site %q", site)
@@ -228,7 +269,7 @@ func (mc *MultiClient) AggregatePercentilesReport(ctx context.Context, site, que
 			}
 			continue
 		}
-		parts = append(parts, FormatAggregatePercentiles(resp, c.SiteLabel(), facets, measure))
+		parts = append(parts, FormatAggregatePercentiles(resp, c.SiteLabel(), facets, measure)+clipNote(resp.Data.Buckets, facets))
 		results = append(results, percentileResultFromResponse(resp, c.SiteLabel(), facets, measure))
 	}
 	if len(parts) == 0 && lastErr != nil {

@@ -1679,7 +1679,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 					"type":"object",
 					"properties":{
 						"query":{"type":"string","description":"Datadog log search query to aggregate over (e.g. 'service:my-service status:ok'). Append exclusions like '-@some_facet:(test* OR demo*)' to drop unwanted values."},
-						"group_by":{"description":"Facet(s) to group by. Either a single facet string (e.g. '@resource_name') or an array of facets for a composite breakdown (e.g. ['@resource_name','@http.method']). Omit for a single overall bucket (no grouping).","oneOf":[{"type":"string"},{"type":"array","items":{"type":"string"}}]},
+						"group_by":{"description":"Facet(s) to group by. Either a single facet string (e.g. '@resource_name') or an array of up to 4 facets for a composite breakdown (e.g. ['@resource_name','@http.method']). Datadog allows 10,000 groups per call, so each facet keeps its top values within its parent row: 100 per facet for one or two facets, 50/20/10 for three, 20/10/10/5 for four. Put the facet whose totals matter first. Omit for a single overall bucket (no grouping).","oneOf":[{"type":"string"},{"type":"array","items":{"type":"string"}}]},
 						"measure":{"type":"string","description":"OPTIONAL. Numeric measure facet to compute p50/p95/p99 over (e.g. '@duration', '@network.bytes_written'). Omit for a count-only aggregation (just the event count per bucket). Must be a registered Datadog measure facet when provided."},
 						"from":{"type":"string","description":"Start of time range: ISO-8601, unix milliseconds, Datadog date math ('now-14d'), or a relative duration ('-24h', '-15m'). Defaults to 14 days ago."},
 						"to":{"type":"string","description":"End of time range, same formats as 'from'. Defaults to now."},
