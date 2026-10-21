@@ -211,6 +211,7 @@ const (
 	integrationFreshworks  = "freshworks"
 	integrationGoogle      = "google" // Google Drive + Sheets (shared service-account client).
 	integrationDocument360 = "document360"
+	integrationGrafana     = "grafana"
 	integrationGitHub      = "github"
 	integrationSlack       = "slack"
 	integrationAzure       = "azure"
@@ -263,6 +264,8 @@ var restrictedIntegrations = map[string][]string{
 	// Document360 (knowledge base, read-only) is exposed to the customer-success
 	// agent only.
 	integrationDocument360: {"pulse"},
+	// Grafana (read-only) follows the Datadog observability set.
+	integrationGrafana: {"ovad", "pulse", "seihin", "hermes"},
 }
 
 // ToolsForIntegration returns the sorted tool names owned by the given

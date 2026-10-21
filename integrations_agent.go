@@ -17,6 +17,7 @@ import (
 	"github.com/justmike1/arbetern/document360"
 	"github.com/justmike1/arbetern/freshworks"
 	"github.com/justmike1/arbetern/google"
+	"github.com/justmike1/arbetern/grafana"
 	"github.com/justmike1/arbetern/nvd"
 	"github.com/justmike1/arbetern/salesforce"
 )
@@ -38,6 +39,7 @@ type agentIntegrationClients struct {
 	freshworks  *freshworks.Client
 	google      *google.Client
 	document360 *document360.Client
+	grafana     *grafana.Client
 }
 
 // buildAgentScopedClients returns a set of integration clients tailored for a
@@ -222,6 +224,20 @@ func buildAgentScopedClients(
 		} else {
 			out.document360 = c
 			log.Printf("Document360 override for agent %q (region: %s, project: %s)", agentID, c.Region(), c.ProjectLabel())
+		}
+	}
+
+	if agentCfg.GrafanaURL != globalCfg.GrafanaURL ||
+		agentCfg.GrafanaServiceAccountToken != globalCfg.GrafanaServiceAccountToken {
+		if !agentCfg.GrafanaConfigured() {
+			log.Printf("Grafana override for agent %q is missing the URL or token — integration disabled for this agent", agentID)
+			out.grafana = nil
+		} else if c, err := grafana.NewClient(agentCfg.GrafanaURL, agentCfg.GrafanaServiceAccountToken); err != nil {
+			log.Printf("Grafana override for agent %q is invalid — integration disabled for this agent: %v", agentID, err)
+			out.grafana = nil
+		} else {
+			out.grafana = c
+			log.Printf("Grafana override for agent %q (instance: %s)", agentID, c.BaseURL())
 		}
 	}
 

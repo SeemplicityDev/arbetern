@@ -37,6 +37,7 @@ import (
 	"github.com/justmike1/arbetern/freshworks"
 	"github.com/justmike1/arbetern/github"
 	"github.com/justmike1/arbetern/google"
+	"github.com/justmike1/arbetern/grafana"
 	"github.com/justmike1/arbetern/internal/httpx"
 	"github.com/justmike1/arbetern/internal/journal"
 	"github.com/justmike1/arbetern/internal/progress"
@@ -1312,6 +1313,7 @@ func refreshIntegrations(
 	freshworksClient *freshworks.Client,
 	googleClient *google.Client,
 	document360Client *document360.Client,
+	grafanaClient *grafana.Client,
 	modelsClient *llm.Client,
 	codeModelsClient *llm.Client,
 ) {
@@ -1886,6 +1888,32 @@ func refreshIntegrations(
 		})
 	}
 
+	// --- Grafana (read-only) ---
+	{
+		gfConnected := grafanaClient != nil && grafanaClient.Ready()
+		gfPerms := []permission{
+			{Scope: "dashboards:read", Description: "Search dashboards and folders, and read dashboard definitions and panel queries", Required: true, Granted: new(gfConnected)},
+			{Scope: "datasources:query", Description: "Run the queries saved on dashboard panels (POST /api/ds/query)", Required: true, Granted: new(gfConnected)},
+			{Scope: "datasources:read", Description: "List datasources and read their settings", Required: false, Granted: new(gfConnected)},
+			{Scope: "annotations:read", Description: "Read annotations on dashboards and the organization", Required: false, Granted: new(gfConnected)},
+		}
+		activeGF := map[string]string{}
+		if grafanaClient != nil {
+			activeGF["Instance"] = grafanaClient.BaseURL()
+			if id := grafanaClient.Identity(); id != "" {
+				activeGF["Service account"] = id
+			}
+		}
+		result = append(result, integration{
+			ID:           "grafana",
+			Name:         "Grafana",
+			Configured:   cfg.GrafanaConfigured(),
+			AuthMode:     "Service-account token (Bearer)",
+			Permissions:  gfPerms,
+			ActiveModels: activeGF,
+		})
+	}
+
 	// --- Google Drive / Sheets ---
 	{
 		gConnected := googleClient != nil && googleClient.Ready()
@@ -1966,10 +1994,11 @@ func startIntegrationsRefresher(
 	freshworksClient *freshworks.Client,
 	googleClient *google.Client,
 	document360Client *document360.Client,
+	grafanaClient *grafana.Client,
 	modelsClient *llm.Client,
 	codeModelsClient *llm.Client,
 ) {
-	refreshIntegrations(cfg, slackClient, ghClient, jiraClient, sfClient, chorusClient, datadogClients, awsClient, azureClient, databricksClient, clickhouseClient, freshworksClient, googleClient, document360Client, modelsClient, codeModelsClient)
+	refreshIntegrations(cfg, slackClient, ghClient, jiraClient, sfClient, chorusClient, datadogClients, awsClient, azureClient, databricksClient, clickhouseClient, freshworksClient, googleClient, document360Client, grafanaClient, modelsClient, codeModelsClient)
 
 	safego.Go("integrations: refresh loop", func() {
 		ticker := time.NewTicker(1 * time.Hour)
@@ -1977,7 +2006,7 @@ func startIntegrationsRefresher(
 		for range ticker.C {
 			// Guarded per tick so one bad refresh cannot end the loop.
 			safego.Run("integrations: refresh", func() {
-				refreshIntegrations(cfg, slackClient, ghClient, jiraClient, sfClient, chorusClient, datadogClients, awsClient, azureClient, databricksClient, clickhouseClient, freshworksClient, googleClient, document360Client, modelsClient, codeModelsClient)
+				refreshIntegrations(cfg, slackClient, ghClient, jiraClient, sfClient, chorusClient, datadogClients, awsClient, azureClient, databricksClient, clickhouseClient, freshworksClient, googleClient, document360Client, grafanaClient, modelsClient, codeModelsClient)
 			})
 		}
 	})
@@ -2262,6 +2291,16 @@ func main() {
 		}
 	}
 
+	var grafanaClient *grafana.Client
+	if cfg.GrafanaConfigured() {
+		if c, err := grafana.NewClient(cfg.GrafanaURL, cfg.GrafanaServiceAccountToken); err != nil {
+			log.Printf("Grafana integration disabled — invalid configuration: %v", err)
+		} else {
+			grafanaClient = c
+			log.Printf("Grafana integration enabled (instance: %s)", c.BaseURL())
+		}
+	}
+
 	// Google Drive / Sheets client — a service account authenticating with the
 	// JWT-bearer grant. Scope is the Drive share itself: the client discovers
 	// every folder and shared drive that has been shared with the account and
@@ -2316,7 +2355,7 @@ func main() {
 	}
 
 	// Start background integration permission refresher (runs once now, then every hour).
-	startIntegrationsRefresher(cfg, slackClient, ghClient, jiraClient, sfClient, chorusClient, datadogClients, awsClient, azureClient, databricksClient, clickhouseClient, freshworksClient, googleClient, document360Client, modelsClient, codeModelsClient)
+	startIntegrationsRefresher(cfg, slackClient, ghClient, jiraClient, sfClient, chorusClient, datadogClients, awsClient, azureClient, databricksClient, clickhouseClient, freshworksClient, googleClient, document360Client, grafanaClient, modelsClient, codeModelsClient)
 
 	// State backend: every registry below reads and writes the S3 bucket and
 	// keeps only a cache in memory, so any replica can serve any request and a
@@ -2536,8 +2575,9 @@ func main() {
 			freshworks:  freshworksClient,
 			google:      googleClient,
 			document360: document360Client,
+			grafana:     grafanaClient,
 		})
-		router := commands.NewRouter(slackClient, ghClient, modelsClient, codeModelsClient, agentClients.jira, agentClients.nvd, agentClients.sf, agentClients.chorus, agentClients.datadog, agentClients.aws, agentClients.azure, agentClients.databricks, agentClients.clickhouse, agentClients.freshworks, agentClients.google, agentClients.document360, dashRegistry, wfRegistry, ap, agent.ID, cfg.AppURL, sessions, cfg.MaxToolRounds, userContextStore, billingStore)
+		router := commands.NewRouter(slackClient, ghClient, modelsClient, codeModelsClient, agentClients.jira, agentClients.nvd, agentClients.sf, agentClients.chorus, agentClients.datadog, agentClients.aws, agentClients.azure, agentClients.databricks, agentClients.clickhouse, agentClients.freshworks, agentClients.google, agentClients.document360, agentClients.grafana, dashRegistry, wfRegistry, ap, agent.ID, cfg.AppURL, sessions, cfg.MaxToolRounds, userContextStore, billingStore)
 		router.SetMCP(mcpRegistry)
 		router.SetCatalog(catalogIndex)
 		router.SetPerf(perfStore)
@@ -2707,7 +2747,7 @@ func main() {
 	var projRegistry *projects.Registry
 	if cfg.ProjectsEnabled {
 		// Sessions reach every configured integration read-only, with arbetern's own credentials, through the gateway.
-		projectsRouter := commands.NewRouter(slackClient, ghClient, modelsClient, codeModelsClient, jiraClient, nvdClient, sfClient, chorusClient, datadogClients, awsClient, azureClient, databricksClient, clickhouseClient, freshworksClient, googleClient, document360Client, nil, nil, nil, "projects", cfg.AppURL, nil, 0, nil, nil)
+		projectsRouter := commands.NewRouter(slackClient, ghClient, modelsClient, codeModelsClient, jiraClient, nvdClient, sfClient, chorusClient, datadogClients, awsClient, azureClient, databricksClient, clickhouseClient, freshworksClient, googleClient, document360Client, grafanaClient, nil, nil, nil, "projects", cfg.AppURL, nil, 0, nil, nil)
 		projRegistry = projects.New(projects.Deps{
 			Backend: backend,
 			GitHub:  ghClient,

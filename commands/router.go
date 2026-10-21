@@ -22,6 +22,7 @@ import (
 	"github.com/justmike1/arbetern/freshworks"
 	"github.com/justmike1/arbetern/github"
 	"github.com/justmike1/arbetern/google"
+	"github.com/justmike1/arbetern/grafana"
 	"github.com/justmike1/arbetern/internal/journal"
 	"github.com/justmike1/arbetern/internal/progress"
 	"github.com/justmike1/arbetern/llm"
@@ -48,6 +49,7 @@ type Router struct {
 	clickhouseClient  *clickhouse.Client
 	freshworksClient  *freshworks.Client
 	document360Client *document360.Client
+	grafanaClient     *grafana.Client
 	googleClient      *google.Client
 	dashboards        *dashboards.Registry
 	workflows         *workflows.Registry
@@ -66,7 +68,7 @@ type Router struct {
 	tiers             ModelTiers
 }
 
-func NewRouter(slackClient SlackClient, ghClient *github.Client, modelsClient *llm.Client, codeModelsClient *llm.Client, jiraClient *atlassian.Client, nvdClient *nvd.Client, sfClient *salesforce.Client, chorusClient *chorus.Client, datadogClients *datadog.MultiClient, awsClient *aws.Client, azureClient *azure.Client, databricksClient *databricks.Client, clickhouseClient *clickhouse.Client, freshworksClient *freshworks.Client, googleClient *google.Client, document360Client *document360.Client, dashboardRegistry *dashboards.Registry, workflowRegistry *workflows.Registry, pp PromptProvider, agentID, appURL string, sessions *SessionStore, maxToolRounds int, userContextStore *UserContextStore, usage UsageRecorder) *Router {
+func NewRouter(slackClient SlackClient, ghClient *github.Client, modelsClient *llm.Client, codeModelsClient *llm.Client, jiraClient *atlassian.Client, nvdClient *nvd.Client, sfClient *salesforce.Client, chorusClient *chorus.Client, datadogClients *datadog.MultiClient, awsClient *aws.Client, azureClient *azure.Client, databricksClient *databricks.Client, clickhouseClient *clickhouse.Client, freshworksClient *freshworks.Client, googleClient *google.Client, document360Client *document360.Client, grafanaClient *grafana.Client, dashboardRegistry *dashboards.Registry, workflowRegistry *workflows.Registry, pp PromptProvider, agentID, appURL string, sessions *SessionStore, maxToolRounds int, userContextStore *UserContextStore, usage UsageRecorder) *Router {
 	// Channel-context cache reuses the thread session window so that an
 	// active in-thread conversation does not re-fetch Slack history on
 	// every turn. Falls back to the package default when sessions is nil.
@@ -92,6 +94,7 @@ func NewRouter(slackClient SlackClient, ghClient *github.Client, modelsClient *l
 		clickhouseClient:  clickhouseClient,
 		freshworksClient:  freshworksClient,
 		document360Client: document360Client,
+		grafanaClient:     grafanaClient,
 		googleClient:      googleClient,
 		dashboards:        dashboardRegistry,
 		workflows:         workflowRegistry,
@@ -291,6 +294,7 @@ func (r *Router) newGeneralHandler(userContext string, session *ThreadSession) *
 		clickhouseClient:  r.clickhouseClient,
 		freshworksClient:  r.freshworksClient,
 		document360Client: r.document360Client,
+		grafanaClient:     r.grafanaClient,
 		googleClient:      r.googleClient,
 		dashboards:        r.dashboards,
 		workflows:         r.workflows,

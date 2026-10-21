@@ -30,6 +30,8 @@ var readOnlyTools = []string{
 	ToolFreshdeskListTickets, ToolFreshdeskGetTicket, ToolFreshdeskSearchTickets, ToolFreshdeskFindAgent, ToolFreshdeskListTicketFields,
 	ToolFreshchatGetConversation, ToolFreshchatGetConversationMessages, ToolFreshworksCRMSearch, ToolFreshworksCRMGetContact, ToolFreshworksCRMGetDeal,
 	ToolDocument360ListWorkspaces, ToolDocument360Search, ToolDocument360ListCategories, ToolDocument360ListArticles, ToolDocument360GetArticle,
+	ToolGrafanaSearchDashboards, ToolGrafanaSearchFolders, ToolGrafanaGetDashboardSummary, ToolGrafanaGetDashboardPanelQueries,
+	ToolGrafanaGetDashboardProperty, ToolGrafanaListDatasources, ToolGrafanaRunPanelQuery, ToolGrafanaGetAnnotations,
 	ToolSheetsReadRange, ToolSheetsGetInfo, ToolDriveFindFile, ToolDriveListFolders, ToolDriveReadFile,
 }
 

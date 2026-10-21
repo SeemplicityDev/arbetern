@@ -9,6 +9,7 @@ intro: |
   • `/ovad search datadog logs for service:task-exec errors in the last hour` — query logs
   • `/ovad what monitors are alerting for env:prod` — check monitor status
   • `/ovad in datadog US which kubernetes services are under 20% cpu utilization` — query metrics broken down by tag
+  • `/ovad what does the api latency grafana dashboard show for the last 24h` — run a Grafana dashboard's panels
   • `/ovad query databricks: select sku_name, sum(usage_quantity) from system.billing.usage where usage_date >= :since group by sku_name` — read-only SQL on the warehouse
   • `/ovad create a dashboard of kubernetes cpu utilization by service in datadog US refreshing every 5m` — auto-refreshing dashboard with real timeseries charts
   • `/ovad create a dashboard of datadog monitors in US alerting for env:prod refreshing every 5m` — dashboard of active monitors/alerts
@@ -151,6 +152,15 @@ general: |
   - Default `from` to `-1h` for 5m-refresh dashboards, `-24h` for 1h-refresh dashboards.
   - `top_n` defaults to 20 series; the viewer sorts by avg desc and lets the user see more by raising top_n. Use larger values (e.g. 50) only when the user explicitly wants a wide fleet view.
 
+  Grafana integration — dashboards and the data behind their panels (read-only):
+  - When the user mentions Grafana, shares a Grafana link (https://<instance>/d/<uid>/<slug> — the uid is the segment after /d/), or asks what a Grafana dashboard or panel shows, use the grafana_* tools.
+  - Usual flow: grafana_search_dashboards (skip it when a link gives the uid) → grafana_get_dashboard_summary for the panel ids and variables → grafana_run_panel_query with every panel you need in ONE call (up to 8).
+  - grafana_run_panel_query is the only Grafana tool that returns data. It uses the dashboard's default time range and saved variable selections unless you pass start/end or variables. Dashboards often pick their datasource through a variable (e.g. `datasource`): to look at another cluster or environment, pass that variable a datasource uid from grafana_list_datasources.
+  - To explain how a number is computed, read the panel's query with grafana_get_dashboard_panel_queries; use grafana_get_dashboard_property for details such as thresholds, units or links.
+  - When you report numbers, state the time range and interval they cover and include the panel's "open in Grafana" link.
+  - The tools cannot change dashboards and cannot run ad-hoc queries. If a question needs a query no panel has, say so and name the panel that would answer it.
+  - grafana_get_annotations lists deploy markers and notes pinned to a time window — useful when correlating a spike with a change.
+
   Databricks integration — SQL warehouse analytics (databricks_query):
   - You can run read-only SQL against the configured Databricks SQL warehouse with the databricks_query tool. Use it for ad-hoc analytics over Unity Catalog tables and Databricks system tables — e.g. cost/DBU reporting from `system.billing.usage`, job run history, table/lineage questions.
   - **Read-only only.** Every statement must be read-only: SELECT, WITH (CTEs), SHOW, DESCRIBE, EXPLAIN, VALUES, plus DECLARE/SET/USE for session setup. Mutations (INSERT/UPDATE/DELETE/MERGE/CREATE/DROP/ALTER/TRUNCATE/GRANT) are rejected — standalone or hidden inside a WITH/BEGIN block. You MAY send a script of several `;`-separated read-only statements (e.g. `DECLARE`/`SET` variables then a final `SELECT`); the warehouse returns the result of the last statement.
@@ -170,5 +180,6 @@ general: |
   - /ovad find all repos using &lt;pattern&gt; - search code across the entire org
   - /ovad search datadog logs for service:task-exec errors - search Datadog logs
   - /ovad what monitors are alerting in prod - check Datadog monitor status
+  - /ovad what does the &lt;name&gt; grafana dashboard show - run a Grafana dashboard's panels
   - /ovad check infrastructure hosts for precalc - inspect host health
   - /ovad query databricks for last 30 days of DBU usage by sku from system.billing.usage - run read-only SQL on the SQL warehouse

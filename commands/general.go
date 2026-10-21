@@ -28,6 +28,7 @@ import (
 	"github.com/justmike1/arbetern/freshworks"
 	"github.com/justmike1/arbetern/github"
 	"github.com/justmike1/arbetern/google"
+	"github.com/justmike1/arbetern/grafana"
 	"github.com/justmike1/arbetern/internal/progress"
 	"github.com/justmike1/arbetern/internal/text"
 	"github.com/justmike1/arbetern/llm"
@@ -79,6 +80,7 @@ type GeneralHandler struct {
 	freshworksClient  *freshworks.Client
 	googleClient      *google.Client
 	document360Client *document360.Client
+	grafanaClient     *grafana.Client
 	dashboards        *dashboards.Registry
 	workflows         *workflows.Registry
 	mcp               *mcp.Registry
@@ -2354,6 +2356,138 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 							"article_ids":{"type":"array","items":{"type":"string"},"description":"Up to 5 article IDs (UUIDs) from search hits or a listing, read in parallel. Prefer this over repeated single calls."},
 							"article_id":{"type":"string","description":"A single article ID. Use 'article_ids' instead when you need more than one."},
 							"lang_code":{"type":"string","description":"Optional language code such as 'en'. Omit for the project default."}
+						}
+					}`),
+				},
+			},
+		)
+	}
+
+	if h.canUseIntegration(integrationGrafana) && h.grafanaClient != nil && h.grafanaClient.Ready() {
+		tools = append(tools,
+			llm.Tool{
+				Type: "function",
+				Function: llm.ToolFunction{
+					Name:        ToolGrafanaSearchDashboards,
+					Description: "Search Grafana dashboards by title fragment, tags or folder. Returns each dashboard's title, uid, folder, tags and link. Start here when the user names a dashboard or a topic; pass the uid to the other grafana_* tools. When the user shares a Grafana link, the uid is the path segment after /d/ (https://<instance>/d/<uid>/<slug>), so skip the search.",
+					Parameters: json.RawMessage(`{
+						"type":"object",
+						"properties":{
+							"query":{"type":"string","description":"Title fragment to match, case-insensitive. Omit to list by tags or folder only."},
+							"tags":{"type":"array","items":{"type":"string"},"description":"Only dashboards carrying ALL of these tags."},
+							"folder_uid":{"type":"string","description":"Only dashboards directly in this folder (uid from grafana_search_folders)."},
+							"limit":{"type":"integer","description":"Max results, 1-100. Default 50."},
+							"page":{"type":"integer","description":"1-based page when a search returns the full limit."}
+						}
+					}`),
+				},
+			},
+			llm.Tool{
+				Type: "function",
+				Function: llm.ToolFunction{
+					Name:        ToolGrafanaSearchFolders,
+					Description: "Search Grafana folders by title fragment. Returns folder titles and uids; pass a uid as folder_uid to grafana_search_dashboards to list that folder's dashboards.",
+					Parameters: json.RawMessage(`{
+						"type":"object",
+						"properties":{
+							"query":{"type":"string","description":"Folder title fragment. Omit to list folders."}
+						}
+					}`),
+				},
+			},
+			llm.Tool{
+				Type: "function",
+				Function: llm.ToolFunction{
+					Name:        ToolGrafanaGetDashboardSummary,
+					Description: "Compact overview of one Grafana dashboard: title, folder, default time range, its variables with their saved selections, and every panel's id, title, type and query count, grouped by row (panels in collapsed rows included). Read this before running panels: the panel ids it lists are what grafana_run_panel_query and grafana_get_dashboard_panel_queries take.",
+					Parameters: json.RawMessage(`{
+						"type":"object",
+						"properties":{
+							"uid":{"type":"string","description":"Dashboard uid."}
+						},
+						"required":["uid"]
+					}`),
+				},
+			},
+			llm.Tool{
+				Type: "function",
+				Function: llm.ToolFunction{
+					Name:        ToolGrafanaGetDashboardPanelQueries,
+					Description: "Show the saved queries (for example ClickHouse SQL) behind a dashboard's panels, with each query's datasource and the variable selections the queries reference. Pass panel_id for one panel's full query text; omit it for every panel, with long queries excerpted. This shows queries without running them; use grafana_run_panel_query for data.",
+					Parameters: json.RawMessage(`{
+						"type":"object",
+						"properties":{
+							"uid":{"type":"string","description":"Dashboard uid."},
+							"panel_id":{"type":"integer","description":"Optional panel id from grafana_get_dashboard_summary."}
+						},
+						"required":["uid"]
+					}`),
+				},
+			},
+			llm.Tool{
+				Type: "function",
+				Function: llm.ToolFunction{
+					Name:        ToolGrafanaGetDashboardProperty,
+					Description: "Read part of a dashboard's JSON model with a JSONPath expression, for details the summary leaves out (thresholds, field config, links, transformations). Examples: '$.panels[*].title', '$.panels[?(@.id == 4)]', '$.templating.list[*].name', '$..targets[*].rawSql'. '$' returns the whole model, truncated. Panels live in panels[]; collapsed rows keep theirs in the row's own panels[].",
+					Parameters: json.RawMessage(`{
+						"type":"object",
+						"properties":{
+							"uid":{"type":"string","description":"Dashboard uid."},
+							"json_path":{"type":"string","description":"JSONPath into the dashboard model, starting at $."}
+						},
+						"required":["uid","json_path"]
+					}`),
+				},
+			},
+			llm.Tool{
+				Type: "function",
+				Function: llm.ToolFunction{
+					Name:        ToolGrafanaListDatasources,
+					Description: "List the Grafana datasources the service account can query, with uid, type and which is the default. Use it to find the uid to pass for a dashboard's datasource variable, for example to point a panel at another cluster's datasource.",
+					Parameters: json.RawMessage(`{
+						"type":"object",
+						"properties":{
+							"type":{"type":"string","description":"Type substring, e.g. 'clickhouse' or 'prometheus'."},
+							"name":{"type":"string","description":"Name or uid substring, e.g. 'prod'."}
+						}
+					}`),
+				},
+			},
+			llm.Tool{
+				Type: "function",
+				Function: llm.ToolFunction{
+					Name:        ToolGrafanaRunPanelQuery,
+					Description: "Run the saved queries of one or more dashboard panels and return their data, as the panel would show it. This is the only Grafana tool that returns live data. Pass dashboard_uid and up to 8 panel_ids (from grafana_get_dashboard_summary). The dashboard's default time range applies unless you pass start/end. Variables keep the dashboard's saved selections unless overridden: e.g. {\"datasource\":\"<uid>\"} to point the panel at another datasource (uids from grafana_list_datasources), {\"service\":\"api,worker\"} for several values of a multi-value variable, or \"All\". Long time series come back summarised per series (last/avg/min/max/sum); tables are capped in rows. Each panel includes an 'open in Grafana' link to share.",
+					Parameters: json.RawMessage(`{
+						"type":"object",
+						"properties":{
+							"dashboard_uid":{"type":"string","description":"Dashboard uid."},
+							"panel_ids":{"type":"array","items":{"type":"integer"},"description":"Panel ids to run, up to 8, in one call."},
+							"start":{"type":"string","description":"Start of the range: 'now-6h', 'now-1d/d', RFC 3339 or unix ms. Default: the dashboard's own range."},
+							"end":{"type":"string","description":"End of the range, same formats. Default: the dashboard's own range (usually now)."},
+							"variables":{"type":"object","additionalProperties":{"type":"string"},"description":"Variable overrides by name, e.g. {\"datasource\":\"<uid>\",\"service\":\"api\"}. Comma-separate several values; 'All' selects every value."},
+							"interval":{"type":"string","description":"Optional bucket size for time-grouped queries, e.g. '1m' or '1h'. Default: the range divided into about 200 points."}
+						},
+						"required":["dashboard_uid","panel_ids"]
+					}`),
+				},
+			},
+			llm.Tool{
+				Type: "function",
+				Function: llm.ToolFunction{
+					Name:        ToolGrafanaGetAnnotations,
+					Description: "List Grafana annotations, newest first: deploy markers, incident notes and other events pinned to a point or span in time. Filter by time window, dashboard, panel or tags.",
+					Parameters: json.RawMessage(`{
+						"type":"object",
+						"properties":{
+							"start":{"type":"string","description":"Window start: 'now-7d', RFC 3339 or unix ms. Omit for the newest annotations."},
+							"end":{"type":"string","description":"Window end, same formats. Default now."},
+							"dashboard_uid":{"type":"string","description":"Only annotations on this dashboard."},
+							"panel_id":{"type":"integer","description":"Only annotations on this panel (with dashboard_uid)."},
+							"tags":{"type":"array","items":{"type":"string"},"description":"Only annotations with these tags (all of them unless match_any)."},
+							"match_any":{"type":"boolean","description":"Match any of the tags instead of all."},
+							"type":{"type":"string","enum":["annotation","alert"],"description":"Only manual annotations, or only alert state changes."},
+							"limit":{"type":"integer","description":"Max results, 1-200. Default 50."}
 						}
 					}`),
 				},
@@ -5916,6 +6050,198 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 			userID, channelID, len(results), read, chars)
 		return document360.FormatArticleBatch(results)
 
+	// ---- Grafana (read-only) ----
+
+	case ToolGrafanaSearchDashboards:
+		if errMsg := requireReady("Grafana", h.grafanaClient); errMsg != "" {
+			return errMsg
+		}
+		args, errMsg := parseToolArgs[struct {
+			Query     string   `json:"query"`
+			Tags      []string `json:"tags"`
+			FolderUID string   `json:"folder_uid"`
+			Limit     int      `json:"limit"`
+			Page      int      `json:"page"`
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
+		}
+		hits, err := h.grafanaClient.SearchDashboards(ctx, grafana.SearchOptions{
+			Query:      args.Query,
+			Tags:       args.Tags,
+			FolderUIDs: []string{args.FolderUID},
+			Limit:      args.Limit,
+			Page:       args.Page,
+		})
+		if err != nil {
+			return grafanaToolErr("searching Grafana dashboards", userID, channelID, err)
+		}
+		log.Printf("[user=%s channel=%s] grafana_search_dashboards (query=%q, results=%d)", userID, channelID, args.Query, len(hits))
+		limit := args.Limit
+		if limit <= 0 {
+			limit = 50
+		}
+		return grafana.FormatSearch("dash-db", args.Query, hits, limit)
+
+	case ToolGrafanaSearchFolders:
+		if errMsg := requireReady("Grafana", h.grafanaClient); errMsg != "" {
+			return errMsg
+		}
+		args, errMsg := parseToolArgs[struct {
+			Query string `json:"query"`
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
+		}
+		hits, err := h.grafanaClient.SearchFolders(ctx, args.Query, 100)
+		if err != nil {
+			return grafanaToolErr("searching Grafana folders", userID, channelID, err)
+		}
+		log.Printf("[user=%s channel=%s] grafana_search_folders (query=%q, results=%d)", userID, channelID, args.Query, len(hits))
+		return grafana.FormatSearch("dash-folder", args.Query, hits, 100)
+
+	case ToolGrafanaGetDashboardSummary, ToolGrafanaGetDashboardPanelQueries, ToolGrafanaGetDashboardProperty:
+		if errMsg := requireReady("Grafana", h.grafanaClient); errMsg != "" {
+			return errMsg
+		}
+		args, errMsg := parseToolArgs[struct {
+			UID      string `json:"uid"`
+			PanelID  int    `json:"panel_id"`
+			JSONPath string `json:"json_path"`
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
+		}
+		if strings.TrimSpace(args.UID) == "" {
+			return preconditionErrf("Error: uid is required (from grafana_search_dashboards or the /d/<uid>/ part of a dashboard link).")
+		}
+		d, err := h.grafanaClient.GetDashboard(ctx, args.UID)
+		if err != nil {
+			return grafanaToolErr("reading the Grafana dashboard", userID, channelID, err)
+		}
+		log.Printf("[user=%s channel=%s] %s (uid=%s, panel=%d, path=%q)", userID, channelID, name, args.UID, args.PanelID, args.JSONPath)
+		switch name {
+		case ToolGrafanaGetDashboardSummary:
+			return grafana.FormatSummary(d)
+		case ToolGrafanaGetDashboardPanelQueries:
+			return grafana.FormatPanelQueries(d, args.PanelID)
+		}
+		if strings.TrimSpace(args.JSONPath) == "" {
+			return preconditionErrf("Error: json_path is required, e.g. '$.panels[*].title'.")
+		}
+		v, err := d.Property(args.JSONPath)
+		if err != nil {
+			return preconditionErrf("Error applying JSONPath %q: %v", args.JSONPath, err)
+		}
+		return grafana.FormatProperty(d, args.JSONPath, v)
+
+	case ToolGrafanaListDatasources:
+		if errMsg := requireReady("Grafana", h.grafanaClient); errMsg != "" {
+			return errMsg
+		}
+		args, errMsg := parseToolArgs[struct {
+			Type string `json:"type"`
+			Name string `json:"name"`
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
+		}
+		list, err := h.grafanaClient.ListDatasources(ctx, args.Type, args.Name)
+		if err != nil {
+			return grafanaToolErr("listing Grafana datasources", userID, channelID, err)
+		}
+		log.Printf("[user=%s channel=%s] grafana_list_datasources (type=%q, name=%q, results=%d)", userID, channelID, args.Type, args.Name, len(list))
+		return grafana.FormatDatasources(list)
+
+	case ToolGrafanaRunPanelQuery:
+		if errMsg := requireReady("Grafana", h.grafanaClient); errMsg != "" {
+			return errMsg
+		}
+		args, errMsg := parseToolArgs[struct {
+			DashboardUID string         `json:"dashboard_uid"`
+			PanelIDs     []int          `json:"panel_ids"`
+			Start        string         `json:"start"`
+			End          string         `json:"end"`
+			Variables    map[string]any `json:"variables"`
+			Interval     string         `json:"interval"`
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
+		}
+		if strings.TrimSpace(args.DashboardUID) == "" || len(args.PanelIDs) == 0 {
+			return preconditionErrf("Error: dashboard_uid and panel_ids are required (panel ids come from grafana_get_dashboard_summary).")
+		}
+		res, err := h.grafanaClient.RunPanels(ctx, grafana.RunOptions{
+			DashboardUID: args.DashboardUID,
+			PanelIDs:     args.PanelIDs,
+			Start:        args.Start,
+			End:          args.End,
+			Variables:    grafanaVariables(args.Variables),
+			Interval:     args.Interval,
+		})
+		if err != nil {
+			return grafanaToolErr("running the Grafana panels", userID, channelID, err)
+		}
+		failed := 0
+		for _, p := range res.Panels {
+			if p.Err != nil {
+				failed++
+				log.Printf("[user=%s channel=%s] grafana_run_panel_query (uid=%s, panel=%d) failed: %s", userID, channelID, args.DashboardUID, p.ID, grafana.ErrorDetail(p.Err))
+			}
+			for _, q := range p.Queries {
+				if q.Err != "" {
+					log.Printf("[user=%s channel=%s] grafana_run_panel_query (uid=%s, panel=%d, ref=%s) query error: %s", userID, channelID, args.DashboardUID, p.ID, q.RefID, q.Err)
+				}
+			}
+		}
+		log.Printf("[user=%s channel=%s] grafana_run_panel_query (uid=%s, panels=%d, failed=%d, range=%s)", userID, channelID, args.DashboardUID, len(res.Panels), failed, res.Range)
+		return grafana.FormatRun(res)
+
+	case ToolGrafanaGetAnnotations:
+		if errMsg := requireReady("Grafana", h.grafanaClient); errMsg != "" {
+			return errMsg
+		}
+		args, errMsg := parseToolArgs[struct {
+			Start        string   `json:"start"`
+			End          string   `json:"end"`
+			DashboardUID string   `json:"dashboard_uid"`
+			PanelID      int      `json:"panel_id"`
+			Tags         []string `json:"tags"`
+			MatchAny     bool     `json:"match_any"`
+			Type         string   `json:"type"`
+			Limit        int      `json:"limit"`
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
+		}
+		now := time.Now()
+		from, err := grafana.ParseTime(args.Start, now, false)
+		if err != nil {
+			return preconditionErrf("Error: %v", err)
+		}
+		to, err := grafana.ParseTime(args.End, now, true)
+		if err != nil {
+			return preconditionErrf("Error: %v", err)
+		}
+		if !from.IsZero() && to.IsZero() {
+			to = now
+		}
+		list, err := h.grafanaClient.GetAnnotations(ctx, grafana.AnnotationOptions{
+			From:         from,
+			To:           to,
+			DashboardUID: args.DashboardUID,
+			PanelID:      args.PanelID,
+			Tags:         args.Tags,
+			MatchAny:     args.MatchAny,
+			Type:         args.Type,
+			Limit:        args.Limit,
+		})
+		if err != nil {
+			return grafanaToolErr("reading Grafana annotations", userID, channelID, err)
+		}
+		log.Printf("[user=%s channel=%s] grafana_get_annotations (dashboard=%s, results=%d)", userID, channelID, args.DashboardUID, len(list))
+		return grafana.FormatAnnotations(list)
+
 	// ---- Google Drive / Sheets (pulse only) ----
 
 	case ToolDriveListFolders:
@@ -6193,6 +6519,38 @@ func document360ToolErr(action, userID, channelID string, err error) string {
 		log.Printf("[user=%s channel=%s] document360 error while %s: %s", userID, channelID, action, detail)
 	}
 	return fmt.Sprintf("Error %s: %v", action, err)
+}
+
+// grafanaToolErr logs Grafana's own diagnostic and returns the sanitized
+// message the model may see.
+func grafanaToolErr(action, userID, channelID string, err error) string {
+	log.Printf("[user=%s channel=%s] grafana error while %s: %s", userID, channelID, action, grafana.ErrorDetail(err))
+	return fmt.Sprintf("Error %s: %v", action, err)
+}
+
+// grafanaVariables flattens variable overrides to strings; a list becomes
+// comma-separated values.
+func grafanaVariables(in map[string]any) map[string]string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		switch t := v.(type) {
+		case string:
+			out[k] = t
+		case []any:
+			parts := make([]string, 0, len(t))
+			for _, x := range t {
+				parts = append(parts, fmt.Sprint(x))
+			}
+			out[k] = strings.Join(parts, ",")
+		case nil:
+		default:
+			out[k] = fmt.Sprint(t)
+		}
+	}
+	return out
 }
 
 func (h *GeneralHandler) fetchWorkflowLogs(ctx context.Context, text, userID, channelID string) string {

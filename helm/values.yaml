@@ -486,6 +486,10 @@ secretValues:
   # document360-api-key: ""           # Scoped API key, d360_sk_…
   # document360-project-id: ""        # Optional. Project UUID — needed only when the key sees several projects
   # document360-region: ""            # Optional. API region: eu (default), us or ca
+  # Grafana (optional — enables the read-only grafana_* tools for the ovad, pulse, seihin and hermes
+  # agents). Auth is a service-account token; the Viewer role covers every tool. See docs/GRAFANA.md.
+  # grafana-url: ""                   # Instance URL, e.g. https://acme.grafana.net
+  # grafana-service-account-token: "" # Service-account token, glsa_…
   # Google Drive / Sheets (optional — enables the drive_* and sheets_* tools for the pulse
   # agent only). Auth is a service-account key (JWT bearer grant — arbetern is headless, so
   # there is no interactive OAuth flow and no domain-wide delegation).

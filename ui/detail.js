@@ -400,6 +400,7 @@ const FLOW_INTEGRATIONS = [
     writeKeys: ['modify_file', 'create_file', 'delete_file', 'move_file', 'regex_replace_file', 'rerun_failed_jobs', 'rerun_workflow'] },
   { id: 'slack', name: 'Slack', kind: 'output', keys: ['slack', 'channel', 'c0', 'u0', 'post_slack', 'dm '] },
   { id: 'datadog', name: 'Datadog', kind: 'source', keys: ['datadog', 'datadog_search_logs', 'datadog_list_monitors', 'datadog_get_monitor', 'datadog_list_hosts', 'datadog_get_dashboard', 'datadog_list_dashboards', 'datadog_query_metrics', 'dd_', 'env:prod'] },
+  { id: 'grafana', name: 'Grafana', kind: 'source', keys: ['grafana_search_dashboards', 'grafana_search_folders', 'grafana_get_dashboard_summary', 'grafana_get_dashboard_panel_queries', 'grafana_get_dashboard_property', 'grafana_list_datasources', 'grafana_run_panel_query', 'grafana_get_annotations', 'grafana'] },
   { id: 'aws', name: 'AWS', kind: 'both', keys: ['aws_get_cost_and_usage', 'aws_get_cost_forecast', 'aws_list_dimension_values', 'aws_s3_put_object', 'aws_s3_get_object', 'aws_s3_list_objects', 'aws_athena_query', 'aws_athena_schema', 'aws_athena_catalogs', 'cost explorer', 'athena', 'amortizedcost', 'unblendedcost', 's3://'],
     readKeys: ['aws_get_cost_and_usage', 'aws_get_cost_forecast', 'aws_list_dimension_values', 'aws_s3_get_object', 'aws_s3_list_objects', 'aws_athena_query', 'aws_athena_schema', 'aws_athena_catalogs', 'cost explorer', 'athena', 'amortizedcost', 'unblendedcost'],
     writeKeys: ['aws_s3_put_object'] },

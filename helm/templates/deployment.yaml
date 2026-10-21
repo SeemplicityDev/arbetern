@@ -425,6 +425,18 @@ spec:
                   key: document360-region
             {{- end }}
             {{- end }}
+            {{- if and (index .Values.secretValues "grafana-url") (index .Values.secretValues "grafana-service-account-token") }}
+            - name: GRAFANA_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: grafana-url
+            - name: GRAFANA_SERVICE_ACCOUNT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: grafana-service-account-token
+            {{- end }}
             - name: GOMEMLIMIT
               value: {{ .Values.goRuntime.goMemLimit | quote }}
             - name: GOGC

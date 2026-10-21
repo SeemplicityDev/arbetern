@@ -134,6 +134,10 @@ type Credentials struct {
 	Document360ProjectID string `cred:"document360-project-id"` // Optional. Project UUID; required only when the key sees several projects.
 	Document360Region    string `cred:"document360-region"`     // Optional. API region: eu (default), us or ca.
 
+	// Grafana (read-only) — a service-account token against one instance's HTTP API.
+	GrafanaURL                 string `cred:"grafana-url"`                   // Instance URL, e.g. "https://acme.grafana.net".
+	GrafanaServiceAccountToken string `cred:"grafana-service-account-token"` // Service-account token (glsa_…), sent as a Bearer token.
+
 	// Google Drive / Sheets — a service-account key with the JWT-bearer grant
 	// (arbetern is headless, so there is no interactive OAuth flow and no
 	// domain-wide delegation; the account acts as itself).
@@ -439,6 +443,11 @@ func (c *Config) Document360Configured() bool {
 	return strings.TrimSpace(c.Document360APIKey) != ""
 }
 
+// GrafanaConfigured returns true when both the instance URL and the token are present.
+func (c *Config) GrafanaConfigured() bool {
+	return strings.TrimSpace(c.GrafanaURL) != "" && strings.TrimSpace(c.GrafanaServiceAccountToken) != ""
+}
+
 // GoogleConfigured returns true when the service-account key is present. The
 // folder IDs are optional: with none set, the connector adopts whatever has been
 // shared with the service account, which is the intended way to run it. The
@@ -509,6 +518,9 @@ func Load() (*Config, error) {
 			Document360APIKey:    os.Getenv("DOCUMENT360_API_KEY"),
 			Document360ProjectID: os.Getenv("DOCUMENT360_PROJECT_ID"),
 			Document360Region:    os.Getenv("DOCUMENT360_REGION"),
+
+			GrafanaURL:                 os.Getenv("GRAFANA_URL"),
+			GrafanaServiceAccountToken: os.Getenv("GRAFANA_SERVICE_ACCOUNT_TOKEN"),
 
 			GoogleCredentialsJSON: os.Getenv("GOOGLE_CREDENTIALS_JSON"),
 			GoogleDriveFolderIDs:  os.Getenv("GOOGLE_DRIVE_FOLDER_IDS"),

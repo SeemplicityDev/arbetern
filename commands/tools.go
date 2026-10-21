@@ -143,6 +143,16 @@ const (
 	ToolDocument360ListArticles   = "document360_list_articles"
 	ToolDocument360GetArticle     = "document360_get_article"
 
+	// Grafana (read-only).
+	ToolGrafanaSearchDashboards         = "grafana_search_dashboards"
+	ToolGrafanaSearchFolders            = "grafana_search_folders"
+	ToolGrafanaGetDashboardSummary      = "grafana_get_dashboard_summary"
+	ToolGrafanaGetDashboardPanelQueries = "grafana_get_dashboard_panel_queries"
+	ToolGrafanaGetDashboardProperty     = "grafana_get_dashboard_property"
+	ToolGrafanaListDatasources          = "grafana_list_datasources"
+	ToolGrafanaRunPanelQuery            = "grafana_run_panel_query"
+	ToolGrafanaGetAnnotations           = "grafana_get_annotations"
+
 	// Google Drive / Sheets.
 	ToolSheetsAppendRow  = "sheets_append_row"
 	ToolSheetsReadRange  = "sheets_read_range"
@@ -301,6 +311,16 @@ var toolIntegration = map[string]string{
 	ToolDocument360ListCategories: integrationDocument360,
 	ToolDocument360ListArticles:   integrationDocument360,
 	ToolDocument360GetArticle:     integrationDocument360,
+
+	// Grafana (read-only).
+	ToolGrafanaSearchDashboards:         integrationGrafana,
+	ToolGrafanaSearchFolders:            integrationGrafana,
+	ToolGrafanaGetDashboardSummary:      integrationGrafana,
+	ToolGrafanaGetDashboardPanelQueries: integrationGrafana,
+	ToolGrafanaGetDashboardProperty:     integrationGrafana,
+	ToolGrafanaListDatasources:          integrationGrafana,
+	ToolGrafanaRunPanelQuery:            integrationGrafana,
+	ToolGrafanaGetAnnotations:           integrationGrafana,
 
 	// Google Drive / Sheets.
 	ToolSheetsAppendRow:  integrationGoogle,
