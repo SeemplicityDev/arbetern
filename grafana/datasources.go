@@ -15,8 +15,7 @@ func (c *Client) fetchDatasources(ctx context.Context) ([]Datasource, error) {
 	err := c.get(ctx, "/api/datasources", nil, &list)
 	var ae *APIError
 	if errors.As(err, &ae) && ae.Status == http.StatusForbidden {
-		// Viewer accounts lack datasources:read; the frontend settings still
-		// list every datasource they may query.
+		// Without datasources:read, the frontend settings still list every queryable datasource.
 		list, err = c.frontendDatasources(ctx)
 	}
 	if err != nil {
@@ -58,8 +57,6 @@ func (c *Client) frontendDatasources(ctx context.Context) ([]Datasource, error) 
 	return list, nil
 }
 
-// isBuiltinDatasource reports the pseudo datasources: -- Grafana --, -- Mixed --,
-// -- Dashboard -- and server-side expressions.
 func isBuiltinDatasource(uid, typ string) bool {
 	switch {
 	case typ == "datasource", typ == "grafana", typ == "__expr__", uid == "grafana", uid == "__expr__":
@@ -70,8 +67,7 @@ func isBuiltinDatasource(uid, typ string) bool {
 	return false
 }
 
-// ListDatasources returns the datasources the service account can see, default
-// first, narrowed by case-insensitive substrings of type and name.
+// ListDatasources returns the visible datasources, default first, filtered by type and name substrings.
 func (c *Client) ListDatasources(ctx context.Context, typeFilter, nameFilter string) ([]Datasource, error) {
 	all, err := c.datasources.Get(ctx)
 	if err != nil {
@@ -92,8 +88,6 @@ func (c *Client) ListDatasources(ctx context.Context, typeFilter, nameFilter str
 	return out, nil
 }
 
-// findDatasource matches a reference against the visible datasources by UID,
-// then by name. An empty reference or "default" means the instance default.
 func (c *Client) findDatasource(ctx context.Context, ref string) (*Datasource, error) {
 	all, err := c.datasources.Get(ctx)
 	if err != nil {
@@ -113,16 +107,13 @@ func (c *Client) findDatasource(ctx context.Context, ref string) (*Datasource, e
 			return &all[i], nil
 		}
 	}
-	for i := range all {
-		if strings.EqualFold(all[i].Name, ref) {
-			return &all[i], nil
-		}
+	if ds, err := matchDatasource(all, ref); err == nil {
+		return &ds, nil
 	}
 	return nil, fmt.Errorf("datasource %q is not visible to the service account: it does not exist, or its permissions exclude the account", ref)
 }
 
-// pickDatasource chooses what Grafana would for a datasource variable with no
-// saved selection: the default if it matches, else the first match.
+// pickDatasource mirrors Grafana's choice for a datasource variable with no saved selection.
 func (c *Client) pickDatasource(ctx context.Context, pluginType, regex string) (*Datasource, error) {
 	all, err := c.datasources.Get(ctx)
 	if err != nil {

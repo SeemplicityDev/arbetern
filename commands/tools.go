@@ -152,6 +152,11 @@ const (
 	ToolGrafanaListDatasources          = "grafana_list_datasources"
 	ToolGrafanaRunPanelQuery            = "grafana_run_panel_query"
 	ToolGrafanaGetAnnotations           = "grafana_get_annotations"
+	ToolGrafanaGetSQLSchema             = "grafana_get_sql_schema"
+	ToolGrafanaQuerySQL                 = "grafana_query_sql"
+	ToolGrafanaSearchLogs               = "grafana_search_logs"
+	ToolGrafanaQueryMetrics             = "grafana_query_metrics"
+	ToolGrafanaSearchTraces             = "grafana_search_traces"
 
 	// Google Drive / Sheets.
 	ToolSheetsAppendRow  = "sheets_append_row"
@@ -321,6 +326,11 @@ var toolIntegration = map[string]string{
 	ToolGrafanaListDatasources:          integrationGrafana,
 	ToolGrafanaRunPanelQuery:            integrationGrafana,
 	ToolGrafanaGetAnnotations:           integrationGrafana,
+	ToolGrafanaGetSQLSchema:             integrationGrafana,
+	ToolGrafanaQuerySQL:                 integrationGrafana,
+	ToolGrafanaSearchLogs:               integrationGrafana,
+	ToolGrafanaQueryMetrics:             integrationGrafana,
+	ToolGrafanaSearchTraces:             integrationGrafana,
 
 	// Google Drive / Sheets.
 	ToolSheetsAppendRow:  integrationGoogle,

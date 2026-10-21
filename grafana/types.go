@@ -14,8 +14,7 @@ type SearchHit struct {
 	Description string   `json:"description"`
 }
 
-// Datasource is one datasource the service account can see. Grafana never
-// returns secure fields.
+// Datasource is one datasource the service account can see.
 type Datasource struct {
 	UID       string         `json:"uid"`
 	Name      string         `json:"name"`
@@ -28,8 +27,6 @@ type Datasource struct {
 	JSONData  map[string]any `json:"jsonData"`
 }
 
-// frontendSettings is the part of /api/frontend/settings that lists the
-// datasources the caller may query; it needs no datasources:read permission.
 type frontendSettings struct {
 	DefaultDatasource string `json:"defaultDatasource"`
 	Datasources       map[string]struct {
@@ -73,7 +70,6 @@ type Annotation struct {
 	NewState     string   `json:"newState"`
 }
 
-// dsQueryResponse is the /api/ds/query body: one result per refId.
 type dsQueryResponse struct {
 	Results map[string]dsResult `json:"results"`
 }
@@ -84,8 +80,7 @@ type dsResult struct {
 	Frames []dsFrame `json:"frames"`
 }
 
-// dsFrame is a data frame in Grafana's JSON wire format: a schema plus
-// column-major values.
+// dsFrame is Grafana's JSON data frame: a schema plus column-major values.
 type dsFrame struct {
 	Schema struct {
 		Name   string    `json:"name"`

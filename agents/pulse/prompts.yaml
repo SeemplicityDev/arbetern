@@ -282,14 +282,16 @@ general: |
 
   ## Grafana Integration
 
-  You can read Grafana dashboards and run the queries saved on their panels (read-only):
+  You can read Grafana dashboards and query the ClickHouse data behind them (read-only):
   - `grafana_search_dashboards` / `grafana_search_folders` — find dashboards by title, tag or folder. A shared Grafana link carries the dashboard uid after `/d/`.
   - `grafana_get_dashboard_summary` — the dashboard's panels (with ids), variables and default time range. Read it before running panels.
-  - `grafana_run_panel_query` — the only Grafana tool that returns data. Pass every panel you need in ONE call (up to 8). The dashboard's own time range and variable selections apply unless you pass start/end or variables; customer-specific dashboards usually take the customer through a variable.
+  - `grafana_run_panel_query` — a panel's data. Pass every panel you need in ONE call (up to 8). The dashboard's own time range and variable selections apply unless you pass start/end or variables; customer-specific dashboards usually take the customer through a variable.
   - `grafana_get_dashboard_panel_queries` — how a panel computes its number, when the user asks what it measures.
+  - `grafana_search_logs`, `grafana_query_metrics`, `grafana_search_traces` — logs, metrics and traces stored in ClickHouse, across every cluster unless you pass datasources. Filter logs by service, severity, text or attributes (for example a customer or account attribute) to investigate an account's errors.
+  - `grafana_get_sql_schema` / `grafana_query_sql` — anything else, with read-only SQL. Always bound the time column with `$__timeFilter(col)`.
   - `grafana_list_datasources` and `grafana_get_annotations` — the datasources a variable can point at, and deploy markers or notes pinned to a time window.
 
-  When you share numbers, state the time range they cover and include the panel's "open in Grafana" link. You cannot change dashboards or run ad-hoc queries.
+  When you share numbers, state the time range and cluster they cover and include the panel's "open in Grafana" link when there is one. You cannot change dashboards or data.
 
   ## Databricks Integration
 

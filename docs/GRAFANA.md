@@ -1,15 +1,15 @@
 # Grafana Integration
 
 Arbetern integrates with **Grafana** so the **ovad**, **pulse**, **seihin** and
-**hermes** agents can find dashboards, read how they are built, and run the
-queries saved on their panels to see the data the panels show. It talks to one
-Grafana instance (Grafana Cloud or self-hosted) over the HTTP API with a
-service-account token.
+**hermes** agents can find dashboards, read how they are built, run the queries
+saved on their panels, and query the ClickHouse datasources behind them —
+logs, metrics and traces stored by ClickStack / OpenTelemetry, or any table
+with read-only SQL. It talks to one Grafana instance (Grafana Cloud or
+self-hosted) over the HTTP API with a service-account token.
 
-The integration is **read-only**. The connector reads dashboards, folders,
-datasources and annotations, and runs the queries dashboard panels already
-define. It has no tool that writes, and no tool that runs a free-form query:
-an agent can only execute what a dashboard author saved.
+The integration is **read-only**. Nothing creates, edits or deletes anything in
+Grafana or in a datasource; every query goes through Grafana's datasource query
+API and is checked before it is sent (see [Security](#security)).
 
 > **Scope: the tools follow the Datadog observability set.**
 > They are advertised to ovad, pulse, seihin and hermes, and the dispatch layer
@@ -19,7 +19,7 @@ an agent can only execute what a dashboard author saved.
 
 ## Tools
 
-The tools mirror the read-only tools of Grafana's own MCP server
+The dashboard tools mirror the read-only tools of Grafana's own MCP server
 ([mcp-grafana](https://github.com/grafana/mcp-grafana)), prefixed `grafana_`.
 
 | Tool | Description |
@@ -32,15 +32,16 @@ The tools mirror the read-only tools of Grafana's own MCP server
 | `grafana_list_datasources` | Datasources the account may query, with uid, type and the default, filterable by type and name |
 | `grafana_run_panel_query` | Runs the queries of up to 8 panels in one call and returns their data |
 | `grafana_get_annotations` | Annotations, newest first, filterable by time window, dashboard, panel, tags and type |
+| `grafana_get_sql_schema` | A ClickHouse datasource's tables with engine, rows, size, partition key, sort key and retention, or one table's columns and key membership |
+| `grafana_query_sql` | One read-only ClickHouse statement on one or more ClickHouse datasources |
+| `grafana_search_logs` | OpenTelemetry logs: total, a breakdown and the newest lines, filtered by service, severity, text, attributes and trace id |
+| `grafana_query_metrics` | OpenTelemetry metrics: the metric names in range, or one metric per interval grouped by service or attributes |
+| `grafana_search_traces` | OpenTelemetry traces: one trace's spans, or matching spans with a per-operation summary of counts, errors and latency |
 
 Not included, on purpose:
 
 - **Write tools** — dashboard, folder, annotation, alerting, incident and
   datasource changes.
-- **Free-form query tools** such as `query_sql` and `query_prometheus`. The
-  MCP server itself drops raw SQL under `--disable-write` because it passes the
-  query through unfiltered; here every query an agent runs comes from a
-  dashboard.
 - **Alerting, Incident, OnCall, Sift, profiling and admin reads.** Add them as
   separate tools if a deployment relies on them.
 
@@ -55,9 +56,9 @@ shapes the result for a model.
 - **Variables.** Saved selections apply unless overridden in `variables`.
   Comma-separate several values of a multi-value variable; `All` selects every
   value. Datasource variables resolve to the selected datasource, or — with no
-  selection saved — to the one Grafana would pick (the default when it matches,
-  else the first match of the plugin type and regex). Passing a datasource uid
-  for such a variable points the whole panel at another datasource.
+  selection saved — to the one Grafana would pick. A datasource override may be
+  a uid, a name or a fragment unique to one datasource, and points the whole
+  panel at that datasource.
 - **Formatting.** Variables are interpolated with Grafana's syntax (`$var`,
   `${var}`, `[[var]]`, `${var:format}`) and its formats (`singlequote`,
   `sqlstring`, `csv`, `pipe`, `regex`, `glob`, `json`, `lucene`, …). A
@@ -71,25 +72,51 @@ shapes the result for a model.
   `$__timeFilter`, `$__timeInterval` and `$__interval_s` are left for the
   datasource to expand, exactly as Grafana's frontend does.
 - **Interval.** The bucket size is the range over about 200 points, rounded to
-  Grafana's familiar steps (20s, 2m, 5m, 1h, …) and raised to the panel's
-  minimum interval. Pass `interval` (e.g. `1m`) to choose it.
-- **ClickHouse.** Queries run in table format, so the rows are exactly what
-  the SQL returns. No `LIMIT` is appended, so trailing `SETTINGS` / `FORMAT`
-  clauses keep working; the output is capped instead.
+  Grafana's familiar steps and raised to the panel's minimum interval. Pass
+  `interval` (e.g. `1m`) to choose it.
 - **Output.** Short results come back as rows. A long time series is
   summarised per series — grouped by its label columns — as last / avg / min /
   max / sum with the point count and span. Each panel carries an *open in
   Grafana* link with the same range and variables. A failing query is reported
   next to the query text that was sent, and the other panels still return.
 
-Variables whose options Grafana computes when the dashboard loads (query
-variables) cannot be expanded to "All" without a saved option list; the tool
-asks for explicit values in that case, unless the reference sits inside
-`$__conditionalAll`.
+Query variables whose options Grafana computes when the dashboard loads cannot
+be expanded to "All" without a saved option list; the tool asks for explicit
+values in that case, unless the reference sits inside `$__conditionalAll`.
 
-Not supported: dashboards stored in Grafana's v2 schema, library panels,
-panels that reuse another panel's results (`-- Dashboard --`) and ad hoc
-filters.
+Not supported: dashboards stored in Grafana's v2 schema, library panels, panels
+that reuse another panel's results (`-- Dashboard --`) and ad hoc filters.
+
+## Querying ClickHouse datasources
+
+The five ClickHouse tools run through Grafana's datasource query API, so they
+reach exactly the datasources the service account may query, with that
+datasource's own credentials and network path.
+
+- **Which datasources.** By default a call runs on every visible ClickHouse
+  datasource and answers in one section per datasource — for example one per
+  cluster. `datasources` narrows it to uids, names or fragments unique to one.
+  A datasource that cannot be reached right now is reported in one line; the
+  others still answer. `grafana_get_sql_schema` uses the first datasource that
+  answers unless one is named.
+- **Time range and macros.** `start` / `end` (default the last hour) set the
+  range the ClickHouse plugin's macros expand to: `$__timeFilter(col)`,
+  `$__fromTime`, `$__toTime`, `$__timeInterval(col)`, `$__interval_s`.
+  `$__from`, `$__to` and `$__interval` are filled in by the connector.
+- **Logs, metrics and traces.** `grafana_search_logs` and
+  `grafana_search_traces` read the logs and traces tables configured on each
+  datasource; `grafana_query_metrics` reads the OpenTelemetry exporter's
+  `otel_metrics_<type>` tables in the same database. Column names are the
+  exporter's defaults. Attribute filters match the signal's own attributes and
+  its resource attributes, exactly or with `*` wildcards.
+- **Counters.** A counter's default aggregation is its increase per interval
+  (`rate` divides by the interval). Delta counters are summed; a cumulative
+  counter's increase is taken per series before summing.
+- **SQL.** `grafana_query_sql` takes one statement. A `SELECT` without a
+  top-level `LIMIT` gets one, placed before a trailing `SETTINGS` or `FORMAT`
+  clause; at most `max_rows` rows (default 100, up to 500) are shown per
+  datasource, with a note when more exist. Errors come back with the executed
+  query, macros expanded.
 
 ## Required Credentials
 
@@ -119,7 +146,9 @@ The tools are advertised once the token has been accepted.
 What the agents can query is what the account can query. Datasource
 permissions are the control: a datasource the account may not query fails with
 a permission error, and the datasource list falls back to the datasources the
-account may query when it lacks `datasources:read`.
+account may query when it lacks `datasources:read`. Give each ClickHouse
+datasource a database user with `SELECT`-only grants (ideally a `readonly`
+profile) so the database refuses writes on its own.
 
 ## Helm
 
@@ -139,24 +168,32 @@ only when both are present. Either key can also be set per agent under
 
 - Reads (`GET`) are retried up to three times on `429` and `5xx` with
   exponential backoff and jitter, honouring `Retry-After`.
-- `/api/ds/query` is retried only on `429`, `502` and `503`; a `500` or `504`
-  is not repeated, so a slow or failing query is not re-run against the
+- Datasource queries are retried only on `429`, `502` and `503`; a `500` or
+  `504` is not repeated, so a slow or failing query is not re-run against the
   backing database.
-- Panels in one call run at most three at a time. The request timeout is 90
-  seconds, leaving room for datasource queries.
-- Dashboards are cached for two minutes and the datasource list for five, so
-  a summary, its panel queries and a run cost one dashboard read.
+- Panels, and datasources in a multi-datasource call, run at most three at a
+  time. The request timeout is 90 seconds; the database's own execution limit
+  still applies.
+- The logs, metrics and traces tools always bound the time column and send
+  their queries for one datasource in a single request.
+- Dashboards are cached for two minutes and the datasource list for five.
 - Redirects are refused, so the token is never sent to another host.
 
 ## Security
 
-- **Read-only.** The connector's only `POST` is `/api/ds/query`, with queries
-  taken from dashboards. Pair it with a Viewer account so the credential cannot
-  write either.
+- **Read-only, in layers.** Grafana side: a Viewer account. Connector side:
+  every SQL statement must start with `SELECT`, `WITH`, `SHOW`, `DESCRIBE`,
+  `DESC`, `EXISTS` or `EXPLAIN`, may not contain a write or session keyword
+  anywhere, must be a single statement, and may not call table functions that
+  reach outside the database (`url`, `s3`, `remote`, `file`, `mysql`, …).
+  Database side: a `SELECT`-only user. The logs, metrics and traces tools build
+  their SQL from escaped literals and quoted identifiers.
+- Panel queries are the ones dashboard authors saved; the connector only fills
+  in variables and macros.
 - The token comes from an environment variable (a Kubernetes Secret in the
   Helm chart) and is never logged.
 - Query results go to the agent's model and into the Slack thread it answers
   in, like any other integration's data. Keep the account's datasource
   permissions to what agents may see.
-- Error text shown to the model is sanitized; Grafana's own message and trace
-  ID go to the pod log.
+- Error text shown to the model is sanitized: connection failures are reported
+  without host names, and Grafana's own message and trace ID go to the pod log.

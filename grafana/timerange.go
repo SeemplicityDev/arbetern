@@ -10,10 +10,7 @@ import (
 
 var relativeTimeRe = regexp.MustCompile(`^now(?:([+-])(\d+)([smhdwMy]))?(?:/([smhdwMy]))?$`)
 
-// ParseTime accepts Grafana's relative syntax ("now", "now-6h", "now-1d/d"),
-// RFC 3339, a bare date, or unix seconds / milliseconds. An empty string
-// returns the zero time. roundUp moves a "/unit" rounding to the end of the
-// unit, as Grafana does for the end of a range.
+// ParseTime accepts now-6h style times (roundUp ends a /unit at the unit's end), RFC 3339, dates and unix s or ms.
 func ParseTime(s string, now time.Time, roundUp bool) (time.Time, error) {
 	s = strings.TrimSpace(s)
 	if s == "" {

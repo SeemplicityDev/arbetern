@@ -1,10 +1,5 @@
-// Package grafana wraps the read-only subset of the Grafana HTTP API an agent
-// needs: dashboard and folder search, dashboard definitions, datasources, the
-// queries saved on dashboard panels, alert rules and annotations.
-//
-// Auth is a service-account token sent as a Bearer token. Nothing here creates,
-// edits or deletes anything; the only POST is /api/ds/query, which runs the
-// queries a dashboard panel already defines.
+// Package grafana is a read-only client for the Grafana HTTP API: dashboards,
+// datasources, annotations, saved panel queries and ClickHouse queries.
 package grafana
 
 import (
@@ -29,10 +24,8 @@ import (
 
 const (
 	maxResponseBody = 16 << 20
-	// httpTimeout leaves room for datasource queries, which Grafana forwards to
-	// the backing database and can take far longer than its own API calls.
-	httpTimeout = 90 * time.Second
-	userAgent   = "arbetern/grafana-connector"
+	httpTimeout     = 90 * time.Second
+	userAgent       = "arbetern/grafana-connector"
 
 	maxRetries           = 3
 	connectRetryInterval = 30 * time.Second
@@ -56,8 +49,7 @@ type Client struct {
 	datasources *ttlcache.Cache[[]Datasource]
 }
 
-// NewClient builds a client for the instance at baseURL. The token is verified
-// in the background with retries, so startup never blocks; Ready reports success.
+// NewClient builds a client; the token is verified in the background and Ready reports success.
 func NewClient(baseURL, token string) (*Client, error) {
 	base, err := normalizeBaseURL(baseURL)
 	if err != nil {
@@ -159,7 +151,6 @@ func (c *Client) verify(ctx context.Context) error {
 	return nil
 }
 
-// link turns a Grafana-relative path such as a search hit's url into an absolute link.
 func (c *Client) link(path string) string {
 	if path == "" || strings.HasPrefix(path, "http://") || strings.HasPrefix(path, "https://") {
 		return path
@@ -179,9 +170,6 @@ func (c *Client) get(ctx context.Context, path string, q url.Values, out any) er
 	return c.do(ctx, http.MethodGet, path, q, nil, out)
 }
 
-// do sends one request with retries. A POST is only ever /api/ds/query, which
-// reads; it is retried on throttling but not on 500/504, where a repeat would
-// re-run a slow or failing query against the backing database.
 func (c *Client) do(ctx context.Context, method, path string, q url.Values, body any, out any) error {
 	if c == nil {
 		return errors.New("grafana client is not configured")
@@ -269,6 +257,7 @@ func (c *Client) do(ctx context.Context, method, path string, q url.Values, body
 	return lastErr
 }
 
+// Queries are not repeated on 500 or 504, where a retry would re-run a slow or failing query.
 func retryable(method string, status int) bool {
 	if method == http.MethodGet {
 		return httpx.RetryableStatus(status)
@@ -276,10 +265,7 @@ func retryable(method string, status int) bool {
 	return status == http.StatusTooManyRequests || status == http.StatusBadGateway || status == http.StatusServiceUnavailable
 }
 
-// ── Errors ─────────────────────────────────────────────────────────────────
-
-// APIError is a non-2xx response. Error() is the model-facing text; Detail()
-// is the log form with Grafana's own message and trace ID.
+// APIError is a non-2xx response; Error is model-facing and Detail is for logs.
 type APIError struct {
 	Status  int
 	Message string
@@ -358,8 +344,7 @@ func (e *APIError) Error() string {
 	}
 }
 
-// ErrorDetail returns the log-surface text for err: an *APIError's full
-// detail, or the error's own text otherwise.
+// ErrorDetail returns the log form of err.
 func ErrorDetail(err error) string {
 	if err == nil {
 		return ""

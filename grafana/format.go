@@ -11,8 +11,6 @@ import (
 )
 
 const (
-	// maxOutputChars caps one tool result so a large dashboard cannot flood
-	// the model's context.
 	maxOutputChars = 24000
 	maxQueryChars  = 1500
 	maxPropChars   = 16000
@@ -209,8 +207,7 @@ func panelDatasource(p *Panel) string {
 	return strings.Join(out, ", ")
 }
 
-// FormatPanelQueries renders the saved queries of one panel, or of every
-// panel, with the variable selections they reference.
+// FormatPanelQueries renders the saved queries of one panel, or of all of them.
 func FormatPanelQueries(d *Dashboard, panelID int) string {
 	var sb strings.Builder
 	panels := d.Panels
@@ -350,8 +347,7 @@ func FormatAnnotations(list []Annotation) string {
 	return sb.String()
 }
 
-// FormatRun renders panel results: per panel its datasource, each query's
-// rows or series summary, and errors next to the query that caused them.
+// FormatRun renders panel results with each query's rows, series summary or error.
 func FormatRun(res *RunResult) string {
 	var sb strings.Builder
 	d := res.Dashboard

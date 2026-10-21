@@ -1893,7 +1893,7 @@ func refreshIntegrations(
 		gfConnected := grafanaClient != nil && grafanaClient.Ready()
 		gfPerms := []permission{
 			{Scope: "dashboards:read", Description: "Search dashboards and folders, and read dashboard definitions and panel queries", Required: true, Granted: new(gfConnected)},
-			{Scope: "datasources:query", Description: "Run the queries saved on dashboard panels (POST /api/ds/query)", Required: true, Granted: new(gfConnected)},
+			{Scope: "datasources:query", Description: "Run saved panel queries and read-only ClickHouse queries for logs, metrics, traces and SQL (POST /api/ds/query)", Required: true, Granted: new(gfConnected)},
 			{Scope: "datasources:read", Description: "List datasources and read their settings", Required: false, Granted: new(gfConnected)},
 			{Scope: "annotations:read", Description: "Read annotations on dashboards and the organization", Required: false, Granted: new(gfConnected)},
 		}

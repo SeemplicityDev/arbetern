@@ -9,9 +9,7 @@ import (
 	"strings"
 )
 
-// evalJSONPath evaluates a JSONPath expression against decoded JSON. A path
-// of plain keys and indexes returns one value; wildcards, recursive descent,
-// unions, slices and filters return a list of matches.
+// evalJSONPath returns one value for a path of keys and indexes, and a list once it has wildcards, recursion, unions, slices or filters.
 func evalJSONPath(root any, path string) (any, error) {
 	path = strings.TrimSpace(path)
 	switch {
@@ -237,8 +235,6 @@ func parseJSONPath(p string) ([]jsonPathSegment, error) {
 	return segs, nil
 }
 
-// matchingBracket finds the ] closing the [ at open, skipping quoted text and
-// nested brackets inside filters.
 func matchingBracket(p string, open int) int {
 	depth := 0
 	var quote byte

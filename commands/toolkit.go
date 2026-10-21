@@ -32,6 +32,7 @@ var readOnlyTools = []string{
 	ToolDocument360ListWorkspaces, ToolDocument360Search, ToolDocument360ListCategories, ToolDocument360ListArticles, ToolDocument360GetArticle,
 	ToolGrafanaSearchDashboards, ToolGrafanaSearchFolders, ToolGrafanaGetDashboardSummary, ToolGrafanaGetDashboardPanelQueries,
 	ToolGrafanaGetDashboardProperty, ToolGrafanaListDatasources, ToolGrafanaRunPanelQuery, ToolGrafanaGetAnnotations,
+	ToolGrafanaGetSQLSchema, ToolGrafanaQuerySQL, ToolGrafanaSearchLogs, ToolGrafanaQueryMetrics, ToolGrafanaSearchTraces,
 	ToolSheetsReadRange, ToolSheetsGetInfo, ToolDriveFindFile, ToolDriveListFolders, ToolDriveReadFile,
 }
 

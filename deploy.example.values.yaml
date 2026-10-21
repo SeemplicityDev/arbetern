@@ -157,8 +157,8 @@ secretValues:
   # document360-api-key: "your-document360-api-key"              # the d360_sk_ secret shown once on creation
   # document360-project-id: "00000000-0000-0000-0000-000000000000"   # optional: only when the key sees several projects
   # document360-region: "eu"                                          # optional: eu (default), us or ca
-  # Grafana (optional — enables the read-only grafana_* dashboard, datasource, panel-query, alert-rule
-  # and annotation tools for the ovad, pulse, seihin and hermes agents).
+  # Grafana (optional — enables the read-only grafana_* dashboard, panel-query, annotation and
+  # ClickHouse logs / metrics / traces / SQL tools for the ovad, pulse, seihin and hermes agents).
   # Auth is a service-account token (Administration → Users and access → Service accounts). The
   # Viewer role covers every tool; the connector never writes. See docs/GRAFANA.md.
   # grafana-url: "https://acme.grafana.net"

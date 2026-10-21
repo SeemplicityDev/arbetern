@@ -22,8 +22,7 @@ type Frame struct {
 	Notices  []string
 }
 
-// Field is one column of a frame. Values hold time.Time, json.Number, string,
-// bool, nil, or compact JSON text for nested values.
+// Field is one column; Values hold time.Time, json.Number, string, bool, nil or compact JSON.
 type Field struct {
 	Name   string
 	Type   string
@@ -89,8 +88,6 @@ func decodeValue(raw json.RawMessage, typ string) any {
 	return string(raw)
 }
 
-// renderFrame writes a frame as a capped table, or, when a long frame is a
-// time series, as one summary line per series.
 func renderFrame(sb *strings.Builder, f Frame, maxRows int) {
 	if f.Rows == 0 {
 		sb.WriteString("_no rows_\n")
@@ -154,8 +151,6 @@ type seriesStats struct {
 
 const maxSeriesLines = 25
 
-// renderSeries groups a long time-series frame by its label columns and
-// summarises each numeric column per group.
 func renderSeries(sb *strings.Builder, f Frame, timeIdx int, nums, labels []int) {
 	ts := f.Fields[timeIdx].Values
 	stats := map[string]*seriesStats{}
@@ -170,7 +165,7 @@ func renderSeries(sb *strings.Builder, f Frame, timeIdx int, nums, labels []int)
 			parts := make([]string, 0, len(labels)+1)
 			for _, li := range labels {
 				if r < len(f.Fields[li].Values) {
-					parts = append(parts, f.Fields[li].Name+"="+text.Truncate(formatCell(f.Fields[li].Values[r]), 60))
+					parts = append(parts, f.Fields[li].Name+"="+firstNonEmpty(text.Truncate(formatCell(f.Fields[li].Values[r]), 60), "(empty)"))
 				}
 			}
 			key := strings.Join(parts, ", ")

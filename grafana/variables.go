@@ -13,22 +13,18 @@ import (
 
 const allMarker = "$__all"
 
-// templateVarRe is Grafana's own variable syntax: $name, [[name:format]] and
-// ${name.field:format}.
+// templateVarRe matches Grafana's $name, [[name:format]] and ${name.field:format} syntax.
 var templateVarRe = regexp.MustCompile(`\$(\w+)|\[\[(\w+?)(?::(\w+))?\]\]|\$\{(\w+)(?:\.([^:^\}]+))?(?::([^\}]+))?\}`)
 
-// scope resolves variables the way the dashboard would with its saved
-// selections, overridden by the caller.
+// scope resolves variables from the dashboard's saved selections and the caller's overrides.
 type scope struct {
 	vars     map[string]*Variable
 	builtins map[string]string
 	from, to time.Time
-	// kind is the datasource family, which decides how an unformatted
-	// multi-value variable is rendered.
+	// kind picks the datasource's rule for unformatted multi-value variables.
 	kind string
 	used map[string]bool
-	// missing names variables that are referenced but have no value Grafana
-	// would not compute itself.
+	// missing holds referenced variables whose options Grafana only computes on load.
 	missing map[string]bool
 }
 
@@ -177,7 +173,6 @@ func (s *scope) selectionIsAllOrEmpty(name string) bool {
 	return v.IsAll || len(v.Values) == 0 || (len(v.Values) == 1 && v.Values[0] == "")
 }
 
-// summary lists the variables the interpolation touched, as name=value.
 func (s *scope) summary() []string {
 	names := make([]string, 0, len(s.used))
 	for n := range s.used {
@@ -208,8 +203,6 @@ func (s *scope) missingNames() []string {
 	return names
 }
 
-// formatValues renders a selection with a named format, or with the
-// datasource's own rule when none is given.
 func formatValues(name string, vals []string, multi bool, format, kind string) string {
 	if i := strings.IndexByte(format, ':'); i >= 0 {
 		format = format[:i]
@@ -327,10 +320,7 @@ func luceneEscape(v string) string {
 
 var conditionalVarRe = regexp.MustCompile(`^\$\{(\w+)\}|^\$(\w+)`)
 
-// applyConditionalAll expands the ClickHouse plugin's frontend macro
-// $__conditionalAll(condition, $var): the condition, or 1=1 when the variable
-// is set to All or is empty. Like the plugin, it works from the last
-// occurrence back so nested uses resolve inside out.
+// applyConditionalAll expands the ClickHouse plugin's $__conditionalAll(cond, $var) to cond, or 1=1 when var is All or empty, last occurrence first like the plugin.
 func (s *scope) applyConditionalAll(sql string) string {
 	const macro = "$__conditionalAll("
 	for guard := 0; guard < 500; guard++ {
@@ -357,8 +347,6 @@ func (s *scope) applyConditionalAll(sql string) string {
 	return sql
 }
 
-// macroArgs splits the arguments of the macro whose "(" is at open, counting
-// brackets as the plugin does. end is the index of the closing ")".
 func macroArgs(s string, open int) (args []string, end int, ok bool) {
 	depth, last := 0, open+1
 	for i := open; i < len(s); i++ {
@@ -380,12 +368,9 @@ func macroArgs(s string, open int) (args []string, end int, ok bool) {
 	return nil, 0, false
 }
 
-// ── Intervals ──────────────────────────────────────────────────────────────
-
 const defaultMaxDataPoints = 200
 
-// panelInterval follows Grafana's calculation: the range over the data-point
-// budget, rounded to a familiar step and raised to the panel's minimum.
+// panelInterval follows Grafana: the range over the point budget, rounded, raised to the panel's minimum.
 func panelInterval(p *Panel, from, to time.Time, override string) time.Duration {
 	if d, ok := parseInterval(override); ok {
 		return d

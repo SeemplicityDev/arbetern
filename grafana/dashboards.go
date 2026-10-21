@@ -28,11 +28,10 @@ type Dashboard struct {
 	Refresh     string
 	Variables   []*Variable
 	Panels      []*Panel
-	// Model is the raw dashboard JSON, for JSONPath reads.
-	Model map[string]any
+	Model       map[string]any
 }
 
-// Panel is one non-row panel. Panels inside collapsed rows are included.
+// Panel is one non-row panel, including those inside collapsed rows.
 type Panel struct {
 	ID            int
 	Title         string
@@ -46,8 +45,7 @@ type Panel struct {
 	LibraryPanel  string
 }
 
-// DSRef is a datasource reference as a dashboard stores it. UID may hold a
-// variable such as ${datasource}, or a name in older dashboards.
+// DSRef is a stored datasource reference; UID may be a variable or, in older dashboards, a name.
 type DSRef struct {
 	UID  string
 	Type string
@@ -243,8 +241,6 @@ func parseDSRef(v any) *DSRef {
 	return nil
 }
 
-// queryExpression returns the query text of a target: the first non-empty of
-// the fields the common datasources keep it in.
 func queryExpression(t map[string]any) string {
 	for _, k := range []string{"expr", "rawSql", "rawSQL", "query", "expression", "rawQuery", "target"} {
 		if s := str(t, k); s != "" {
@@ -308,8 +304,6 @@ func parseVariable(m map[string]any) *Variable {
 	}
 	return v
 }
-
-// ── JSON helpers ───────────────────────────────────────────────────────────
 
 func obj(m map[string]any, k string) map[string]any {
 	if m == nil {

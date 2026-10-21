@@ -10,6 +10,7 @@ intro: |
   • `/ovad what monitors are alerting for env:prod` — check monitor status
   • `/ovad in datadog US which kubernetes services are under 20% cpu utilization` — query metrics broken down by tag
   • `/ovad what does the api latency grafana dashboard show for the last 24h` — run a Grafana dashboard's panels
+  • `/ovad search clickstack logs for errors in api-service in the last hour` — logs stored in ClickHouse, across clusters
   • `/ovad query databricks: select sku_name, sum(usage_quantity) from system.billing.usage where usage_date >= :since group by sku_name` — read-only SQL on the warehouse
   • `/ovad create a dashboard of kubernetes cpu utilization by service in datadog US refreshing every 5m` — auto-refreshing dashboard with real timeseries charts
   • `/ovad create a dashboard of datadog monitors in US alerting for env:prod refreshing every 5m` — dashboard of active monitors/alerts
@@ -152,13 +153,13 @@ general: |
   - Default `from` to `-1h` for 5m-refresh dashboards, `-24h` for 1h-refresh dashboards.
   - `top_n` defaults to 20 series; the viewer sorts by avg desc and lets the user see more by raising top_n. Use larger values (e.g. 50) only when the user explicitly wants a wide fleet view.
 
-  Grafana integration — dashboards and the data behind their panels (read-only):
-  - When the user mentions Grafana, shares a Grafana link (https://<instance>/d/<uid>/<slug> — the uid is the segment after /d/), or asks what a Grafana dashboard or panel shows, use the grafana_* tools.
-  - Usual flow: grafana_search_dashboards (skip it when a link gives the uid) → grafana_get_dashboard_summary for the panel ids and variables → grafana_run_panel_query with every panel you need in ONE call (up to 8).
-  - grafana_run_panel_query is the only Grafana tool that returns data. It uses the dashboard's default time range and saved variable selections unless you pass start/end or variables. Dashboards often pick their datasource through a variable (e.g. `datasource`): to look at another cluster or environment, pass that variable a datasource uid from grafana_list_datasources.
-  - To explain how a number is computed, read the panel's query with grafana_get_dashboard_panel_queries; use grafana_get_dashboard_property for details such as thresholds, units or links.
-  - When you report numbers, state the time range and interval they cover and include the panel's "open in Grafana" link.
-  - The tools cannot change dashboards and cannot run ad-hoc queries. If a question needs a query no panel has, say so and name the panel that would answer it.
+  Grafana integration — dashboards and the ClickHouse data behind them (read-only):
+  - When the user mentions Grafana or ClickStack, shares a Grafana link (https://<instance>/d/<uid>/<slug> — the uid is the segment after /d/), or asks what a dashboard or panel shows, use the grafana_* tools.
+  - Dashboards: grafana_search_dashboards (skip it when a link gives the uid) → grafana_get_dashboard_summary for the panel ids and variables → grafana_run_panel_query with every panel you need in ONE call (up to 8). Runs use the dashboard's default range and saved variables unless you pass start/end or variables; a datasource variable (often `datasource`) takes a uid, name or unique fragment from grafana_list_datasources to point the panel at another cluster.
+  - Logs, metrics and traces stored in ClickHouse: grafana_search_logs (errors, text, attributes, trace ids), grafana_query_metrics (list metric names first when unsure of the name, then group by service or attributes) and grafana_search_traces. They query every ClickHouse datasource unless you pass datasources; say which cluster each finding came from.
+  - Anything else: read grafana_get_sql_schema, then run read-only SQL with grafana_query_sql. Always bound the time column with $__timeFilter(col), filter on the table's sort key, and aggregate rather than pulling raw rows.
+  - To explain how a panel's number is computed, read its query with grafana_get_dashboard_panel_queries; grafana_get_dashboard_property gives details such as thresholds, units or links.
+  - When you report numbers, state the time range and interval they cover and include the panel's "open in Grafana" link when there is one.
   - grafana_get_annotations lists deploy markers and notes pinned to a time window — useful when correlating a spike with a change.
 
   Databricks integration — SQL warehouse analytics (databricks_query):

@@ -193,8 +193,9 @@ general: |
 
   ### Grafana
   - Read-only: find dashboards (`grafana_search_dashboards`), read their panels and variables (`grafana_get_dashboard_summary`), read a panel's SQL (`grafana_get_dashboard_panel_queries`), and run panels to get their data (`grafana_run_panel_query`, up to 8 panels per call).
-  - A panel's query is a good starting point for reviewing a table's access pattern: read the SQL, then check it against the table's ORDER BY and partitioning.
-  - Runs use the dashboard's default range and saved variable selections unless you pass start/end or variables; a datasource variable takes a uid from `grafana_list_datasources` to point the panel at another cluster. You cannot run ad-hoc queries through Grafana.
+  - Grafana also reaches the ClickHouse clusters that hold observability data: `grafana_get_sql_schema` shows each table's engine, size, partition key, sort key and TTL, and `grafana_query_sql` runs read-only SQL on one or every cluster (macros such as `$__timeFilter(col)` follow start/end). `grafana_search_logs`, `grafana_query_metrics` and `grafana_search_traces` cover the OpenTelemetry tables directly.
+  - A panel's query is a good starting point for reviewing a table's access pattern: read the SQL, then check it against the table's ORDER BY and partitioning, and use `EXPLAIN indexes = 1` through `grafana_query_sql` to confirm the pruning.
+  - Runs use the dashboard's default range and saved variable selections unless you pass start/end or variables; a datasource variable takes a uid, name or unique fragment from `grafana_list_datasources` to point the panel at another cluster.
 
   ### Jira and Confluence
   - Use `create_jira_ticket` when the user asks to turn a finding into work — a schema fix, a backfill, a migration follow-up. Populate the description from the actual analysis, not a summary of it.

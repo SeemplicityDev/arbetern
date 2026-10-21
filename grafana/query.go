@@ -60,9 +60,7 @@ type QueryRun struct {
 	Err        string
 }
 
-// RunPanels executes the saved queries of up to maxPanelsPerRun panels, the
-// way the dashboard would, with the caller's time range and variable values.
-// The time range defaults to the dashboard's own.
+// RunPanels runs the saved queries of up to maxPanelsPerRun panels as the dashboard would.
 func (c *Client) RunPanels(ctx context.Context, opts RunOptions) (*RunResult, error) {
 	d, err := c.GetDashboard(ctx, opts.DashboardUID)
 	if err != nil {
@@ -95,6 +93,16 @@ func (c *Client) RunPanels(ctx context.Context, opts RunOptions) (*RunResult, er
 	if err != nil {
 		return nil, err
 	}
+	vars := make(map[string]string, len(opts.Variables))
+	for name, val := range opts.Variables {
+		vars[name] = val
+		if v := d.Variable(name); v != nil && v.Type == "datasource" {
+			if ds, err := c.findDatasource(ctx, val); err == nil {
+				vars[name] = ds.UID
+			}
+		}
+	}
+	opts.Variables = vars
 	res := &RunResult{Dashboard: d, From: from, To: to, Range: start + " → " + end, Dropped: dropped, Panels: make([]PanelRun, len(ids))}
 	runConcurrent(len(ids), maxConcurrentRuns, func(i int) {
 		res.Panels[i] = c.runPanel(ctx, d, ids[i], from, to, opts)
@@ -183,7 +191,7 @@ func (c *Client) runPanel(ctx context.Context, d *Dashboard, id int, from, to ti
 			continue
 		}
 		if r.Error != "" {
-			qr.Err = r.Error
+			qr.Err = c.queryError(Datasource{UID: qr.Datasource}, r.Error)
 		}
 		for _, f := range r.Frames {
 			qr.Frames = append(qr.Frames, decodeFrame(f))
@@ -192,8 +200,6 @@ func (c *Client) runPanel(ctx context.Context, d *Dashboard, id int, from, to ti
 	return run
 }
 
-// buildQuery turns one target into an /api/ds/query entry, returning the
-// datasource label shown next to its results.
 func (c *Client) buildQuery(ctx context.Context, sc *scope, p *Panel, t Target, interval time.Duration, points int) (map[string]any, string, error) {
 	ref := t.Datasource
 	if ref == nil || ref.UID == "" {
@@ -219,8 +225,7 @@ func (c *Client) buildQuery(ctx context.Context, sc *scope, p *Panel, t Target, 
 		if strings.TrimSpace(sql) == "" {
 			return nil, label, errors.New("this query has no SQL text (builder-only targets are not supported)")
 		}
-		// Raw rows (format 1) rather than the panel's own frame shaping keep
-		// the result exactly what the SQL returns.
+		// Table format keeps the rows exactly as the SQL returns them.
 		q = map[string]any{
 			"rawSql": sc.interpolate(sc.applyConditionalAll(sql)),
 			"format": 1,
@@ -245,9 +250,6 @@ func (c *Client) buildQuery(ctx context.Context, sc *scope, p *Panel, t Target, 
 
 var dsVarRe = regexp.MustCompile(`\$\{(\w+)(?::[^}]*)?\}|\[\[(\w+)\]\]|\$(\w+)`)
 
-// resolveDatasource turns a stored reference into a visible datasource:
-// variables are resolved from the selection, names mapped to UIDs, and a
-// missing reference means the instance default.
 func (c *Client) resolveDatasource(ctx context.Context, sc *scope, ref *DSRef) (uid, typ, label string, err error) {
 	if ref != nil {
 		switch {
@@ -324,8 +326,6 @@ func datasourceKind(typ string) string {
 	return ""
 }
 
-// interpolateTree interpolates every string in a target except its
-// datasource reference and refId.
 func (s *scope) interpolateTree(v any) any {
 	switch t := v.(type) {
 	case string:
@@ -359,8 +359,7 @@ func (c *Client) dsQuery(ctx context.Context, from, to time.Time, queries []map[
 	err := c.do(ctx, http.MethodPost, "/api/ds/query", nil, body, &resp)
 	var ae *APIError
 	if errors.As(err, &ae) && len(ae.body) > 0 {
-		// One failing query fails the whole response, but the body still
-		// carries every query's result and error.
+		// One failing query fails the response, but its body still holds every query's result.
 		var partial dsQueryResponse
 		if json.Unmarshal(ae.body, &partial) == nil && len(partial.Results) > 0 {
 			return &partial, nil

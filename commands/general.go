@@ -2492,6 +2492,109 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 					}`),
 				},
 			},
+			llm.Tool{
+				Type: "function",
+				Function: llm.ToolFunction{
+					Name:        ToolGrafanaGetSQLSchema,
+					Description: "Show what a ClickHouse datasource holds: every table with engine, row count, size, partition key, sort key and retention; or, with table, that table's columns and which belong to the sort and partition keys. Read it before writing grafana_query_sql. OpenTelemetry data (ClickStack) usually sits in otel_logs, otel_traces and otel_metrics_<type> tables.",
+					Parameters: json.RawMessage(`{
+						"type":"object",
+						"properties":{
+							"datasource":{"type":"string","description":"Datasource uid, name, or a fragment unique to one (e.g. a region). Default: the first ClickHouse datasource that answers."},
+							"database":{"type":"string","description":"Only this database."},
+							"table":{"type":"string","description":"Describe this table's columns; 'db.table' also works."}
+						}
+					}`),
+				},
+			},
+			llm.Tool{
+				Type: "function",
+				Function: llm.ToolFunction{
+					Name:        ToolGrafanaQuerySQL,
+					Description: "Run one read-only ClickHouse SQL statement (SELECT, WITH, SHOW, DESCRIBE, EXPLAIN) through Grafana on ClickHouse datasources: by default every one, each answered in its own section (e.g. one per cluster). Use it for anything grafana_search_logs, grafana_query_metrics and grafana_search_traces do not cover. Grafana macros work and follow start/end: $__timeFilter(col), $__fromTime, $__toTime, $__timeInterval(col), $__interval_s. On large tables ALWAYS bound the time column with $__timeFilter and filter on the sort key (see grafana_get_sql_schema). Map columns read as Attributes['key']. A SELECT without LIMIT gets one; at most max_rows rows are shown. Writes, table functions that reach outside the database, and multiple statements are refused.",
+					Parameters: json.RawMessage(`{
+						"type":"object",
+						"properties":{
+							"sql":{"type":"string","description":"One ClickHouse statement, no trailing FORMAT."},
+							"datasources":{"type":"array","items":{"type":"string"},"description":"Datasource uids, names or unique fragments. Default: every ClickHouse datasource."},
+							"start":{"type":"string","description":"Range start for the macros: 'now-1h', RFC 3339 or unix ms. Default now-1h."},
+							"end":{"type":"string","description":"Range end, same formats. Default now."},
+							"interval":{"type":"string","description":"Bucket size for $__timeInterval / $__interval_s, e.g. '1m'. Default: the range over about 100 points."},
+							"max_rows":{"type":"integer","description":"Rows shown per datasource, 1-500. Default 100."}
+						},
+						"required":["sql"]
+					}`),
+				},
+			},
+			llm.Tool{
+				Type: "function",
+				Function: llm.ToolFunction{
+					Name:        ToolGrafanaSearchLogs,
+					Description: "Search logs stored in ClickHouse (ClickStack / OpenTelemetry) on ClickHouse datasources, by default every one. Per datasource it returns the total match count, a breakdown (by service and severity, or count_by) and the newest lines. Filters combine with AND: service names; severity prefixes ('err' matches error, 'warn' matches warn and warning); text substrings in the message, all required; exclude_text; attributes matched in log or resource attributes, exact or with * wildcards; trace_id. fields adds attribute values to each line. count_by takes service, severity, an attribute key, or attribute_keys to discover which attributes exist. Default range: the last hour.",
+					Parameters: json.RawMessage(`{
+						"type":"object",
+						"properties":{
+							"datasources":{"type":"array","items":{"type":"string"},"description":"Datasource uids, names or unique fragments. Default: every ClickHouse datasource."},
+							"start":{"type":"string","description":"Range start: 'now-1h', RFC 3339 or unix ms. Default now-1h."},
+							"end":{"type":"string","description":"Range end, same formats. Default now."},
+							"service":{"type":"array","items":{"type":"string"},"description":"Service names (any of them)."},
+							"severity":{"type":"array","items":{"type":"string"},"description":"Severity prefixes, case-insensitive, e.g. ['err', 'warn']."},
+							"text":{"type":"array","items":{"type":"string"},"description":"Substrings the message must all contain, case-insensitive."},
+							"exclude_text":{"type":"array","items":{"type":"string"},"description":"Substrings the message must not contain."},
+							"attributes":{"type":"object","additionalProperties":{"type":"string"},"description":"Attribute filters, e.g. {\"k8s.namespace.name\":\"prod\",\"k8s.pod.name\":\"api-*\"}."},
+							"trace_id":{"type":"string","description":"Only lines of this trace."},
+							"fields":{"type":"array","items":{"type":"string"},"description":"Attribute keys to show on each line, up to 8."},
+							"count_by":{"type":"string","description":"Breakdown: service, severity, an attribute key, or attribute_keys."},
+							"limit":{"type":"integer","description":"Lines per datasource, 1-200. Default 30."}
+						}
+					}`),
+				},
+			},
+			llm.Tool{
+				Type: "function",
+				Function: llm.ToolFunction{
+					Name:        ToolGrafanaQueryMetrics,
+					Description: "Query metrics stored in ClickHouse (ClickStack / OpenTelemetry) on ClickHouse datasources, by default every one. Without metric it lists the metric names reporting in the range with type, unit and the number of reporting services (narrow with search and service). With metric it returns the metric per interval, grouped by group_by ('service' or attribute keys) and summarised per series as last/avg/min/max/sum. Gauges default to avg (also min, max, sum, last, count); counters default to their increase per interval, or rate per second. Filter with service and attributes (metric or resource attributes, * wildcards). Default range: the last hour.",
+					Parameters: json.RawMessage(`{
+						"type":"object",
+						"properties":{
+							"datasources":{"type":"array","items":{"type":"string"},"description":"Datasource uids, names or unique fragments. Default: every ClickHouse datasource."},
+							"start":{"type":"string","description":"Range start: 'now-6h', RFC 3339 or unix ms. Default now-1h."},
+							"end":{"type":"string","description":"Range end, same formats. Default now."},
+							"metric":{"type":"string","description":"Exact metric name. Omit to list metric names."},
+							"search":{"type":"string","description":"When listing, only names containing this text."},
+							"service":{"type":"array","items":{"type":"string"},"description":"Service names (any of them)."},
+							"attributes":{"type":"object","additionalProperties":{"type":"string"},"description":"Attribute filters, e.g. {\"k8s.namespace.name\":\"prod\"}."},
+							"group_by":{"type":"array","items":{"type":"string"},"description":"'service' and/or attribute keys, e.g. ['service', 'k8s.pod.name']."},
+							"aggregation":{"type":"string","enum":["avg","min","max","sum","last","count","increase","rate"],"description":"Per-interval aggregation. Default: avg for gauges, increase for counters."},
+							"interval":{"type":"string","description":"Bucket size, e.g. '1m' or '1h'. Default: the range over about 100 points."}
+						}
+					}`),
+				},
+			},
+			llm.Tool{
+				Type: "function",
+				Function: llm.ToolFunction{
+					Name:        ToolGrafanaSearchTraces,
+					Description: "Search traces stored in ClickHouse (ClickStack / OpenTelemetry) on ClickHouse datasources, by default every one. With trace_id it returns every span of that trace in time order (default range the last 24 hours). Otherwise it returns spans matching service, span_name (substring), min_duration_ms, status and attributes (span or resource attributes, * wildcards), slowest first or latest first, plus a per-operation summary of span count, errors and p50/p95/max latency. Default range: the last hour.",
+					Parameters: json.RawMessage(`{
+						"type":"object",
+						"properties":{
+							"datasources":{"type":"array","items":{"type":"string"},"description":"Datasource uids, names or unique fragments. Default: every ClickHouse datasource."},
+							"start":{"type":"string","description":"Range start: 'now-1h', RFC 3339 or unix ms."},
+							"end":{"type":"string","description":"Range end, same formats. Default now."},
+							"trace_id":{"type":"string","description":"Return this trace's spans."},
+							"service":{"type":"array","items":{"type":"string"},"description":"Service names (any of them)."},
+							"span_name":{"type":"string","description":"Substring of the span name."},
+							"min_duration_ms":{"type":"number","description":"Only spans at least this long."},
+							"status":{"type":"string","enum":["error","ok","unset"],"description":"Only spans with this status."},
+							"attributes":{"type":"object","additionalProperties":{"type":"string"},"description":"Attribute filters, e.g. {\"http.route\":\"/api/*\"}."},
+							"order":{"type":"string","enum":["slowest","latest"],"description":"Span order. Default slowest."},
+							"limit":{"type":"integer","description":"Spans per datasource, 1-200. Default 30."}
+						}
+					}`),
+				},
+			},
 		)
 	}
 
@@ -6242,6 +6345,171 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		log.Printf("[user=%s channel=%s] grafana_get_annotations (dashboard=%s, results=%d)", userID, channelID, args.DashboardUID, len(list))
 		return grafana.FormatAnnotations(list)
 
+	case ToolGrafanaGetSQLSchema:
+		if errMsg := requireReady("Grafana", h.grafanaClient); errMsg != "" {
+			return errMsg
+		}
+		args, errMsg := parseToolArgs[struct {
+			Datasource string `json:"datasource"`
+			Database   string `json:"database"`
+			Table      string `json:"table"`
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
+		}
+		res, err := h.grafanaClient.SQLSchema(ctx, args.Datasource, args.Database, args.Table)
+		if err != nil {
+			return grafanaToolErr("reading the ClickHouse schema", userID, channelID, err)
+		}
+		log.Printf("[user=%s channel=%s] grafana_get_sql_schema (datasource=%s, table=%q, tables=%d, columns=%d)", userID, channelID, res.Datasource.UID, args.Table, len(res.Tables), len(res.Columns))
+		return grafana.FormatSchema(res)
+
+	case ToolGrafanaQuerySQL:
+		if errMsg := requireReady("Grafana", h.grafanaClient); errMsg != "" {
+			return errMsg
+		}
+		args, errMsg := parseToolArgs[struct {
+			SQL         string `json:"sql"`
+			Datasources any    `json:"datasources"`
+			Start       string `json:"start"`
+			End         string `json:"end"`
+			Interval    string `json:"interval"`
+			MaxRows     int    `json:"max_rows"`
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
+		}
+		res, err := h.grafanaClient.QuerySQL(ctx, grafana.SQLQuery{
+			Datasources: grafanaStrings(args.Datasources),
+			SQL:         args.SQL,
+			Start:       args.Start,
+			End:         args.End,
+			Interval:    args.Interval,
+			MaxRows:     args.MaxRows,
+		})
+		if err != nil {
+			return preconditionErrf("Error: %v", err)
+		}
+		logGrafanaRuns(userID, channelID, name, res.Runs)
+		return grafana.FormatSQL(res)
+
+	case ToolGrafanaSearchLogs:
+		if errMsg := requireReady("Grafana", h.grafanaClient); errMsg != "" {
+			return errMsg
+		}
+		args, errMsg := parseToolArgs[struct {
+			Datasources any            `json:"datasources"`
+			Start       string         `json:"start"`
+			End         string         `json:"end"`
+			Service     any            `json:"service"`
+			Severity    any            `json:"severity"`
+			Text        any            `json:"text"`
+			ExcludeText any            `json:"exclude_text"`
+			Attributes  map[string]any `json:"attributes"`
+			TraceID     string         `json:"trace_id"`
+			Fields      any            `json:"fields"`
+			CountBy     string         `json:"count_by"`
+			Limit       int            `json:"limit"`
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
+		}
+		res, err := h.grafanaClient.SearchLogs(ctx, grafana.LogSearch{
+			Datasources: grafanaStrings(args.Datasources),
+			Start:       args.Start,
+			End:         args.End,
+			Services:    grafanaStrings(args.Service),
+			Severities:  grafanaStrings(args.Severity),
+			Text:        grafanaStrings(args.Text),
+			ExcludeText: grafanaStrings(args.ExcludeText),
+			Attributes:  grafanaVariables(args.Attributes),
+			TraceID:     args.TraceID,
+			Fields:      grafanaStrings(args.Fields),
+			CountBy:     args.CountBy,
+			Limit:       args.Limit,
+		})
+		if err != nil {
+			return grafanaToolErr("searching ClickHouse logs", userID, channelID, err)
+		}
+		logGrafanaRuns(userID, channelID, name, res.Runs)
+		return grafana.FormatLogs(res)
+
+	case ToolGrafanaQueryMetrics:
+		if errMsg := requireReady("Grafana", h.grafanaClient); errMsg != "" {
+			return errMsg
+		}
+		args, errMsg := parseToolArgs[struct {
+			Datasources any            `json:"datasources"`
+			Start       string         `json:"start"`
+			End         string         `json:"end"`
+			Metric      string         `json:"metric"`
+			Search      string         `json:"search"`
+			Service     any            `json:"service"`
+			Attributes  map[string]any `json:"attributes"`
+			GroupBy     any            `json:"group_by"`
+			Aggregation string         `json:"aggregation"`
+			Interval    string         `json:"interval"`
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
+		}
+		res, err := h.grafanaClient.QueryMetrics(ctx, grafana.MetricQuery{
+			Datasources: grafanaStrings(args.Datasources),
+			Start:       args.Start,
+			End:         args.End,
+			Metric:      args.Metric,
+			Search:      args.Search,
+			Services:    grafanaStrings(args.Service),
+			Attributes:  grafanaVariables(args.Attributes),
+			GroupBy:     grafanaStrings(args.GroupBy),
+			Aggregation: args.Aggregation,
+			Interval:    args.Interval,
+		})
+		if err != nil {
+			return grafanaToolErr("querying ClickHouse metrics", userID, channelID, err)
+		}
+		logGrafanaRuns(userID, channelID, name, res.Runs)
+		return grafana.FormatMetrics(res)
+
+	case ToolGrafanaSearchTraces:
+		if errMsg := requireReady("Grafana", h.grafanaClient); errMsg != "" {
+			return errMsg
+		}
+		args, errMsg := parseToolArgs[struct {
+			Datasources   any            `json:"datasources"`
+			Start         string         `json:"start"`
+			End           string         `json:"end"`
+			TraceID       string         `json:"trace_id"`
+			Service       any            `json:"service"`
+			SpanName      string         `json:"span_name"`
+			MinDurationMs float64        `json:"min_duration_ms"`
+			Status        string         `json:"status"`
+			Attributes    map[string]any `json:"attributes"`
+			Order         string         `json:"order"`
+			Limit         int            `json:"limit"`
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
+		}
+		res, err := h.grafanaClient.SearchTraces(ctx, grafana.TraceSearch{
+			Datasources:   grafanaStrings(args.Datasources),
+			Start:         args.Start,
+			End:           args.End,
+			TraceID:       args.TraceID,
+			Services:      grafanaStrings(args.Service),
+			SpanName:      args.SpanName,
+			MinDurationMs: args.MinDurationMs,
+			Status:        args.Status,
+			Attributes:    grafanaVariables(args.Attributes),
+			Order:         args.Order,
+			Limit:         args.Limit,
+		})
+		if err != nil {
+			return grafanaToolErr("searching ClickHouse traces", userID, channelID, err)
+		}
+		logGrafanaRuns(userID, channelID, name, res.Runs)
+		return grafana.FormatTraces(res)
+
 	// ---- Google Drive / Sheets (pulse only) ----
 
 	case ToolDriveListFolders:
@@ -6521,15 +6789,47 @@ func document360ToolErr(action, userID, channelID string, err error) string {
 	return fmt.Sprintf("Error %s: %v", action, err)
 }
 
-// grafanaToolErr logs Grafana's own diagnostic and returns the sanitized
-// message the model may see.
 func grafanaToolErr(action, userID, channelID string, err error) string {
 	log.Printf("[user=%s channel=%s] grafana error while %s: %s", userID, channelID, action, grafana.ErrorDetail(err))
 	return fmt.Sprintf("Error %s: %v", action, err)
 }
 
-// grafanaVariables flattens variable overrides to strings; a list becomes
-// comma-separated values.
+func grafanaStrings(v any) []string {
+	switch t := v.(type) {
+	case string:
+		if strings.TrimSpace(t) == "" {
+			return nil
+		}
+		return []string{t}
+	case []any:
+		out := make([]string, 0, len(t))
+		for _, x := range t {
+			if s := strings.TrimSpace(fmt.Sprint(x)); s != "" {
+				out = append(out, s)
+			}
+		}
+		return out
+	}
+	return nil
+}
+
+func logGrafanaRuns(userID, channelID, tool string, runs []grafana.DatasourceRun) {
+	for _, r := range runs {
+		failed := 0
+		for ref, q := range r.Results {
+			if q.Err != "" {
+				failed++
+				log.Printf("[user=%s channel=%s] %s (datasource=%s, ref=%s) error: %s", userID, channelID, tool, r.Datasource.UID, ref, q.Err)
+			}
+		}
+		if r.Err != nil {
+			log.Printf("[user=%s channel=%s] %s (datasource=%s) failed: %s", userID, channelID, tool, r.Datasource.UID, grafana.ErrorDetail(r.Err))
+			continue
+		}
+		log.Printf("[user=%s channel=%s] %s (datasource=%s, queries=%d, failed=%d)", userID, channelID, tool, r.Datasource.UID, len(r.Results), failed)
+	}
+}
+
 func grafanaVariables(in map[string]any) map[string]string {
 	if len(in) == 0 {
 		return nil
