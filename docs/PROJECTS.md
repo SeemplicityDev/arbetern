@@ -566,10 +566,11 @@ Slack channel hears when auto-merge goes on. A few cases need more:
   delay again once it is ready. Auto-merge a person turned on stays as they set
   it: arbetern never turns it off, so GitHub may merge while a round is still
   pushing.
-- **Turned off by someone else.** When auto-merge is turned off outside
-  arbetern, by a person or by GitHub after a push from someone without write
-  access, arbetern leaves that pull request's auto-merge off until someone
-  turns it on again.
+- **Turned off by a person.** When a person turns auto-merge off by hand,
+  arbetern leaves that pull request's auto-merge off until someone turns it on
+  again, and the task names who did. When anything else turns it off, such as
+  an app, GitHub itself, or automation that uses arbetern's own GitHub account,
+  the pull request goes through the delay again.
 - **Refused.** When GitHub refuses, for instance because the repository does
   not allow auto-merge or the merge method, the reason shows on the task and
   arbetern tries again after the delay.

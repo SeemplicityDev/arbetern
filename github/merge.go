@@ -56,6 +56,42 @@ func (c *Client) DisablePullRequestAutoMerge(ctx context.Context, nodeID string)
 	return c.mutate(ctx, "disablePullRequestAutoMerge", mutation, map[string]any{"id": nodeID})
 }
 
+// AutoMergeDisabledBy returns the user who last turned auto-merge off by hand, or "" when an app or GitHub itself did, or nobody has.
+func (c *Client) AutoMergeDisabledBy(ctx context.Context, nodeID string) (string, error) {
+	if nodeID == "" {
+		return "", errors.New("the pull request has no node id")
+	}
+	var resp struct {
+		Data struct {
+			Node struct {
+				TimelineItems struct {
+					Nodes []struct {
+						ReasonCode string `json:"reasonCode"`
+						Disabler   *struct {
+							Login string `json:"login"`
+						} `json:"disabler"`
+					} `json:"nodes"`
+				} `json:"timelineItems"`
+			} `json:"node"`
+		} `json:"data"`
+		Errors []struct {
+			Message string `json:"message"`
+		} `json:"errors"`
+	}
+	query := `query($id:ID!){node(id:$id){... on PullRequest{timelineItems(last:1,itemTypes:[AUTO_MERGE_DISABLED_EVENT]){nodes{... on AutoMergeDisabledEvent{reasonCode disabler{login}}}}}}}`
+	if err := c.graphql(ctx, query, map[string]any{"id": nodeID}, &resp); err != nil {
+		return "", fmt.Errorf("autoMergeDisabledEvent: %w", err)
+	}
+	if len(resp.Errors) > 0 {
+		return "", &refusal{"autoMergeDisabledEvent", resp.Errors[0].Message}
+	}
+	nodes := resp.Data.Node.TimelineItems.Nodes
+	if len(nodes) == 0 || nodes[0].Disabler == nil || !strings.EqualFold(nodes[0].ReasonCode, "manually_disabled") {
+		return "", nil
+	}
+	return nodes[0].Disabler.Login, nil
+}
+
 // MergePullRequest merges a pull request with method while its head is still sha.
 func (c *Client) MergePullRequest(ctx context.Context, owner, repo string, number int, sha, method string) error {
 	if _, _, err := c.api.PullRequests.Merge(ctx, owner, repo, number, "", &gh.PullRequestOptions{SHA: sha, MergeMethod: method}); err != nil {

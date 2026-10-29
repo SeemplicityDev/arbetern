@@ -800,7 +800,7 @@ function pjdReviewHtml(rv) {
 
 function pjdMergeLabel(am) {
   if (am.merged_at) return 'merged by arbetern ' + timeAgo(am.merged_at);
-  if (am.held) return 'turned off outside arbetern';
+  if (am.held) return am.held_by ? 'turned off by ' + am.held_by : 'turned off outside arbetern';
   if (am.withdrawing) return 'turning off';
   if (am.on) return am.enabled_at ? 'on since ' + fmtDateTime(am.enabled_at) : 'on';
   return am.armed_at ? 'delay started ' + timeAgo(am.armed_at) : '';
