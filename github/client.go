@@ -20,7 +20,9 @@ import (
 )
 
 type Client struct {
-	api *gh.Client
+	api   *gh.Client
+	token string
+	app   *appAuth
 }
 
 // apiTimeout bounds every GitHub call. go-github defaults to a client with no
@@ -37,10 +39,64 @@ func NewClient(token string) *Client {
 		log.Printf("[github] client setup failed: %v", err)
 		api, _ = gh.NewClient(gh.WithTimeout(apiTimeout))
 	}
-	return &Client{api: api}
+	return &Client{api: api, token: token}
+}
+
+// NewAppClient authenticates as a GitHub App installation, so GitHub shows the App's bot account as the author of everything arbetern does.
+func NewAppClient(cfg AppConfig) (*Client, error) {
+	app, err := newAppAuth(cfg)
+	if err != nil {
+		return nil, err
+	}
+	api, err := gh.NewClient(gh.WithTransport(bearer(app.Token)), gh.WithTimeout(apiTimeout))
+	if err != nil {
+		return nil, err
+	}
+	return &Client{api: api, app: app}, nil
+}
+
+// IsApp reports whether the client authenticates as a GitHub App installation.
+func (c *Client) IsApp() bool { return c.app != nil }
+
+// Token returns the credential the client sends GitHub: the configured token, or the App installation's current one.
+func (c *Client) Token(ctx context.Context) (string, error) {
+	if c.app != nil {
+		return c.app.Token(ctx)
+	}
+	return c.token, nil
+}
+
+// AppPermissions returns the permissions the GitHub App installation grants, such as "contents": "write".
+func (c *Client) AppPermissions(ctx context.Context) (map[string]string, error) {
+	if c.app == nil {
+		return nil, errors.New("GitHub access uses a token, not a GitHub App")
+	}
+	if _, err := c.app.Token(ctx); err != nil {
+		return nil, err
+	}
+	return c.app.permissions(), nil
+}
+
+// CommitAuthor returns the name and email that attribute a commit to the GitHub App's bot account, or empty strings with a token.
+func (c *Client) CommitAuthor(ctx context.Context) (name, email string, err error) {
+	if c.app == nil {
+		return "", "", nil
+	}
+	login, err := c.app.login(ctx)
+	if err != nil {
+		return "", "", err
+	}
+	user, _, err := c.api.Users.Get(ctx, login)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to read the GitHub App's bot account: %w", err)
+	}
+	return login, fmt.Sprintf("%d+%s@users.noreply.github.com", user.GetID(), login), nil
 }
 
 func (c *Client) GetAuthenticatedUser(ctx context.Context) (string, error) {
+	if c.app != nil {
+		return c.app.login(ctx)
+	}
 	user, _, err := c.api.Users.Get(ctx, "")
 	if err != nil {
 		return "", fmt.Errorf("failed to get authenticated user: %w", err)
@@ -70,6 +126,9 @@ func (c *Client) GetGrantedScopes(ctx context.Context) ([]string, error) {
 }
 
 func (c *Client) ResolveOwner(ctx context.Context) (string, error) {
+	if c.app != nil {
+		return c.app.owner(ctx)
+	}
 	user, _, err := c.api.Users.Get(ctx, "")
 	if err != nil {
 		return "", fmt.Errorf("failed to resolve owner: %w", err)
@@ -614,6 +673,19 @@ type OrgRepository struct {
 // ListOrgRepositories lists an organization's repositories that are neither archived nor disabled and that the token can push to.
 func (c *Client) ListOrgRepositories(ctx context.Context, org string) ([]OrgRepository, error) {
 	var out []OrgRepository
+	if c.app != nil {
+		// An App reaches exactly the repositories it is installed on, with the same permissions on each.
+		repos, err := c.installationRepos(ctx)
+		if err != nil {
+			return nil, err
+		}
+		for _, r := range repos {
+			if strings.EqualFold(r.GetOwner().GetLogin(), org) && !r.GetArchived() && !r.GetDisabled() {
+				out = append(out, OrgRepository{Name: r.GetName(), DefaultBranch: r.GetDefaultBranch()})
+			}
+		}
+		return out, nil
+	}
 	opts := &gh.RepositoryListByOrgOptions{ListOptions: gh.ListOptions{PerPage: 100}}
 	for {
 		repos, resp, err := c.api.Repositories.ListByOrg(ctx, org, opts)
@@ -634,8 +706,34 @@ func (c *Client) ListOrgRepositories(ctx context.Context, org string) ([]OrgRepo
 	}
 }
 
+func (c *Client) installationRepos(ctx context.Context) ([]*gh.Repository, error) {
+	var out []*gh.Repository
+	opts := &gh.ListOptions{PerPage: 100}
+	for {
+		page, resp, err := c.api.Apps.ListRepos(ctx, opts)
+		if err != nil {
+			return nil, fmt.Errorf("failed to list the GitHub App's repositories: %w", err)
+		}
+		out = append(out, page.Repositories...)
+		if resp.NextPage == 0 {
+			return out, nil
+		}
+		opts.Page = resp.NextPage
+	}
+}
+
 func (c *Client) ListUserRepos(ctx context.Context) ([]string, error) {
 	var allRepos []string
+	if c.app != nil {
+		repos, err := c.installationRepos(ctx)
+		if err != nil {
+			return nil, err
+		}
+		for _, r := range repos {
+			allRepos = append(allRepos, r.GetFullName())
+		}
+		return allRepos, nil
+	}
 	opts := &gh.RepositoryListByAuthenticatedUserOptions{
 		ListOptions: gh.ListOptions{PerPage: 100},
 	}
@@ -671,8 +769,9 @@ type RepoTeamAccess struct {
 // the given repository, along with their permission level. This mirrors
 // the "Settings → Collaborators and teams → Direct access" tab in the
 // GitHub UI. Requires a token with `read:org` (or `admin:org`) plus repo
-// access; users without admin on the repo may receive 403 from GitHub —
-// surface the error verbatim rather than masking it.
+// access, or a GitHub App with Administration read; users without admin on
+// the repo may receive 403 from GitHub — surface the error verbatim rather
+// than masking it.
 func (c *Client) ListRepoTeams(ctx context.Context, owner, repo string) ([]RepoTeamAccess, error) {
 	var out []RepoTeamAccess
 	opts := &gh.ListOptions{PerPage: 100}

@@ -73,7 +73,7 @@ Bayes.
 
 - Go 1.26.8+ (the container image builds with Go 1.27)
 - A Slack app with a slash command pointing to `/<agent>/webhook` (see [docs/SLACK_BOT.md](docs/SLACK_BOT.md))
-- A GitHub PAT with repo access (see [docs/GITHUB_PAT.md](docs/GITHUB_PAT.md))
+- A GitHub App installed on your repositories (see [docs/GITHUB_APP.md](docs/GITHUB_APP.md)), or a GitHub PAT with repo access ([docs/GITHUB_PAT.md](docs/GITHUB_PAT.md))
 - (Optional) An Anthropic API key, Azure OpenAI credentials or an AWS Bedrock region for LLM inference
 
 ### Environment Variables
@@ -84,7 +84,8 @@ The core variables you'll set on day one:
 |---|---|---|
 | `SLACK_BOT_TOKEN` | yes | Slack bot OAuth token (`xoxb-...`) |
 | `SLACK_SIGNING_SECRET` | yes | Slack app signing secret |
-| `GITHUB_TOKEN` | yes\* | GitHub PAT (\*or use the Anthropic API / Azure OpenAI / AWS Bedrock for inference) |
+| `GITHUB_APP_ID` / `GITHUB_APP_PRIVATE_KEY` | yes\* | GitHub App credentials, the default GitHub access: GitHub shows the App's bot account on everything arbetern does ([docs/GITHUB_APP.md](docs/GITHUB_APP.md)). Add `GITHUB_APP_INSTALLATION_ID` when the App is installed on more than one account |
+| `GITHUB_TOKEN` | no\* | GitHub PAT: GitHub access when no App is set, and the GitHub Models LLM backend (\*GitHub features need an App or a token; inference needs a token unless the Anthropic API / Azure OpenAI / AWS Bedrock is set) |
 | `GENERAL_MODEL` | yes | A [model label](#model-labels) such as `sonnet`, or the model ID for the active backend — e.g. `openai/gpt-4o` (GitHub), a deployment name (Azure), or a Bedrock model / inference-profile ID. **Required; there is no default** |
 | `CODE_MODEL` | no | Separate model for code-related tasks. Optional — falls back to `GENERAL_MODEL` when unset |
 | `LIGHT_MODEL` / `HEAVY_MODEL` | no | Cheaper and stronger models an interactive turn may start on when the [model router](docs/MODEL_ROUTER.md) picks the light or heavy tier. Each falls back to `GENERAL_MODEL` when unset |
@@ -250,7 +251,7 @@ Every stateful feature (workflows, dashboards, projects, chat, billing, skills, 
 <details>
 <summary><b>GitOps sync</b> — workflows + dashboards from a git repo</summary>
 
-See [docs/GITOPS.md](docs/GITOPS.md). All variables reuse `GITHUB_TOKEN`.
+See [docs/GITOPS.md](docs/GITOPS.md). All variables reuse arbetern's GitHub access (its GitHub App or `GITHUB_TOKEN`).
 
 | Variable | Description |
 |---|---|
@@ -271,7 +272,7 @@ See [docs/PROJECTS.md](docs/PROJECTS.md). The chart sets all of these from its `
 
 | Variable | Description |
 |---|---|
-| `PROJECTS_ENABLED` | `true` turns on the projects registry, their console API and the session gateway (default `false`). Needs `ANTHROPIC_API_KEY` and `GITHUB_TOKEN` |
+| `PROJECTS_ENABLED` | `true` turns on the projects registry, their console API and the session gateway (default `false`). Needs `ANTHROPIC_API_KEY` and GitHub access (a GitHub App or `GITHUB_TOKEN`) |
 | `PROJECTS_GATEWAY_PORT` | Port of the session-facing listener (default `8081`); must differ from `PORT` |
 | `PROJECTS_GATEWAY_URL` | **Required when enabled.** The gateway as session pods reach it |
 | `PROJECTS_NAMESPACE` | **Required when enabled.** Where session Jobs run |
@@ -286,7 +287,8 @@ See [docs/PROJECTS.md](docs/PROJECTS.md). The chart sets all of these from its `
 ```bash
 export SLACK_BOT_TOKEN=xoxb-...
 export SLACK_SIGNING_SECRET=...
-export GITHUB_TOKEN=ghp_...
+export GITHUB_APP_ID=123456
+export GITHUB_APP_PRIVATE_KEY="$(cat arbetern.private-key.pem)"   # or: export GITHUB_TOKEN=ghp_...
 go run .
 ```
 
@@ -294,7 +296,7 @@ go run .
 
 ```bash
 docker build -t arbetern .
-docker run -e SLACK_BOT_TOKEN -e SLACK_SIGNING_SECRET -e GITHUB_TOKEN arbetern
+docker run -e SLACK_BOT_TOKEN -e SLACK_SIGNING_SECRET -e GITHUB_APP_ID -e GITHUB_APP_PRIVATE_KEY arbetern
 ```
 
 ### Helm
@@ -1106,7 +1108,7 @@ with auto-merge on, arbetern turns on GitHub's auto-merge after a ready pull
 request has stayed unchanged for a delay.
 
 Projects are off by default, and every session resource exists only when
-`projects.enabled` is on. They need an Anthropic API key, a GitHub token and a
+`projects.enabled` is on. They need an Anthropic API key, GitHub access (a GitHub App or a token) and a
 session image built from `runner/Dockerfile`. See
 [docs/PROJECTS.md](docs/PROJECTS.md) for setup, configuration, the statistics
 and the security model.
@@ -1163,7 +1165,7 @@ skills/              # custom skill registry (instruction blocks appended to age
 mcp/                 # MCP connector registry, Streamable HTTP JSON-RPC client, tool exposure + API
 ui/                  # embedded management console (index.html shell, app.css, app.js)
 helm/                # Helm chart
-docs/                # setup guides (Slack, GitHub PAT, Atlassian)
+docs/                # setup guides (Slack, GitHub App, Atlassian)
 ```
 
 ## Customizing Prompts
@@ -1241,7 +1243,7 @@ transport, limits and roadmap.
 | Integration | Documentation | Required By |
 |---|---|---|
 | Slack | [docs/SLACK_BOT.md](docs/SLACK_BOT.md) | All agents |
-| GitHub | [docs/GITHUB_PAT.md](docs/GITHUB_PAT.md) | ovad, agent-q, goldsai |
+| GitHub | [docs/GITHUB_APP.md](docs/GITHUB_APP.md) (token: [docs/GITHUB_PAT.md](docs/GITHUB_PAT.md)) | ovad, agent-q, goldsai |
 | Atlassian (Jira + Confluence) | [docs/ATLASSIAN.md](docs/ATLASSIAN.md) | seihin, ovad, agent-q, goldsai, pulse, hermes |
 | NVD | [NVD API](https://nvd.nist.gov/developers) | goldsai |
 | Salesforce | [docs/SALESFORCE.md](docs/SALESFORCE.md) | pulse |

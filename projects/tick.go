@@ -377,7 +377,7 @@ func feedbackNote(number int, fb *github.PRFeedback) string {
 	var parts []string
 	add := func(c github.PRComment, label string) {
 		body := oneLine(c.Body, 300)
-		if body == "" || isBotLogin(c.Author) {
+		if body == "" || isBotLogin(c.Author) || strings.Contains(c.Body, commentMarker) {
 			return
 		}
 		who := cmp.Or(c.Author, "someone")

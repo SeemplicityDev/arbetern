@@ -57,6 +57,10 @@ type Credentials struct {
 	AzureEndpoint      string `cred:"azure-openai-endpoint"`
 	AzureAPIKey        string `cred:"azure-api-key"`
 	AnthropicAPIKey    string `cred:"anthropic-api-key"`
+	// A GitHub App installation, used for GitHub instead of GitHubToken when set.
+	GitHubAppID             string `cred:"github-app-id"`              // App ID or client ID.
+	GitHubAppInstallationID string `cred:"github-app-installation-id"` // Optional when the App has a single installation.
+	GitHubAppPrivateKey     string `cred:"github-app-private-key"`     // PEM, raw or base64-encoded.
 	// BedrockAPIKey is an AWS Bedrock API key (bearer token). When set, the
 	// Bedrock backend authenticates with it instead of resolving SigV4
 	// credentials. Sourced from AWS_BEARER_TOKEN_BEDROCK. Requires
@@ -283,6 +287,22 @@ type Config struct {
 	ProjectsModel       string   // model for sessions whose project names none
 }
 
+// GitHubAppConfigured returns true when arbetern authenticates to GitHub as a GitHub App.
+func (c *Config) GitHubAppConfigured() bool {
+	return c.GitHubAppID != "" && strings.TrimSpace(c.GitHubAppPrivateKey) != ""
+}
+
+// GitHubConfigured returns true when a GitHub App or a token gives arbetern GitHub access.
+func (c *Config) GitHubConfigured() bool {
+	return c.GitHubAppConfigured() || c.GitHubToken != ""
+}
+
+// GitHubAppInstallation returns the configured installation ID, or 0 to use the App's only installation.
+func (c *Config) GitHubAppInstallation() int64 {
+	n, _ := strconv.ParseInt(c.GitHubAppInstallationID, 10, 64)
+	return n
+}
+
 // UseAzure returns true when Azure OpenAI credentials are configured.
 func (c *Config) UseAzure() bool {
 	return c.AzureEndpoint != "" && c.AzureAPIKey != ""
@@ -496,6 +516,10 @@ func Load() (*Config, error) {
 			AzureBillingAccountID:  os.Getenv("AZURE_BILLING_ACCOUNT_ID"),
 			DatabricksHost:         os.Getenv("DATABRICKS_HOST"),
 
+			GitHubAppID:             strings.TrimSpace(os.Getenv("GITHUB_APP_ID")),
+			GitHubAppInstallationID: strings.TrimSpace(os.Getenv("GITHUB_APP_INSTALLATION_ID")),
+			GitHubAppPrivateKey:     os.Getenv("GITHUB_APP_PRIVATE_KEY"),
+
 			ClickHouseQueryEndpoint: os.Getenv("CLICKHOUSE_QUERY_ENDPOINT"),
 			ClickHouseQueryUser:     os.Getenv("CLICKHOUSE_QUERY_USER"),
 			ClickHouseQueryPassword: os.Getenv("CLICKHOUSE_QUERY_PASSWORD"),
@@ -620,6 +644,9 @@ func Load() (*Config, error) {
 	if cfg.GitHubToken == "" && !cfg.UseAnthropic() && !cfg.UseAzure() && !cfg.UseBedrock() {
 		return nil, fmt.Errorf("GITHUB_TOKEN is required (or set ANTHROPIC_API_KEY, AZURE_OPEN_AI_ENDPOINT and AZURE_API_KEY, or BEDROCK_REGION)")
 	}
+	if err := cfg.validateGitHubApp(); err != nil {
+		return nil, err
+	}
 
 	// GENERAL_MODEL is required for every backend — there is no default model,
 	// so an unset value never silently ships a wrong provider's model ID.
@@ -714,14 +741,26 @@ func Load() (*Config, error) {
 	return cfg, nil
 }
 
+func (c *Config) validateGitHubApp() error {
+	switch {
+	case c.GitHubAppID == "" && strings.TrimSpace(c.GitHubAppPrivateKey) == "" && c.GitHubAppInstallationID == "":
+		return nil
+	case !c.GitHubAppConfigured():
+		return fmt.Errorf("GITHUB_APP_ID and GITHUB_APP_PRIVATE_KEY must be set together")
+	case c.GitHubAppInstallationID != "" && c.GitHubAppInstallation() <= 0:
+		return fmt.Errorf("invalid GITHUB_APP_INSTALLATION_ID %q: must be a positive integer", c.GitHubAppInstallationID)
+	}
+	return nil
+}
+
 func (c *Config) validateProjects() error {
 	switch {
 	case c.ProjectsNamespace == "" || c.ProjectsJobTemplate == "" || c.ProjectsGatewayURL == "":
 		return fmt.Errorf("PROJECTS_ENABLED needs PROJECTS_NAMESPACE, PROJECTS_JOB_TEMPLATE and PROJECTS_GATEWAY_URL")
 	case !strings.HasPrefix(c.ProjectsGatewayURL, "http://") && !strings.HasPrefix(c.ProjectsGatewayURL, "https://"):
 		return fmt.Errorf("invalid PROJECTS_GATEWAY_URL %q: must be an http(s) URL", c.ProjectsGatewayURL)
-	case c.AnthropicAPIKey == "" || c.GitHubToken == "":
-		return fmt.Errorf("PROJECTS_ENABLED needs ANTHROPIC_API_KEY and GITHUB_TOKEN, which arbetern adds to the sessions' model and git calls")
+	case c.AnthropicAPIKey == "" || !c.GitHubConfigured():
+		return fmt.Errorf("PROJECTS_ENABLED needs ANTHROPIC_API_KEY and GitHub access (GITHUB_APP_ID and GITHUB_APP_PRIVATE_KEY, or GITHUB_TOKEN), which arbetern adds to the sessions' model and git calls")
 	}
 	if c.ProjectsModel != "" && !llm.KnownModel(c.ProjectsModel) {
 		return fmt.Errorf("invalid PROJECTS_MODEL %q: use a label (sonnet, opus, haiku, fable) or an Anthropic model ID", c.ProjectsModel)

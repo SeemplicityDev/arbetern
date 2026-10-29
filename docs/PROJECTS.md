@@ -84,23 +84,25 @@ Usage & Billing page under the source `project`.
 
 ### GitHub
 
-- arbetern's own `GITHUB_TOKEN` is the only GitHub credential involved. The git
-  proxy adds it to clones and pushes, and arbetern opens and follows the pull
-  requests with it, so it needs **Contents** and **Pull requests** read and
-  write, **Checks** and **Commit statuses** read, and **Actions** read and write
-  on every project repository (see [GITHUB_PAT.md](GITHUB_PAT.md)). An
+- arbetern's own GitHub access, its GitHub App (see
+  [GITHUB_APP.md](GITHUB_APP.md)) or else `GITHUB_TOKEN`, is the only GitHub
+  credential involved. The git proxy adds it to clones and pushes, and arbetern
+  opens and follows the pull requests with it, so it needs **Contents** and
+  **Pull requests** read and write, **Checks** and **Commit statuses** read,
+  and **Actions** read and write on every project repository. An
   organization-scoped project also lists the organization's repositories, and
-  reaches only those the token can see. Project
-  pull requests are authored by that token's account and carry the arbetern
-  body marker, so they also appear on the console's **Pull requests** page
-  with source `project`.
-- Protect the base branch, keep the **Workflows** permission off the token, and
-  treat the CI runs that session pushes start as untrusted
+  reaches only those the App is installed on or the token can see. Project
+  pull requests are authored by that identity (with an App, its bot account
+  such as `arbetern[bot]`, which also authors the sessions' commits) and carry
+  the arbetern body marker, so they also appear on the console's
+  **Pull requests** page with source `project`.
+- Protect the base branch, keep the **Workflows** permission off the App or
+  token, and treat the CI runs that session pushes start as untrusted
   (see [Security](#security)).
 - Branch and title rules in CI apply to project pull requests too: their
   branches start with `claude/` unless the project's
   [conventions](#repository-conventions-and-tickets) name them, and their
-  author is the token's account.
+  author is arbetern's GitHub identity.
 
 ### Jira
 
@@ -195,7 +197,7 @@ true.
 | `sessions.permissionMode` | `bypassPermissions` | Claude Code permission mode in the session: `bypassPermissions`, `acceptEdits`, `dontAsk`, `auto` or `manual`. `bypassPermissions` is what the sandbox is for; the others make Claude refuse anything it would otherwise ask about, since nobody can answer |
 | `sessions.bashSandbox` | `false` | Claude Code's own Bash sandbox (bubblewrap) inside the pod, on top of the pod's isolation. Needs user namespaces on the nodes; sessions fail when it cannot start. Sandboxed commands reach the gateway host and `sandboxAllowedDomains` only |
 | `sessions.sandboxAllowedDomains` | `[]` | Hosts the Bash sandbox lets commands reach besides the gateway, such as a package mirror also listed in `egress.extraCIDRs` |
-| `sessions.git.name` / `email` | `arbetern` / `arbetern@users.noreply.github.com` | The commit identity |
+| `sessions.git.name` / `email` | `""` / `""` | The commit identity. Empty: the GitHub App's bot account with its no-reply email, so GitHub links the commits to the App; with a token, `arbetern` / `arbetern@users.noreply.github.com` |
 | `sessions.job.ttlSecondsAfterFinished` | `600` | Finished Jobs, and the token Secrets they own, are deleted after this long |
 | `sessions.job.terminationGracePeriodSeconds` | `120` | Room for the transcript upload and the end report |
 | `sessions.resources` | requests 2 CPU / 4Gi / 4Gi ephemeral; limits 4 CPU / 4Gi / 24Gi ephemeral | Per session |
@@ -218,7 +220,7 @@ The chart sets these on the arbetern container from the values above.
 
 | Variable | Default | Description |
 |---|---|---|
-| `PROJECTS_ENABLED` | `false` | `true` turns on the projects registry, the console API and the gateway listener. It needs `ANTHROPIC_API_KEY` and `GITHUB_TOKEN` |
+| `PROJECTS_ENABLED` | `false` | `true` turns on the projects registry, the console API and the gateway listener. It needs `ANTHROPIC_API_KEY` and GitHub access: `GITHUB_APP_ID` and `GITHUB_APP_PRIVATE_KEY`, or `GITHUB_TOKEN` |
 | `PROJECTS_GATEWAY_PORT` | `8081` | Port of the session gateway. Must differ from `PORT` |
 | `PROJECTS_GATEWAY_URL` | — | Required when enabled. The gateway as session pods reach it, `http://<service>.<namespace>.svc.cluster.local:<port>` |
 | `PROJECTS_NAMESPACE` | — | Required when enabled. Where session Jobs run |
@@ -569,8 +571,9 @@ Slack channel hears when auto-merge goes on. A few cases need more:
 - **Turned off by a person.** When a person turns auto-merge off by hand,
   arbetern leaves that pull request's auto-merge off until someone turns it on
   again, and the task names who did. When anything else turns it off, such as
-  an app, GitHub itself, or automation that uses arbetern's own GitHub account,
-  the pull request goes through the delay again.
+  an app (arbetern's own GitHub App included), GitHub itself, or automation
+  that uses arbetern's own token account, the pull request goes through the
+  delay again.
 - **Refused.** When GitHub refuses, for instance because the repository does
   not allow auto-merge or the merge method, the reason shows on the task and
   arbetern tries again after the delay.
@@ -1147,7 +1150,7 @@ browser request.
   approval before it turns auto-merge on.
 - **Branch rules.** Protect the base branch against direct pushes. Where
   nothing else uses the project's branch names, a ruleset on them and on tags
-  that only the token's account bypasses keeps everything else from creating,
+  that only arbetern's GitHub identity bypasses keeps everything else from creating,
   moving or deleting them; Claude Code on the web pushes `claude/` branches
   too, so a ruleset on all of `claude/**` would block it.
 - **CI on session branches.** A push the proxy forwards still starts the
@@ -1156,8 +1159,8 @@ browser request.
   untrusted: set the default workflow permissions to read-only (the rulesets
   above then also stop a workflow's `GITHUB_TOKEN`), keep deployment secrets in
   environments that need an approval, and keep the **Workflows** permission
-  (classic tokens: the `workflow` scope) off arbetern's token, so GitHub refuses
-  any session push that adds or changes a workflow.
+  (classic tokens: the `workflow` scope) off arbetern's GitHub App or token, so
+  GitHub refuses any session push that adds or changes a workflow.
 
 ### Cluster hardening outside the chart
 
@@ -1231,7 +1234,7 @@ browser request.
 | Symptom | Cause and fix |
 |---|---|
 | **New project** is missing, or saving answers 403 | The viewer is not in `adminTeams` / `adminEmails`. Refusals by the admin list are logged as `[rbac] DENIED … scope=projects` |
-| arbetern exits at startup with `PROJECTS_ENABLED needs …` | The chart sets `PROJECTS_NAMESPACE`, `PROJECTS_JOB_TEMPLATE` and `PROJECTS_GATEWAY_URL`; outside the chart set them yourself, and set `ANTHROPIC_API_KEY` and `GITHUB_TOKEN` |
+| arbetern exits at startup with `PROJECTS_ENABLED needs …` | The chart sets `PROJECTS_NAMESPACE`, `PROJECTS_JOB_TEMPLATE` and `PROJECTS_GATEWAY_URL`; outside the chart set them yourself, and set `ANTHROPIC_API_KEY` and GitHub access (`GITHUB_APP_ID` and `GITHUB_APP_PRIVATE_KEY`, or `GITHUB_TOKEN`) |
 | arbetern exits with `session Jobs need arbetern's service account token` | The pod runs without a mounted ServiceAccount token (`serviceAccount.automount: false`); sessions need it to create Jobs |
 | Last error `this deployment has no Datadog credentials for site <site>` | Give the deployment Datadog keys for that site |
 | Last error `scanning Datadog US: …`, `scanning Datadog EU: …`, `querying Datadog US metrics: …` or `syncing pull requests: …` | An outage or permission problem upstream. The tick skipped dispatching new work; the next one retries, and no failure is counted. A log signal on two sites still moves the site that answered on; a metric signal waits for both |

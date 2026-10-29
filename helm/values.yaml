@@ -277,7 +277,7 @@ dashboards:
 workflows:
   # GitOps sync: poll a remote GitHub repo for workflow JSON descriptors and
   # reconcile them into the local registry every `interval`. The same
-  # GITHUB_TOKEN the rest of the app uses is required. Workflows synced
+  # GitHub access (App or GITHUB_TOKEN) the rest of the app uses is required. Workflows synced
   # this way are tagged Source="gitops" so the UI can mark them read-only
   # (toggling enabled still works locally; everything else is overwritten
   # on the next tick to keep git as the source of truth).
@@ -322,9 +322,9 @@ projects:
     permissionMode: bypassPermissions  # Claude Code permission mode inside the session pod
     bashSandbox: false               # Claude Code's Bash sandbox (bubblewrap); the nodes must allow user namespaces
     sandboxAllowedDomains: []        # hosts sandboxed commands may reach besides the gateway, such as a package mirror
-    git:
-      name: arbetern
-      email: arbetern@users.noreply.github.com
+    git:                             # commit identity; empty: the GitHub App's bot account, or arbetern with a token
+      name: ""
+      email: ""
     job:
       ttlSecondsAfterFinished: 600
       terminationGracePeriodSeconds: 120
@@ -376,14 +376,23 @@ secretName: arbetern-secrets
 #   kubectl create secret generic arbetern-secrets \
 #     --from-literal=slack-bot-token=xoxb-... \
 #     --from-literal=slack-signing-secret=... \
-#     --from-literal=github-token=ghp_... \
+#     --from-literal=github-app-id=123456 \
+#     --from-file=github-app-private-key=arbetern.private-key.pem \
 #     --from-literal=slack-app-token=xapp-...  # optional, for Socket Mode
+# and still list github-app-id below (any non-empty value) so the GitHub App variables are wired.
 createSecret: false
 
 secretValues:
   slack-bot-token: "xoxb-EXAMPLE-TOKEN"
   slack-signing-secret: "EXAMPLE-SIGNING-SECRET"
-  github-token: "ghp_EXAMPLE-GITHUB-TOKEN"
+  # GitHub access as a GitHub App (recommended): GitHub shows the App's bot account as
+  # the author of every comment, pull request and commit. See docs/GITHUB_APP.md.
+  github-app-id: ""                 # App ID or client ID
+  github-app-installation-id: ""    # optional when the App is installed on one account only
+  github-app-private-key: ""        # the App's private key (PEM); use a | block
+  # Personal access token (optional): GitHub access when no App is set, and the
+  # GitHub Models LLM backend. See docs/GITHUB_PAT.md.
+  github-token: ""
   # Azure OpenAI credentials (optional – when set the app uses Azure instead of GitHub Models)
   azure-openai-endpoint: ""
   azure-api-key: ""

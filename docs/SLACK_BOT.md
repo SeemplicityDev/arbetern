@@ -66,7 +66,8 @@ Set these environment variables on the server running arbetern:
 ```
 SLACK_BOT_TOKEN=xoxb-your-bot-token
 SLACK_SIGNING_SECRET=your-signing-secret
-GITHUB_TOKEN=your-github-pat
+GITHUB_APP_ID=your-github-app-id
+GITHUB_APP_PRIVATE_KEY=your-github-app-private-key-pem   # or GITHUB_TOKEN=your-github-pat; see docs/GITHUB_APP.md
 GENERAL_MODEL=openai/gpt-4o
 PORT=8080
 # Optional: enable thread follow-ups via Socket Mode (see below)

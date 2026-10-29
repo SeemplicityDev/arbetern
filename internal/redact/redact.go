@@ -23,6 +23,8 @@ var rules = []struct {
 	{[]string{"sk-ant-"}, regexp.MustCompile(`(^|[^A-Za-z0-9])sk-ant-[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*`), "${1}sk-ant-<redacted>"},
 	{[]string{"eyj"}, regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*`), "<redacted-jwt>"},
 	{[]string{"xox", "xapp-"}, regexp.MustCompile(`\b(xox[abeposr]|xapp)-[A-Za-z0-9-]{10,}`), "${1}-<redacted>"},
+	// Stateless GitHub App installation tokens: ghs_<app id>_<JWT>.
+	{[]string{"ghs_"}, regexp.MustCompile(`\b(ghs_)[A-Za-z0-9._-]{36,}`), "${1}<redacted>"},
 	{[]string{"ghp_", "gho_", "ghu_", "ghs_", "ghr_"}, regexp.MustCompile(`\b(gh[pousr]_)[A-Za-z0-9]{30,}`), "${1}<redacted>"},
 	{[]string{"github_pat_"}, regexp.MustCompile(`\b(github_pat_)[A-Za-z0-9_]{22,}`), "${1}<redacted>"},
 	{[]string{"akia", "asia"}, regexp.MustCompile(`\b(AKIA|ASIA)[A-Z0-9]{16}\b`), "${1}<redacted>"},

@@ -1,5 +1,12 @@
 # GitHub Personal Access Token Setup Guide
 
+> arbetern's default is a **GitHub App** ([GITHUB_APP.md](GITHUB_APP.md)), so
+> GitHub shows the App's bot account on everything arbetern does instead of the
+> token owner's. Use a personal access token when you cannot register an App,
+> or for the GitHub Models LLM backend, which needs one. When an App is
+> configured as well, arbetern uses the App for GitHub and the token only for
+> GitHub Models.
+
 ## Overview
 
 Arbetern uses a GitHub Personal Access Token (PAT) for two purposes:
@@ -87,7 +94,7 @@ Set the token as the `GITHUB_TOKEN` environment variable where arbetern runs:
 GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 ```
 
-If you are using Azure OpenAI instead of GitHub Models for LLM inference, also set `AZURE_OPEN_AI_ENDPOINT` and `AZURE_API_KEY` and you can skip the GitHub Models requirement. Otherwise, `GITHUB_TOKEN` is used for both API access and LLM calls.
+If you are using Azure OpenAI instead of GitHub Models for LLM inference, also set `AZURE_OPEN_AI_ENDPOINT` and `AZURE_API_KEY` and you can skip the GitHub Models requirement. Otherwise, `GITHUB_TOKEN` is used for both API access and LLM calls. With `GITHUB_APP_ID` and `GITHUB_APP_PRIVATE_KEY` also set, the token serves only LLM calls.
 
 See the main [README](../README.md) for the full list of environment variables.
 

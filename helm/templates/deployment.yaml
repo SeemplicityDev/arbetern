@@ -89,11 +89,31 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.secretName }}
                   key: slack-signing-secret
+            {{- if index .Values.secretValues "github-app-id" }}
+            - name: GITHUB_APP_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: github-app-id
+            - name: GITHUB_APP_PRIVATE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: github-app-private-key
+            {{- if index .Values.secretValues "github-app-installation-id" }}
+            - name: GITHUB_APP_INSTALLATION_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: github-app-installation-id
+            {{- end }}
+            {{- end }}
             - name: GITHUB_TOKEN
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.secretName }}
                   key: github-token
+                  optional: true
             {{- if index .Values.secretValues "azure-openai-endpoint" }}
             - name: AZURE_OPEN_AI_ENDPOINT
               valueFrom:

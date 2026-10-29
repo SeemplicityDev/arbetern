@@ -45,13 +45,12 @@ const UserAgent = "arbetern/projects"
 
 // ClusterConfig is what arbetern needs to run project sessions as Jobs in its cluster.
 type ClusterConfig struct {
-	Kube        *kube.Client
-	Namespace   string // where session Jobs run
-	Template    string // file holding the session Job template as JSON
-	GatewayURL  string // the gateway as session pods reach it
-	APIKey      string // Anthropic API key the model proxy adds
-	GitHubToken string // token the git proxy adds
-	Model       string // model for sessions whose project names none
+	Kube       *kube.Client
+	Namespace  string // where session Jobs run
+	Template   string // file holding the session Job template as JSON
+	GatewayURL string // the gateway as session pods reach it
+	APIKey     string // Anthropic API key the model proxy adds
+	Model      string // model for sessions whose project names none
 }
 
 type cluster struct {
@@ -84,6 +83,8 @@ type clusterSession struct {
 	claudeSession string
 	resume        bool
 	deadline      time.Duration
+	gitName       string // commit author; empty keeps the Job template's
+	gitEmail      string
 }
 
 func (s clusterSession) workOrder() string {
@@ -343,7 +344,7 @@ func (c *cluster) renderJob(raw []byte, name string, s clusterSession) (map[stri
 	if repo.Name != "" {
 		fullName = repo.Owner + "/" + repo.Name
 	}
-	setEnv(container, map[string]string{
+	vars := map[string]string{
 		"ARBETERN_GATEWAY_URL":    c.cfg.GatewayURL,
 		"ARBETERN_WORK_ORDER":     s.workOrder(),
 		"ARBETERN_OWNER":          repo.Owner,
@@ -360,8 +361,21 @@ func (c *cluster) renderJob(raw []byte, name string, s clusterSession) (map[stri
 		"ANTHROPIC_DEFAULT_SONNET_MODEL": llm.AnthropicModel(string(llm.ModelSonnet)),
 		"ANTHROPIC_DEFAULT_OPUS_MODEL":   llm.AnthropicModel(string(llm.ModelOpus)),
 		"ANTHROPIC_SMALL_FAST_MODEL":     llm.AnthropicModel(string(llm.ModelHaiku)),
-	})
+	}
+	// A commit identity the chart sets explicitly wins over the GitHub App's.
+	if s.gitName != "" && !hasEnv(container, "ARBETERN_GIT_NAME") {
+		vars["ARBETERN_GIT_NAME"], vars["ARBETERN_GIT_EMAIL"] = s.gitName, s.gitEmail
+	}
+	setEnv(container, vars)
 	return job, nil
+}
+
+func hasEnv(container map[string]any, name string) bool {
+	env, _ := container["env"].([]any)
+	return slices.ContainsFunc(env, func(e any) bool {
+		entry, _ := e.(map[string]any)
+		return entry["name"] == name
+	})
 }
 
 func setSecretVolume(pod map[string]any, name string) error {
@@ -474,6 +488,12 @@ func (r *Registry) launch(ctx context.Context, p *Project, t *Task, round int) (
 	if err := r.writeBinding(ctx, id, b); err != nil {
 		return nil, fmt.Errorf("storing the session binding: %w", err)
 	}
+	var gitName, gitEmail string
+	if r.gh != nil {
+		if gitName, gitEmail, err = r.gh.CommitAuthor(ctx); err != nil {
+			log.Printf("[projects] %s task %s: the GitHub App's commit identity is unknown, so the session commits as its Job template says: %v", p.ID, t.ID, err)
+		}
+	}
 	s := clusterSession{
 		id:            id,
 		token:         token,
@@ -485,6 +505,8 @@ func (r *Registry) launch(ctx context.Context, p *Project, t *Task, round int) (
 		claudeSession: claudeSession,
 		resume:        resume,
 		deadline:      time.Duration(p.Limits.effective().SessionTimeoutMinutes)*time.Minute + jobDeadlineGrace,
+		gitName:       gitName,
+		gitEmail:      gitEmail,
 	}
 	if err := r.cluster.start(ctx, s); err != nil {
 		// The API server may have kept a Job whose creation answered with an error.

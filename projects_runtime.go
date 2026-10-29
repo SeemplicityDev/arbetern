@@ -14,12 +14,11 @@ func projectsCluster(cfg *config.Config) projects.ClusterConfig {
 		log.Fatalf("projects: session Jobs need arbetern's service account token: %v", err)
 	}
 	return projects.ClusterConfig{
-		Kube:        kc,
-		Namespace:   cfg.ProjectsNamespace,
-		Template:    cfg.ProjectsJobTemplate,
-		GatewayURL:  cfg.ProjectsGatewayURL,
-		APIKey:      cfg.AnthropicAPIKey,
-		GitHubToken: cfg.GitHubToken,
-		Model:       cfg.ProjectsModel,
+		Kube:       kc,
+		Namespace:  cfg.ProjectsNamespace,
+		Template:   cfg.ProjectsJobTemplate,
+		GatewayURL: cfg.ProjectsGatewayURL,
+		APIKey:     cfg.AnthropicAPIKey,
+		Model:      cfg.ProjectsModel,
 	}
 }

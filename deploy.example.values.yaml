@@ -61,7 +61,16 @@ backendView:
   emails: []             # e.g. ["ops@example.com", "example.com"]
 
 secretValues:
-  github-token: "ghp_your_github_token"
+  # GitHub App (recommended): GitHub shows the App's bot account on everything arbetern does.
+  # See docs/GITHUB_APP.md.
+  github-app-id: "123456"
+  # github-app-installation-id: "12345678"  # only when the App is installed on more than one account
+  github-app-private-key: |
+    -----BEGIN RSA PRIVATE KEY-----
+    your-github-app-private-key
+    -----END RSA PRIVATE KEY-----
+  # Personal access token instead of an App, or for the GitHub Models LLM backend (docs/GITHUB_PAT.md)
+  # github-token: "ghp_your_github_token"
   slack-bot-token: "xoxb-your-slack-bot-token"
   slack-signing-secret: "your-slack-signing-secret"
   # Anthropic API (optional — takes precedence over Bedrock, Azure OpenAI and GitHub Models)

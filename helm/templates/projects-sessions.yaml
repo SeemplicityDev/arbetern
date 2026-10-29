@@ -56,10 +56,14 @@ spec:
               value: /etc/claude/CLAUDE.md
             - name: ARBETERN_PERMISSION_MODE
               value: {{ $s.permissionMode | quote }}
+            {{- with $s.git.name }}
             - name: ARBETERN_GIT_NAME
-              value: {{ $s.git.name | quote }}
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with $s.git.email }}
             - name: ARBETERN_GIT_EMAIL
-              value: {{ $s.git.email | quote }}
+              value: {{ . | quote }}
+            {{- end }}
             - name: DISABLE_TELEMETRY
               value: "1"
             - name: DISABLE_ERROR_REPORTING

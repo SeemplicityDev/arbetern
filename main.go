@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log"
+	"maps"
 	"net/http"
 	"os"
 	"os/signal"
@@ -1263,6 +1264,40 @@ func extractIntroLine(intro string) string {
 	return "no description available"
 }
 
+// githubAppPermissions lists the GitHub App permissions arbetern uses, checked against what the installation grants.
+func githubAppPermissions(ctx context.Context, client *github.Client) []permission {
+	need := []struct {
+		name, level, desc string
+		required          bool
+	}{
+		{"contents", "write", "Read code, push branches and commits, merge pull requests", true},
+		{"pull_requests", "write", "Open, comment on, update and auto-merge pull requests", true},
+		{"metadata", "read", "Required by GitHub for every App", true},
+		{"actions", "write", "Read workflow runs, jobs and logs; re-run failed jobs", false},
+		{"checks", "read", "Read check runs and their annotations for CI feedback", false},
+		{"statuses", "read", "Read the commit statuses a project waits on", false},
+		{"administration", "read", "List the teams with access to a repository", false},
+	}
+	granted, err := client.AppPermissions(ctx)
+	if err != nil {
+		log.Printf("[status] reading the GitHub App's permissions: %v", err)
+	}
+	rank := map[string]int{"read": 1, "write": 2, "admin": 3}
+	out := make([]permission, 0, len(need))
+	for _, n := range need {
+		p := permission{Scope: n.name + ": " + n.level, Description: n.desc, Required: n.required}
+		if err == nil {
+			p.Granted = new(rank[granted[n.name]] >= rank[n.level])
+		}
+		out = append(out, p)
+		delete(granted, n.name)
+	}
+	for _, name := range slices.Sorted(maps.Keys(granted)) {
+		out = append(out, permission{Scope: name + ": " + granted[name], Granted: new(true), Extra: true})
+	}
+	return out
+}
+
 // hasScope checks if a scope exists in a granted scopes list.
 // For hierarchical scopes like "repo" covering "repo:status", does prefix matching.
 // Also handles classic PAT implicit grants (e.g. "repo" implies "actions" and "checks").
@@ -1371,7 +1406,11 @@ func refreshIntegrations(
 		{Scope: "checks:read", Description: "Read check run annotations for detailed CI feedback", Required: false},
 	}
 	ghAuthMode := ""
-	if cfg.GitHubToken != "" {
+	switch {
+	case ghClient != nil && ghClient.IsApp():
+		ghAuthMode = "GitHub App"
+		ghPerms = githubAppPermissions(context.Background(), ghClient)
+	case cfg.GitHubToken != "":
 		ghAuthMode = "Personal Access Token"
 		if ghClient != nil {
 			if scopes, err := ghClient.GetGrantedScopes(context.Background()); err == nil && scopes != nil {
@@ -1405,7 +1444,7 @@ func refreshIntegrations(
 		{
 			ID:          "github",
 			Name:        "GitHub",
-			Configured:  cfg.GitHubToken != "",
+			Configured:  ghClient != nil,
 			AuthMode:    ghAuthMode,
 			Permissions: ghPerms,
 		},
@@ -2076,7 +2115,14 @@ func main() {
 	slackClient := slack.NewClient(cfg.SlackBotToken)
 
 	var ghClient *github.Client
-	if cfg.GitHubToken != "" {
+	switch {
+	case cfg.GitHubAppConfigured():
+		ghClient, err = github.NewAppClient(github.AppConfig{ID: cfg.GitHubAppID, InstallationID: cfg.GitHubAppInstallation(), PrivateKey: cfg.GitHubAppPrivateKey})
+		if err != nil {
+			log.Fatalf("GitHub App setup failed: %v", err)
+		}
+		log.Printf("GitHub: authenticating as GitHub App %s", cfg.GitHubAppID)
+	case cfg.GitHubToken != "":
 		ghClient = github.NewClient(cfg.GitHubToken)
 	}
 
@@ -3226,7 +3272,7 @@ func main() {
 	var wfSyncer *gitopssync.Syncer
 	if cfg.WorkflowsGitOpsRepo != "" {
 		if ghClient == nil {
-			log.Printf("warn: WORKFLOWS_GITOPS_REPO is set but GITHUB_TOKEN is not — gitops sync disabled")
+			log.Printf("warn: WORKFLOWS_GITOPS_REPO is set but GitHub access is not — gitops sync disabled")
 		} else {
 			s, err := gitopssync.New(gitopssync.Config{
 				Owner:    cfg.WorkflowsGitOpsOwner,
@@ -3260,7 +3306,7 @@ func main() {
 	var dashSyncer *dashgitops.Syncer
 	if cfg.DashboardsGitOpsRepo != "" {
 		if ghClient == nil {
-			log.Printf("warn: DASHBOARDS_GITOPS_REPO is set but GITHUB_TOKEN is not — gitops sync disabled")
+			log.Printf("warn: DASHBOARDS_GITOPS_REPO is set but GitHub access is not — gitops sync disabled")
 		} else {
 			s, err := dashgitops.New(dashgitops.Config{
 				Owner:    cfg.DashboardsGitOpsOwner,

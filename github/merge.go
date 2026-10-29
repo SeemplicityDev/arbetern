@@ -68,6 +68,7 @@ func (c *Client) AutoMergeDisabledBy(ctx context.Context, nodeID string) (string
 					Nodes []struct {
 						ReasonCode string `json:"reasonCode"`
 						Disabler   *struct {
+							Type  string `json:"__typename"`
 							Login string `json:"login"`
 						} `json:"disabler"`
 					} `json:"nodes"`
@@ -78,7 +79,7 @@ func (c *Client) AutoMergeDisabledBy(ctx context.Context, nodeID string) (string
 			Message string `json:"message"`
 		} `json:"errors"`
 	}
-	query := `query($id:ID!){node(id:$id){... on PullRequest{timelineItems(last:1,itemTypes:[AUTO_MERGE_DISABLED_EVENT]){nodes{... on AutoMergeDisabledEvent{reasonCode disabler{login}}}}}}}`
+	query := `query($id:ID!){node(id:$id){... on PullRequest{timelineItems(last:1,itemTypes:[AUTO_MERGE_DISABLED_EVENT]){nodes{... on AutoMergeDisabledEvent{reasonCode disabler{__typename login}}}}}}}`
 	if err := c.graphql(ctx, query, map[string]any{"id": nodeID}, &resp); err != nil {
 		return "", fmt.Errorf("autoMergeDisabledEvent: %w", err)
 	}
@@ -86,7 +87,7 @@ func (c *Client) AutoMergeDisabledBy(ctx context.Context, nodeID string) (string
 		return "", &refusal{"autoMergeDisabledEvent", resp.Errors[0].Message}
 	}
 	nodes := resp.Data.Node.TimelineItems.Nodes
-	if len(nodes) == 0 || nodes[0].Disabler == nil || !strings.EqualFold(nodes[0].ReasonCode, "manually_disabled") {
+	if len(nodes) == 0 || nodes[0].Disabler == nil || nodes[0].Disabler.Type != "User" || !strings.EqualFold(nodes[0].ReasonCode, "manually_disabled") {
 		return "", nil
 	}
 	return nodes[0].Disabler.Login, nil

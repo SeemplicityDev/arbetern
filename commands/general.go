@@ -660,7 +660,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 			Type: "function",
 			Function: llm.ToolFunction{
 				Name:        ToolListUserRepos,
-				Description: "List all repositories accessible by the authenticated GitHub user. Use ONLY when the user explicitly asks to list/discover repos, or when no repository was provided and repo discovery is required.",
+				Description: "List all repositories the bot's GitHub credentials can access. Use ONLY when the user explicitly asks to list/discover repos, or when no repository was provided and repo discovery is required.",
 				Parameters:  json.RawMessage(`{"type":"object","properties":{}}`),
 			},
 		},
@@ -668,7 +668,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 			Type: "function",
 			Function: llm.ToolFunction{
 				Name:        ToolListRepoTeams,
-				Description: "List the GitHub teams that have direct access to a repository, with each team's permission level (admin, maintain, push, triage, or pull). This mirrors Settings → Collaborators and teams → Direct access in the GitHub UI. Use this to answer 'who can trigger / merge / admin <repo>'. Requires the bot's token to have read:org plus access to the repo; a 403 from GitHub usually means the token lacks read:org or the repo is private to another team. For more than ~3 repos, prefer `list_repo_teams_bulk` instead (parallel fetch).",
+				Description: "List the GitHub teams that have direct access to a repository, with each team's permission level (admin, maintain, push, triage, or pull). This mirrors Settings → Collaborators and teams → Direct access in the GitHub UI. Use this to answer 'who can trigger / merge / admin <repo>'. Requires read:org on the bot's token, or the Administration read permission on its GitHub App, plus access to the repo; a 403 from GitHub usually means that permission is missing or the repo is private to another team. For more than ~3 repos, prefer `list_repo_teams_bulk` instead (parallel fetch).",
 				Parameters: json.RawMessage(`{
 					"type":"object",
 					"properties":{

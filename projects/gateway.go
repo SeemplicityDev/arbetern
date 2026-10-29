@@ -123,8 +123,8 @@ func NewGateway(r *Registry) http.Handler {
 	if key := r.cluster.cfg.APIKey; key != "" {
 		g.models = newModelProxy(anthropicAPI, key, r.usage)
 	}
-	if token := r.cluster.cfg.GitHubToken; token != "" {
-		g.git = newGitProxy(githubWeb, token)
+	if r.gh != nil {
+		g.git = newGitProxy(githubWeb, r.gh.Token)
 	}
 	if r.deps.Tools != nil {
 		g.tools = append(slices.Clone(workOrderTools), integrationTools(r.deps.Tools.Tools())...)

@@ -190,7 +190,7 @@ func mergeSnapshot(pr *github.PRState, content string, checks []github.Check, di
 	for _, it := range discussion {
 		mine := strings.EqualFold(it.Author, self)
 		// An approval is what auto-merge waits for, and bots repost their conversation comments on every push, so neither restarts the delay.
-		if mine && (it.Kind != github.DiscussionComment || ownComment(it.Body)) || it.Kind == github.DiscussionReview && it.State == "APPROVED" || it.Bot && it.Kind == github.DiscussionComment {
+		if mine && (it.Kind != github.DiscussionComment || ownComment(it.Body)) || strings.Contains(it.Body, commentMarker) || it.Kind == github.DiscussionReview && it.State == "APPROVED" || it.Bot && it.Kind == github.DiscussionComment {
 			continue
 		}
 		talk = append(talk, strings.Join([]string{it.Kind, strconv.FormatInt(it.ID, 10), it.State, laterOf(it.CreatedAt, it.UpdatedAt).Format(time.RFC3339Nano)}, "\x1f"))

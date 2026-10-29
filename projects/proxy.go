@@ -91,8 +91,7 @@ func newModelProxy(upstream *url.URL, apiKey string, meter *usageMeter) *httputi
 	}
 }
 
-func newGitProxy(upstream *url.URL, token string) *httputil.ReverseProxy {
-	auth := "Basic " + base64.StdEncoding.EncodeToString([]byte("x-access-token:"+token))
+func newGitProxy(upstream *url.URL, token func(context.Context) (string, error)) *httputil.ReverseProxy {
 	return &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			target, _ := pr.In.Context().Value(gitTargetKey{}).(Repo)
@@ -103,15 +102,33 @@ func newGitProxy(upstream *url.URL, token string) *httputil.ReverseProxy {
 			pr.Out.URL = &url.URL{Scheme: upstream.Scheme, Host: upstream.Host, Path: "/" + target.Owner + "/" + target.Name + ".git" + op, RawQuery: pr.In.URL.RawQuery}
 			pr.Out.Host = upstream.Host
 			stripCredentials(pr.Out.Header)
-			pr.Out.Header.Set("Authorization", auth)
 		},
 		FlushInterval: -1,
-		Transport:     upstreamTransport(),
+		Transport:     gitAuth{token: token, next: upstreamTransport()},
 		ErrorHandler: func(w http.ResponseWriter, req *http.Request, err error) {
 			log.Printf("[projects] git proxy: %v", err)
 			http.Error(w, "GitHub could not be reached", http.StatusBadGateway)
 		},
 	}
+}
+
+// gitAuth adds GitHub's credential as each request leaves, since a GitHub App's token changes every hour.
+type gitAuth struct {
+	token func(context.Context) (string, error)
+	next  http.RoundTripper
+}
+
+func (t gitAuth) RoundTrip(req *http.Request) (*http.Response, error) {
+	token, err := t.token(req.Context())
+	if err != nil {
+		if req.Body != nil {
+			_ = req.Body.Close()
+		}
+		return nil, err
+	}
+	req = req.Clone(req.Context())
+	req.Header.Set("Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte("x-access-token:"+token)))
+	return t.next.RoundTrip(req)
 }
 
 func (g *gateway) handleModel(w http.ResponseWriter, req *http.Request) {

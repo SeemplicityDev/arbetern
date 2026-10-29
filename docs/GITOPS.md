@@ -102,9 +102,9 @@ to one of:
 - **Repo-absolute** — `"/arbetern/workflows/_shared/prompt.md"`. Treated
   as a path from the source repo's root.
 - **Cross-repo URL** — `"https://github.com/<owner>/<repo>/blob/<branch>/<path>"`.
-  The same `GITHUB_TOKEN` is used to fetch it, so it must have read
-  access to the target repo. Branch names containing slashes are not
-  supported.
+  arbetern's GitHub access (its GitHub App or `GITHUB_TOKEN`) fetches it,
+  so it must be able to read the target repo; an App must be installed on
+  it. Branch names containing slashes are not supported.
 
 ```jsonc
 {
@@ -229,8 +229,9 @@ syncer.
 | `dashboards.gitops.interval`              | `DASHBOARDS_GITOPS_INTERVAL`     | `5m`                    | Go duration. Minimum 30 s.                                           |
 | `dashboards.gitops.prune`                 | `DASHBOARDS_GITOPS_PRUNE`        | `true`                  | Delete locally-managed dashboards that disappear from git.           |
 
-Both syncers reuse the same `GITHUB_TOKEN` as the rest of the app, so it
-needs `contents:read` on the source repo(s). No extra credentials.
+Both syncers reuse the rest of the app's GitHub access (its GitHub App or
+`GITHUB_TOKEN`), so it needs `contents:read` on the source repo(s). No extra
+credentials.
 
 ## Helm example
 
@@ -287,7 +288,7 @@ spec:
             - configMapRef:
                 name: arbetern-gitops
             - secretRef:
-                name: arbetern-secrets   # provides GITHUB_TOKEN, etc.
+                name: arbetern-secrets   # provides the GitHub App credentials or GITHUB_TOKEN, etc.
 ```
 
 ## Operational notes
