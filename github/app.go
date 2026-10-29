@@ -91,13 +91,14 @@ func newAppAuth(cfg AppConfig) (*appAuth, error) {
 func parseAppKey(s string) (*rsa.PrivateKey, error) {
 	s = strings.TrimSpace(s)
 	if !strings.Contains(s, "-----BEGIN") {
-		if raw, err := base64.StdEncoding.DecodeString(s); err == nil {
+		// Wrapped or YAML-folded base64 can carry spaces, which the decoder rejects.
+		if raw, err := base64.StdEncoding.DecodeString(strings.Join(strings.Fields(s), "")); err == nil {
 			s = string(raw)
 		}
 	}
 	block, _ := pem.Decode([]byte(strings.ReplaceAll(s, `\n`, "\n")))
 	if block == nil {
-		return nil, errors.New("the GitHub App private key is not a PEM block")
+		return nil, errors.New("the GitHub App private key is neither a PEM block nor a base64-encoded one")
 	}
 	if key, err := x509.ParsePKCS1PrivateKey(block.Bytes); err == nil {
 		return key, nil

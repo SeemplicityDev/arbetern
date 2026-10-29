@@ -69,6 +69,8 @@ secretValues:
     -----BEGIN RSA PRIVATE KEY-----
     your-github-app-private-key
     -----END RSA PRIVATE KEY-----
+  # or on one line, base64-encoded (base64 -i arbetern.<date>.private-key.pem):
+  # github-app-private-key: "LS0tLS1CRUdJTiBSU0EgUFJJVkFURSBLRVktLS0tLQo..."
   # Personal access token instead of an App, or for the GitHub Models LLM backend (docs/GITHUB_PAT.md)
   # github-token: "ghp_your_github_token"
   slack-bot-token: "xoxb-your-slack-bot-token"

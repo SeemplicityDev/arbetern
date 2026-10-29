@@ -75,7 +75,7 @@ reads it from GitHub, so any name works.
 | Variable | Required | Description |
 |---|---|---|
 | `GITHUB_APP_ID` | yes | The App ID or client ID |
-| `GITHUB_APP_PRIVATE_KEY` | yes | The private key: the PEM file's content, base64-encoded or not |
+| `GITHUB_APP_PRIVATE_KEY` | yes | The private key: the PEM file's content, or that content base64-encoded |
 | `GITHUB_APP_INSTALLATION_ID` | no | The installation to act as; needed only when the App is installed on more than one account |
 
 With the Helm chart and `createSecret: true`:
@@ -87,6 +87,15 @@ secretValues:
     -----BEGIN RSA PRIVATE KEY-----
     ...
     -----END RSA PRIVATE KEY-----
+```
+
+or with the key on one line, base64-encoded
+(`base64 -i arbetern.<date>.private-key.pem`):
+
+```yaml
+secretValues:
+  github-app-id: "123456"
+  github-app-private-key: "LS0tLS1CRUdJTiBSU0EgUFJJVkFURSBLRVktLS0tLQo..."
 ```
 
 With a Secret you create yourself (`createSecret: false`):
@@ -153,8 +162,9 @@ The bot's login is `<slug>[bot]` in the REST API and in searches
 ## Troubleshooting
 
 **`GitHub App setup failed` at startup**
-- The private key is not a PEM block, or not the App's RSA key. Paste the whole
-  `.pem` file, including the `BEGIN` and `END` lines.
+- The private key is neither a PEM block nor a base64-encoded one, or not the
+  App's RSA key. Paste the whole `.pem` file, including the `BEGIN` and `END`
+  lines, or the output of `base64 -i` on it.
 
 **`creating a GitHub App installation token: … 401`**
 - The App ID does not match the key, the key was deleted, or the server's clock

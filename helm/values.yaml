@@ -389,7 +389,7 @@ secretValues:
   # the author of every comment, pull request and commit. See docs/GITHUB_APP.md.
   github-app-id: ""                 # App ID or client ID
   github-app-installation-id: ""    # optional when the App is installed on one account only
-  github-app-private-key: ""        # the App's private key (PEM); use a | block
+  github-app-private-key: ""        # the App's private key: PEM in a | block, or base64-encoded on one line
   # Personal access token (optional): GitHub access when no App is set, and the
   # GitHub Models LLM backend. See docs/GITHUB_PAT.md.
   github-token: ""
