@@ -1432,6 +1432,21 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 		}, llm.Tool{
 			Type: "function",
 			Function: llm.ToolFunction{
+				Name:        ToolTransitionJiraIssue,
+				Description: "Change a Jira issue's status (e.g. To Do → In Progress, Done or Won't Do) through one of the workflow transitions open to it now. Nothing changes when the issue is already in that status. When no transition fits, the error lists the ones available from the current status; call again with one of them.",
+				Parameters: json.RawMessage(`{
+					"type":"object",
+					"properties":{
+						"issue_key":{"type":"string","description":"Jira issue key (e.g. 'ENG-123')."},
+						"status":{"type":"string","description":"The status to move the issue to (e.g. 'In Progress', 'Done'), or the name of the transition to take."},
+						"resolution":{"type":"string","description":"Optional resolution to set with the transition (e.g. Won't Do, Duplicate), for a workflow where that is a resolution of a done status rather than a status of its own. Only a transition whose screen shows the resolution field accepts it; Jira refuses it on any other."}
+					},
+					"required":["issue_key","status"]
+				}`),
+			},
+		}, llm.Tool{
+			Type: "function",
+			Function: llm.ToolFunction{
 				Name:        ToolAssignJiraActiveSprint,
 				Description: "Move an existing Jira issue into the project's currently active sprint, overriding any prior (stale/closed) sprint value. No-op when the issue is already in the active sprint. Returns an informative message when no scrum board or active sprint exists for the project. Sprint field is the only thing mutated — summary, description, status, assignee are untouched.",
 				Parameters: json.RawMessage(`{
@@ -4364,6 +4379,52 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		log.Printf("[user=%s channel=%s] updated Jira issue %s (%s)", userID, channelID, args.IssueKey, strings.Join(updated, ", "))
 		return fmt.Sprintf("Successfully updated %s: %s", args.IssueKey, strings.Join(updated, " and "))
 
+	case ToolTransitionJiraIssue:
+		if errMsg := requireReady("Jira", h.jiraClient); errMsg != "" {
+			return errMsg
+		}
+		args, errMsg := parseToolArgs[struct {
+			IssueKey   string `json:"issue_key"`
+			Status     string `json:"status"`
+			Resolution string `json:"resolution"`
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
+		}
+		issueKey, status, resolution := strings.TrimSpace(args.IssueKey), strings.TrimSpace(args.Status), strings.TrimSpace(args.Resolution)
+		if issueKey == "" || status == "" {
+			return preconditionErrf("Error: issue_key and status are both required.")
+		}
+		current, transitions, err := h.jiraClient.IssueTransitions(issueKey)
+		if err != nil {
+			return fmt.Sprintf("Error reading the transitions of %s: %v", issueKey, err)
+		}
+		if strings.EqualFold(current.Name, status) {
+			return fmt.Sprintf("%s is already in %s; nothing changed.", issueKey, current.Name)
+		}
+		matches := jiraTransitionsTo(transitions, status)
+		switch {
+		case len(transitions) == 0:
+			return preconditionErrf("Error: %s has no transition from %s that the Jira account can take. The status may be final, or the account may lack the Transition Issues permission in this project.", issueKey, current.Name)
+		case len(matches) == 0:
+			return preconditionErrf("Error: %s has no transition to %q from %s. Available: %s.", issueKey, status, current.Name, jiraTransitionList(transitions))
+		case len(matches) > 1:
+			return preconditionErrf("Error: several transitions from %s match %q: %s. Call again with the name of the one to take.", current.Name, status, jiraTransitionList(matches))
+		}
+		t := matches[0]
+		if err := h.jiraClient.TransitionIssue(issueKey, t.ID, resolution); err != nil {
+			return fmt.Sprintf("Error moving %s to %s: %v", issueKey, t.To.Name, err)
+		}
+		log.Printf("[user=%s channel=%s] moved Jira issue %s from %s to %s via %q", userID, channelID, issueKey, current.Name, t.To.Name, t.Name)
+		moved := fmt.Sprintf("Moved %s from %s to %s", issueKey, current.Name, t.To.Name)
+		if !strings.EqualFold(t.Name, t.To.Name) {
+			moved += " through " + t.Name
+		}
+		if resolution != "" {
+			moved += " with resolution " + resolution
+		}
+		return moved + "."
+
 	case ToolAssignJiraActiveSprint:
 		if errMsg := requireReady("Jira", h.jiraClient); errMsg != "" {
 			return errMsg
@@ -7017,4 +7078,32 @@ func jiraFieldLine(f atlassian.FieldValue) string {
 		return label + ": (empty)"
 	}
 	return label + ": " + text.Truncate(value, 300)
+}
+
+func jiraTransitionsTo(ts []atlassian.IssueTransition, want string) []atlassian.IssueTransition {
+	var named, leading []atlassian.IssueTransition
+	for _, t := range ts {
+		switch {
+		case strings.EqualFold(t.Name, want):
+			named = append(named, t)
+		case strings.EqualFold(t.To.Name, want):
+			leading = append(leading, t)
+		}
+	}
+	if len(named) > 0 {
+		return named
+	}
+	return leading
+}
+
+func jiraTransitionList(ts []atlassian.IssueTransition) string {
+	out := make([]string, 0, len(ts))
+	for _, t := range ts {
+		if strings.EqualFold(t.Name, t.To.Name) {
+			out = append(out, t.To.Name)
+		} else {
+			out = append(out, t.Name+" → "+t.To.Name)
+		}
+	}
+	return strings.Join(out, ", ")
 }

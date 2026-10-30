@@ -2508,22 +2508,25 @@ func (e commentEnvelope) toComment() Comment {
 	}
 }
 
-// AddComment posts a comment on a Jira issue. The body is converted from
-// markdown-flavoured text to ADF using the same converter used by issue
-// descriptions. Returns the created comment.
-// IssueTransition is a workflow step an issue can take now; Category is its target status category: new, indeterminate or done.
-type IssueTransition struct {
-	ID       string
+// IssueStatus is a workflow status; Category is new, indeterminate or done.
+type IssueStatus struct {
 	Name     string
-	To       string
 	Category string
 }
 
-// IssueTransitions returns the category of an issue's current status and the transitions it can take now.
-func (c *Client) IssueTransitions(issueKey string) (string, []IssueTransition, error) {
+// IssueTransition is a workflow step an issue can take now.
+type IssueTransition struct {
+	ID   string
+	Name string
+	To   IssueStatus
+}
+
+// IssueTransitions returns an issue's current status and the transitions it can take now.
+func (c *Client) IssueTransitions(issueKey string) (IssueStatus, []IssueTransition, error) {
 	var issue struct {
 		Fields struct {
 			Status struct {
+				Name           string `json:"name"`
 				StatusCategory struct {
 					Key string `json:"key"`
 				} `json:"statusCategory"`
@@ -2531,7 +2534,7 @@ func (c *Client) IssueTransitions(issueKey string) (string, []IssueTransition, e
 		} `json:"fields"`
 	}
 	if err := c.jiraJSON(http.MethodGet, "/rest/api/3/issue/"+url.PathEscape(issueKey)+"?fields=status", nil, &issue); err != nil {
-		return "", nil, err
+		return IssueStatus{}, nil, err
 	}
 	var list struct {
 		Transitions []struct {
@@ -2546,18 +2549,22 @@ func (c *Client) IssueTransitions(issueKey string) (string, []IssueTransition, e
 		} `json:"transitions"`
 	}
 	if err := c.jiraJSON(http.MethodGet, "/rest/api/3/issue/"+url.PathEscape(issueKey)+"/transitions", nil, &list); err != nil {
-		return "", nil, err
+		return IssueStatus{}, nil, err
 	}
 	out := make([]IssueTransition, 0, len(list.Transitions))
 	for _, t := range list.Transitions {
-		out = append(out, IssueTransition{ID: t.ID, Name: t.Name, To: t.To.Name, Category: t.To.StatusCategory.Key})
+		out = append(out, IssueTransition{ID: t.ID, Name: t.Name, To: IssueStatus{Name: t.To.Name, Category: t.To.StatusCategory.Key}})
 	}
-	return issue.Fields.Status.StatusCategory.Key, out, nil
+	current := IssueStatus{Name: issue.Fields.Status.Name, Category: issue.Fields.Status.StatusCategory.Key}
+	return current, out, nil
 }
 
-// TransitionIssue moves an issue through the transition with the given id.
-func (c *Client) TransitionIssue(issueKey, transitionID string) error {
+// TransitionIssue moves an issue through the transition with the given id, setting resolution when it is not empty.
+func (c *Client) TransitionIssue(issueKey, transitionID, resolution string) error {
 	body := map[string]any{"transition": map[string]string{"id": transitionID}}
+	if resolution != "" {
+		body["fields"] = map[string]any{"resolution": map[string]string{"name": resolution}}
+	}
 	return c.jiraJSON(http.MethodPost, "/rest/api/3/issue/"+url.PathEscape(issueKey)+"/transitions", body, nil)
 }
 
@@ -2599,6 +2606,9 @@ func (c *Client) jiraJSON(method, path string, body, out any) error {
 	return json.Unmarshal(data, out)
 }
 
+// AddComment posts a comment on a Jira issue. The body is converted from
+// markdown-flavoured text to ADF using the same converter used by issue
+// descriptions. Returns the created comment.
 func (c *Client) AddComment(issueKey, body string) (*Comment, error) {
 	if strings.TrimSpace(issueKey) == "" {
 		return nil, fmt.Errorf("issue key is required")

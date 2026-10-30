@@ -284,13 +284,13 @@ func (j jiraTickets) ResolveTicket(_ context.Context, key string) error {
 	switch {
 	case err != nil:
 		return err
-	case current == "done":
+	case current.Category == "done":
 		return nil
 	}
 	// Several workflow steps end in a done category, such as won't do or duplicate; only the one named Done fits a merged fix.
 	for _, t := range transitions {
-		if t.Category == "done" && strings.EqualFold(t.To, "done") {
-			return j.c.TransitionIssue(key, t.ID)
+		if t.To.Category == "done" && strings.EqualFold(t.To.Name, "done") {
+			return j.c.TransitionIssue(key, t.ID, "")
 		}
 	}
 	return fmt.Errorf("%s has no transition to Done", key)

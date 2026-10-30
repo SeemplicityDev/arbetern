@@ -75,6 +75,7 @@ const (
 	ToolGetJiraIssue           = "get_jira_issue"
 	ToolGetJiraLabelAuthor     = "get_jira_label_author"
 	ToolUpdateJiraIssue        = "update_jira_issue"
+	ToolTransitionJiraIssue    = "transition_jira_issue"
 	ToolAssignJiraActiveSprint = "assign_jira_active_sprint"
 	ToolAssignJiraTeam         = "assign_jira_team"
 	ToolAddJiraComment         = "add_jira_comment"
@@ -249,6 +250,7 @@ var toolIntegration = map[string]string{
 	ToolGetJiraIssue:           integrationAtlassian,
 	ToolGetJiraLabelAuthor:     integrationAtlassian,
 	ToolUpdateJiraIssue:        integrationAtlassian,
+	ToolTransitionJiraIssue:    integrationAtlassian,
 	ToolAssignJiraActiveSprint: integrationAtlassian,
 	ToolAssignJiraTeam:         integrationAtlassian,
 	ToolAddJiraComment:         integrationAtlassian,

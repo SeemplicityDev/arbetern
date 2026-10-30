@@ -166,6 +166,7 @@ Classic API tokens inherit **all** permissions of the account, so using a person
    | `BROWSE_PROJECTS` | Browse Projects | List projects and view project metadata |
    | `CREATE_ISSUES` | Create Issues | Create new tickets via the API |
    | `EDIT_ISSUES` | Edit Issues | Update ticket descriptions and summaries (used by Seihin agent) |
+   | `TRANSITION_ISSUES` | Transition Issues | Move tickets to another status (`transition_jira_issue`, and `done_on_merge` in projects) |
    | `MODIFY_REPORTER` | Modify Reporter | Set the Reporter to the originating human on create (see [Reporter attribution](#reporter-attribution)) |
 
 3. **Generate the API token** from the service account:
@@ -214,6 +215,7 @@ Once configured, the bot exposes the following Jira tools to the LLM:
 | **search_jira_issues** | Search for issues using JQL (e.g., find all in-progress tickets for a user); `fields` adds up to 10 more fields to each result, by id or name, such as a custom field's option values. A field Jira does not return is named as such, not shown as empty |
 | **get_jira_issue** | Fetch full details of a specific issue by key (including description); `fields` adds up to 10 more fields, by id or name |
 | **update_jira_issue** | Update an issue's summary and/or description |
+| **transition_jira_issue** | Move an issue to another status through one of the workflow transitions open to it, by target status or transition name, optionally setting a resolution. When none fits, the error lists the transitions available from the current status |
 
 | **search_confluence_pages** | Search for Confluence pages by keyword |
 | **get_confluence_page** | Fetch the full content of a Confluence page by ID |

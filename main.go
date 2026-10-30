@@ -1461,6 +1461,7 @@ func refreshIntegrations(
 			{Scope: "BROWSE_PROJECTS", Description: "View projects, issues, and field metadata", Required: true},
 			{Scope: "CREATE_ISSUES", Description: "Create new issues (tickets, stories, bugs)", Required: true},
 			{Scope: "EDIT_ISSUES", Description: "Update issue descriptions, fields, and team assignments", Required: true},
+			{Scope: "TRANSITION_ISSUES", Description: "Move issues to another status", Required: false},
 			{Scope: "ASSIGN_ISSUES", Description: "Search assignable users and set issue assignees", Required: false},
 			{Scope: "BROWSE_USERS", Description: "Search for Jira users by name or email (global permission)", Required: false},
 		}
@@ -1472,7 +1473,7 @@ func refreshIntegrations(
 			)
 		}
 
-		keys := make([]string, 0, 5)
+		keys := make([]string, 0, len(jiraPerms))
 		for _, p := range jiraPerms {
 			if p.Scope == strings.ToUpper(p.Scope) {
 				keys = append(keys, p.Scope)
@@ -1539,6 +1540,7 @@ func refreshIntegrations(
 				{Scope: "BROWSE_PROJECTS", Description: "View projects, issues, and field metadata", Required: true},
 				{Scope: "CREATE_ISSUES", Description: "Create new issues (tickets, stories, bugs)", Required: true},
 				{Scope: "EDIT_ISSUES", Description: "Update issue descriptions, fields, and team assignments", Required: true},
+				{Scope: "TRANSITION_ISSUES", Description: "Move issues to another status", Required: false},
 				{Scope: "ASSIGN_ISSUES", Description: "Search assignable users and set issue assignees", Required: false},
 			},
 		})
@@ -2805,7 +2807,7 @@ func main() {
 			},
 			Slack:      slackClient,
 			Usage:      billingStore.Record,
-			Tools:      projectsRouter.ReadOnlyToolkit(),
+			Tools:      projectsRouter.SessionToolkit(),
 			Connectors: mcpRegistry,
 			Tickets:    projects.JiraTickets(jiraClient),
 			Cluster:    projectsCluster(cfg),

@@ -13,7 +13,7 @@ import (
 
 const (
 	mcpProtocolVersion = "2025-06-18"
-	mcpInstructions    = "Call get_task first; it returns your work order. The other tools read arbetern's integrations, such as Datadog, GitHub and Jira, with arbetern's own access. Finish with report_outcome."
+	mcpInstructions    = "Call get_task first; it returns your work order. The other tools read arbetern's integrations, such as Datadog, GitHub and Jira, with arbetern's own access, and transition_jira_issue moves a Jira issue to another status. Finish with report_outcome."
 
 	rpcParseError     = -32700
 	rpcInvalidRequest = -32600
