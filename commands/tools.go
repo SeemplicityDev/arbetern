@@ -33,6 +33,7 @@ const (
 	ToolGetPullRequest       = "get_pull_request"
 	ToolListPullRequests     = "list_pull_requests"
 	ToolSearchPullRequests   = "search_pull_requests"
+	ToolFindOpenPullRequests = "find_open_pull_requests"
 	ToolListCommits          = "list_commits"
 	ToolGetCommit            = "get_commit"
 	ToolSearchCode           = "search_code"
@@ -210,6 +211,7 @@ var toolIntegration = map[string]string{
 	ToolListCommits:          integrationGitHub,
 	ToolGetCommit:            integrationGitHub,
 	ToolSearchPullRequests:   integrationGitHub,
+	ToolFindOpenPullRequests: integrationGitHub,
 	ToolSearchCode:           integrationGitHub,
 	ToolSearchCodeOrg:        integrationGitHub,
 	ToolGetWorkflowRun:       integrationGitHub,

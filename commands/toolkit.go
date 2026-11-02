@@ -12,7 +12,7 @@ import (
 var readOnlyTools = []string{
 	ToolListOrgRepos, ToolListUserRepos, ToolListRepoTeams, ToolListRepoTeamsBulk, ToolGetFilesBulk, ToolGetFileContent,
 	ToolGetRepoDefaultBranch, ToolResolveOwner, ToolSearchFiles, ToolListDirectory, ToolGetPullRequest, ToolListPullRequests,
-	ToolSearchPullRequests, ToolListCommits, ToolGetCommit, ToolSearchCode, ToolSearchCodeOrg, ToolGetWorkflowRun,
+	ToolSearchPullRequests, ToolFindOpenPullRequests, ToolListCommits, ToolGetCommit, ToolSearchCode, ToolSearchCodeOrg, ToolGetWorkflowRun,
 	ToolSlackConversationsHistory, ToolSlackConversationsReplies, ToolFetchThreadContext, ToolGetSlackUserInfo, ToolLookupSlackUser,
 	ToolLookupCVE, ToolSearchCVE,
 	ToolSalesforceQuery, ToolSalesforceDescribe,

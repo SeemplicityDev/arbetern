@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -966,6 +967,27 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 						"state":{"type":"string","description":"Optional filter: 'open', 'closed', 'merged', or omit for all states."}
 					},
 					"required":["text"]
+				}`),
+			},
+		},
+		{
+			Type: "function",
+			Function: llm.ToolFunction{
+				Name:        ToolFindOpenPullRequests,
+				Description: "Find the OPEN pull requests of one or more repositories that match structured filters, in a single call: whose review they are waiting on (people or teams), who opened them, their labels and draft state. Use it for review queues ('which PRs are waiting on alice or the backend team?') and for open PRs by an author across several repos. A review request is pending until that reviewer submits a review, so someone who already reviewed no longer matches; a request made to a team matches requested_teams only, never its members' logins. Different filters must all match, while the values inside one filter are alternatives. Each result has the repo, number, title, author, created and updated times, base branch, draft flag, pending reviewers and teams, labels, URL and the start of the description. For text search across the organization use search_pull_requests; for a PR's changed files and diff use get_pull_request.",
+				Parameters: json.RawMessage(`{
+					"type":"object",
+					"properties":{
+						"repos":{"type":"array","items":{"type":"string"},"description":"Repository names (without owner) to look in."},
+						"requested_reviewers":{"type":"array","items":{"type":"string"},"description":"GitHub logins. Keeps pull requests with a pending review request to any of them."},
+						"requested_teams":{"type":"array","items":{"type":"string"},"description":"Team slugs ('backend' or 'org/backend'). Keeps pull requests with a pending review request to any of these teams. Given together with requested_reviewers, a pull request matching either list is kept."},
+						"authors":{"type":"array","items":{"type":"string"},"description":"GitHub logins. Keeps pull requests opened by any of them."},
+						"labels":{"type":"array","items":{"type":"string"},"description":"Keeps pull requests carrying any of these labels."},
+						"draft":{"type":"boolean","description":"false leaves drafts out, true keeps only drafts. Omit to keep both."},
+						"sort":{"type":"string","enum":["created","updated"],"description":"'created' (default): oldest first. 'updated': most recently updated first."},
+						"limit":{"type":"integer","description":"Maximum pull requests to return (default 50, max 200)."}
+					},
+					"required":["repos"]
 				}`),
 			},
 		},
@@ -3542,6 +3564,76 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		}
 		log.Printf("[user=%s channel=%s] searched PRs in org '%s' for %q (%d matches)", userID, channelID, owner, args.Text, len(prs))
 		return sb.String()
+
+	case ToolFindOpenPullRequests:
+		args, errMsg := parseToolArgs[struct {
+			Repos              []string `json:"repos"`
+			RequestedReviewers []string `json:"requested_reviewers"`
+			RequestedTeams     []string `json:"requested_teams"`
+			Authors            []string `json:"authors"`
+			Labels             []string `json:"labels"`
+			Draft              *bool    `json:"draft"`
+			Sort               string   `json:"sort"`
+			Limit              int      `json:"limit"`
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
+		}
+		repos := bareGitHubNames(args.Repos)
+		if len(repos) == 0 {
+			return "Error: repos is required."
+		}
+		owner, err := h.ghClient.ResolveOwner(ctx)
+		if err != nil {
+			return fmt.Sprintf("Error resolving owner: %v", err)
+		}
+		results, err := h.ghClient.ListOpenPullRequestsBulk(ctx, owner, repos)
+		if err != nil {
+			return fmt.Sprintf("Error listing open pull requests: %v", err)
+		}
+		filter := github.OpenPRFilter{
+			Reviewers: bareGitHubNames(args.RequestedReviewers),
+			Teams:     bareGitHubNames(args.RequestedTeams),
+			Authors:   bareGitHubNames(args.Authors),
+			Draft:     args.Draft,
+		}
+		for _, l := range args.Labels {
+			if l = strings.TrimSpace(l); l != "" {
+				filter.Labels = append(filter.Labels, l)
+			}
+		}
+		var prs []github.OpenPullRequest
+		var unread, truncated []string
+		for _, r := range results {
+			if r.Error != "" {
+				unread = append(unread, fmt.Sprintf("%s (%s)", r.Repo, r.Error))
+				continue
+			}
+			if r.Truncated {
+				truncated = append(truncated, r.Repo)
+			}
+			for _, pr := range r.PRs {
+				if filter.Match(pr) {
+					prs = append(prs, pr)
+				}
+			}
+		}
+		if len(unread) == len(results) {
+			return "Error: no repository could be read: " + strings.Join(unread, "; ")
+		}
+		byUpdated := args.Sort == "updated"
+		slices.SortStableFunc(prs, func(a, b github.OpenPullRequest) int {
+			if byUpdated {
+				return b.UpdatedAt.Compare(a.UpdatedAt)
+			}
+			return a.CreatedAt.Compare(b.CreatedAt)
+		})
+		limit := args.Limit
+		if limit <= 0 {
+			limit = 50
+		}
+		log.Printf("[user=%s channel=%s] found %d open PRs matching filters in %d repos (%d unreadable)", userID, channelID, len(prs), len(repos), len(unread))
+		return formatOpenPRs(owner, prs, min(limit, 200), byUpdated, len(results)-len(unread), unread, truncated)
 
 	case ToolListCommits:
 		args, errMsg := parseToolArgs[struct {
@@ -7106,4 +7198,63 @@ func jiraTransitionList(ts []atlassian.IssueTransition) string {
 		}
 	}
 	return strings.Join(out, ", ")
+}
+
+func bareGitHubNames(vals []string) []string {
+	var out []string
+	for _, v := range vals {
+		v = strings.TrimSpace(v)
+		v = strings.TrimPrefix(v[strings.LastIndex(v, "/")+1:], "@")
+		if v != "" && !slices.Contains(out, v) {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+func formatOpenPRs(owner string, prs []github.OpenPullRequest, limit int, byUpdated bool, read int, unread, truncated []string) string {
+	var sb strings.Builder
+	if len(prs) == 0 {
+		fmt.Fprintf(&sb, "No open pull requests match the filters in the %d repos read.\n", read)
+	} else {
+		order := "oldest first"
+		if byUpdated {
+			order = "most recently updated first"
+		}
+		fmt.Fprintf(&sb, "Open pull requests matching the filters in %d repos (%d), %s:\n", read, len(prs), order)
+		if len(prs) > limit {
+			fmt.Fprintf(&sb, "Showing the first %d; raise limit or narrow the filters to see the rest.\n", limit)
+			prs = prs[:limit]
+		}
+		for _, pr := range prs {
+			draft := ""
+			if pr.Draft {
+				draft = " [draft]"
+			}
+			fmt.Fprintf(&sb, "\n• %s#%d%s: %s\n", pr.Repo, pr.Number, draft, pr.Title)
+			fmt.Fprintf(&sb, "  Author: %s · Created: %s · Updated: %s · Base: %s\n",
+				pr.Author, pr.CreatedAt.UTC().Format(time.RFC3339), pr.UpdatedAt.UTC().Format(time.RFC3339), pr.BaseRef)
+			reviewers := slices.Clone(pr.RequestedReviewers)
+			for _, t := range pr.RequestedTeams {
+				reviewers = append(reviewers, "@"+owner+"/"+t)
+			}
+			if len(reviewers) > 0 {
+				fmt.Fprintf(&sb, "  Review requested from: %s\n", strings.Join(reviewers, ", "))
+			}
+			if len(pr.Labels) > 0 {
+				fmt.Fprintf(&sb, "  Labels: %s\n", strings.Join(pr.Labels, ", "))
+			}
+			fmt.Fprintf(&sb, "  URL: %s\n", pr.URL)
+			if desc := strings.Join(strings.Fields(text.StripHTML(pr.Body)), " "); desc != "" {
+				fmt.Fprintf(&sb, "  Description: %s\n", text.Truncate(desc, 300))
+			}
+		}
+	}
+	if len(truncated) > 0 {
+		fmt.Fprintf(&sb, "\nOnly the oldest open pull requests of %s were read; they have more than one call reads.\n", strings.Join(truncated, ", "))
+	}
+	if len(unread) > 0 {
+		fmt.Fprintf(&sb, "\nNot read, so not checked: %s\n", strings.Join(unread, "; "))
+	}
+	return sb.String()
 }

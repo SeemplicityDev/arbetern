@@ -396,7 +396,7 @@ const FLOW_INTEGRATIONS = [
   { id: 'jira', name: 'Jira', kind: 'source', keys: ['jira', 'jql', 'ticket', 'issue', 'project ='] },
   { id: 'confluence', name: 'Confluence', kind: 'source', keys: ['confluence', 'cql', 'search_confluence_pages', 'get_confluence_page', 'list_confluence_spaces', 'create_confluence_page'] },
   { id: 'github', name: 'GitHub', kind: 'both', keys: ['github', 'gh', 'repo', 'repository', 'pull request', 'pr ', 'pull-request', 'branch', 'commit', '.github'],
-    readKeys: ['get_file_content', 'get_files_bulk', 'list_pull_requests', 'search_pull_requests', 'get_pull_request', 'list_commits', 'search_code', 'search_code_org', 'search_files', 'list_directory', 'list_org_repos', 'list_user_repos', 'list_repo_teams', 'resolve_owner', 'get_repo_default_branch', 'get_authenticated_user', 'get_workflow_run'],
+    readKeys: ['get_file_content', 'get_files_bulk', 'list_pull_requests', 'search_pull_requests', 'find_open_pull_requests', 'get_pull_request', 'list_commits', 'search_code', 'search_code_org', 'search_files', 'list_directory', 'list_org_repos', 'list_user_repos', 'list_repo_teams', 'resolve_owner', 'get_repo_default_branch', 'get_authenticated_user', 'get_workflow_run'],
     writeKeys: ['modify_file', 'create_file', 'delete_file', 'move_file', 'regex_replace_file', 'rerun_failed_jobs', 'rerun_workflow'] },
   { id: 'slack', name: 'Slack', kind: 'output', keys: ['slack', 'channel', 'c0', 'u0', 'post_slack', 'dm '] },
   { id: 'datadog', name: 'Datadog', kind: 'source', keys: ['datadog', 'datadog_search_logs', 'datadog_list_monitors', 'datadog_get_monitor', 'datadog_list_hosts', 'datadog_get_dashboard', 'datadog_list_dashboards', 'datadog_query_metrics', 'dd_', 'env:prod'] },
