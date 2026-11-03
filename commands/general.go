@@ -974,7 +974,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 			Type: "function",
 			Function: llm.ToolFunction{
 				Name:        ToolFindOpenPullRequests,
-				Description: "Find the OPEN pull requests of one or more repositories that match structured filters, in a single call: whose review they are waiting on (people or teams), who opened them, their labels and draft state. Use it for review queues ('which PRs are waiting on alice or the backend team?') and for open PRs by an author across several repos. A review request is pending until that reviewer submits a review, so someone who already reviewed no longer matches; a request made to a team matches requested_teams only, never its members' logins. Different filters must all match, while the values inside one filter are alternatives. Each result has the repo, number, title, author, created and updated times, base branch, draft flag, pending reviewers and teams, labels, URL and the start of the description. For text search across the organization use search_pull_requests; for a PR's changed files and diff use get_pull_request.",
+				Description: "Find the OPEN pull requests of one or more repositories that match structured filters, in a single call: whose review they are waiting on (people or teams), who opened them, their labels and draft state. Use it for review queues ('which PRs are waiting on alice or the backend team?') and for open PRs by an author across several repos. A review request is pending until that reviewer submits a review, so someone who already reviewed no longer matches; a request made to a team matches requested_teams only, never its members' logins. Different filters must all match, while the values inside one filter are alternatives. Each result has the repo, number, title, author, created and updated times, base branch, draft flag, pending reviewers and teams, labels, URL and the start of the description, or with description_lines_containing the description lines that contain a given text. For text search across the organization use search_pull_requests; for a PR's changed files and diff use get_pull_request.",
 				Parameters: json.RawMessage(`{
 					"type":"object",
 					"properties":{
@@ -985,7 +985,8 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 						"labels":{"type":"array","items":{"type":"string"},"description":"Keeps pull requests carrying any of these labels."},
 						"draft":{"type":"boolean","description":"false leaves drafts out, true keeps only drafts. Omit to keep both."},
 						"sort":{"type":"string","enum":["created","updated"],"description":"'created' (default): oldest first. 'updated': most recently updated first."},
-						"limit":{"type":"integer","description":"Maximum pull requests to return (default 50, max 200)."}
+						"limit":{"type":"integer","description":"Maximum pull requests to return (default 50, max 200)."},
+						"description_lines_containing":{"type":"string","description":"Shows each pull request's description lines that contain this text (case-insensitive, up to 3) instead of the description's start, e.g. 'risk' for a declared risk line. Use it when one line of each description is all you need, rather than a get_pull_request per pull request."}
 					},
 					"required":["repos"]
 				}`),
@@ -3590,6 +3591,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 			Draft              *bool    `json:"draft"`
 			Sort               string   `json:"sort"`
 			Limit              int      `json:"limit"`
+			LinesContaining    string   `json:"description_lines_containing"`
 		}](argsJSON)
 		if errMsg != "" {
 			return errMsg
@@ -3648,7 +3650,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 			limit = 50
 		}
 		log.Printf("[user=%s channel=%s] found %d open PRs matching filters in %d repos (%d unreadable)", userID, channelID, len(prs), len(repos), len(unread))
-		return formatOpenPRs(owner, prs, min(limit, 200), byUpdated, len(results)-len(unread), unread, truncated)
+		return formatOpenPRs(owner, prs, min(limit, 200), byUpdated, strings.TrimSpace(args.LinesContaining), len(results)-len(unread), unread, truncated)
 
 	case ToolListCommits:
 		args, errMsg := parseToolArgs[struct {
@@ -7245,7 +7247,7 @@ func bareGitHubNames(vals []string) []string {
 	return out
 }
 
-func formatOpenPRs(owner string, prs []github.OpenPullRequest, limit int, byUpdated bool, read int, unread, truncated []string) string {
+func formatOpenPRs(owner string, prs []github.OpenPullRequest, limit int, byUpdated bool, linesContaining string, read int, unread, truncated []string) string {
 	var sb strings.Builder
 	if len(prs) == 0 {
 		fmt.Fprintf(&sb, "No open pull requests match the filters in the %d repos read.\n", read)
@@ -7278,7 +7280,13 @@ func formatOpenPRs(owner string, prs []github.OpenPullRequest, limit int, byUpda
 				fmt.Fprintf(&sb, "  Labels: %s\n", strings.Join(pr.Labels, ", "))
 			}
 			fmt.Fprintf(&sb, "  URL: %s\n", pr.URL)
-			if desc := strings.Join(strings.Fields(text.StripHTML(pr.Body)), " "); desc != "" {
+			if linesContaining != "" {
+				if lines := descriptionLinesContaining(pr.Body, linesContaining); len(lines) > 0 {
+					fmt.Fprintf(&sb, "  Description lines containing %q:\n    %s\n", linesContaining, strings.Join(lines, "\n    "))
+				} else {
+					fmt.Fprintf(&sb, "  Description lines containing %q: none\n", linesContaining)
+				}
+			} else if desc := strings.Join(strings.Fields(text.StripHTML(pr.Body)), " "); desc != "" {
 				fmt.Fprintf(&sb, "  Description: %s\n", text.Truncate(desc, 300))
 			}
 		}
@@ -7290,4 +7298,20 @@ func formatOpenPRs(owner string, prs []github.OpenPullRequest, limit int, byUpda
 		fmt.Fprintf(&sb, "\nNot read, so not checked: %s\n", strings.Join(unread, "; "))
 	}
 	return sb.String()
+}
+
+func descriptionLinesContaining(body, needle string) []string {
+	needle = strings.ToLower(needle)
+	var out []string
+	for _, line := range strings.Split(text.StripHTML(body), "\n") {
+		line = strings.Join(strings.Fields(line), " ")
+		if !strings.Contains(strings.ToLower(line), needle) {
+			continue
+		}
+		out = append(out, text.Truncate(line, 200))
+		if len(out) == 3 {
+			break
+		}
+	}
+	return out
 }
