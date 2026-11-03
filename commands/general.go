@@ -1369,7 +1369,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 			Type: "function",
 			Function: llm.ToolFunction{
 				Name:        ToolCreateJiraTicket,
-				Description: "Create a Jira ticket (issue). Use this when the user asks to create a ticket, task, story, or bug from the conversation content (e.g., a test plan, action item, or bug report). Populate the summary and description from the relevant content discussed in the conversation. IMPORTANT: Format the description using markdown — use # for headers, - for bullet lists, 1) for numbered lists, **bold** for emphasis, and `code` for inline code. Structure the ticket professionally with clear sections (e.g., ## Context, ## Scope, ## Acceptance Criteria). If the user asks to assign the ticket to a person, use the assignee field — or pass account_id directly when you already have the Jira accountId from resolve_jira_user (skips the fuzzy name search). If the user asks to assign to a team, use the team field. Set use_active_sprint=true to drop the new ticket into the project's currently active sprint. Use fields for arbitrary Jira fields like priority or custom fields (e.g. {\"priority\":{\"name\":\"High\"}}); typed parameters above always win on conflict.",
+				Description: "Create a Jira ticket (issue). Use this when the user asks to create a ticket, task, story, or bug from the conversation content (e.g., a test plan, action item, or bug report). Populate the summary and description from the relevant content discussed in the conversation. IMPORTANT: Format the description using markdown — use # for headers, - for bullet lists, 1) for numbered lists, **bold** for emphasis, and `code` for inline code. Structure the ticket professionally with clear sections (e.g., ## Context, ## Scope, ## Acceptance Criteria). If the user asks to assign the ticket to a person, use the assignee field — or pass account_id directly when you already have the Jira accountId from resolve_jira_user (skips the fuzzy name search). If the user asks to assign to a team, use the team field. Set use_active_sprint=true to drop the new ticket into the project's currently active sprint, or use_next_sprint=true for the next sprint. Use fields for arbitrary Jira fields like priority or custom fields (e.g. {\"priority\":{\"name\":\"High\"}}); typed parameters above always win on conflict.",
 				Parameters: json.RawMessage(`{
 					"type":"object",
 					"properties":{
@@ -1380,7 +1380,8 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 						"assignee":{"type":"string","description":"Name of the person to assign the ticket to (e.g. 'Ada', 'John Smith'). The system will search for a matching Jira user. Ignored when account_id is set."},
 						"account_id":{"type":"string","description":"Jira accountId of the assignee (e.g. '712020:abc-def'). When set, skips the fuzzy name search performed for 'assignee'. Get one via resolve_jira_user."},
 						"team":{"type":"string","description":"Name of the team to assign the ticket to (e.g. 'Application', 'DevOps', 'asgard'). The system will search for a matching Jira team."},
-						"use_active_sprint":{"type":"boolean","description":"When true, drop the new ticket into the project's currently active sprint (if a scrum board with an active sprint exists). Silently skipped when no active sprint is found."},
+						"use_active_sprint":{"type":"boolean","description":"When true, drop the new ticket into the project's currently active sprint (if a scrum board with an active sprint exists). When there is none, the ticket is created outside a sprint and the result says so."},
+						"use_next_sprint":{"type":"boolean","description":"When true, put the new ticket in the project's next sprint: the first future sprint after the active one. Do not combine with use_active_sprint. When there is none, the ticket is created outside a sprint and the result says so."},
 						"fields":{"type":"object","additionalProperties":true,"description":"Arbitrary Jira fields to set at create time (e.g. {\"priority\":{\"name\":\"High\"}}, {\"components\":[{\"name\":\"API\"}]}, custom fields like {\"customfield_10010\":\"value\"}). Typed parameters above (summary, description, issue_type, labels, assignee/account_id) always win on conflict."}
 					},
 					"required":["summary","description"]
@@ -1471,6 +1472,20 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 			Function: llm.ToolFunction{
 				Name:        ToolAssignJiraActiveSprint,
 				Description: "Move an existing Jira issue into the project's currently active sprint, overriding any prior (stale/closed) sprint value. No-op when the issue is already in the active sprint. Returns an informative message when no scrum board or active sprint exists for the project. Sprint field is the only thing mutated — summary, description, status, assignee are untouched.",
+				Parameters: json.RawMessage(`{
+					"type":"object",
+					"properties":{
+						"issue_key":{"type":"string","description":"Jira issue key (e.g. 'ENG-123')."},
+						"project":{"type":"string","description":"Optional project key. Defaults to the issue's project (derived from issue_key prefix) when omitted."}
+					},
+					"required":["issue_key"]
+				}`),
+			},
+		}, llm.Tool{
+			Type: "function",
+			Function: llm.ToolFunction{
+				Name:        ToolAssignJiraNextSprint,
+				Description: "Move an existing Jira issue into the project's next sprint: the first future sprint on the board running the active sprint, or the first future sprint when none is active. Use this when the user asks for next sprint; assign_jira_active_sprint is for the current one. Overrides any prior sprint value and is a no-op when the issue is already there. Returns an informative message when the project has no future sprint. Sprint field is the only thing mutated — summary, description, status, assignee are untouched.",
 				Parameters: json.RawMessage(`{
 					"type":"object",
 					"properties":{
@@ -4140,10 +4155,14 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 			AccountID       string                 `json:"account_id"`
 			Team            string                 `json:"team"`
 			UseActiveSprint bool                   `json:"use_active_sprint"`
+			UseNextSprint   bool                   `json:"use_next_sprint"`
 			Fields          map[string]interface{} `json:"fields"`
 		}](argsJSON)
 		if errMsg != "" {
 			return errMsg
+		}
+		if args.UseActiveSprint && args.UseNextSprint {
+			return preconditionErrf("Error: set use_active_sprint or use_next_sprint, not both.")
 		}
 		// Append agent stamp to the description.
 		stamp := fmt.Sprintf("\n\n---\nCreated by **%s** via Arbetern", h.agentID)
@@ -4253,22 +4272,27 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 			}
 		}
 
-		// Drop into the active sprint if requested. Done post-create because
+		// Drop into the active or next sprint if requested. Done post-create because
 		// the Sprint custom field id has to be discovered first and Jira
 		// Cloud rejects sprint writes inside the create payload on some
 		// instances; the update path is the reliable one.
-		if args.UseActiveSprint {
-			sprint, err := h.jiraClient.GetActiveSprintForProject(args.Project)
+		var sprintLine string
+		if args.UseActiveSprint || args.UseNextSprint {
+			sprint, which, err := h.lookupJiraSprint(args.Project, args.UseNextSprint)
 			switch {
 			case err != nil:
-				log.Printf("[user=%s channel=%s] active sprint lookup failed for %s: %v", userID, channelID, issue.Key, err)
+				log.Printf("[user=%s channel=%s] %s sprint lookup failed for %s: %v", userID, channelID, which, issue.Key, err)
+				sprintLine = fmt.Sprintf("\nSprint: not set, the %s sprint lookup failed: %v", which, err)
 			case sprint == nil:
-				log.Printf("[user=%s channel=%s] no active sprint found for project of %s", userID, channelID, issue.Key)
+				log.Printf("[user=%s channel=%s] no %s sprint found for project of %s", userID, channelID, which, issue.Key)
+				sprintLine = fmt.Sprintf("\nSprint: not set, the project has no %s sprint", which)
 			default:
 				if err := h.jiraClient.SetSprintField(issue.Key, sprint.ID); err != nil {
 					log.Printf("[user=%s channel=%s] failed to set sprint %d on %s: %v", userID, channelID, sprint.ID, issue.Key, err)
+					sprintLine = fmt.Sprintf("\nSprint: not set, adding it to %s sprint %q failed: %v", which, sprint.Name, err)
 				} else {
-					log.Printf("[user=%s channel=%s] added %s to active sprint %q (id %d)", userID, channelID, issue.Key, sprint.Name, sprint.ID)
+					log.Printf("[user=%s channel=%s] added %s to %s sprint %q (id %d)", userID, channelID, issue.Key, which, sprint.Name, sprint.ID)
+					sprintLine = fmt.Sprintf("\nSprint: %s (the %s sprint)", sprint.Name, which)
 				}
 			}
 		}
@@ -4278,7 +4302,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		if reporterName != "" {
 			result += fmt.Sprintf("\nReporter: %s (the requesting user)", reporterName)
 		}
-		return result
+		return result + sprintLine
 
 	case ToolListJiraProjects:
 		if errMsg := requireReady("Jira", h.jiraClient); errMsg != "" {
@@ -4517,7 +4541,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		}
 		return moved + "."
 
-	case ToolAssignJiraActiveSprint:
+	case ToolAssignJiraActiveSprint, ToolAssignJiraNextSprint:
 		if errMsg := requireReady("Jira", h.jiraClient); errMsg != "" {
 			return errMsg
 		}
@@ -4541,22 +4565,22 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		if project == "" {
 			return "Error: could not determine project from issue_key; pass project explicitly."
 		}
-		sprint, err := h.jiraClient.GetActiveSprintForProject(project)
+		sprint, which, err := h.lookupJiraSprint(project, name == ToolAssignJiraNextSprint)
 		if err != nil {
-			return fmt.Sprintf("Error resolving active sprint for project %s: %v", project, err)
+			return fmt.Sprintf("Error resolving %s sprint for project %s: %v", which, project, err)
 		}
 		if sprint == nil {
-			return fmt.Sprintf("No active sprint on project %s — nothing to assign.", project)
+			return fmt.Sprintf("No %s sprint on project %s — nothing to assign.", which, project)
 		}
-		// Skip if the issue is already in the named active sprint.
+		// Skip if the issue is already in the named sprint.
 		if issue, err := h.jiraClient.GetIssue(issueKey); err == nil && strings.EqualFold(issue.Sprint, sprint.Name) {
-			return fmt.Sprintf("%s is already in active sprint %q (id %d) — no change.", issueKey, sprint.Name, sprint.ID)
+			return fmt.Sprintf("%s is already in %s sprint %q (id %d) — no change.", issueKey, which, sprint.Name, sprint.ID)
 		}
 		if err := h.jiraClient.SetSprintField(issueKey, sprint.ID); err != nil {
-			return fmt.Sprintf("Error assigning %s to active sprint %q (id %d): %v", issueKey, sprint.Name, sprint.ID, err)
+			return fmt.Sprintf("Error assigning %s to %s sprint %q (id %d): %v", issueKey, which, sprint.Name, sprint.ID, err)
 		}
-		log.Printf("[user=%s channel=%s] assigned %s to active sprint %q (id %d) on project %s", userID, channelID, issueKey, sprint.Name, sprint.ID, project)
-		return fmt.Sprintf("Assigned %s to active sprint %q (id %d).", issueKey, sprint.Name, sprint.ID)
+		log.Printf("[user=%s channel=%s] assigned %s to %s sprint %q (id %d) on project %s", userID, channelID, issueKey, which, sprint.Name, sprint.ID, project)
+		return fmt.Sprintf("Assigned %s to %s sprint %q (id %d).", issueKey, which, sprint.Name, sprint.ID)
 
 	case ToolAssignJiraTeam:
 		if errMsg := requireReady("Jira", h.jiraClient); errMsg != "" {
@@ -7198,6 +7222,15 @@ func jiraTransitionList(ts []atlassian.IssueTransition) string {
 		}
 	}
 	return strings.Join(out, ", ")
+}
+
+func (h *GeneralHandler) lookupJiraSprint(project string, next bool) (*atlassian.Sprint, string, error) {
+	if next {
+		sprint, err := h.jiraClient.GetNextSprintForProject(project)
+		return sprint, "next", err
+	}
+	sprint, err := h.jiraClient.GetActiveSprintForProject(project)
+	return sprint, "active", err
 }
 
 func bareGitHubNames(vals []string) []string {

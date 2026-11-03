@@ -2790,6 +2790,15 @@ func (c *Client) SprintFieldID() string {
 // client's configured default project. Returns (nil, nil) when no scrum board
 // or active sprint exists — that's a normal state, not an error.
 func (c *Client) GetActiveSprintForProject(projectKey string) (*Sprint, error) {
+	return c.projectSprint(projectKey, false)
+}
+
+// GetNextSprintForProject returns the first future sprint on the board running the project's active sprint (any board's when none is active), or nil when there is none.
+func (c *Client) GetNextSprintForProject(projectKey string) (*Sprint, error) {
+	return c.projectSprint(projectKey, true)
+}
+
+func (c *Client) projectSprint(projectKey string, next bool) (*Sprint, error) {
 	if strings.TrimSpace(projectKey) == "" {
 		projectKey = c.projectKey
 	}
@@ -2835,10 +2844,15 @@ func (c *Client) GetActiveSprintForProject(projectKey string) (*Sprint, error) {
 	// per project is rare but real (e.g. team-specific scrum boards under
 	// one project), and we don't have a signal to pick a "best" one.
 	// A board that cannot be read is skipped, but when no board yields a sprint its error is returned, not "no sprint".
+	states := "active"
+	if next {
+		states = "active,future"
+	}
 	var failed error
+	var firstFuture *Sprint
 	for _, b := range boards.Values {
-		sprintURL := fmt.Sprintf("%s/rest/agile/1.0/board/%d/sprint?state=active",
-			c.baseURL, b.ID)
+		sprintURL := fmt.Sprintf("%s/rest/agile/1.0/board/%d/sprint?state=%s",
+			c.baseURL, b.ID, states)
 		sreq, err := http.NewRequest(http.MethodGet, sprintURL, nil)
 		if err != nil {
 			failed = cmp.Or(failed, err)
@@ -2867,13 +2881,30 @@ func (c *Client) GetActiveSprintForProject(projectKey string) (*Sprint, error) {
 			failed = cmp.Or(failed, fmt.Errorf("board %d sprints: %w", b.ID, err))
 			continue
 		}
-		if len(sprints.Values) > 0 {
-			s := sprints.Values[0]
+		var active, future *Sprint
+		for i := range sprints.Values {
+			s := &sprints.Values[i]
 			if s.BoardID == 0 {
 				s.BoardID = b.ID
 			}
-			return &s, nil
+			switch {
+			case active == nil && strings.EqualFold(s.State, "active"):
+				active = s
+			case future == nil && strings.EqualFold(s.State, "future"):
+				future = s
+			}
 		}
+		switch {
+		case active != nil && !next:
+			return active, nil
+		case active != nil:
+			return future, nil
+		case firstFuture == nil:
+			firstFuture = future
+		}
+	}
+	if firstFuture != nil {
+		return firstFuture, nil
 	}
 	return nil, failed
 }
