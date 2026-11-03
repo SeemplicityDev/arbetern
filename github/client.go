@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	gh "github.com/google/go-github/v91/github"
 
@@ -904,8 +905,8 @@ var workflowRunURLPattern = regexp.MustCompile(`https://github\.com/([^/]+)/([^/
 // prURLPattern matches GitHub PR URLs like https://github.com/owner/repo/pull/123
 var prURLPattern = regexp.MustCompile(`https://github\.com/([^/]+)/([^/]+)/pull/(\d+)`)
 
-// jiraKeyPattern matches Jira issue keys like ABC-123.
-var jiraKeyPattern = regexp.MustCompile(`(?i)\b([A-Z][A-Z0-9]+-\d+)\b`)
+// jiraKeyPattern matches a token that is a whole Jira issue key, like ABC-123.
+var jiraKeyPattern = regexp.MustCompile(`^[A-Z][A-Z0-9]+-[1-9][0-9]*$`)
 
 // ExtractPRURLs returns all GitHub PR URLs found in the given text.
 func ExtractPRURLs(text string) []string {
@@ -1401,11 +1402,13 @@ func (c *Client) listPullRequestFiles(ctx context.Context, owner, repo string, n
 
 func extractJiraKeys(s string) map[string]struct{} {
 	out := make(map[string]struct{})
-	for _, m := range jiraKeyPattern.FindAllStringSubmatch(strings.ToUpper(s), -1) {
-		if len(m) < 2 {
-			continue
+	tokens := strings.FieldsFunc(s, func(r rune) bool {
+		return r != '-' && r != '_' && !unicode.IsLetter(r) && !unicode.IsDigit(r)
+	})
+	for _, token := range tokens {
+		if jiraKeyPattern.MatchString(token) {
+			out[token] = struct{}{}
 		}
-		out[m[1]] = struct{}{}
 	}
 	return out
 }
