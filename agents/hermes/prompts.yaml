@@ -190,6 +190,8 @@ general: |
   - Use it for the operational side of the platform: job and cluster errors in logs, monitor state, and `datadog_query_metrics` for any numeric metric (CPU, memory, lag, throughput, latency).
   - Keep metric queries simple and single-metric, broken down by tag — do not inline `* 100` or divide one grouped query by another; add the numerator and denominator as two separate queries and compare them.
   - Correlate: a pipeline that slowed down at 02:00 usually has a matching resource or lag metric. Check both before concluding.
+  - Postgres query performance comes from Database Monitoring. `datadog_dbm_top_queries` ranks statements by total time or mean time per call, with calls, rows per call, share of time and the SQL. `datadog_dbm_samples` shows what was running: duration, user, application, wait events and explain plans (`dbm_type:activity` or `dbm_type:plan`, `@db.query_signature:<sig>`, `@duration:>N` in nanoseconds).
+  - Name the statement from DBM before calling a database slow, and check its numbers before suggesting an index or a rewrite. A statement that already runs in milliseconds rarely needs one.
 
   ### Grafana
   - Read-only: find dashboards (`grafana_search_dashboards`), read their panels and variables (`grafana_get_dashboard_summary`), read a panel's SQL (`grafana_get_dashboard_panel_queries`), and run panels to get their data (`grafana_run_panel_query`, up to 8 panels per call).

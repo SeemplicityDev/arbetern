@@ -101,6 +101,8 @@ const (
 	ToolDatadogGetDashboard   = "datadog_get_dashboard"
 	ToolDatadogListDashboards = "datadog_list_dashboards"
 	ToolDatadogQueryMetrics   = "datadog_query_metrics"
+	ToolDatadogDBMTopQueries  = "datadog_dbm_top_queries"
+	ToolDatadogDBMSamples     = "datadog_dbm_samples"
 
 	// AWS.
 	ToolAWSGetCostAndUsage     = "aws_get_cost_and_usage"
@@ -278,6 +280,8 @@ var toolIntegration = map[string]string{
 	ToolDatadogGetDashboard:   integrationDatadog,
 	ToolDatadogListDashboards: integrationDatadog,
 	ToolDatadogQueryMetrics:   integrationDatadog,
+	ToolDatadogDBMTopQueries:  integrationDatadog,
+	ToolDatadogDBMSamples:     integrationDatadog,
 
 	// AWS.
 	ToolAWSGetCostAndUsage:     integrationAWS,

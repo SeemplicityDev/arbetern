@@ -21,7 +21,7 @@ var readOnlyTools = []string{
 	ToolResolveJiraUser, ToolResolveJiraTeam, ToolGetJiraDashboard, ToolGetJiraFilter,
 	ToolSearchConfluencePages, ToolGetConfluencePage, ToolListConfluenceSpaces,
 	ToolDatadogSearchLogs, ToolDatadogLogsAggregate, ToolDatadogListMonitors, ToolDatadogGetMonitor, ToolDatadogListHosts,
-	ToolDatadogGetDashboard, ToolDatadogListDashboards, ToolDatadogQueryMetrics,
+	ToolDatadogGetDashboard, ToolDatadogListDashboards, ToolDatadogQueryMetrics, ToolDatadogDBMTopQueries, ToolDatadogDBMSamples,
 	ToolAWSGetCostAndUsage, ToolAWSGetCostForecast, ToolAWSListDimensionValues,
 	ToolAWSAthenaQuery, ToolAWSAthenaSchema, ToolAWSAthenaCatalogs,
 	ToolAzureGetCostAndUsage, ToolAzureGetCostForecast, ToolAzureListDimensionValues,

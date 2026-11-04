@@ -446,6 +446,10 @@ func (c *Client) baseURL() string {
 	return fmt.Sprintf("https://api.%s", c.site)
 }
 
+func (c *Client) appURL() string {
+	return fmt.Sprintf("https://app.%s", c.site)
+}
+
 // Rate-limit / retry tuning for the Datadog transport.
 const (
 	// ddMaxRetries bounds retry attempts on 408, 429 and 5xx responses.
@@ -545,6 +549,15 @@ func ctxSleep(ctx context.Context, d time.Duration) bool {
 	}
 }
 
+type apiError struct {
+	status int
+	body   string
+}
+
+func (e *apiError) Error() string {
+	return fmt.Sprintf("datadog API returned %d: %s", e.status, e.body)
+}
+
 func (c *Client) get(ctx context.Context, path string, params url.Values, target interface{}) error {
 	u := c.baseURL() + path
 	if params != nil {
@@ -556,25 +569,27 @@ func (c *Client) get(ctx context.Context, path string, params url.Values, target
 		return err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("datadog API returned %d: %s", resp.StatusCode, string(body))
+		return &apiError{status: resp.StatusCode, body: string(body)}
 	}
 	return decodeJSON(resp, body, target)
 }
 
 func (c *Client) post(ctx context.Context, path string, payload interface{}, target interface{}) error {
-	u := c.baseURL() + path
+	return c.postURL(ctx, c.baseURL()+path, path, payload, target)
+}
 
+func (c *Client) postURL(ctx context.Context, u, logPath string, payload interface{}, target interface{}) error {
 	bodyBytes, err := json.Marshal(payload)
 	if err != nil {
 		return fmt.Errorf("encoding request body: %w", err)
 	}
 
-	body, resp, err := c.doRequest(ctx, http.MethodPost, u, path, bodyBytes)
+	body, resp, err := c.doRequest(ctx, http.MethodPost, u, logPath, bodyBytes)
 	if err != nil {
 		return err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("datadog API returned %d: %s", resp.StatusCode, string(body))
+		return &apiError{status: resp.StatusCode, body: string(body)}
 	}
 	return decodeJSON(resp, body, target)
 }
@@ -1091,15 +1106,18 @@ func NormalizeLogsTime(v string) string {
 	return time.Now().Add(d).UTC().Format(time.RFC3339)
 }
 
-// parseTimeArg accepts ISO-8601, unix seconds, or relative shorthand like
-// "-1h", "-30m", "-7d". Empty falls back to the provided default.
+// parseTimeArg accepts ISO-8601, unix seconds, "now", or relative shorthand
+// like "-1h", "-30m", "-7d", "now-24h". Empty falls back to the provided default.
 func parseTimeArg(v string, def time.Time) (int64, error) {
 	v = strings.TrimSpace(v)
 	if v == "" {
 		return def.Unix(), nil
 	}
-	if strings.HasPrefix(v, "-") || strings.HasPrefix(v, "+") {
-		if d, err := time.ParseDuration(v); err == nil {
+	if v == "now" {
+		return time.Now().Unix(), nil
+	}
+	if rel := strings.TrimPrefix(v, "now"); strings.HasPrefix(rel, "-") || strings.HasPrefix(rel, "+") {
+		if d, err := parseRelativeDuration(rel); err == nil {
 			return time.Now().Add(d).Unix(), nil
 		}
 	}
@@ -1113,6 +1131,17 @@ func parseTimeArg(v string, def time.Time) (int64, error) {
 		return t.Unix(), nil
 	}
 	return 0, fmt.Errorf("unrecognized time format %q (use ISO-8601, unix seconds, or a duration like -1h)", v)
+}
+
+func parseRelativeDuration(s string) (time.Duration, error) {
+	if days, ok := strings.CutSuffix(s, "d"); ok {
+		n, err := strconv.Atoi(days)
+		if err != nil {
+			return 0, err
+		}
+		return time.Duration(n) * 24 * time.Hour, nil
+	}
+	return time.ParseDuration(s)
 }
 
 // FormatMetricsQuery renders a metrics query response into a Slack-friendly

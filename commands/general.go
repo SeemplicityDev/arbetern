@@ -1829,6 +1829,41 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 					"required":["query"]
 				}`),
 			},
+		}, llm.Tool{
+			Type: "function",
+			Function: llm.ToolFunction{
+				Name:        ToolDatadogDBMTopQueries,
+				Description: "Rank PostgreSQL statements with Datadog Database Monitoring (DBM) query metrics, which come from pg_stat_statements. Each row is one normalized statement (its query_signature) with its total execution time and share of all statement time in the scope, calls, mean time per call, rows per call, and the start of its SQL. Sort by 'total_time' (default) for what costs the database the most time, or 'mean_time' for what is slowest per call. Use it to find the statements behind database load or latency, and to confirm a query is actually slow before suggesting an index or a rewrite. Executions are counted when they finish, so a query that is still running shows up only in datadog_dbm_samples. Default window: the last 24 hours.",
+				Parameters: json.RawMessage(`{
+					"type":"object",
+					"properties":{
+						"scope":{"type":"string","description":"Metric tag filter for the databases to rank, e.g. 'dbclusteridentifier:my-cluster', 'host:my-db-1', 'env:prod AND db:app'. Use the tags the org's Postgres monitors and dashboards group by. Defaults to '*' (every Postgres host DBM monitors on the site)."},
+						"group_by":{"description":"Up to 2 tags to split each statement by, e.g. 'dbclusteridentifier' or ['host','db'], to see where it runs.","oneOf":[{"type":"string"},{"type":"array","items":{"type":"string"}}]},
+						"sort":{"type":"string","enum":["total_time","mean_time"],"description":"'total_time' (default) ranks by total execution time over the window; 'mean_time' by mean time per call."},
+						"limit":{"type":"integer","description":"Statements to return (default 10, max 50)."},
+						"from":{"type":"string","description":"Start of the window: ISO-8601, unix seconds, 'now-24h', or a relative duration ('-24h', '-7d'). Defaults to -24h."},
+						"to":{"type":"string","description":"End of the window, same formats as 'from'. Defaults to now."},
+						"site":{"type":"string","enum":["us","eu"],"description":"Datadog site to query: 'us' (datadoghq.com), 'eu' (datadoghq.eu). Omit to query all configured sites."}
+					}
+				}`),
+			},
+		}, llm.Tool{
+			Type: "function",
+			Function: llm.ToolFunction{
+				Name:        ToolDatadogDBMSamples,
+				Description: "Search Datadog Database Monitoring (DBM) query samples and explain plans for PostgreSQL, grouped by record type, query_signature and database instance. Samples are snapshots of the queries running on a database, taken every few seconds, so one long query appears in many samples. Each group shows how many records matched, the longest duration seen, the first and last time, databases, users, applications, states and wait events, and the full normalized SQL. Plan groups add the estimated cost, and the first three groups also show the plan's operator tree (scan type per table with estimated rows, filters and index conditions) and the other attributes of their longest record (state, pid, blocking pids and the like). Use it to name the statement behind a long-running-query alert, to get the full SQL and plan for a query_signature from datadog_dbm_top_queries, and to see what a query waited on. It reads the newest 1,000 matching records; when the result says it stopped there, narrow the query or the window. Samples are kept 15 days. Default window: the last hour.",
+				Parameters: json.RawMessage(`{
+					"type":"object",
+					"properties":{
+						"query":{"type":"string","description":"DBM search query. 'dbm_type:activity' selects query samples and 'dbm_type:plan' explain plans. Narrow with '@db.query_signature:<sig>', '@db.user:<user>', '@db.application:<app>', 'host:<host>' or another tag on the database host, and '@duration:>N' with N in nanoseconds (e.g. '@duration:>60000000000' for longer than a minute)."},
+						"limit":{"type":"integer","description":"Statement groups to show (default 10, max 30)."},
+						"from":{"type":"string","description":"Start of the window: ISO-8601, unix seconds, 'now-24h', or a relative duration ('-1h', '-24h', '-7d'). Defaults to -1h."},
+						"to":{"type":"string","description":"End of the window, same formats as 'from'. Defaults to now."},
+						"site":{"type":"string","enum":["us","eu"],"description":"Datadog site to query: 'us' (datadoghq.com), 'eu' (datadoghq.eu). Omit to query all configured sites."}
+					},
+					"required":["query"]
+				}`),
+			},
 		})
 	}
 
@@ -5527,6 +5562,57 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 			return fmt.Sprintf("Error querying Datadog metrics: %v", err)
 		}
 		log.Printf("[user=%s channel=%s] queried Datadog metrics (site=%s, query=%q, from=%q, to=%q)", userID, channelID, args.Site, args.Query, args.From, args.To)
+		return result
+
+	case ToolDatadogDBMTopQueries:
+		if h.datadogClients == nil {
+			return "Error: Datadog integration is not configured. Set DD_API_KEY_US/DD_APP_KEY_US and/or DD_API_KEY_EU/DD_APP_KEY_EU to enable it."
+		}
+		args, errMsg := parseToolArgs[struct {
+			Scope   string      `json:"scope"`
+			GroupBy groupBySpec `json:"group_by"`
+			Sort    string      `json:"sort"`
+			Limit   int         `json:"limit"`
+			From    string      `json:"from"`
+			To      string      `json:"to"`
+			Site    string      `json:"site"`
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
+		}
+		result, err := h.datadogClients.DBMTopQueries(ctx, args.Site, datadog.DBMTopQueriesOptions{
+			Scope: args.Scope, GroupBy: args.GroupBy, Sort: args.Sort, Limit: args.Limit, From: args.From, To: args.To,
+		})
+		if err != nil {
+			return fmt.Sprintf("Error reading Datadog DBM query metrics: %v", err)
+		}
+		log.Printf("[user=%s channel=%s] ranked Datadog DBM statements (site=%s, scope=%q, group_by=%v, sort=%s)", userID, channelID, args.Site, args.Scope, []string(args.GroupBy), args.Sort)
+		return result
+
+	case ToolDatadogDBMSamples:
+		if h.datadogClients == nil {
+			return "Error: Datadog integration is not configured. Set DD_API_KEY_US/DD_APP_KEY_US and/or DD_API_KEY_EU/DD_APP_KEY_EU to enable it."
+		}
+		args, errMsg := parseToolArgs[struct {
+			Query string `json:"query"`
+			Limit int    `json:"limit"`
+			From  string `json:"from"`
+			To    string `json:"to"`
+			Site  string `json:"site"`
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
+		}
+		if strings.TrimSpace(args.Query) == "" {
+			return "Error: query is required (e.g. 'dbm_type:activity @duration:>60000000000')."
+		}
+		result, err := h.datadogClients.DBMSamples(ctx, args.Site, datadog.DBMSamplesOptions{
+			Query: args.Query, Limit: args.Limit, From: args.From, To: args.To,
+		})
+		if err != nil {
+			return fmt.Sprintf("Error searching Datadog DBM samples: %v", err)
+		}
+		log.Printf("[user=%s channel=%s] searched Datadog DBM samples for %q (site=%s)", userID, channelID, args.Query, args.Site)
 		return result
 
 	// ---- AWS Cost Explorer tools ----

@@ -126,6 +126,7 @@ general: |
   - For log searches, use Datadog query syntax: 'pod_name:prefix*', 'service:name status:error', 'env:prod source:kubernetes @http.status_code:>499', etc.
   - Use datadog_list_hosts to check infrastructure health and find hosts running specific services.
   - Use datadog_get_dashboard / datadog_list_dashboards to understand what metrics and monitors a team tracks.
+  - For PostgreSQL performance, use datadog_dbm_top_queries (statements ranked by total or mean time per call, from pg_stat_statements) and datadog_dbm_samples (running queries, wait events and explain plans; filter with dbm_type:activity or dbm_type:plan and @db.query_signature).
   - **For ANY question about numeric metrics (CPU, memory, network, disk, latency, throughput, error rate, pod count, load, etc.), USE datadog_query_metrics.** This is the only tool that can return actual metric values broken down by tag. Do NOT reply "I can only search logs/monitors/dashboards" — query the metric directly.
     - CPU usage by Kubernetes app: `avg:kubernetes.cpu.usage.total{cluster_name:<cluster>} by {kube_app_name}` (nanocores — the viewer converts to cores/millicores automatically).
     - CPU requests by app: `avg:kubernetes.cpu.requests{*} by {kube_app_name}` (nanocores).
