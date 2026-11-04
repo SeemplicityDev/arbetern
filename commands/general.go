@@ -1833,14 +1833,16 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 			Type: "function",
 			Function: llm.ToolFunction{
 				Name:        ToolDatadogDBMTopQueries,
-				Description: "Rank PostgreSQL statements with Datadog Database Monitoring (DBM) query metrics, which come from pg_stat_statements. Each row is one normalized statement (its query_signature) with its total execution time and share of all statement time in the scope, calls, mean time per call, rows per call, and the start of its SQL. Sort by 'total_time' (default) for what costs the database the most time, or 'mean_time' for what is slowest per call. Use it to find the statements behind database load or latency, and to confirm a query is actually slow before suggesting an index or a rewrite. Executions are counted when they finish, so a query that is still running shows up only in datadog_dbm_samples. Default window: the last 24 hours.",
+				Description: "Rank PostgreSQL statements with Datadog Database Monitoring (DBM) query metrics, which come from pg_stat_statements. Each row is one normalized statement (its query_signature) with its total execution time and share of all statement time in the scope, calls, mean time per call, rows per call, and the start of its SQL. Sort by 'total_time' (default) for what costs the database the most time, or 'mean_time' for what is slowest per call. Set 'baseline_days' to compare each row with the days before the window (mean and time per day, now ÷ before), which shows regressions. Set aggregate 'group' to rank the group_by tag values themselves, e.g. execution time per database role or per cluster. Use it to find the statements behind database load or latency, and to confirm a query is actually slow before suggesting an index or a rewrite. Executions are counted when they finish, so a query that is still running shows up only in datadog_dbm_samples. Default window: the last 24 hours.",
 				Parameters: json.RawMessage(`{
 					"type":"object",
 					"properties":{
 						"scope":{"type":"string","description":"Metric tag filter for the databases to rank, e.g. 'dbclusteridentifier:my-cluster', 'host:my-db-1', 'env:prod AND db:app'. Use the tags the org's Postgres monitors and dashboards group by. Defaults to '*' (every Postgres host DBM monitors on the site)."},
 						"group_by":{"description":"Up to 2 tags to split each statement by, e.g. 'dbclusteridentifier' or ['host','db'], to see where it runs.","oneOf":[{"type":"string"},{"type":"array","items":{"type":"string"}}]},
 						"sort":{"type":"string","enum":["total_time","mean_time"],"description":"'total_time' (default) ranks by total execution time over the window; 'mean_time' by mean time per call."},
-						"limit":{"type":"integer","description":"Statements to return (default 10, max 50)."},
+						"aggregate":{"type":"string","enum":["statement","group"],"description":"'statement' (default) ranks statements. 'group' ranks the group_by tag values across all their statements, e.g. group_by 'user' for execution time per database role. Needs group_by."},
+						"baseline_days":{"type":"integer","description":"Compare each row with this many days before the window (max 30), e.g. 7. Omit for no comparison."},
+						"limit":{"type":"integer","description":"Rows to return (default 10, max 50)."},
 						"from":{"type":"string","description":"Start of the window: ISO-8601, unix seconds, 'now-24h', or a relative duration ('-24h', '-7d'). Defaults to -24h."},
 						"to":{"type":"string","description":"End of the window, same formats as 'from'. Defaults to now."},
 						"site":{"type":"string","enum":["us","eu"],"description":"Datadog site to query: 'us' (datadoghq.com), 'eu' (datadoghq.eu). Omit to query all configured sites."}
@@ -1851,7 +1853,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 			Type: "function",
 			Function: llm.ToolFunction{
 				Name:        ToolDatadogDBMSamples,
-				Description: "Search Datadog Database Monitoring (DBM) query samples and explain plans for PostgreSQL, grouped by record type, query_signature and database instance. Samples are snapshots of the queries running on a database, taken every few seconds, so one long query appears in many samples. Each group shows how many records matched, the longest duration seen, the first and last time, databases, users, applications, states and wait events, and the full normalized SQL. Plan groups add the estimated cost, and the first three groups also show the plan's operator tree (scan type per table with estimated rows, filters and index conditions) and the other attributes of their longest record (state, pid, blocking pids and the like). Use it to name the statement behind a long-running-query alert, to get the full SQL and plan for a query_signature from datadog_dbm_top_queries, and to see what a query waited on. It reads the newest 1,000 matching records; when the result says it stopped there, narrow the query or the window. Samples are kept 15 days. Default window: the last hour.",
+				Description: "Search Datadog Database Monitoring (DBM) query samples and explain plans for PostgreSQL, grouped by record type, query_signature and database instance. Samples are snapshots of the queries running on a database, taken every few seconds, so one long query appears in many samples. Each group shows how many records matched, the longest duration seen, the first and last time, databases, users and applications, the share of records per state and per wait event (an active sample with no wait event counts as CPU, so the shares show where the statement's time goes), how many records were blocking or blocked by other sessions, and the full normalized SQL. Plan groups add the estimated cost, and the first three groups also show the plan's operator tree (scan type per table with estimated rows, filters and index conditions) and the other attributes of their longest record (state, pid, blocking pids and the like). Use it to name the statement behind a long-running-query alert, to get the full SQL and plan for a query_signature from datadog_dbm_top_queries, and to see what a query waited on. It reads the newest 1,000 matching records; when the result says it stopped there, narrow the query or the window. Samples are kept 15 days. Default window: the last hour.",
 				Parameters: json.RawMessage(`{
 					"type":"object",
 					"properties":{
@@ -5569,24 +5571,27 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 			return "Error: Datadog integration is not configured. Set DD_API_KEY_US/DD_APP_KEY_US and/or DD_API_KEY_EU/DD_APP_KEY_EU to enable it."
 		}
 		args, errMsg := parseToolArgs[struct {
-			Scope   string      `json:"scope"`
-			GroupBy groupBySpec `json:"group_by"`
-			Sort    string      `json:"sort"`
-			Limit   int         `json:"limit"`
-			From    string      `json:"from"`
-			To      string      `json:"to"`
-			Site    string      `json:"site"`
+			Scope        string      `json:"scope"`
+			GroupBy      groupBySpec `json:"group_by"`
+			Sort         string      `json:"sort"`
+			Aggregate    string      `json:"aggregate"`
+			BaselineDays int         `json:"baseline_days"`
+			Limit        int         `json:"limit"`
+			From         string      `json:"from"`
+			To           string      `json:"to"`
+			Site         string      `json:"site"`
 		}](argsJSON)
 		if errMsg != "" {
 			return errMsg
 		}
 		result, err := h.datadogClients.DBMTopQueries(ctx, args.Site, datadog.DBMTopQueriesOptions{
-			Scope: args.Scope, GroupBy: args.GroupBy, Sort: args.Sort, Limit: args.Limit, From: args.From, To: args.To,
+			Scope: args.Scope, GroupBy: args.GroupBy, Sort: args.Sort, Aggregate: args.Aggregate,
+			BaselineDays: args.BaselineDays, Limit: args.Limit, From: args.From, To: args.To,
 		})
 		if err != nil {
 			return fmt.Sprintf("Error reading Datadog DBM query metrics: %v", err)
 		}
-		log.Printf("[user=%s channel=%s] ranked Datadog DBM statements (site=%s, scope=%q, group_by=%v, sort=%s)", userID, channelID, args.Site, args.Scope, []string(args.GroupBy), args.Sort)
+		log.Printf("[user=%s channel=%s] ranked Datadog DBM statements (site=%s, scope=%q, group_by=%v, sort=%s, aggregate=%s, baseline_days=%d)", userID, channelID, args.Site, args.Scope, []string(args.GroupBy), args.Sort, args.Aggregate, args.BaselineDays)
 		return result
 
 	case ToolDatadogDBMSamples:

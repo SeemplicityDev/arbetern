@@ -25,6 +25,7 @@ const (
 	defaultDBMStatements = 10
 	maxDBMStatements     = 50
 	maxDBMGroupByTags    = 2
+	maxDBMBaselineDays   = 30
 	defaultDBMGroups     = 10
 	maxDBMGroups         = 30
 	dbmDetailGroups      = 3
@@ -33,6 +34,8 @@ const (
 	dbmTopTextChars      = 300
 	dbmSampleTextChars   = 1500
 	dbmPlanCondChars     = 160
+
+	dayMs = 24 * 60 * 60 * 1000
 )
 
 // DBMSortMeanTime ranks statements by mean time per call instead of total time.
@@ -48,14 +51,19 @@ var (
 	}
 )
 
+// DBMAggregateGroups ranks the group_by tag values themselves instead of the statements within them.
+const DBMAggregateGroups = "group"
+
 // DBMTopQueriesOptions selects the Postgres statements DBMTopQueries ranks.
 type DBMTopQueriesOptions struct {
-	Scope   string
-	GroupBy []string
-	Sort    string
-	Limit   int
-	From    string
-	To      string
+	Scope        string
+	GroupBy      []string
+	Sort         string
+	Aggregate    string
+	BaselineDays int
+	Limit        int
+	From         string
+	To           string
 }
 
 // DBMSamplesOptions selects the query samples and explain plans DBMSamples reads.
@@ -116,9 +124,12 @@ type dbmStatement struct {
 	totalNs   float64
 	calls     float64
 	rows      float64
+	baseNs    float64
+	baseCalls float64
 	hasTotal  bool
 	hasCalls  bool
 	hasRows   bool
+	hasBase   bool
 	text      string
 }
 
@@ -126,7 +137,10 @@ type dbmTopResult struct {
 	scope        string
 	groupBy      []string
 	sort         string
+	bySignature  bool
 	fromMs, toMs int64
+	baseDays     int
+	baseOK       bool
 	scopeNs      float64
 	hasScope     bool
 	statements   []dbmStatement
@@ -142,12 +156,19 @@ func (c *Client) dbmTopQueries(ctx context.Context, o DBMTopQueriesOptions) (*db
 	if err != nil {
 		return nil, err
 	}
-	res := &dbmTopResult{scope: metricScope(o.Scope), groupBy: groupBy, sort: "total_time", fromMs: fromMs, toMs: toMs}
+	res := &dbmTopResult{scope: metricScope(o.Scope), groupBy: groupBy, sort: "total_time", bySignature: o.Aggregate != DBMAggregateGroups, fromMs: fromMs, toMs: toMs}
 	if o.Sort == DBMSortMeanTime {
 		res.sort = DBMSortMeanTime
 	}
+	if !res.bySignature && len(groupBy) == 0 {
+		return nil, fmt.Errorf("aggregate %q needs at least one group_by tag", DBMAggregateGroups)
+	}
 	limit := boundedOrDefault(o.Limit, defaultDBMStatements, maxDBMStatements)
-	keys := append([]string{"query_signature"}, groupBy...)
+	var sigKey []string
+	if res.bySignature {
+		sigKey = []string{"query_signature"}
+	}
+	keys := slices.Concat(sigKey, groupBy)
 
 	var ranked []scalarRow
 	var unit string
@@ -174,7 +195,7 @@ func (c *Client) dbmTopQueries(ctx context.Context, o DBMTopQueriesOptions) (*db
 		}
 		index[statementKey(st.signature, st.groups)] = len(res.statements)
 		res.statements = append(res.statements, st)
-		if dbmSignatureRE.MatchString(st.signature) && !slices.Contains(sigs, st.signature) {
+		if res.bySignature && dbmSignatureRE.MatchString(st.signature) && !slices.Contains(sigs, st.signature) {
 			sigs = append(sigs, st.signature)
 		}
 	}
@@ -187,41 +208,61 @@ func (c *Client) dbmTopQueries(ctx context.Context, o DBMTopQueriesOptions) (*db
 	} else if len(total) > 0 {
 		res.scopeNs, res.hasScope = total[0].value*nanosPer(unit), true
 	}
-	if len(sigs) == 0 {
-		return res, nil
-	}
 
-	narrowed := signatureScope(res.scope, sigs)
-	merge := func(metric string, extra []string, apply func(st *dbmStatement, r scalarRow, unit string)) {
-		k := append(append([]string{"query_signature"}, extra...), groupBy...)
-		rows, unit, err := c.queryScalar(ctx, fromMs, toMs, "v", map[string]string{"v": dbmMetricQuery(metric, narrowed, k)}, k, min(len(sigs)*25, 1000))
+	detailScope, detailLimit := res.scope, 1000
+	if res.bySignature {
+		if len(sigs) == 0 {
+			return res, nil
+		}
+		detailScope, detailLimit = signatureScope(res.scope, sigs), min(len(sigs)*25, 1000)
+	}
+	merge := func(fromMs, toMs int64, metric string, extra []string, apply func(st *dbmStatement, r scalarRow, unit string)) bool {
+		k := slices.Concat(sigKey, extra, groupBy)
+		rows, unit, err := c.queryScalar(ctx, fromMs, toMs, "v", map[string]string{"v": dbmMetricQuery(metric, detailScope, k)}, k, detailLimit)
 		if err != nil {
-			res.notes = append(res.notes, fmt.Sprintf("postgresql.queries.%s unavailable: %v", metric, err))
-			return
+			res.notes = append(res.notes, fmt.Sprintf("postgresql.queries.%s unavailable for %s → %s: %v", metric, formatMs(fromMs), formatMs(toMs), err))
+			return false
 		}
 		for _, r := range rows {
 			if i, ok := index[statementKey(r.tags["query_signature"], tagValues(r.tags, groupBy))]; ok {
 				apply(&res.statements[i], r, unit)
 			}
 		}
+		return true
 	}
 	if res.sort == DBMSortMeanTime {
-		merge("time", nil, func(st *dbmStatement, r scalarRow, unit string) {
+		merge(fromMs, toMs, "time", nil, func(st *dbmStatement, r scalarRow, unit string) {
 			st.totalNs += r.value * nanosPer(unit)
 			st.hasTotal = true
 		})
 	}
-	merge("count", []string{"query"}, func(st *dbmStatement, r scalarRow, _ string) {
+	var withText []string
+	if res.bySignature {
+		withText = []string{"query"}
+	}
+	merge(fromMs, toMs, "count", withText, func(st *dbmStatement, r scalarRow, _ string) {
 		st.calls += r.value
 		st.hasCalls = true
 		if t := r.tags["query"]; t != "N/A" && len(t) > len(st.text) {
 			st.text = t
 		}
 	})
-	merge("rows", nil, func(st *dbmStatement, r scalarRow, _ string) {
-		st.rows += r.value
-		st.hasRows = true
-	})
+	if res.bySignature {
+		merge(fromMs, toMs, "rows", nil, func(st *dbmStatement, r scalarRow, _ string) {
+			st.rows += r.value
+			st.hasRows = true
+		})
+	}
+	if o.BaselineDays > 0 {
+		res.baseDays = min(o.BaselineDays, maxDBMBaselineDays)
+		baseFrom := fromMs - int64(res.baseDays)*dayMs
+		res.baseOK = merge(baseFrom, fromMs, "time", nil, func(st *dbmStatement, r scalarRow, unit string) {
+			st.baseNs += r.value * nanosPer(unit)
+			st.hasBase = true
+		}) && merge(baseFrom, fromMs, "count", nil, func(st *dbmStatement, r scalarRow, _ string) {
+			st.baseCalls += r.value
+		})
+	}
 	return res, nil
 }
 
@@ -231,7 +272,11 @@ func (r *dbmTopResult) format(siteLabel string) string {
 	if r.sort == DBMSortMeanTime {
 		order = "mean time per call"
 	}
-	fmt.Fprintf(&sb, "*[%s]* Postgres statements by %s · scope `%s` · %s → %s\n", siteLabel, order, r.scope, formatMs(r.fromMs), formatMs(r.toMs))
+	subject := "Postgres statements"
+	if !r.bySignature {
+		subject = "Postgres execution time by " + strings.Join(r.groupBy, ", ")
+	}
+	fmt.Fprintf(&sb, "*[%s]* %s, ranked by %s · scope `%s` · %s → %s\n", siteLabel, subject, order, r.scope, formatMs(r.fromMs), formatMs(r.toMs))
 	if r.hasScope {
 		fmt.Fprintf(&sb, "All statements in scope: %s of execution time\n", formatNanos(r.scopeNs))
 	}
@@ -239,11 +284,16 @@ func (r *dbmTopResult) format(siteLabel string) string {
 		sb.WriteString("No DBM query metrics matched. Check the scope against the tags the Postgres monitors use, and that Database Monitoring runs on these hosts.\n")
 		return sb.String()
 	}
+	windowDays := float64(r.toMs-r.fromMs) / dayMs
 	for i, st := range r.statements {
-		fmt.Fprintf(&sb, "\n%d. `%s`", i+1, st.signature)
-		for j, tag := range r.groupBy {
-			fmt.Fprintf(&sb, " · %s:%s", tag, st.groups[j])
+		var label []string
+		if r.bySignature {
+			label = append(label, "`"+st.signature+"`")
 		}
+		for j, tag := range r.groupBy {
+			label = append(label, tag+":"+st.groups[j])
+		}
+		fmt.Fprintf(&sb, "\n%d. %s", i+1, strings.Join(label, " · "))
 		var parts []string
 		if st.hasTotal {
 			p := "total " + formatNanos(st.totalNs)
@@ -261,6 +311,9 @@ func (r *dbmTopResult) format(siteLabel string) string {
 				parts = append(parts, formatQuantity(st.rows/st.calls)+" rows/call")
 			}
 		}
+		if r.baseOK {
+			parts = append(parts, st.baselineText(r.baseDays, windowDays))
+		}
 		if len(parts) > 0 {
 			sb.WriteString(" — " + strings.Join(parts, " · "))
 		}
@@ -272,8 +325,41 @@ func (r *dbmTopResult) format(siteLabel string) string {
 	for _, n := range r.notes {
 		fmt.Fprintf(&sb, "\nNote: %s\n", n)
 	}
-	sb.WriteString("\nMean is total time ÷ calls from pg_stat_statements; a statement still running is counted only once it finishes, so use datadog_dbm_samples for those. The text is the metric's query tag, cut at 200 characters; datadog_dbm_samples with @db.query_signature:<sig> returns the full statement and its explain plans.\n")
+	sb.WriteString("\nMean is total time ÷ calls from pg_stat_statements; a statement still running is counted only once it finishes, so use datadog_dbm_samples for those.")
+	if r.baseOK {
+		fmt.Fprintf(&sb, " The %dd baseline is the %d days before the window, per day, with now ÷ before as ×.", r.baseDays, r.baseDays)
+	}
+	if r.bySignature {
+		sb.WriteString(" The text is the metric's query tag, cut at 200 characters; datadog_dbm_samples with @db.query_signature:<sig> returns the full statement and its explain plans.")
+	}
+	sb.WriteString("\n")
 	return sb.String()
+}
+
+func (st dbmStatement) baselineText(days int, windowDays float64) string {
+	label := fmt.Sprintf("%dd before:", days)
+	if !st.hasBase || st.baseNs <= 0 {
+		return label + " not seen"
+	}
+	var parts []string
+	if st.baseCalls > 0 {
+		before := st.baseNs / st.baseCalls
+		p := "mean " + formatNanos(before)
+		if st.hasCalls && st.calls > 0 && st.hasTotal {
+			p += " (" + ratio(st.totalNs/st.calls, before) + ")"
+		}
+		parts = append(parts, p)
+	}
+	perDay := st.baseNs / float64(days)
+	p := formatNanos(perDay) + "/day"
+	if st.hasTotal && windowDays > 0 {
+		p += " (" + ratio(st.totalNs/windowDays, perDay) + ")"
+	}
+	return label + " " + strings.Join(append(parts, p), ", ")
+}
+
+func ratio(now, before float64) string {
+	return "×" + strconv.FormatFloat(math.Round(now/before*10)/10, 'f', -1, 64)
 }
 
 func dbmMetricQuery(metric, scope string, keys []string) string {
@@ -645,6 +731,7 @@ type dbmGroup struct {
 	hasCost                         bool
 	planSigs                        map[string]bool
 	plan                            any
+	blocking, blocked               int
 }
 
 func groupDBMRecords(recs []dbmRecord) []*dbmGroup {
@@ -691,8 +778,20 @@ func (g *dbmGroup) add(r *dbmRecord) {
 	tally(g.users, attrString(r.custom, "db.user"))
 	tally(g.apps, attrString(r.custom, "db.application"))
 	tally(g.dbs, attrString(r.custom, "db.instance"))
-	tally(g.states, cmp.Or(attrString(r.custom, "db.state"), attrString(r.custom, "postgres.state"), attrString(r.custom, "state")))
-	tally(g.waits, strings.Trim(attrString(r.custom, "db.wait_event_type")+"/"+attrString(r.custom, "db.wait_event"), "/"))
+	state := cmp.Or(attrString(r.custom, "db.state"), attrString(r.custom, "postgres.state"), attrString(r.custom, "state"))
+	tally(g.states, state)
+	wait := strings.Trim(attrString(r.custom, "db.wait_event_type")+"/"+attrString(r.custom, "db.wait_event"), "/")
+	// An active backend that reports no wait event is running on CPU.
+	if wait == "" && g.kind == "activity" && (state == "" || state == "active") {
+		wait = "CPU"
+	}
+	tally(g.waits, wait)
+	if v := findKey(r.custom, "is_blocking"); v == true || v == "true" {
+		g.blocking++
+	}
+	if nonEmpty(findKey(r.custom, "blocking_pids")) {
+		g.blocked++
+	}
 	if rows, ok := attrNumber(r.custom, "db.rows"); ok {
 		g.maxRows, g.hasRows = max(g.maxRows, rows), true
 	}
@@ -720,6 +819,35 @@ func tally(m map[string]int, v string) {
 	if v != "" {
 		m[v]++
 	}
+}
+
+func findKey(v any, name string) any {
+	m, ok := v.(map[string]any)
+	if !ok {
+		return nil
+	}
+	if x, ok := m[name]; ok {
+		return x
+	}
+	for _, child := range m {
+		if x := findKey(child, name); x != nil {
+			return x
+		}
+	}
+	return nil
+}
+
+func nonEmpty(v any) bool {
+	switch t := v.(type) {
+	case []any:
+		return len(t) > 0
+	case string:
+		t = strings.TrimSpace(t)
+		return t != "" && t != "{}" && t != "[]" && t != "null"
+	case float64:
+		return t != 0
+	}
+	return false
 }
 
 func (r *dbmSamplesResult) format(siteLabel string) string {
@@ -764,10 +892,21 @@ func (g *dbmGroup) write(sb *strings.Builder, n int, detail bool) {
 	for _, f := range []struct {
 		label  string
 		values map[string]int
-	}{{"db", g.dbs}, {"user", g.users}, {"app", g.apps}, {"state", g.states}, {"wait", g.waits}} {
-		if s := topValues(f.values, 3); s != "" {
+		share  bool
+	}{{"db", g.dbs, false}, {"user", g.users, false}, {"app", g.apps, false}, {"state", g.states, true}, {"wait", g.waits, true}} {
+		total := 0
+		if f.share {
+			total = g.count
+		}
+		if s := topValues(f.values, 3, total); s != "" {
 			facts = append(facts, f.label+" "+s)
 		}
+	}
+	if g.blocking > 0 {
+		facts = append(facts, fmt.Sprintf("blocking other sessions in %s of %s", formatCount(float64(g.blocking)), plural(g.count, "record")))
+	}
+	if g.blocked > 0 {
+		facts = append(facts, fmt.Sprintf("blocked by another session in %s of %s", formatCount(float64(g.blocked)), plural(g.count, "record")))
 	}
 	if g.hasRows {
 		facts = append(facts, "rows up to "+formatCount(g.maxRows))
@@ -803,7 +942,7 @@ func (g *dbmGroup) write(sb *strings.Builder, n int, detail bool) {
 	}
 }
 
-func topValues(m map[string]int, n int) string {
+func topValues(m map[string]int, n, total int) string {
 	if len(m) == 0 {
 		return ""
 	}
@@ -812,6 +951,10 @@ func topValues(m map[string]int, n int) string {
 	})
 	parts := make([]string, 0, n+1)
 	for _, k := range keys[:min(n, len(keys))] {
+		if total > 0 {
+			parts = append(parts, fmt.Sprintf("%s %.0f%%", k, 100*float64(m[k])/float64(total)))
+			continue
+		}
 		parts = append(parts, fmt.Sprintf("%s ×%s", k, formatCount(float64(m[k]))))
 	}
 	if len(keys) > n {
