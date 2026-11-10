@@ -1,12 +1,14 @@
 package commands
 
 import (
+	"cmp"
 	"context"
 	"encoding/csv"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
+	"maps"
 	"regexp"
 	"slices"
 	"strconv"
@@ -1442,13 +1444,18 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 			Type: "function",
 			Function: llm.ToolFunction{
 				Name:        ToolUpdateJiraIssue,
-				Description: "Update a Jira issue's description or summary. Use this to rewrite, refine, or improve ticket descriptions. IMPORTANT: Format the new description using markdown — use # for headers, - for bullet lists, 1) for numbered lists, **bold** for emphasis. Structure it professionally with clear sections.",
+				Description: "Update an existing Jira issue in one write: summary, description, labels, priority, assignee, and any other field by id or name, such as a custom select field or the Team field. Fields left out are untouched. List fields (labels, multi-selects, checkboxes, components, versions, multi-user pickers) are merged: values are added or removed and the issue keeps its other values; a list is never replaced. A value a field does not allow, such as a name missing from a select field's options, is refused with the allowed or closest values, and nothing is changed. The result lists each edited field as Jira holds it after the write, with its value before; check it to verify the write. Format a new description in markdown — # for headers, - for bullet lists, 1) for numbered lists, **bold** for emphasis — with clear sections.",
 				Parameters: json.RawMessage(`{
 					"type":"object",
 					"properties":{
 						"issue_key":{"type":"string","description":"Jira issue key (e.g. 'ENG-123')"},
-						"summary":{"type":"string","description":"New summary/title for the ticket (optional — only set if you want to change it)"},
-						"description":{"type":"string","description":"New description for the ticket in markdown format. Structure with clear sections like ## Context, ## Requirements, ## Acceptance Criteria, etc."}
+						"summary":{"type":"string","description":"New summary/title. Set it only to change it."},
+						"description":{"type":"string","description":"New description in markdown; replaces the whole description. Structure it with clear sections like ## Context, ## Requirements, ## Acceptance Criteria."},
+						"labels":{"type":"array","items":{"type":"string"},"description":"Labels to add. The issue keeps its other labels, and a label it already has is left as is. Jira labels cannot contain spaces."},
+						"remove_labels":{"type":"array","items":{"type":"string"},"description":"Labels to remove."},
+						"priority":{"type":"string","description":"New priority by name (e.g. 'High')."},
+						"account_id":{"type":"string","description":"Jira accountId of the new assignee, from resolve_jira_user. To unassign, pass fields {\"assignee\": null}."},
+						"fields":{"type":"object","additionalProperties":true,"description":"Any other fields to change, keyed by field id (e.g. 'customfield_10010') or exact field name. A list field takes {\"add\": [...], \"remove\": [...]}; a plain value or list is added. Any other field takes its new value, or null to clear it. Select options, priorities, components and versions may be given by name (e.g. 'Acme') or as Jira objects ({\"value\": \"Acme\"}, {\"name\": \"High\"}, {\"id\": \"10200\"}); a cascading select takes {\"value\": \"<parent>\", \"child\": {\"value\": \"<child>\"}}. User fields take an accountId, a Team field takes the team UUID from resolve_jira_team, and rich-text fields take markdown. Example: {\"customfield_10010\": {\"add\": [{\"value\": \"Acme\"}]}, \"customfield_10011\": \"<team uuid>\", \"duedate\": \"2026-12-31\"}."}
 					},
 					"required":["issue_key"]
 				}`),
@@ -4502,37 +4509,47 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 			return errMsg
 		}
 		args, errMsg := parseToolArgs[struct {
-			IssueKey    string `json:"issue_key"`
-			Summary     string `json:"summary"`
-			Description string `json:"description"`
+			IssueKey     string         `json:"issue_key"`
+			Summary      string         `json:"summary"`
+			Description  string         `json:"description"`
+			Labels       []string       `json:"labels"`
+			RemoveLabels []string       `json:"remove_labels"`
+			Priority     string         `json:"priority"`
+			AccountID    string         `json:"account_id"`
+			Fields       map[string]any `json:"fields"`
 		}](argsJSON)
 		if errMsg != "" {
 			return errMsg
 		}
-		if args.Summary == "" && args.Description == "" {
-			return "Error: at least one of summary or description must be provided."
-		}
-		// Update summary if provided.
-		if args.Summary != "" {
-			if err := h.jiraClient.UpdateIssueFields(args.IssueKey, map[string]interface{}{"summary": args.Summary}); err != nil {
-				return fmt.Sprintf("Error updating summary: %v", err)
+		var edits []atlassian.FieldEdit
+		given := func(ok bool, field string, op atlassian.EditOp, value any) {
+			if ok {
+				edits = append(edits, atlassian.FieldEdit{Field: field, Op: op, Value: value})
 			}
 		}
-		// Update description if provided (using ADF format).
-		if args.Description != "" {
-			if err := h.jiraClient.UpdateIssueDescription(args.IssueKey, args.Description); err != nil {
-				return fmt.Sprintf("Error updating description: %v", err)
-			}
+		given(args.Summary != "", "summary", atlassian.EditSet, args.Summary)
+		given(args.Description != "", "description", atlassian.EditSet, args.Description)
+		given(len(args.Labels) > 0, "labels", atlassian.EditAdd, args.Labels)
+		given(len(args.RemoveLabels) > 0, "labels", atlassian.EditRemove, args.RemoveLabels)
+		given(args.Priority != "", "priority", atlassian.EditSet, args.Priority)
+		given(args.AccountID != "", "assignee", atlassian.EditSet, args.AccountID)
+		edits = append(edits, jiraFieldEdits(args.Fields)...)
+		if len(edits) == 0 {
+			return preconditionErrf("Error: nothing to change; pass summary, description, labels, remove_labels, priority, account_id or fields.")
 		}
-		updated := []string{}
-		if args.Summary != "" {
-			updated = append(updated, "summary")
+		res, err := h.jiraClient.UpdateIssue(args.IssueKey, edits)
+		if rejected, ok := errors.AsType[*atlassian.EditRejected](err); ok {
+			return preconditionErrf("Error: %s was not changed: %v", cmp.Or(args.IssueKey, "the issue"), rejected)
 		}
-		if args.Description != "" {
-			updated = append(updated, "description")
+		if err != nil {
+			return fmt.Sprintf("Error updating %s: %v", args.IssueKey, err)
 		}
-		log.Printf("[user=%s channel=%s] updated Jira issue %s (%s)", userID, channelID, args.IssueKey, strings.Join(updated, ", "))
-		return fmt.Sprintf("Successfully updated %s: %s", args.IssueKey, strings.Join(updated, " and "))
+		ids := make([]string, len(res.Fields))
+		for i, f := range res.Fields {
+			ids[i] = f.ID
+		}
+		log.Printf("[user=%s channel=%s] updated Jira issue %s (%s, changed=%t)", userID, channelID, res.Key, strings.Join(ids, ", "), res.Changed)
+		return jiraUpdateText(res)
 
 	case ToolTransitionJiraIssue:
 		if errMsg := requireReady("Jira", h.jiraClient); errMsg != "" {
@@ -7287,6 +7304,50 @@ func jiraFieldLine(f atlassian.FieldValue) string {
 		return label + ": (empty)"
 	}
 	return label + ": " + text.Truncate(value, 300)
+}
+
+func jiraFieldEdits(fields map[string]any) []atlassian.FieldEdit {
+	ops := []atlassian.EditOp{atlassian.EditSet, atlassian.EditAdd, atlassian.EditRemove}
+	var edits []atlassian.FieldEdit
+	for _, field := range slices.Sorted(maps.Keys(fields)) {
+		v := fields[field]
+		m, _ := v.(map[string]any)
+		opsOnly := len(m) > 0
+		for k := range m {
+			opsOnly = opsOnly && slices.Contains(ops, atlassian.EditOp(k))
+		}
+		if !opsOnly {
+			edits = append(edits, atlassian.FieldEdit{Field: field, Value: v})
+			continue
+		}
+		for _, op := range ops {
+			if val, ok := m[string(op)]; ok {
+				edits = append(edits, atlassian.FieldEdit{Field: field, Op: op, Value: val})
+			}
+		}
+	}
+	return edits
+}
+
+func jiraUpdateText(res *atlassian.IssueUpdate) string {
+	var sb strings.Builder
+	if res.Changed {
+		fmt.Fprintf(&sb, "Updated %s. Fields as Jira now holds them:\n", res.Key)
+	} else {
+		fmt.Fprintf(&sb, "%s already held every requested value; nothing was written.\n", res.Key)
+	}
+	for _, f := range res.Fields {
+		sb.WriteString(jiraFieldLine(atlassian.FieldValue{Name: f.Name, ID: f.ID, Text: f.After}))
+		if f.Before != f.After {
+			fmt.Fprintf(&sb, " (was %s)", cmp.Or(text.Truncate(strings.Join(strings.Fields(f.Before), " "), 120), "empty"))
+		}
+		for _, note := range f.Skipped {
+			sb.WriteString("; " + note)
+		}
+		sb.WriteString("\n")
+	}
+	sb.WriteString("URL: " + res.Browse)
+	return sb.String()
 }
 
 func jiraTransitionsTo(ts []atlassian.IssueTransition, want string) []atlassian.IssueTransition {

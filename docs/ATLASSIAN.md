@@ -165,7 +165,8 @@ Classic API tokens inherit **all** permissions of the account, so using a person
    |---|---|---|
    | `BROWSE_PROJECTS` | Browse Projects | List projects and view project metadata |
    | `CREATE_ISSUES` | Create Issues | Create new tickets via the API |
-   | `EDIT_ISSUES` | Edit Issues | Update ticket descriptions and summaries (used by Seihin agent) |
+   | `EDIT_ISSUES` | Edit Issues | Update ticket summaries, descriptions, labels, priority and custom fields (`update_jira_issue`, `assign_jira_team`) |
+   | `ASSIGN_ISSUES` | Assign Issues | Set the assignee (`account_id` of `update_jira_issue`, and `assignee` of `create_jira_ticket`) |
    | `TRANSITION_ISSUES` | Transition Issues | Move tickets to another status (`transition_jira_issue`, and `done_on_merge` in projects) |
    | `SCHEDULE_ISSUES` | Schedule Issues | Put tickets in a sprint (`assign_jira_active_sprint`, `assign_jira_next_sprint`, and the sprint options of `create_jira_ticket`) |
    | `MODIFY_REPORTER` | Modify Reporter | Set the Reporter to the originating human on create (see [Reporter attribution](#reporter-attribution)) |
@@ -215,7 +216,7 @@ Once configured, the bot exposes the following Jira tools to the LLM:
 | **list_jira_projects** | Discover available project keys |
 | **search_jira_issues** | Search for issues using JQL (e.g., find all in-progress tickets for a user); `fields` adds up to 10 more fields to each result, by id or name, such as a custom field's option values. A field Jira does not return is named as such, not shown as empty |
 | **get_jira_issue** | Fetch full details of a specific issue by key (including description); `fields` adds up to 10 more fields, by id or name |
-| **update_jira_issue** | Update an issue's summary and/or description |
+| **update_jira_issue** | Update an issue in one write: summary, description, labels (`labels` adds, `remove_labels` removes), priority, assignee (`account_id`), and any other field by id or name through `fields`. List fields are merged, never replaced, and the result shows each edited field as Jira holds it afterwards. See [Editing fields](#editing-fields) |
 | **transition_jira_issue** | Move an issue to another status through one of the workflow transitions open to it, by target status or transition name, optionally setting a resolution. When none fits, the error lists the transitions available from the current status |
 | **assign_jira_active_sprint** | Move an issue into the project's active sprint |
 | **assign_jira_next_sprint** | Move an issue into the project's next sprint: the first future sprint on the board running the active sprint, or the first future sprint when none is active |
@@ -232,3 +233,43 @@ Example Slack commands:
 /seihin go over my jira tickets in progress and edit and redefine the description and its details
 /seihin review ticket ENG-123 and improve its description
 ```
+
+### Editing fields
+
+`update_jira_issue` reads the issue and its edit metadata first, checks every
+requested change, and only then writes them all in one request. A refused
+edit, whether by this check or by Jira, changes nothing.
+
+```json
+{
+  "issue_key": "ENG-123",
+  "labels": ["triaged"],
+  "priority": "High",
+  "fields": {
+    "customfield_10010": {"add": [{"value": "Acme"}], "remove": ["Globex"]},
+    "customfield_10011": "<team uuid>",
+    "duedate": "2026-12-31"
+  }
+}
+```
+
+- **Fields** are named by id (`customfield_10010`) or exact name. A name that
+  several fields share is refused; use the id.
+- **List fields** (labels, multi-selects, checkboxes, components, versions,
+  multi-user pickers) take `{"add": [...], "remove": [...]}`, or a plain value
+  or list, which is added. The issue keeps its other values. Replacing a whole
+  list, or clearing it with `null`, is refused, so a list can only lose the
+  values named in `remove`.
+- **Other fields** take their new value, or `null` to clear it. Users take a
+  Jira accountId, a Team field takes the team UUID from `resolve_jira_team`,
+  and rich-text fields such as the description take markdown.
+- **Allowed values.** Select options, priorities, components and versions can
+  be given by name or as Jira objects (`{"value": "Acme"}`, `{"id": "10200"}`).
+  They are checked against the values the field allows on that issue. A value
+  it does not allow is refused with the closest matches or the allowed list,
+  and nothing is written. A field missing from the edit metadata, such as one
+  off the edit screen, is still sent, and Jira's own check applies.
+- **Result.** Each edited field is read back after the write and shown with its
+  previous value. Values the issue already had, and values to remove it did not
+  have, are listed rather than treated as errors. When nothing needs to change,
+  nothing is written.

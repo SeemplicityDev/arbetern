@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -597,22 +598,7 @@ func (c *Client) createIssue(input CreateIssueInput) (*Issue, error) {
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		// Try to parse structured Jira error for actionable diagnostics.
-		var jiraErr struct {
-			ErrorMessages []string          `json:"errorMessages"`
-			Errors        map[string]string `json:"errors"`
-		}
-		if json.Unmarshal(respBody, &jiraErr) == nil {
-			var parts []string
-			parts = append(parts, jiraErr.ErrorMessages...)
-			for field, msg := range jiraErr.Errors {
-				parts = append(parts, fmt.Sprintf("%s: %s", field, msg))
-			}
-			if len(parts) > 0 {
-				return nil, fmt.Errorf("jira API error (HTTP %d): %s", resp.StatusCode, strings.Join(parts, "; "))
-			}
-		}
-		return nil, fmt.Errorf("jira API error (HTTP %d): %s", resp.StatusCode, string(respBody))
+		return nil, fmt.Errorf("jira API error (HTTP %d): %s", resp.StatusCode, jiraErrorText(respBody))
 	}
 
 	var issue Issue
@@ -959,13 +945,17 @@ func (c *Client) FindTeamFields() ([]TeamFieldInfo, error) {
 }
 
 type jiraField struct {
-	ID          string   `json:"id"`
-	Name        string   `json:"name"`
-	ClauseNames []string `json:"clauseNames"`
-	Schema      *struct {
-		Type   string `json:"type"`
-		Custom string `json:"custom"`
-	} `json:"schema"`
+	ID          string       `json:"id"`
+	Name        string       `json:"name"`
+	ClauseNames []string     `json:"clauseNames"`
+	Schema      *fieldSchema `json:"schema"`
+}
+
+type fieldSchema struct {
+	Type   string `json:"type"`
+	Items  string `json:"items"`
+	System string `json:"system"`
+	Custom string `json:"custom"`
 }
 
 func (c *Client) fetchFields() ([]jiraField, error) {
@@ -1912,43 +1902,6 @@ func diffLabelTokens(from, to string) (added, removed []string) {
 	return added, removed
 }
 
-// UpdateIssueDescription updates only the description of a Jira issue using ADF format.
-func (c *Client) UpdateIssueDescription(issueKey, description string) error {
-	adf := textToADF(description)
-	payload := map[string]interface{}{
-		"fields": map[string]interface{}{
-			"description": adf,
-		},
-	}
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return fmt.Errorf("marshal payload: %w", err)
-	}
-
-	reqURL := fmt.Sprintf("%s/rest/api/3/issue/%s", c.baseURL, issueKey)
-	req, err := http.NewRequest(http.MethodPut, reqURL, bytes.NewReader(body))
-	if err != nil {
-		return fmt.Errorf("create request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	if err := c.authRequest(req); err != nil {
-		return fmt.Errorf("auth request: %w", err)
-	}
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("send request: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
-		return fmt.Errorf("jira API error (HTTP %d): %s", resp.StatusCode, string(respBody))
-	}
-
-	return nil
-}
-
 // IssueSummary represents a Jira issue with common fields.
 type IssueSummary struct {
 	Key         string       `json:"key"`
@@ -1989,6 +1942,15 @@ var fieldIDPattern = regexp.MustCompile(`^[a-z][A-Za-z0-9_.-]{0,63}$`)
 type fieldCatalog struct {
 	ids    map[string]string   // lowercased id to id
 	byName map[string][]string // lowercased name or JQL clause name to ids
+	byID   map[string]jiraField
+}
+
+func (cat *fieldCatalog) field(id string) (jiraField, bool) {
+	if cat == nil {
+		return jiraField{}, false
+	}
+	f, ok := cat.byID[id]
+	return f, ok
 }
 
 func (c *Client) fieldCatalog() *fieldCatalog {
@@ -2004,9 +1966,10 @@ func (c *Client) fieldCatalog() *fieldCatalog {
 		c.catalogTried = time.Now()
 		return c.catalog
 	}
-	cat := &fieldCatalog{ids: make(map[string]string, len(list)), byName: map[string][]string{}}
+	cat := &fieldCatalog{ids: make(map[string]string, len(list)), byName: map[string][]string{}, byID: make(map[string]jiraField, len(list))}
 	for _, f := range list {
 		cat.ids[strings.ToLower(f.ID)] = f.ID
+		cat.byID[f.ID] = f
 		for _, n := range append([]string{f.Name}, f.ClauseNames...) {
 			k := strings.ToLower(strings.TrimSpace(n))
 			if k != "" && !slices.Contains(cat.byName[k], f.ID) {
@@ -2047,27 +2010,30 @@ func (c *Client) resolveFields(extra []string) ([]fieldRef, error) {
 	}
 	cat := c.fieldCatalog()
 	for i := range refs {
-		r := &refs[i]
-		key := strings.ToLower(r.asked)
-		switch {
-		case cat != nil && cat.ids[key] == r.asked:
-			r.id = r.asked
-		case cat != nil && len(cat.byName[key]) == 1:
-			r.id = cat.byName[key][0]
-		case cat != nil && len(cat.byName[key]) > 1:
-			r.problem = "several fields have this name (" + strings.Join(cat.byName[key], ", ") + "); ask for one by id"
-		case cat != nil && cat.ids[key] != "":
-			r.id = cat.ids[key]
-		case fieldIDPattern.MatchString(r.asked):
-			// Not in the catalog, which may predate the field: Jira decides.
-			r.id = r.asked
-		case cat == nil:
-			r.problem = "field names cannot be looked up right now; ask by field id"
-		default:
-			r.problem = "no field with this id or name is visible to arbetern"
-		}
+		refs[i].id, refs[i].problem = cat.resolve(refs[i].asked)
 	}
 	return refs, nil
+}
+
+func (cat *fieldCatalog) resolve(asked string) (id, problem string) {
+	key := strings.ToLower(asked)
+	switch {
+	case cat != nil && cat.ids[key] == asked:
+		return asked, ""
+	case cat != nil && len(cat.byName[key]) == 1:
+		return cat.byName[key][0], ""
+	case cat != nil && len(cat.byName[key]) > 1:
+		return "", "several fields have this name (" + strings.Join(cat.byName[key], ", ") + "); ask for one by id"
+	case cat != nil && cat.ids[key] != "":
+		return cat.ids[key], ""
+	case fieldIDPattern.MatchString(asked):
+		// Not in the catalog, which may predate the field: Jira decides.
+		return asked, ""
+	case cat == nil:
+		return "", "field names cannot be looked up right now; ask by field id"
+	default:
+		return "", "no field with this id or name is visible to arbetern"
+	}
 }
 
 func fieldIDs(refs []fieldRef) []string {
@@ -2598,12 +2564,38 @@ func (c *Client) jiraJSON(method, path string, body, out any) error {
 		return fmt.Errorf("read response: %w", err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("jira API error (HTTP %d): %s", resp.StatusCode, string(data))
+		return &jiraAPIError{status: resp.StatusCode, body: data}
 	}
 	if out == nil || len(data) == 0 {
 		return nil
 	}
 	return json.Unmarshal(data, out)
+}
+
+type jiraAPIError struct {
+	status int
+	body   []byte
+}
+
+func (e *jiraAPIError) Error() string {
+	return fmt.Sprintf("jira API error (HTTP %d): %s", e.status, e.body)
+}
+
+func jiraErrorText(body []byte) string {
+	var e struct {
+		ErrorMessages []string          `json:"errorMessages"`
+		Errors        map[string]string `json:"errors"`
+	}
+	if json.Unmarshal(body, &e) == nil {
+		parts := e.ErrorMessages
+		for _, field := range slices.Sorted(maps.Keys(e.Errors)) {
+			parts = append(parts, field+": "+e.Errors[field])
+		}
+		if len(parts) > 0 {
+			return strings.Join(parts, "; ")
+		}
+	}
+	return string(body)
 }
 
 // AddComment posts a comment on a Jira issue. The body is converted from
