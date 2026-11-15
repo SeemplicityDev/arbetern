@@ -942,6 +942,7 @@ type PRSummary struct {
 	URL       string
 	BaseRef   string
 	HeadRef   string
+	HeadSHA   string
 	Body      string
 	Diff      string
 	FileNames []string
@@ -984,6 +985,7 @@ func (c *Client) GetPullRequest(ctx context.Context, owner, repo string, number 
 		URL:     pr.GetHTMLURL(),
 		BaseRef: pr.GetBase().GetRef(),
 		HeadRef: pr.GetHead().GetRef(),
+		HeadSHA: pr.GetHead().GetSHA(),
 		Body:    pr.GetBody(),
 	}
 

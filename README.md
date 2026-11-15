@@ -34,6 +34,8 @@ and picks a class without influencing the next:
    exclusion. First match wins.
    A message carrying a Slack permalink always takes the tool loop, since only
    the general handler can run `fetch_thread_context` to read the linked thread.
+   A thread follow-up always takes it too, since it is answered with the thread
+   it continues.
 3. **Tool loop (posterior update).** The general handler iterates LLM → tool
    calls → results until the model stops calling tools. The tool palette is
    feature-gated: each integration's `Ready()` flag toggles its tools in/out
@@ -426,6 +428,7 @@ Every Slack-driven request — DMs, channel mentions, slash commands, and in-thr
 | **Agent prompt** | Per agent, static | File on disk (read-only) | Whatever you author in `agents/<id>/prompts.yaml`, plus the enabled skills |
 | **Slack user profile** | Per request | Refetched every turn via `users.info` | A few hundred bytes (Slack ID, real name, display name, email, title) |
 | **Channel context** | Per channel/DM | In-memory cache, TTL = `THREAD_SESSION_TTL` (default 7m). Background sweeper evicts stale entries; hard cap of 4096 channels with oldest-first eviction | Up to 50 most recent Slack messages (no per-message char cap) |
+| **Thread transcript** | Per Slack thread, follow-ups only | Read fresh from Slack on every follow-up, never stored. Whoever replies sees the same thread, including the bot's own answers; status notes and the reply being answered are left out | The opening request plus the newest replies, up to 16,000 chars, 2,000 per message |
 | **Working memory** | Per `(agent, user, channel)` | The user-context entries of the last 10 minutes in the same channel, read from the state bucket on every request so any replica sees the same conversation | Up to 10 turns, each capped like a user-context entry |
 | **User context (persistent)** | Per `(agent, user)`, shared across DMs, channels and web chat | Document in the state bucket at `user-context/<agent>/<user>.json`. 30-day TTL on inactivity (refreshed on every append) | Each entry capped at 800 chars (question) + 1200 chars (answer). Recency mode: up to 50 entries and 96 KiB, all injected. Semantic mode (`S3_VECTORS_INDEX_ARN`): up to 200 entries stored; the closest matches from the last 90 days (cosine distance ≤ 0.6 and within 0.2 of the best) plus the 2 latest injected, capped at 24 KiB |
 | **Shared memory** (opt-in) | Per agent with `shared_memory: true` | Semantic mode only: up to 4 related turns of other users of the agent, rendered without names | 8 KiB |

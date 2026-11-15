@@ -196,6 +196,7 @@ env:
 - When a slash command is executed, arbetern posts an audit message (creating a thread) and opens a **thread session**
 - The session stays active for `THREAD_SESSION_TTL` (default: 7 minutes), refreshed on every message; it is stored in the state bucket, so with several replicas any of them can answer the follow-up
 - Any user reply in that thread is automatically routed through the same agent — no `/command` prefix needed
+- A follow-up is answered with the thread so far: the request that opened it and every reply since, including the bot's own answers. A reply from anyone in the thread can say "the PR" or "fix the CI error" without a link
 - While the bot is working on a request the session cannot expire; the TTL restarts when the reply is posted
 - A request that runs longer than about a minute gets one `Still working` reply in the thread, edited in place with the elapsed time and tool activity and removed when the answer lands
 - With the [model router](MODEL_ROUTER.md#thread-acknowledgements) enabled, a reply that only thanks the bot ("thanks!", "perfect, ty") gets no answer and costs no model call; questions, approvals ("yes, thanks", "👍"), anything with a link, and a thank-you right after the bot asked a question are answered as usual

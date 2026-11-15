@@ -139,6 +139,58 @@ type Check struct {
 	Summary    string `json:"summary,omitempty"`
 }
 
+var failedConclusions = []string{"failure", "timed_out", "cancelled", "action_required", "startup_failure", "stale"}
+
+// Failed reports whether the check finished without passing.
+func (c Check) Failed() bool {
+	return c.Status == "completed" && slices.Contains(failedConclusions, c.Conclusion)
+}
+
+const maxListedChecks = 15
+
+// FormatChecks lists the failed and pending checks of sha with their URLs.
+func FormatChecks(sha string, checks []Check) string {
+	short := sha[:min(len(sha), 7)]
+	if len(checks) == 0 {
+		return fmt.Sprintf("CI checks on %s: none reported.", short)
+	}
+	var open []string
+	failed, pending := 0, 0
+	for _, c := range checks {
+		state := "PENDING"
+		switch {
+		case c.Failed():
+			state = "FAILED"
+			failed++
+		case c.Status != "completed":
+			pending++
+		default:
+			continue
+		}
+		line := fmt.Sprintf("  • %s %s (%s)", state, c.Name, cmp.Or(c.Conclusion, c.Status))
+		if c.URL != "" {
+			line += " " + c.URL
+		}
+		if note, _, _ := strings.Cut(strings.TrimSpace(cmp.Or(c.Title, c.Summary)), "\n"); note != "" {
+			line += " — " + text.Truncate(note, 200)
+		}
+		open = append(open, line)
+	}
+	passed := len(checks) - failed - pending
+	if len(open) == 0 {
+		return fmt.Sprintf("CI checks on %s: all %d passed.", short, passed)
+	}
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "CI checks on %s (%d failed, %d pending, %d passed):", short, failed, pending, passed)
+	for _, l := range open[:min(len(open), maxListedChecks)] {
+		sb.WriteString("\n" + l)
+	}
+	if extra := len(open) - maxListedChecks; extra > 0 {
+		fmt.Fprintf(&sb, "\n  • … %d more", extra)
+	}
+	return sb.String()
+}
+
 // ChecksForRef returns the latest check runs and the commit statuses of ref.
 func (c *Client) ChecksForRef(ctx context.Context, owner, repo, ref string) ([]Check, error) {
 	var out []Check

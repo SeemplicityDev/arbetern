@@ -336,6 +336,11 @@ func (h *GeneralHandler) Execute(ctx context.Context, channelID, userID, text, r
 	if channelContext != "" && channelContext != "(no recent messages)" {
 		fmt.Fprintf(&turnCtx, "\n\nRecent channel messages for context:\n%s", channelContext)
 	}
+	if h.followUp {
+		if thread := threadTranscript(h.slackClient, channelID, auditTS, userID, text); thread != "" {
+			fmt.Fprintf(&turnCtx, "\n\n%s", thread)
+		}
+	}
 	// Proactively fetch workflow run logs from GitHub Actions URLs found in the user's message
 	// (not channel context — channel context may contain unrelated CI notifications).
 	if workflowLogs := h.fetchWorkflowLogs(ctx, text, userID, channelID); workflowLogs != "" {
@@ -929,7 +934,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 			Type: "function",
 			Function: llm.ToolFunction{
 				Name:        ToolGetPullRequest,
-				Description: "Get details, changed files, and diff of a GitHub pull request by number or URL. Use this to analyze what a PR changed, understand code patterns introduced or removed, and find old/new usage patterns.",
+				Description: "Get details, changed files, diff, and CI check results of a GitHub pull request by number or URL. Use this to analyze what a PR changed, understand code patterns introduced or removed, and find old/new usage patterns. Failed and pending checks are listed with their URLs; pass a failed GitHub Actions check's URL to get_workflow_run for its logs.",
 				Parameters: json.RawMessage(`{
 					"type":"object",
 					"properties":{
@@ -1063,7 +1068,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 			Type: "function",
 			Function: llm.ToolFunction{
 				Name:        ToolGetWorkflowRun,
-				Description: "Fetch details and logs for a GitHub Actions workflow run. Use this PROACTIVELY whenever you see a failed CI/CD notification, a GitHub Actions URL, or the user mentions a build/deploy/pipeline failure. Returns the run status, jobs, steps, annotations, and actual log output for any failed jobs so you can diagnose the root cause.",
+				Description: "Fetch details and logs for a GitHub Actions workflow run. Use this PROACTIVELY whenever you see a failed CI/CD notification, a GitHub Actions URL, or the user mentions a build/deploy/pipeline failure. Returns the run status, jobs, steps, annotations, and actual log output for any failed jobs so you can diagnose the root cause. When you only have a pull request, get_pull_request lists its failed checks with their run URLs.",
 				Parameters: json.RawMessage(`{
 					"type":"object",
 					"properties":{
@@ -3562,7 +3567,15 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 			return fmt.Sprintf("Error getting PR: %v", err)
 		}
 		log.Printf("[user=%s channel=%s] fetched PR #%d in %s/%s", userID, channelID, args.Number, owner, args.Repo)
-		return github.FormatPRSummary(pr)
+		out := github.FormatPRSummary(pr)
+		if pr.HeadSHA != "" {
+			if checks, err := h.ghClient.ChecksForRef(ctx, owner, args.Repo, pr.HeadSHA); err != nil {
+				out += fmt.Sprintf("\nCI checks could not be read: %v\n", err)
+			} else {
+				out += "\n" + github.FormatChecks(pr.HeadSHA, checks) + "\n"
+			}
+		}
+		return out
 
 	case ToolListPullRequests:
 		args, errMsg := parseToolArgs[struct {

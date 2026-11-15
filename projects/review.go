@@ -22,8 +22,6 @@ const (
 	maxCheckAnnotations = 10
 )
 
-var failedConclusions = []string{"failure", "timed_out", "cancelled", "action_required", "startup_failure", "stale"}
-
 type prWatch struct {
 	taskID  string
 	owner   string
@@ -55,7 +53,7 @@ func ciState(checks []github.Check) (string, []github.Check) {
 		switch {
 		case c.Status != "completed":
 			pending = true
-		case slices.Contains(failedConclusions, c.Conclusion):
+		case c.Failed():
 			failed = append(failed, c)
 		}
 	}

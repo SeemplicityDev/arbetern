@@ -399,7 +399,8 @@ func (r *Router) beginTurn(ctx context.Context, channelID, threadTS, userID, tex
 
 // dispatch runs the request through the debug or general handler.
 func (r *Router) dispatch(ctx context.Context, channelID, userID, text, responseURL, threadTS, userContext string, sess *ThreadSession, followUp bool) {
-	if isDebugIntent(strings.ToLower(text)) {
+	// A follow-up needs the thread it continues, which only the general handler reads.
+	if !followUp && isDebugIntent(strings.ToLower(text)) {
 		log.Printf("[user=%s channel=%s thread=%s] routed to: debug", userID, channelID, threadTS)
 		r.newDebugHandler(userContext).Execute(ctx, channelID, userID, text, responseURL, threadTS)
 		return

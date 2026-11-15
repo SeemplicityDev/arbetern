@@ -1,10 +1,12 @@
 package commands
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"log"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -13,6 +15,7 @@ import (
 	slacklib "github.com/slack-go/slack"
 
 	"github.com/justmike1/arbetern/internal/safego"
+	"github.com/justmike1/arbetern/internal/text"
 )
 
 const (
@@ -213,6 +216,91 @@ func formatMessages(messages []slacklib.Message) string {
 		return "(no recent messages with content)"
 	}
 	return sb.String()
+}
+
+const (
+	threadContextFetch    = 200
+	threadContextMaxChars = 16000
+	threadMessageMaxChars = 2000
+)
+
+var usageStampRe = regexp.MustCompile(`\n*_:bar_chart: [^\n]*_\s*$`)
+
+func threadTranscript(sc SlackClient, channelID, threadTS, userID, current string) string {
+	msgs, err := sc.FetchThreadReplies(channelID, threadTS, threadContextFetch)
+	if err != nil {
+		log.Printf("[channel=%s thread=%s] could not read the thread for context: %v", channelID, threadTS, err)
+		return ""
+	}
+	if len(msgs) == 0 || msgs[0].Timestamp != threadTS {
+		return ""
+	}
+	// Sessions only open on the bot's own audit message, so the root carries our bot ID.
+	self := msgs[0].BotID
+	root := renderThreadMessage(msgs[0], self)
+	used, trimmed, answered := len(root), false, false
+	var replies []string
+	for i := len(msgs) - 1; i > 0; i-- {
+		m := msgs[i]
+		if self != "" && m.BotID == self && strings.HasPrefix(m.Text, "_:") {
+			continue
+		}
+		if !answered && m.User == userID && strings.TrimSpace(m.Text) == current {
+			answered = true
+			continue
+		}
+		line := renderThreadMessage(m, self)
+		if line == "" {
+			continue
+		}
+		if used+len(line) > threadContextMaxChars {
+			trimmed = true
+			break
+		}
+		used += len(line)
+		replies = append(replies, line)
+	}
+	if root == "" && len(replies) == 0 {
+		return ""
+	}
+	slices.Reverse(replies)
+
+	var sb strings.Builder
+	sb.WriteString("This message is a reply in a Slack thread. The thread so far, oldest first: the first message opened it, and \"you\" marks your own earlier replies. " +
+		"Resolve what the user refers to (\"it\", \"the PR\", \"the CI error\") from this thread before asking them for a link.")
+	if root != "" {
+		sb.WriteString("\n" + root)
+	}
+	if trimmed {
+		sb.WriteString("\n(earlier replies omitted)")
+	}
+	for _, r := range replies {
+		sb.WriteString("\n" + r)
+	}
+	return sb.String()
+}
+
+func renderThreadMessage(m slacklib.Message, self string) string {
+	own := self != "" && m.BotID == self
+	if own {
+		m.Text = usageStampRe.ReplaceAllString(m.Text, "")
+	}
+	content := text.Truncate(strings.TrimSpace(extractMessageContent(m)), threadMessageMaxChars)
+	if content == "" {
+		return ""
+	}
+	sender := "<@" + m.User + ">"
+	switch {
+	case own:
+		sender = "you"
+	case m.BotID != "":
+		sender = "bot " + cmp.Or(m.Username, m.BotID)
+	}
+	when := m.Timestamp
+	if t, err := tsToTime(m.Timestamp); err == nil {
+		when = t.UTC().Format("15:04")
+	}
+	return fmt.Sprintf("[%s] %s: %s", when, sender, content)
 }
 
 func extractMessageContent(msg slacklib.Message) string {
