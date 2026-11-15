@@ -1,6 +1,8 @@
 package commands
 
 import (
+	"encoding/json"
+
 	"github.com/justmike1/arbetern/billing"
 	"github.com/justmike1/arbetern/metrics"
 	slacklib "github.com/slack-go/slack"
@@ -30,6 +32,7 @@ type SlackClient interface {
 	DeleteMessage(channelID, ts string) error
 	PostBlocks(channelID, fallback string, blocks []slacklib.Block) (string, error)
 	PostThreadBlocks(channelID, threadTS, fallback string, blocks []slacklib.Block) error
+	PostMessageBlocks(channelID, threadTS, text string, blocks []json.RawMessage) (string, error)
 	GetPermalink(channelID, messageTS string) (string, error)
 	GetUserInfo(userID string) (*slacklib.User, error)
 	GetUserByEmail(email string) (*slacklib.User, error)

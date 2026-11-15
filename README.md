@@ -963,6 +963,17 @@ it (e.g. an AWS cost report with the day's GitHub digest threaded
 underneath). Capture the `ts` returned by the first `post_slack_message`
 call and pass it as `thread_ts` on subsequent calls.
 
+### Block Kit messages
+
+`post_slack_message` also takes an optional `blocks` argument: a Slack Block
+Kit array for layouts mrkdwn cannot show, such as native tables. The blocks
+are posted exactly as given, as one message (no ```` ```table ```` rendering,
+no splitting), and `text` becomes the notification fallback. When Slack
+rejects the blocks (`invalid_blocks` and similar), its error, including the
+JSON pointer of the bad field, goes back to the agent so it can fix the
+payload and call again. Nothing was posted, so the rejection does not fail
+the workflow tick.
+
 ### Design patterns
 
 Workflows are modelled after the four Prefect flow-composition patterns,

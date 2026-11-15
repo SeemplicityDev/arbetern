@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
@@ -160,6 +161,60 @@ func (c *Client) PostThreadBlocks(channelID, threadTS, fallback string, blocks [
 		return fmt.Errorf("failed to post thread blocks: %w", err)
 	}
 	return nil
+}
+
+// ErrBlocksRejected marks a post Slack refused because of its blocks; nothing was posted.
+var ErrBlocksRejected = errors.New("slack rejected the blocks")
+
+var blockErrorCodes = map[string]bool{"invalid_blocks": true, "invalid_blocks_format": true, "msg_blocks_too_long": true}
+
+// PostMessageBlocks posts blocks exactly as given, with text as the notification fallback.
+func (c *Client) PostMessageBlocks(channelID, threadTS, text string, blocks []json.RawMessage) (string, error) {
+	set := make([]slack.Block, len(blocks))
+	for i, b := range blocks {
+		set[i] = rawBlock(b)
+	}
+	opts := []slack.MsgOption{
+		slack.MsgOptionText(text, false),
+		slack.MsgOptionBlocks(set...),
+		slack.MsgOptionDisableLinkUnfurl(),
+		slack.MsgOptionDisableMediaUnfurl(),
+	}
+	if strings.TrimSpace(threadTS) != "" {
+		opts = append(opts, slack.MsgOptionTS(threadTS))
+	}
+	_, ts, err := c.api.PostMessage(channelID, opts...)
+	var apiErr slack.SlackErrorResponse
+	switch {
+	case err == nil:
+		return ts, nil
+	case errors.As(err, &apiErr) && blockErrorCodes[apiErr.Err]:
+		return "", fmt.Errorf("%w: %s", ErrBlocksRejected, describeAPIError(apiErr))
+	default:
+		return "", fmt.Errorf("failed to post message: %w", err)
+	}
+}
+
+type rawBlock json.RawMessage
+
+func (b rawBlock) BlockType() slack.MessageBlockType { return "" }
+func (b rawBlock) ID() string                        { return "" }
+func (b rawBlock) MarshalJSON() ([]byte, error)      { return b, nil }
+
+func describeAPIError(e slack.SlackErrorResponse) string {
+	var details []string
+	for _, d := range e.Errors {
+		if d.Message != nil {
+			details = append(details, *d.Message)
+		}
+	}
+	if len(details) == 0 {
+		details = e.ResponseMetadata.Messages
+	}
+	if len(details) == 0 {
+		return e.Err
+	}
+	return e.Err + ": " + strings.Join(details, "; ")
 }
 
 func (c *Client) FetchThreadReplies(channelID, threadTS string, limit int) ([]slack.Message, error) {

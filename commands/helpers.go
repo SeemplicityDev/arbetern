@@ -55,6 +55,21 @@ func neutralizeUserPing(text, userID string) (string, bool) {
 	return re.ReplaceAllString(text, "an unresolved user"), true
 }
 
+func parseSlackBlocks(raw json.RawMessage) ([]json.RawMessage, error) {
+	var encoded string
+	if json.Unmarshal(raw, &encoded) == nil {
+		raw = json.RawMessage(encoded)
+	}
+	if s := strings.TrimSpace(string(raw)); s == "" || s == "null" {
+		return nil, nil
+	}
+	var blocks []json.RawMessage
+	if err := json.Unmarshal(raw, &blocks); err != nil {
+		return nil, fmt.Errorf("'blocks' must be a JSON array of Block Kit blocks: %v", err)
+	}
+	return blocks, nil
+}
+
 // slackAttribution renders the requesting Slack user for a GitHub-facing PR
 // body: the human name followed by the raw mention token, e.g.
 // "Jane Doe (<@U123>)". GitHub does not resolve <@U123>, so a reviewer looking

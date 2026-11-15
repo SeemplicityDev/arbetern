@@ -125,7 +125,7 @@ type GeneralHandler struct {
 	// handler is created for each command/tick by newGeneralHandler.
 	aggregateCache map[string]cachedAggregate
 	// postedSlackSigs deduplicates post_slack_message calls within a single
-	// headless run, keyed by a (channel, thread_ts, text) signature → the ts
+	// headless run, keyed by a (channel, thread_ts, text, blocks) signature → the ts
 	// of the message that was actually posted. A scheduled tick's LLM loop
 	// occasionally calls post_slack_message twice for the same report, which
 	// produces duplicate top-level messages in the channel. The guard performs
@@ -1120,13 +1120,14 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 			Type: "function",
 			Function: llm.ToolFunction{
 				Name:        ToolPostSlackMessage,
-				Description: "Post a message to a specific Slack channel by channel ID. Use this when the user gives you an explicit channel ID (e.g. 'C0123456789') and asks you to send a message there, OR inside a scheduled workflow tick where no interactive thread is available. If 'thread_ts' is set, the message is posted as a threaded reply under that parent message (use this to keep multi-part reports on the same thread — capture the ts returned by the first call and pass it as thread_ts on subsequent calls). Supports Slack markdown. For a table, write a fenced block opened with ```table and one row per line with cells separated by '|' (header row first); the tool pads the columns (first left-aligned, the rest right-aligned) and renders a normal code block, so never pad columns yourself. Messages longer than Slack's limit are split at line breaks into consecutive posts, closing and reopening code blocks at the cut. Returns the posted message ts on success (the first part's ts when split).",
+				Description: "Post a message to a specific Slack channel by channel ID. Use this when the user gives you an explicit channel ID (e.g. 'C0123456789') and asks you to send a message there, OR inside a scheduled workflow tick where no interactive thread is available. If 'thread_ts' is set, the message is posted as a threaded reply under that parent message (use this to keep multi-part reports on the same thread — capture the ts returned by the first call and pass it as thread_ts on subsequent calls). Supports Slack markdown. For a table, write a fenced block opened with ```table and one row per line with cells separated by '|' (header row first); the tool pads the columns (first left-aligned, the rest right-aligned) and renders a normal code block, so never pad columns yourself. Messages longer than Slack's limit are split at line breaks into consecutive posts, closing and reopening code blocks at the cut. To use Slack Block Kit instead (e.g. a native table block), pass 'blocks': they are posted exactly as given as a single message, with no ```table rendering or splitting, and 'text' becomes the notification fallback. Returns the posted message ts on success (the first part's ts when split).",
 				Parameters: json.RawMessage(`{
 					"type":"object",
 					"properties":{
 						"channel_id":{"type":"string","description":"Slack channel ID (e.g. 'C0123456789'). NOT a channel name."},
-						"text":{"type":"string","description":"Message body. Supports Slack markdown formatting."},
-						"thread_ts":{"type":"string","description":"OPTIONAL. Parent message ts to reply under. Omit or leave empty to post as a new top-level channel message. Use the ts returned by a prior post_slack_message call to keep a multi-part report threaded together."}
+						"text":{"type":"string","description":"Message body. Supports Slack markdown formatting. When 'blocks' is set, this is only the notification and screen-reader fallback: one summary line."},
+						"thread_ts":{"type":"string","description":"OPTIONAL. Parent message ts to reply under. Omit or leave empty to post as a new top-level channel message. Use the ts returned by a prior post_slack_message call to keep a multi-part report threaded together."},
+						"blocks":{"type":"array","items":{"type":"object"},"description":"OPTIONAL. Slack Block Kit blocks, sent to Slack exactly as given as one message: at most 50 blocks, never split. A native table: {\"type\":\"table\",\"column_settings\":[{\"align\":\"left\"},{\"align\":\"right\"}],\"rows\":[[{\"type\":\"raw_text\",\"text\":\"Name\"},{\"type\":\"raw_text\",\"text\":\"Cost\"}],[{\"type\":\"raw_text\",\"text\":\"web\"},{\"type\":\"raw_text\",\"text\":\"$1.20\"}]]}, header row first, at most 100 rows of 20 cells and 10,000 characters across all cells. If Slack rejects the blocks, nothing is posted and Slack's error is returned: fix the blocks and call again."}
 					},
 					"required":["channel_id","text"]
 				}`),
@@ -3944,9 +3945,10 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 
 	case ToolPostSlackMessage:
 		args, errMsg := parseToolArgs[struct {
-			ChannelID string `json:"channel_id"`
-			Text      string `json:"text"`
-			ThreadTS  string `json:"thread_ts"`
+			ChannelID string          `json:"channel_id"`
+			Text      string          `json:"text"`
+			ThreadTS  string          `json:"thread_ts"`
+			Blocks    json.RawMessage `json:"blocks"`
 		}](argsJSON)
 		if errMsg != "" {
 			return errMsg
@@ -3963,19 +3965,28 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		// creator merely because attribution failed. Correct attribution
 		// (get_jira_label_author) is the real fix; this is the backstop.
 		if h.headless {
-			if cleaned, changed := neutralizeUserPing(args.Text, userID); changed {
+			text, textChanged := neutralizeUserPing(args.Text, userID)
+			rawBlocks, blocksChanged := neutralizeUserPing(string(args.Blocks), userID)
+			if textChanged || blocksChanged {
 				log.Printf("[user=%s channel=%s] post_slack_message: stripped creator self-mention <@%s> from headless output (likely failed-attribution fallback)", userID, channelID, userID)
-				args.Text = cleaned
+				args.Text, args.Blocks = text, json.RawMessage(rawBlocks)
 			}
+		}
+		blocks, err := parseSlackBlocks(args.Blocks)
+		if err != nil {
+			return preconditionErrf("Error: %v", err)
 		}
 		// In a headless workflow tick, guard against the LLM posting the exact
 		// same message twice in one run — a known tool-loop slip that produces
 		// duplicate top-level reports in the channel. Identical (channel,
-		// thread_ts, text) posts are deduplicated: the first does the real
+		// thread_ts, text, blocks) posts are deduplicated: the first does the real
 		// Slack post; any repeat returns the original message's ts WITHOUT
 		// posting again, so the model still gets a valid thread parent for its
 		// follow-up reply.
 		sig := args.ChannelID + "\x00" + strings.TrimSpace(args.ThreadTS) + "\x00" + args.Text
+		for _, b := range blocks {
+			sig += "\x00" + string(b)
+		}
 		if h.headless {
 			if prevTS, ok := h.postedSlackSigs[sig]; ok {
 				log.Printf("[user=%s channel=%s] post_slack_message dedup: identical message already posted to %s (ts=%s); skipping duplicate", userID, channelID, args.ChannelID, prevTS)
@@ -3985,8 +3996,19 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 				return fmt.Sprintf("Already posted this exact message to channel %s (ts=%s). Did not post a duplicate — use ts=%s as the thread parent for any follow-up reply.", args.ChannelID, prevTS, prevTS)
 			}
 		}
-		pieces := slack.SplitForSlack(slack.RenderPipeTables(args.Text), slack.MaxMessageRunes)
-		ts, err := h.slackClient.PostMessageInThread(args.ChannelID, args.ThreadTS, pieces[0])
+		var (
+			ts     string
+			pieces []string
+		)
+		if len(blocks) > 0 {
+			ts, err = h.slackClient.PostMessageBlocks(args.ChannelID, args.ThreadTS, args.Text, blocks)
+		} else {
+			pieces = slack.SplitForSlack(slack.RenderPipeTables(args.Text), slack.MaxMessageRunes)
+			ts, err = h.slackClient.PostMessageInThread(args.ChannelID, args.ThreadTS, pieces[0])
+		}
+		if errors.Is(err, slack.ErrBlocksRejected) {
+			return preconditionErrf("Error: %v. Nothing was posted; fix 'blocks' and call again.", err)
+		}
 		if err != nil {
 			return fmt.Sprintf("Error posting to channel %s: %v", args.ChannelID, err)
 		}
@@ -3996,12 +4018,12 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 			}
 			h.postedSlackSigs[sig] = ts
 		}
-		for i, piece := range pieces[1:] {
-			if _, err := h.slackClient.PostMessageInThread(args.ChannelID, args.ThreadTS, piece); err != nil {
-				return fmt.Sprintf("Error posting part %d/%d to channel %s (part 1 posted, ts=%s; do not re-post the message): %v", i+2, len(pieces), args.ChannelID, ts, err)
-			}
-		}
 		if len(pieces) > 1 {
+			for i, piece := range pieces[1:] {
+				if _, err := h.slackClient.PostMessageInThread(args.ChannelID, args.ThreadTS, piece); err != nil {
+					return fmt.Sprintf("Error posting part %d/%d to channel %s (part 1 posted, ts=%s; do not re-post the message): %v", i+2, len(pieces), args.ChannelID, ts, err)
+				}
+			}
 			log.Printf("[user=%s channel=%s] post_slack_message split a %d-rune message into %d parts", userID, channelID, utf8.RuneCountInString(args.Text), len(pieces))
 		}
 		if strings.TrimSpace(args.ThreadTS) != "" {
