@@ -3,17 +3,13 @@ package databricks
 import (
 	"fmt"
 	"strings"
-
-	"github.com/justmike1/arbetern/internal/text"
 )
 
 const (
-	// maxDisplayRows caps how many rows FormatQueryResult renders inline so a
-	// big result set doesn't blow past Slack message limits. The full set is
-	// still available via ToCSV for snippet uploads.
-	maxDisplayRows = 50
-	// maxColWidth caps per-column width in the rendered table.
-	maxColWidth = 40
+	// maxPadWidth caps column padding; a longer cell is written whole and pushes the rest of its row right.
+	maxPadWidth = 80
+	// maxOutputBytes bounds the rendered table so one wide result can't flood the model's context.
+	maxOutputBytes = 64 << 10
 )
 
 // FormatQueryResult renders a QueryResult as a Slack-friendly fixed-width
@@ -44,21 +40,13 @@ func FormatQueryResult(r *QueryResult) string {
 		headers[i] = c.Name
 	}
 
-	display := r.Rows
-	if len(display) > maxDisplayRows {
-		display = display[:maxDisplayRows]
-	}
-
-	// Compute column widths from headers + displayed rows.
 	widths := make([]int, len(headers))
 	for i, h := range headers {
-		widths[i] = len(text.Truncate(h, maxColWidth))
+		widths[i] = min(len(h), maxPadWidth)
 	}
-	for _, row := range display {
+	for _, row := range r.Rows {
 		for i := 0; i < len(headers) && i < len(row); i++ {
-			if w := len(text.Truncate(row[i], maxColWidth)); w > widths[i] {
-				widths[i] = w
-			}
+			widths[i] = max(widths[i], min(len(row[i]), maxPadWidth))
 		}
 	}
 
@@ -70,13 +58,18 @@ func FormatQueryResult(r *QueryResult) string {
 		seps[i] = strings.Repeat("─", widths[i])
 	}
 	writeRow(&sb, seps, widths)
-	for _, row := range display {
+	shown := 0
+	for _, row := range r.Rows {
+		if sb.Len() >= maxOutputBytes {
+			break
+		}
 		writeRow(&sb, row, widths)
+		shown++
 	}
 	sb.WriteString("```\n")
 
-	if len(r.Rows) > maxDisplayRows {
-		fmt.Fprintf(&sb, "_(showing first %d of %d rows — upload as a snippet for the full set)_\n", maxDisplayRows, len(r.Rows))
+	if shown < len(r.Rows) {
+		fmt.Fprintf(&sb, "_(showing first %d of %d rows; the rest exceed the output budget — aggregate in SQL or select fewer columns)_\n", shown, len(r.Rows))
 	}
 	return sb.String()
 }
@@ -94,10 +87,14 @@ func writeRow(sb *strings.Builder, cells []string, widths []int) {
 	for i, w := range widths {
 		val := ""
 		if i < len(cells) {
-			val = text.Truncate(cells[i], maxColWidth)
+			val = cells[i]
 		}
 		if i > 0 {
 			sb.WriteString("  ")
+		}
+		if i == len(widths)-1 {
+			sb.WriteString(val)
+			continue
 		}
 		fmt.Fprintf(sb, "%-*s", w, val)
 	}

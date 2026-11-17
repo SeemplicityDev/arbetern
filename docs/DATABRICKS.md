@@ -266,7 +266,9 @@ SELECT * FROM ai_forecast(TABLE(history), horizon => 30)
   statements (e.g. `DECLARE`/`SET` … `SELECT`) is allowed; it returns the result
   of the last statement.
 - **Inline results.** Results are fetched inline (JSON), capped by `row_limit`
-  (max 10000) and by the API's 25 MiB inline ceiling. Large exports should be
-  narrowed with SQL aggregation or a tighter `row_limit`.
+  (max 10000) and by the API's 25 MiB inline ceiling. The table handed to the
+  model shows every cell in full and stops at 64 KiB, with a note saying how many
+  rows were left out. Large exports should be narrowed with SQL aggregation or a
+  tighter `row_limit`.
 - **Cold warehouses.** A stopped SQL warehouse takes time to start; the first
   query after idle may run near the client's poll budget before returning.
