@@ -18,6 +18,7 @@ import (
 	gh "github.com/google/go-github/v91/github"
 
 	"github.com/justmike1/arbetern/internal/safego"
+	"github.com/justmike1/arbetern/internal/text"
 )
 
 type Client struct {
@@ -933,19 +934,32 @@ type PRSummary struct {
 	// State is GitHub's own state field, which is "closed" for both a merged
 	// PR and an abandoned one. Merged tells the two apart; callers deciding
 	// whether prior work landed must read it rather than inferring from State.
-	State  string
-	Merged bool
+	State    string
+	Merged   bool
+	MergedAt time.Time
 	// Repo is the "owner/name" the PR belongs to. Only set by searches that
 	// span more than one repository, where the caller cannot infer it.
-	Repo      string
-	Author    string
-	URL       string
-	BaseRef   string
-	HeadRef   string
-	HeadSHA   string
-	Body      string
-	Diff      string
-	FileNames []string
+	Repo    string
+	Author  string
+	URL     string
+	BaseRef string
+	HeadRef string
+	HeadSHA string
+	Body    string
+	Diff    string
+	Files   []PRFile
+	// Additions, Deletions and ChangedFiles are GitHub's totals for the PR; Files can list fewer.
+	Additions    int
+	Deletions    int
+	ChangedFiles int
+}
+
+// PRFile is one file a pull request changes.
+type PRFile struct {
+	Name      string
+	Status    string
+	Additions int
+	Deletions int
 }
 
 // GetPullRequestRefs fetches a PR's identity and refs without its file list or
@@ -977,16 +991,20 @@ func (c *Client) GetPullRequest(ctx context.Context, owner, repo string, number 
 	}
 
 	summary := &PRSummary{
-		Number:  number,
-		Title:   pr.GetTitle(),
-		State:   pr.GetState(),
-		Merged:  pr.GetMerged(),
-		Author:  pr.GetUser().GetLogin(),
-		URL:     pr.GetHTMLURL(),
-		BaseRef: pr.GetBase().GetRef(),
-		HeadRef: pr.GetHead().GetRef(),
-		HeadSHA: pr.GetHead().GetSHA(),
-		Body:    pr.GetBody(),
+		Number:       number,
+		Title:        pr.GetTitle(),
+		State:        pr.GetState(),
+		Merged:       pr.GetMerged(),
+		MergedAt:     pr.GetMergedAt().Time,
+		Author:       pr.GetUser().GetLogin(),
+		URL:          pr.GetHTMLURL(),
+		BaseRef:      pr.GetBase().GetRef(),
+		HeadRef:      pr.GetHead().GetRef(),
+		HeadSHA:      pr.GetHead().GetSHA(),
+		Body:         pr.GetBody(),
+		Additions:    pr.GetAdditions(),
+		Deletions:    pr.GetDeletions(),
+		ChangedFiles: pr.GetChangedFiles(),
 	}
 
 	// Get changed files with pagination.
@@ -998,7 +1016,7 @@ func (c *Client) GetPullRequest(ctx context.Context, owner, repo string, number 
 			break
 		}
 		for _, f := range files {
-			summary.FileNames = append(summary.FileNames, f.GetFilename())
+			summary.Files = append(summary.Files, PRFile{Name: f.GetFilename(), Status: f.GetStatus(), Additions: f.GetAdditions(), Deletions: f.GetDeletions()})
 			fmt.Fprintf(&diff, "--- %s (%s, +%d -%d)\n", f.GetFilename(), f.GetStatus(), f.GetAdditions(), f.GetDeletions())
 			if patch := f.GetPatch(); patch != "" {
 				diff.WriteString(patch)
@@ -1029,27 +1047,13 @@ func PRStateLabel(s *PRSummary) string {
 }
 
 // FormatPRSummary turns a PRSummary into a readable string.
-func FormatPRSummary(s *PRSummary) string {
+func FormatPRSummary(s *PRSummary, linesContaining string) string {
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "PR #%d: %s\n", s.Number, s.Title)
-	fmt.Fprintf(&sb, "Author: %s | State: %s\n", s.Author, PRStateLabel(s))
-	if s.HeadRef != "" {
-		// The head branch is what a follow-up write targets to land on this PR
-		// instead of opening a new one, so it has to survive into the model's view.
-		fmt.Fprintf(&sb, "Head branch: %s -> base: %s\n", s.HeadRef, s.BaseRef)
-	}
-	fmt.Fprintf(&sb, "URL: %s\n", s.URL)
-	if s.Body != "" {
-		body := s.Body
-		if len(body) > 1000 {
-			body = body[:1000] + "..."
-		}
-		fmt.Fprintf(&sb, "\nDescription:\n%s\n", body)
-	}
-	if len(s.FileNames) > 0 {
-		fmt.Fprintf(&sb, "\nChanged files (%d):\n", len(s.FileNames))
-		for _, f := range s.FileNames {
-			fmt.Fprintf(&sb, "  • %s\n", f)
+	writePRHead(&sb, s, PRStateLabel(s), linesContaining)
+	if len(s.Files) > 0 {
+		fmt.Fprintf(&sb, "\nChanged files (%d):\n", len(s.Files))
+		for _, f := range s.Files {
+			fmt.Fprintf(&sb, "  • %s\n", f.Name)
 		}
 	}
 	if s.Diff != "" {
@@ -1060,6 +1064,66 @@ func FormatPRSummary(s *PRSummary) string {
 		fmt.Fprintf(&sb, "\nDiff:\n%s\n", diff)
 	}
 	return sb.String()
+}
+
+// FormatPRBrief renders a PRSummary without its diff, listing each changed file's line counts and the PR's totals.
+func FormatPRBrief(s *PRSummary, linesContaining string) string {
+	state := PRStateLabel(s)
+	if !s.MergedAt.IsZero() {
+		state += " | Merged at: " + s.MergedAt.UTC().Format(time.RFC3339)
+	}
+	var sb strings.Builder
+	writePRHead(&sb, s, state, linesContaining)
+	fmt.Fprintf(&sb, "\nChanged files (%d, +%d -%d):\n", s.ChangedFiles, s.Additions, s.Deletions)
+	for _, f := range s.Files {
+		fmt.Fprintf(&sb, "  • %s (%s, +%d -%d)\n", f.Name, f.Status, f.Additions, f.Deletions)
+	}
+	if missing := s.ChangedFiles - len(s.Files); missing > 0 {
+		fmt.Fprintf(&sb, "  • … %d more not listed\n", missing)
+	}
+	return sb.String()
+}
+
+func writePRHead(sb *strings.Builder, s *PRSummary, state, linesContaining string) {
+	fmt.Fprintf(sb, "PR #%d: %s\n", s.Number, s.Title)
+	fmt.Fprintf(sb, "Author: %s | State: %s\n", s.Author, state)
+	if s.HeadRef != "" {
+		// The head branch is what a follow-up write targets to land on this PR
+		// instead of opening a new one, so it has to survive into the model's view.
+		fmt.Fprintf(sb, "Head branch: %s -> base: %s\n", s.HeadRef, s.BaseRef)
+	}
+	fmt.Fprintf(sb, "URL: %s\n", s.URL)
+	switch {
+	case linesContaining != "":
+		if lines := DescriptionLinesContaining(s.Body, linesContaining); len(lines) > 0 {
+			fmt.Fprintf(sb, "\nDescription lines containing %q:\n%s\n", linesContaining, strings.Join(lines, "\n"))
+		} else {
+			fmt.Fprintf(sb, "\nDescription lines containing %q: none\n", linesContaining)
+		}
+	case s.Body != "":
+		body := s.Body
+		if len(body) > 1000 {
+			body = body[:1000] + "..."
+		}
+		fmt.Fprintf(sb, "\nDescription:\n%s\n", body)
+	}
+}
+
+// DescriptionLinesContaining returns up to 3 lines of a PR description that contain needle, case-insensitively.
+func DescriptionLinesContaining(body, needle string) []string {
+	needle = strings.ToLower(needle)
+	var out []string
+	for _, line := range strings.Split(text.StripHTML(body), "\n") {
+		line = strings.Join(strings.Fields(line), " ")
+		if !strings.Contains(strings.ToLower(line), needle) {
+			continue
+		}
+		out = append(out, text.Truncate(line, 200))
+		if len(out) == 3 {
+			break
+		}
+	}
+	return out
 }
 
 // CommitSummary holds essential information about a single commit.

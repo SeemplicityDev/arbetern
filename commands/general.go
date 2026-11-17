@@ -934,13 +934,15 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 			Type: "function",
 			Function: llm.ToolFunction{
 				Name:        ToolGetPullRequest,
-				Description: "Get details, changed files, diff, and CI check results of a GitHub pull request by number or URL. Use this to analyze what a PR changed, understand code patterns introduced or removed, and find old/new usage patterns. Failed and pending checks are listed with their URLs; pass a failed GitHub Actions check's URL to get_workflow_run for its logs.",
+				Description: "Get details, changed files, diff, and CI check results of a GitHub pull request by number or URL. Use this to analyze what a PR changed, understand code patterns introduced or removed, and find old/new usage patterns. Failed and pending checks are listed with their URLs; pass a failed GitHub Actions check's URL to get_workflow_run for its logs. To triage pull requests by their description and size, pass include_diff: false for a fraction of the output, and fetch the diff only for the ones whose code you need to read.",
 				Parameters: json.RawMessage(`{
 					"type":"object",
 					"properties":{
 						"repo":{"type":"string","description":"Repository name (without owner)"},
 						"number":{"type":"integer","description":"Pull request number (e.g., 123)"},
-						"url":{"type":"string","description":"Full GitHub PR URL (alternative to repo+number). If provided, repo and number are extracted from it."}
+						"url":{"type":"string","description":"Full GitHub PR URL (alternative to repo+number). If provided, repo and number are extracted from it."},
+						"include_diff":{"type":"boolean","description":"Default true. false leaves out the diff and the CI checks, and adds the merge time, each changed file's added and deleted line counts, and the totals."},
+						"description_lines_containing":{"type":"string","description":"Shows the description lines that contain this text (case-insensitive, up to 3) instead of the description, e.g. 'risk' for a declared risk line."}
 					},
 					"required":[]
 				}`),
@@ -3538,9 +3540,11 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 
 	case ToolGetPullRequest:
 		args, errMsg := parseToolArgs[struct {
-			Repo   string `json:"repo"`
-			Number int    `json:"number"`
-			URL    string `json:"url"`
+			Repo            string `json:"repo"`
+			Number          int    `json:"number"`
+			URL             string `json:"url"`
+			IncludeDiff     *bool  `json:"include_diff"`
+			LinesContaining string `json:"description_lines_containing"`
 		}](argsJSON)
 		if errMsg != "" {
 			return errMsg
@@ -3567,7 +3571,11 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 			return fmt.Sprintf("Error getting PR: %v", err)
 		}
 		log.Printf("[user=%s channel=%s] fetched PR #%d in %s/%s", userID, channelID, args.Number, owner, args.Repo)
-		out := github.FormatPRSummary(pr)
+		linesContaining := strings.TrimSpace(args.LinesContaining)
+		if args.IncludeDiff != nil && !*args.IncludeDiff {
+			return github.FormatPRBrief(pr, linesContaining)
+		}
+		out := github.FormatPRSummary(pr, linesContaining)
 		if pr.HeadSHA != "" {
 			if checks, err := h.ghClient.ChecksForRef(ctx, owner, args.Repo, pr.HeadSHA); err != nil {
 				out += fmt.Sprintf("\nCI checks could not be read: %v\n", err)
@@ -7468,7 +7476,7 @@ func formatOpenPRs(owner string, prs []github.OpenPullRequest, limit int, byUpda
 			}
 			fmt.Fprintf(&sb, "  URL: %s\n", pr.URL)
 			if linesContaining != "" {
-				if lines := descriptionLinesContaining(pr.Body, linesContaining); len(lines) > 0 {
+				if lines := github.DescriptionLinesContaining(pr.Body, linesContaining); len(lines) > 0 {
 					fmt.Fprintf(&sb, "  Description lines containing %q:\n    %s\n", linesContaining, strings.Join(lines, "\n    "))
 				} else {
 					fmt.Fprintf(&sb, "  Description lines containing %q: none\n", linesContaining)
@@ -7485,20 +7493,4 @@ func formatOpenPRs(owner string, prs []github.OpenPullRequest, limit int, byUpda
 		fmt.Fprintf(&sb, "\nNot read, so not checked: %s\n", strings.Join(unread, "; "))
 	}
 	return sb.String()
-}
-
-func descriptionLinesContaining(body, needle string) []string {
-	needle = strings.ToLower(needle)
-	var out []string
-	for _, line := range strings.Split(text.StripHTML(body), "\n") {
-		line = strings.Join(strings.Fields(line), " ")
-		if !strings.Contains(strings.ToLower(line), needle) {
-			continue
-		}
-		out = append(out, text.Truncate(line, 200))
-		if len(out) == 3 {
-			break
-		}
-	}
-	return out
 }
