@@ -2172,6 +2172,8 @@ func main() {
 	if cfg.HeadroomURL != "" {
 		modelsClient.SetCompressionURL(cfg.HeadroomURL)
 		codeModelsClient.SetCompressionURL(cfg.HeadroomURL)
+		modelsClient.SetCompressionExemptTools(commands.CompressionExemptTools)
+		codeModelsClient.SetCompressionExemptTools(commands.CompressionExemptTools)
 		if cfg.HeadroomTimeout > 0 {
 			modelsClient.SetCompressionTimeout(cfg.HeadroomTimeout)
 			codeModelsClient.SetCompressionTimeout(cfg.HeadroomTimeout)

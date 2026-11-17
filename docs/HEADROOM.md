@@ -178,9 +178,15 @@ every backend benefits:
 - **CCR retrieval is not wired.** Headroom's reversible "retrieve the original
   on demand" tool (`headroom_retrieve`) is only automatic in full-proxy mode.
   With `/v1/compress` the model sees the compressed view and cannot re-expand a
-  truncated tool output. For arbetern's tool-heavy workloads (Datadog, Databricks,
-  search) the SmartCrusher savings are the main win, so this is usually an
-  acceptable trade.
+  truncated tool output. For arbetern's tool-heavy workloads (Datadog, search)
+  the SmartCrusher savings are the main win, so this is usually an acceptable
+  trade.
+- **SQL and billing results bypass it.** Headroom's router can read a result
+  table whose rows start with a date as a log and drop every row, leaving only
+  a `[N lines compressed to 0. Retrieve more: hash=…]` marker. The tools in
+  `commands.CompressionExemptTools` (Databricks, ClickHouse, Grafana SQL, Athena,
+  AWS/Azure cost) return figures a report computes with, so their results are
+  withheld from `/v1/compress` and reach the model verbatim.
 - **One extra loopback round-trip per LLM call** (~tens of ms, bounded by
   `HEADROOM_COMPRESS_TIMEOUT`). Negligible against the token savings on each
   provider call, and skipped entirely while the sidecar is unhealthy — at most

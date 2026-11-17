@@ -137,6 +137,8 @@ type Client struct {
 	// defaultCompressTimeout. Set via SetCompressionTimeout.
 	compressTimeout time.Duration
 
+	compressExempt map[string]bool
+
 	// Azure OpenAI fields (empty when using GitHub Models).
 	azureEndpoint string
 	azureAPIKey   string
@@ -177,6 +179,14 @@ func (c *Client) SetCompressionTimeout(d time.Duration) {
 		d = 0 // fall back to defaultCompressTimeout in compressMessages
 	}
 	c.compressTimeout = d
+}
+
+// SetCompressionExemptTools names tools whose results reach the model uncompressed.
+func (c *Client) SetCompressionExemptTools(names []string) {
+	c.compressExempt = make(map[string]bool, len(names))
+	for _, n := range names {
+		c.compressExempt[n] = true
+	}
 }
 
 // NewAzureClient creates an LLM client backed by Azure OpenAI.
@@ -417,7 +427,8 @@ func (c *Client) compressMessages(ctx context.Context, messages []ChatMessage) (
 }
 
 func (c *Client) compress(ctx context.Context, messages []ChatMessage) ([]ChatMessage, CompressionStats, error) {
-	payload, err := json.Marshal(compressRequest{Model: c.compressModel(), Messages: messages})
+	sent, held := c.holdExempt(messages)
+	payload, err := json.Marshal(compressRequest{Model: c.compressModel(), Messages: sent})
 	if err != nil {
 		// Our own request is malformed; that says nothing about the proxy.
 		return messages, CompressionStats{}, nil
@@ -470,11 +481,49 @@ func (c *Client) compress(ctx context.Context, messages []ChatMessage) ([]ChatMe
 		pct := float64(cr.TokensSaved) / float64(cr.TokensBefore) * 100
 		log.Printf("[llm] headroom compressed %d->%d tokens (saved %d, %.1f%%)", cr.TokensBefore, cr.TokensAfter, cr.TokensSaved, pct)
 	}
-	return cr.Messages, CompressionStats{
+	return restoreHeld(cr.Messages, held), CompressionStats{
 		TokensBefore: cr.TokensBefore,
 		TokensAfter:  cr.TokensAfter,
 		TokensSaved:  cr.TokensSaved,
 	}, nil
+}
+
+const heldPlaceholder = "[withheld from compression]"
+
+func (c *Client) holdExempt(messages []ChatMessage) ([]ChatMessage, map[string]string) {
+	if len(c.compressExempt) == 0 {
+		return messages, nil
+	}
+	exemptIDs := make(map[string]bool)
+	for _, m := range messages {
+		for _, tc := range m.ToolCalls {
+			if c.compressExempt[tc.Function.Name] {
+				exemptIDs[tc.ID] = true
+			}
+		}
+	}
+	if len(exemptIDs) == 0 {
+		return messages, nil
+	}
+	out := make([]ChatMessage, len(messages))
+	copy(out, messages)
+	held := make(map[string]string, len(exemptIDs))
+	for i, m := range out {
+		if m.Role == "tool" && exemptIDs[m.ToolCallID] {
+			held[m.ToolCallID] = m.Content
+			out[i].Content = heldPlaceholder
+		}
+	}
+	return out, held
+}
+
+func restoreHeld(messages []ChatMessage, held map[string]string) []ChatMessage {
+	for i, m := range messages {
+		if content, ok := held[m.ToolCallID]; ok && m.Role == "tool" {
+			messages[i].Content = content
+		}
+	}
+	return messages
 }
 
 func (c *Client) doChat(ctx context.Context, messages []ChatMessage, tools []Tool) (*ChatResponse, error) {

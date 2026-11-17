@@ -176,6 +176,19 @@ const (
 	ToolHTTPGet = "http_get"
 )
 
+// CompressionExemptTools return exact figures the model computes with; Headroom can drop every row of such a table.
+var CompressionExemptTools = []string{
+	ToolDatabricksQuery,
+	ToolClickHouseQuery,
+	ToolClickHouseUsageCost,
+	ToolGrafanaQuerySQL,
+	ToolAWSAthenaQuery,
+	ToolAWSGetCostAndUsage,
+	ToolAWSGetCostForecast,
+	ToolAzureGetCostAndUsage,
+	ToolAzureGetCostForecast,
+}
+
 // toolIntegration maps every integration-scoped tool to the integration that
 // owns it. It is the SINGLE catalogue used both for:
 //   - the dispatch-side gating guard (toolDenied): a tool whose integration is
