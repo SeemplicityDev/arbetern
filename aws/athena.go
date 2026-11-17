@@ -530,9 +530,11 @@ func FormatAthenaQuery(r *AthenaQueryResult) string {
 	if len(r.Rows) == 0 {
 		sb.WriteString("_Query succeeded but returned no rows._\n")
 	} else {
-		sb.WriteString("```\n")
-		sb.WriteString(athenaTableText(r.Columns, r.Rows))
-		sb.WriteString("```\n")
+		headers := make([]string, len(r.Columns))
+		for i, c := range r.Columns {
+			headers[i] = c.Name
+		}
+		sb.WriteString(text.Table{Headers: headers, Rows: r.Rows, Hint: text.HintSQL}.String())
 	}
 	fmt.Fprintf(&sb, "_%d rows", r.RowCount)
 	if r.Truncated {
@@ -589,24 +591,19 @@ func FormatAthenaSchema(r *AthenaSchemaResult) string {
 		sb.WriteString("```\n")
 	case len(r.Tables) == 1 && len(r.Tables[0].Columns) > 0:
 		t := r.Tables[0]
-		fmt.Fprintf(&sb, "*`%s.%s`* (%s)\n```\n", r.Database, t.Name, t.Type)
-		for _, col := range t.Columns {
-			fmt.Fprintf(&sb, "%-48s %s\n", text.Truncate(col.Name, 48), col.Type)
-		}
-		sb.WriteString("```\n")
+		fmt.Fprintf(&sb, "*`%s.%s`* (%s)\n", r.Database, t.Name, t.Type)
+		sb.WriteString(columnTable(t.Columns))
 		if len(t.PartitionKeys) > 0 {
-			sb.WriteString("*Partition keys* (filter on these to keep scans cheap)\n```\n")
-			for _, col := range t.PartitionKeys {
-				fmt.Fprintf(&sb, "%-48s %s\n", text.Truncate(col.Name, 48), col.Type)
-			}
-			sb.WriteString("```\n")
+			sb.WriteString("*Partition keys* (filter on these to keep scans cheap)\n")
+			sb.WriteString(columnTable(t.PartitionKeys))
 		}
 	case len(r.Tables) > 0:
-		fmt.Fprintf(&sb, "*Tables in `%s.%s`:*\n```\n", r.Catalog, r.Database)
+		fmt.Fprintf(&sb, "*Tables in `%s.%s`:*\n", r.Catalog, r.Database)
+		rows := make([][]string, 0, len(r.Tables))
 		for _, t := range r.Tables {
-			fmt.Fprintf(&sb, "%-60s %s\n", text.Truncate(t.Name, 60), t.Type)
+			rows = append(rows, []string{t.Name, t.Type})
 		}
-		sb.WriteString("```\n")
+		sb.WriteString(text.Table{Rows: rows}.String())
 		if r.Truncated {
 			fmt.Fprintf(&sb, "_(first %d tables — narrow with a search expression)_\n", maxAthenaTables)
 		}
@@ -616,44 +613,10 @@ func FormatAthenaSchema(r *AthenaSchemaResult) string {
 	return sb.String()
 }
 
-// athenaTableText lays rows out in columns sized to their content, with each
-// cell capped so one long value can't stretch the table.
-func athenaTableText(cols []AthenaColumn, rows [][]string) string {
-	const maxCell = 40
-	widths := make([]int, len(cols))
-	for i, c := range cols {
-		widths[i] = len(text.Truncate(c.Name, maxCell))
+func columnTable(cols []AthenaColumn) string {
+	rows := make([][]string, 0, len(cols))
+	for _, c := range cols {
+		rows = append(rows, []string{c.Name, c.Type})
 	}
-	cells := make([][]string, 0, len(rows))
-	for _, row := range rows {
-		out := make([]string, len(row))
-		for i, v := range row {
-			out[i] = text.Truncate(v, maxCell)
-			if i < len(widths) && len(out[i]) > widths[i] {
-				widths[i] = len(out[i])
-			}
-		}
-		cells = append(cells, out)
-	}
-	var sb strings.Builder
-	for i, c := range cols {
-		fmt.Fprintf(&sb, "%-*s  ", widths[i], text.Truncate(c.Name, maxCell))
-	}
-	sb.WriteString("\n")
-	total := 0
-	for _, w := range widths {
-		total += w + 2
-	}
-	sb.WriteString(strings.Repeat("─", total) + "\n")
-	for _, row := range cells {
-		for i, v := range row {
-			w := maxCell
-			if i < len(widths) {
-				w = widths[i]
-			}
-			fmt.Fprintf(&sb, "%-*s  ", w, v)
-		}
-		sb.WriteString("\n")
-	}
-	return sb.String()
+	return text.Table{Rows: rows}.String()
 }

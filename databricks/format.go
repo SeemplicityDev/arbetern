@@ -3,13 +3,8 @@ package databricks
 import (
 	"fmt"
 	"strings"
-)
 
-const (
-	// maxPadWidth caps column padding; a longer cell is written whole and pushes the rest of its row right.
-	maxPadWidth = 80
-	// maxOutputBytes bounds the rendered table so one wide result can't flood the model's context.
-	maxOutputBytes = 64 << 10
+	"github.com/justmike1/arbetern/internal/text"
 )
 
 // FormatQueryResult renders a QueryResult as a Slack-friendly fixed-width
@@ -39,38 +34,7 @@ func FormatQueryResult(r *QueryResult) string {
 	for i, c := range r.Columns {
 		headers[i] = c.Name
 	}
-
-	widths := make([]int, len(headers))
-	for i, h := range headers {
-		widths[i] = min(len(h), maxPadWidth)
-	}
-	for _, row := range r.Rows {
-		for i := 0; i < len(headers) && i < len(row); i++ {
-			widths[i] = max(widths[i], min(len(row[i]), maxPadWidth))
-		}
-	}
-
-	sb.WriteString("```\n")
-	writeRow(&sb, headers, widths)
-	// Separator line.
-	seps := make([]string, len(headers))
-	for i := range seps {
-		seps[i] = strings.Repeat("─", widths[i])
-	}
-	writeRow(&sb, seps, widths)
-	shown := 0
-	for _, row := range r.Rows {
-		if sb.Len() >= maxOutputBytes {
-			break
-		}
-		writeRow(&sb, row, widths)
-		shown++
-	}
-	sb.WriteString("```\n")
-
-	if shown < len(r.Rows) {
-		fmt.Fprintf(&sb, "_(showing first %d of %d rows; the rest exceed the output budget — aggregate in SQL or select fewer columns)_\n", shown, len(r.Rows))
-	}
+	sb.WriteString(text.Table{Headers: headers, Rows: r.Rows, Hint: text.HintSQL}.String())
 	return sb.String()
 }
 
@@ -80,25 +44,6 @@ func hostLabel(host string) string {
 	h = strings.TrimPrefix(h, "https://")
 	h = strings.TrimPrefix(h, "http://")
 	return strings.TrimRight(h, "/")
-}
-
-// writeRow renders one padded, pipe-separated table row.
-func writeRow(sb *strings.Builder, cells []string, widths []int) {
-	for i, w := range widths {
-		val := ""
-		if i < len(cells) {
-			val = cells[i]
-		}
-		if i > 0 {
-			sb.WriteString("  ")
-		}
-		if i == len(widths)-1 {
-			sb.WriteString(val)
-			continue
-		}
-		fmt.Fprintf(sb, "%-*s", w, val)
-	}
-	sb.WriteString("\n")
 }
 
 // ToCSV renders the full result set (all rows) as RFC-4180-ish CSV. Useful for

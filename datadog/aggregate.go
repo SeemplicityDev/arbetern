@@ -6,6 +6,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/justmike1/arbetern/internal/text"
 )
 
 // Logs Aggregate API (v2) — server-side aggregations & percentiles
@@ -327,8 +329,8 @@ func percentileResultFromResponse(resp *AggregateResponse, siteLabel string, fac
 
 // FormatAggregatePercentiles renders an aggregate response as a table. facets
 // may hold one or more group-by facets; for multiple facets each row's key is
-// the composite "value1 | value2" and the key column is widened. With no
-// measure it renders a count-only table sorted by count.
+// the composite "value1 | value2". With no measure it renders a count-only
+// table sorted by count.
 func FormatAggregatePercentiles(resp *AggregateResponse, siteLabel string, facets []string, measure string) string {
 	facets = normalizeGroupByFacets(facets)
 	label := joinFacetNames(facets)
@@ -346,30 +348,21 @@ func FormatAggregatePercentiles(resp *AggregateResponse, siteLabel string, facet
 	// Defensive: re-sort desc in case the API limit clipped before sorting.
 	idx := sortComputeIndex(measure)
 	sort.SliceStable(rows, func(i, j int) bool { return rows[i].Computes[idx] > rows[j].Computes[idx] })
-	// Widen the key column for composite (multi-facet) keys.
-	keyWidth := 32
-	if len(facets) > 1 {
-		keyWidth = 48
+	t := text.Table{
+		Headers: []string{label, "count"},
+		Align:   []text.Align{text.AlignLeft, text.AlignRight, text.AlignRight, text.AlignRight, text.AlignRight},
+		NoFence: true,
 	}
-	if measure == "" {
-		fmt.Fprintf(&sb, "%-*s %10s\n", keyWidth, label, "count")
-		for _, b := range rows {
-			name := bucketKey(b.By, facets)
-			if len(name) > keyWidth {
-				name = name[:keyWidth-1] + "…"
-			}
-			fmt.Fprintf(&sb, "%-*s %10.0f\n", keyWidth, name, b.Computes["c0"])
-		}
-		return sb.String()
+	if measure != "" {
+		t.Headers = append(t.Headers, "p50", "p95", "p99")
 	}
-	fmt.Fprintf(&sb, "%-*s %10s %10s %10s %10s\n", keyWidth, label, "count", "p50", "p95", "p99")
 	for _, b := range rows {
-		name := bucketKey(b.By, facets)
-		if len(name) > keyWidth {
-			name = name[:keyWidth-1] + "…"
+		row := []string{bucketKey(b.By, facets), fmt.Sprintf("%.0f", b.Computes["c0"])}
+		if measure != "" {
+			row = append(row, fmt.Sprintf("%.3f", b.Computes["c1"]), fmt.Sprintf("%.3f", b.Computes["c2"]), fmt.Sprintf("%.3f", b.Computes["c3"]))
 		}
-		fmt.Fprintf(&sb, "%-*s %10.0f %10.3f %10.3f %10.3f\n",
-			keyWidth, name, b.Computes["c0"], b.Computes["c1"], b.Computes["c2"], b.Computes["c3"])
+		t.Rows = append(t.Rows, row)
 	}
+	sb.WriteString(t.String())
 	return sb.String()
 }

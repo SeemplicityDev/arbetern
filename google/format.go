@@ -12,14 +12,6 @@ import (
 	"github.com/justmike1/arbetern/internal/text"
 )
 
-const (
-	// maxColWidth caps per-column width in a rendered table.
-	maxColWidth = 40
-	// maxDisplayRows caps how many rows a read renders inline so a wide range
-	// does not blow past Slack's message limit.
-	maxDisplayRows = 50
-)
-
 // FormatAppendResult renders a batch append: a headline, a per-target table,
 // and the failures spelled out in full so the model can correct and retry only
 // what actually failed.
@@ -44,15 +36,9 @@ func FormatAppendResult(r *BatchAppendResult) string {
 		} else if o.RowsAppended != o.RowsRequested {
 			status = fmt.Sprintf("partial (%d of %d)", o.RowsAppended, o.RowsRequested)
 		}
-		rows = append(rows, []string{
-			text.Truncate(o.SpreadsheetID, maxColWidth),
-			text.Truncate(o.Tab, maxColWidth),
-			fmt.Sprintf("%d", o.RowsRequested),
-			text.Truncate(o.UpdatedRange, maxColWidth),
-			status,
-		})
+		rows = append(rows, []string{o.SpreadsheetID, o.Tab, fmt.Sprintf("%d", o.RowsRequested), o.UpdatedRange, status})
 	}
-	writeTable(&sb, headers, rows)
+	sb.WriteString(text.Table{Headers: headers, Rows: rows}.String())
 
 	if r.Failed > 0 {
 		fmt.Fprintf(&sb, "\n*%d target%s failed:*\n", r.Failed, pluralS(r.Failed))
@@ -106,26 +92,7 @@ func FormatReadResult(r *ReadResult) string {
 			sb.WriteString("_(empty)_\n")
 			continue
 		}
-		// The first row is treated as the header only when it is complete and
-		// entirely non-numeric — guessing wrong would hide a data row.
-		display := rv.Values
-		trimmed := false
-		if len(display) > maxDisplayRows {
-			display = display[:maxDisplayRows]
-			trimmed = true
-		}
-		cells := make([][]string, 0, len(display))
-		for _, row := range display {
-			out := make([]string, len(row))
-			for i, v := range row {
-				out[i] = text.Truncate(v, maxColWidth)
-			}
-			cells = append(cells, out)
-		}
-		writeTable(&sb, nil, cells)
-		if trimmed {
-			fmt.Fprintf(&sb, "_showing the first %d of %d rows_\n", maxDisplayRows, rv.Rows)
-		}
+		sb.WriteString(text.Table{Rows: rv.Values, Hint: "read a narrower range"}.String())
 	}
 	if r.Truncated {
 		sb.WriteString("\n_Result was capped; request a narrower range to see the rest._\n")
@@ -155,15 +122,9 @@ func FormatFindResult(r *FindFilesResult) string {
 	headers := []string{"Name", "File ID", "Type", "Size", "Modified"}
 	rows := make([][]string, 0, len(r.Files))
 	for _, f := range r.Files {
-		rows = append(rows, []string{
-			text.Truncate(f.Name, maxColWidth),
-			f.ID,
-			fileKind(f),
-			fileSize(f),
-			text.Truncate(f.ModifiedTime, 20),
-		})
+		rows = append(rows, []string{f.Name, f.ID, fileKind(f), fileSize(f), f.ModifiedTime})
 	}
-	writeTable(&sb, headers, rows)
+	sb.WriteString(text.Table{Headers: headers, Rows: rows}.String())
 
 	if r.Truncated {
 		sb.WriteString("\n_More files matched than were returned; narrow the name or pass a folder_id._\n")
@@ -200,9 +161,9 @@ func FormatRoots(roots []Root, serviceAccount string, pinned bool) string {
 	headers := []string{"Name", "Folder ID", "Kind"}
 	rows := make([][]string, 0, len(roots))
 	for _, r := range roots {
-		rows = append(rows, []string{text.Truncate(r.Name, maxColWidth), r.ID, r.Kind})
+		rows = append(rows, []string{r.Name, r.ID, r.Kind})
 	}
-	writeTable(&sb, headers, rows)
+	sb.WriteString(text.Table{Headers: headers, Rows: rows}.String())
 	return sb.String()
 }
 
@@ -221,12 +182,12 @@ func FormatCopyResult(r *CopyFileResult) string {
 	} else {
 		folder = fmt.Sprintf("%s (%s)", folder, r.FolderID)
 	}
-	writeTable(&sb, nil, [][]string{
+	sb.WriteString(text.Table{Rows: [][]string{
 		{"New file ID", r.File.ID},
 		{"Type", fileKind(r.File)},
-		{"Folder", text.Truncate(folder, maxColWidth)},
+		{"Folder", folder},
 		{"Copied from", r.Source.ID},
-	})
+	}}.String())
 	if r.File.WebViewLink != "" {
 		fmt.Fprintf(&sb, "%s\n", r.File.WebViewLink)
 	}
@@ -341,71 +302,13 @@ func FormatSpreadsheetInfo(i *SpreadsheetInfo) string {
 	headers := []string{"Tab", "Rows", "Columns"}
 	rows := make([][]string, 0, len(i.Tabs))
 	for _, t := range i.Tabs {
-		rows = append(rows, []string{
-			text.Truncate(t.Title, maxColWidth),
-			fmt.Sprintf("%d", t.RowCount),
-			fmt.Sprintf("%d", t.ColCount),
-		})
+		rows = append(rows, []string{t.Title, fmt.Sprintf("%d", t.RowCount), fmt.Sprintf("%d", t.ColCount)})
 	}
-	writeTable(&sb, headers, rows)
+	sb.WriteString(text.Table{Headers: headers, Rows: rows}.String())
 	return sb.String()
 }
 
 // ── helpers ────────────────────────────────────────────────────────────────
-
-// writeTable renders a fixed-width table inside a code block. headers may be
-// nil for a headerless grid (a raw sheet range).
-func writeTable(sb *strings.Builder, headers []string, rows [][]string) {
-	cols := len(headers)
-	for _, r := range rows {
-		if len(r) > cols {
-			cols = len(r)
-		}
-	}
-	if cols == 0 {
-		return
-	}
-
-	widths := make([]int, cols)
-	for i, h := range headers {
-		widths[i] = len(h)
-	}
-	for _, r := range rows {
-		for i, cell := range r {
-			if len(cell) > widths[i] {
-				widths[i] = len(cell)
-			}
-		}
-	}
-
-	sb.WriteString("```\n")
-	if len(headers) > 0 {
-		writeRow(sb, headers, widths)
-		seps := make([]string, cols)
-		for i := range seps {
-			seps[i] = strings.Repeat("─", widths[i])
-		}
-		writeRow(sb, seps, widths)
-	}
-	for _, r := range rows {
-		writeRow(sb, r, widths)
-	}
-	sb.WriteString("```\n")
-}
-
-func writeRow(sb *strings.Builder, cells []string, widths []int) {
-	for i, w := range widths {
-		val := ""
-		if i < len(cells) {
-			val = cells[i]
-		}
-		if i > 0 {
-			sb.WriteString("  ")
-		}
-		fmt.Fprintf(sb, "%-*s", w, val)
-	}
-	sb.WriteString("\n")
-}
 
 // shortMime renders a MIME type as a short human word: a Google-native type by
 // its trailing segment ("document", "spreadsheet"), anything else by its

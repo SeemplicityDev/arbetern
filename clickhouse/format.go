@@ -3,18 +3,9 @@ package clickhouse
 import (
 	"fmt"
 	"sort"
-	"strconv"
 	"strings"
 
 	"github.com/justmike1/arbetern/internal/text"
-)
-
-const (
-	// maxDisplayRows caps how many entity rows FormatUsageCost renders inline so
-	// a big organization doesn't blow past Slack message limits.
-	maxDisplayRows = 50
-	// maxColWidth caps per-column width in the rendered table.
-	maxColWidth = 40
 )
 
 // FormatUsageCost renders a UsageCostReport as a Slack-friendly summary: a
@@ -73,51 +64,18 @@ func FormatUsageCost(r *UsageCostReport) string {
 	}
 	sort.SliceStable(rows, func(i, j int) bool { return rows[i].totalCHC > rows[j].totalCHC })
 
-	headers := []string{"Entity", "Type", "Cost (CHC)"}
-	display := rows
-	truncated := false
-	if len(display) > maxDisplayRows {
-		display = display[:maxDisplayRows]
-		truncated = true
+	cells := make([][]string, 0, len(rows))
+	for _, row := range rows {
+		cells = append(cells, []string{row.name, row.typ, text.Commify(row.totalCHC)})
 	}
-
-	cells := make([][]string, 0, len(display))
-	for _, row := range display {
-		cells = append(cells, []string{
-			text.Truncate(row.name, maxColWidth),
-			row.typ,
-			commify(row.totalCHC),
-		})
-	}
-
-	widths := make([]int, len(headers))
-	for i, h := range headers {
-		widths[i] = len(h)
-	}
-	for _, row := range cells {
-		for i := range row {
-			if len(row[i]) > widths[i] {
-				widths[i] = len(row[i])
-			}
-		}
-	}
-
-	sb.WriteString("```\n")
-	writeRow(&sb, headers, widths)
-	seps := make([]string, len(headers))
-	for i := range seps {
-		seps[i] = strings.Repeat("─", widths[i])
-	}
-	writeRow(&sb, seps, widths)
-	for _, row := range cells {
-		writeRow(&sb, row, widths)
-	}
-	sb.WriteString("```\n")
+	sb.WriteString(text.Table{
+		Headers: []string{"Entity", "Type", "Cost (CHC)"},
+		Rows:    cells,
+		Align:   []text.Align{text.AlignLeft, text.AlignLeft, text.AlignRight},
+		Hint:    "highest cost first",
+	}.String())
 
 	fmt.Fprintf(&sb, "_%d entit%s across %d daily record(s)_\n", len(rows), plural(len(rows)), len(r.Records))
-	if truncated {
-		fmt.Fprintf(&sb, "_(showing top %d by cost)_\n", maxDisplayRows)
-	}
 
 	// By-category rollup across all records (only non-zero categories).
 	var compute, storage, backup, dataTransfer, initialLoad, publicXfer, interRegion float64
@@ -161,62 +119,10 @@ func FormatUsageCost(r *UsageCostReport) string {
 	return sb.String()
 }
 
-// writeRow renders one padded, space-separated table row.
-func writeRow(sb *strings.Builder, cells []string, widths []int) {
-	for i, w := range widths {
-		val := ""
-		if i < len(cells) {
-			val = cells[i]
-		}
-		if i > 0 {
-			sb.WriteString("  ")
-		}
-		fmt.Fprintf(sb, "%-*s", w, val)
-	}
-	sb.WriteString("\n")
-}
-
 // money renders a ClickHouse Credit amount with thousands separators and the
 // CHC unit, e.g. 1234.5 → "1,234.50 CHC".
 func money(v float64) string {
-	return commify(v) + " CHC"
-}
-
-// commify formats a float with two decimal places and comma thousands
-// separators, e.g. 1234567.5 → "1,234,567.50".
-func commify(v float64) string {
-	s := strconv.FormatFloat(v, 'f', 2, 64)
-	neg := strings.HasPrefix(s, "-")
-	if neg {
-		s = s[1:]
-	}
-	intPart, frac := s, ""
-	if dot := strings.IndexByte(s, '.'); dot >= 0 {
-		intPart, frac = s[:dot], s[dot:]
-	}
-	n := len(intPart)
-	if n > 3 {
-		var b strings.Builder
-		pre := n % 3
-		if pre > 0 {
-			b.WriteString(intPart[:pre])
-			if n > pre {
-				b.WriteByte(',')
-			}
-		}
-		for i := pre; i < n; i += 3 {
-			b.WriteString(intPart[i : i+3])
-			if i+3 < n {
-				b.WriteByte(',')
-			}
-		}
-		intPart = b.String()
-	}
-	out := intPart + frac
-	if neg {
-		out = "-" + out
-	}
-	return out
+	return text.Commify(v) + " CHC"
 }
 
 // plural returns the "entit{y,ies}" suffix for n.
@@ -248,43 +154,9 @@ func FormatSQLResult(r *SQLQueryResult) string {
 
 	headers := make([]string, len(r.Columns))
 	for i, col := range r.Columns {
-		headers[i] = text.Truncate(col.Name, maxColWidth)
+		headers[i] = col.Name
 	}
-
-	cells := make([][]string, 0, len(r.Rows))
-	for _, row := range r.Rows {
-		out := make([]string, len(headers))
-		for i := range headers {
-			if i < len(row) {
-				out[i] = text.Truncate(row[i], maxColWidth)
-			}
-		}
-		cells = append(cells, out)
-	}
-
-	widths := make([]int, len(headers))
-	for i, h := range headers {
-		widths[i] = len(h)
-	}
-	for _, row := range cells {
-		for i := range row {
-			if len(row[i]) > widths[i] {
-				widths[i] = len(row[i])
-			}
-		}
-	}
-
-	sb.WriteString("```\n")
-	writeRow(&sb, headers, widths)
-	seps := make([]string, len(headers))
-	for i := range seps {
-		seps[i] = strings.Repeat("─", widths[i])
-	}
-	writeRow(&sb, seps, widths)
-	for _, row := range cells {
-		writeRow(&sb, row, widths)
-	}
-	sb.WriteString("```\n")
+	sb.WriteString(text.Table{Headers: headers, Rows: r.Rows, Hint: text.HintSQL}.String())
 
 	noun := "rows"
 	if r.RowCount == 1 {
