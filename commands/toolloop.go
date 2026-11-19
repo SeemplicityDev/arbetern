@@ -11,6 +11,7 @@ import (
 	"github.com/justmike1/arbetern/internal/journal"
 	"github.com/justmike1/arbetern/internal/progress"
 	"github.com/justmike1/arbetern/internal/safego"
+	"github.com/justmike1/arbetern/internal/text"
 	"github.com/justmike1/arbetern/llm"
 	"github.com/justmike1/arbetern/metrics"
 )
@@ -379,7 +380,7 @@ func anyMutating(calls []llm.ToolCall) bool {
 func previewText(s string, n int) string {
 	s = strings.ReplaceAll(s, "\n", " ")
 	if len(s) > n {
-		return s[:n] + "…"
+		return text.TruncatePlain(s, n) + "…"
 	}
 	return s
 }

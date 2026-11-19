@@ -10,6 +10,7 @@ import (
 
 	"github.com/justmike1/arbetern/internal/httpx"
 	"github.com/justmike1/arbetern/internal/store"
+	"github.com/justmike1/arbetern/internal/text"
 )
 
 // maxMessageBytes bounds an inbound chat message to keep the LLM prompt and
@@ -136,9 +137,7 @@ func (r *Registry) handleConversation(w http.ResponseWriter, req *http.Request, 
 			http.Error(w, "message must not be empty", http.StatusBadRequest)
 			return
 		}
-		if len(msg) > maxMessageBytes {
-			msg = msg[:maxMessageBytes]
-		}
+		msg = text.TruncatePlain(msg, maxMessageBytes)
 		// Prefer the OAuth-proxy-verified email (when a proxy is in front) over
 		// any client-supplied name, so an authenticated sender is attributed by
 		// their real identity instead of "Anonymous". Falls back to the free-text
@@ -147,9 +146,7 @@ func (r *Registry) handleConversation(w http.ResponseWriter, req *http.Request, 
 		if owner != "" {
 			user = owner
 		}
-		if len(user) > 80 {
-			user = user[:80]
-		}
+		user = text.TruncatePlain(user, 80)
 
 		if err := r.Start(agent, id, owner, user, msg); err != nil {
 			switch {
@@ -177,9 +174,7 @@ func (r *Registry) handleConversation(w http.ResponseWriter, req *http.Request, 
 			http.Error(w, "title must not be empty", http.StatusBadRequest)
 			return
 		}
-		if len(title) > 120 {
-			title = title[:120]
-		}
+		title = text.TruncatePlain(title, 120)
 		conv, err := r.RenameConversation(req.Context(), agent, id, owner, title)
 		if errors.Is(err, ErrForbidden) {
 			http.Error(w, "conversation not found", http.StatusNotFound)

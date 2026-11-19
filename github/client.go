@@ -460,7 +460,7 @@ func describeHTTPError(resp *gh.Response, err error) (status, body string) {
 		b, _ := io.ReadAll(resp.Body)
 		body = strings.TrimSpace(string(b))
 		if len(body) > 500 {
-			body = body[:500] + "…"
+			body = text.TruncatePlain(body, 500) + "…"
 		}
 	}
 	if body == "" {
@@ -571,7 +571,7 @@ func (c *Client) graphql(ctx context.Context, query string, vars map[string]any,
 	if resp.StatusCode >= 400 {
 		snippet := string(body)
 		if len(snippet) > 500 {
-			snippet = snippet[:500] + "…"
+			snippet = text.TruncatePlain(snippet, 500) + "…"
 		}
 		return fmt.Errorf("graphql HTTP %d: %s", resp.StatusCode, snippet)
 	}
@@ -1061,7 +1061,7 @@ func FormatPRSummary(s *PRSummary, linesContaining string) string {
 	if s.Diff != "" {
 		diff := s.Diff
 		if len(diff) > 12000 {
-			diff = diff[:12000] + "\n... (diff truncated)"
+			diff = text.TruncatePlain(diff, 12000) + "\n... (diff truncated)"
 		}
 		fmt.Fprintf(&sb, "\nDiff:\n%s\n", diff)
 	}
@@ -1105,7 +1105,7 @@ func writePRHead(sb *strings.Builder, s *PRSummary, state, linesContaining strin
 	case s.Body != "":
 		body := s.Body
 		if len(body) > 1000 {
-			body = body[:1000] + "..."
+			body = text.TruncatePlain(body, 1000) + "..."
 		}
 		fmt.Fprintf(sb, "\nDescription:\n%s\n", body)
 	}

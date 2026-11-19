@@ -28,6 +28,7 @@ import (
 	"github.com/justmike1/arbetern/internal/progress"
 	"github.com/justmike1/arbetern/internal/safego"
 	"github.com/justmike1/arbetern/internal/store"
+	"github.com/justmike1/arbetern/internal/text"
 )
 
 // Prefix is the object prefix transcripts are stored under.
@@ -639,7 +640,7 @@ func deriveTitle(message string) string {
 	}
 	const max = 60
 	if len(s) > max {
-		s = strings.TrimSpace(s[:max]) + "…"
+		s = strings.TrimSpace(text.TruncatePlain(s, max)) + "…"
 	}
 	return s
 }

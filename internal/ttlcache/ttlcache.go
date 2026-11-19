@@ -65,6 +65,14 @@ func (c *Cache[T]) Get(ctx context.Context) (T, error) {
 	return v, nil
 }
 
+// Set installs v as the current value, as if it had just been fetched.
+func (c *Cache[T]) Set(v T) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.data, c.ok, c.expiresAt = v, true, time.Now().Add(c.ttl)
+	c.failUntil, c.lastErr = time.Time{}, nil
+}
+
 // Invalidate drops the cached value so the next Get refetches.
 func (c *Cache[T]) Invalidate() {
 	c.mu.Lock()

@@ -23,6 +23,8 @@ import (
 	awsv2 "github.com/aws/aws-sdk-go-v2/aws"
 	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+
+	"github.com/justmike1/arbetern/internal/text"
 )
 
 // maxS3InlineBytes caps how much of an object S3GetObject returns inline.
@@ -149,12 +151,11 @@ func (c *Client) S3GetObject(ctx context.Context, bucket, key string) (*S3GetRes
 	if err != nil {
 		return nil, fmt.Errorf("read s3://%s/%s: %w", bucket, key, err)
 	}
-	res := &S3GetResult{Bucket: bucket, Key: key, Region: region}
-	if len(data) > maxS3InlineBytes {
-		data = data[:maxS3InlineBytes]
+	res := &S3GetResult{Bucket: bucket, Key: key, Region: region, Body: string(data)}
+	if len(res.Body) > maxS3InlineBytes {
+		res.Body = text.TruncatePlain(res.Body, maxS3InlineBytes)
 		res.Truncated = true
 	}
-	res.Body = string(data)
 	if out.ContentLength != nil {
 		res.Size = *out.ContentLength
 	}

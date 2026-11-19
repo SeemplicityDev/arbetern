@@ -48,8 +48,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/justmike1/arbetern/internal/store"
 	"github.com/robfig/cron/v3"
+
+	"github.com/justmike1/arbetern/internal/store"
+	"github.com/justmike1/arbetern/internal/text"
 
 	"github.com/justmike1/arbetern/internal/crud"
 	"github.com/justmike1/arbetern/internal/journal"
@@ -1318,7 +1320,7 @@ func (r *Registry) runOnce(ctx context.Context, agent, id, triggeredBy string) (
 
 	duration := time.Since(start)
 	if len(finalResult) > MaxResultChars {
-		finalResult = finalResult[:MaxResultChars] + "\n…(truncated)"
+		finalResult = text.TruncatePlain(finalResult, MaxResultChars) + "\n…(truncated)"
 	}
 	entry.DurationMS = duration.Milliseconds()
 	entry.Result = finalResult
@@ -1420,7 +1422,7 @@ func composeTaskPrompt(task Task, prior []string) string {
 	}
 	joined := strings.Join(prior, "\n\n")
 	if len(joined) > MaxTaskContextChars {
-		joined = joined[:MaxTaskContextChars] + "\n…(truncated)"
+		joined = text.TruncatePlain(joined, MaxTaskContextChars) + "\n…(truncated)"
 	}
 	return fmt.Sprintf("Previous task results:\n%s\n\n---\nCurrent task: %s\n%s", joined, task.Name, task.Prompt)
 }

@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/justmike1/arbetern/internal/httpx"
+	"github.com/justmike1/arbetern/internal/text"
 )
 
 // protocolVersion is the MCP revision this client speaks (Streamable HTTP).
@@ -192,7 +193,7 @@ func (c *Client) ListTools(ctx context.Context) ([]ToolInfo, error) {
 
 // CallTool invokes one tool and flattens its content blocks to text. isError
 // mirrors the server's isError flag; err covers transport and protocol errors.
-func (c *Client) CallTool(ctx context.Context, name string, args json.RawMessage) (text string, isError bool, err error) {
+func (c *Client) CallTool(ctx context.Context, name string, args json.RawMessage) (output string, isError bool, err error) {
 	var arguments any = map[string]any{}
 	if len(bytes.TrimSpace(args)) > 0 {
 		var parsed any
@@ -244,7 +245,7 @@ func (c *Client) CallTool(ctx context.Context, name string, args json.RawMessage
 	}
 	out := strings.TrimSpace(sb.String())
 	if len(out) > maxToolOutput {
-		out = out[:maxToolOutput] + "\n… [output truncated]"
+		out = text.TruncatePlain(out, maxToolOutput) + "\n… [output truncated]"
 	}
 	return out, res.IsError, nil
 }

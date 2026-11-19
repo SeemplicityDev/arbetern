@@ -301,6 +301,25 @@ const plural = (n, word, many) => `${fmtInt(n)} ${n === 1 ? word : many || word 
 const windowLabel = () => (days ? `last ${days} days` : 'all time');
 const emptyHtml = (text, tall) => `<div class="empty${tall ? ' tall' : ''}">${escapeHtml(text)}</div>`;
 
+function statusPillHtml([cls, label, title]) {
+  return `<span class="status-pill ${cls}" title="${escapeHtml(title)}">${escapeHtml(label)}</span>`;
+}
+
+function timeCellHtml(iso) {
+  return `<td class="muted" title="${escapeHtml(iso ? fmtDateTime(iso) : '')}">${iso ? timeAgo(iso) : '—'}</td>`;
+}
+
+function pausedStatus(e) {
+  return e.disabled_reason ? ['auto', 'auto-paused', e.disabled_reason] : ['paused', 'paused', ''];
+}
+
+function onPill(id, pick) {
+  document.getElementById(id).addEventListener('click', e => {
+    const b = e.target.closest('.pill');
+    if (b) pick(b.dataset);
+  });
+}
+
 function hashColor(str) {
   let hash = 0;
   for (let i = 0; i < str.length; i++) hash = str.charCodeAt(i) + ((hash << 5) - hash);
@@ -329,8 +348,6 @@ function getAgentProfession(agent) {
 }
 
 /* Shell: theme, side rail, routing */
-const DETAIL_PARENT = { workflow: 'workflows', dashboard: 'dashboards', project: 'projects' };
-
 function setThemeLabel(theme) {
   const btn = document.getElementById('theme-toggle');
   btn.title = 'Switch to ' + (theme === 'light' ? 'dark' : 'light') + ' theme';
@@ -1056,7 +1073,7 @@ function renderRecent(sum) {
   };
   el.innerHTML = `<table class="data-table"><thead><tr><th>When</th><th>Who</th><th>Agent</th><th>Source</th><th class="n">Tokens</th><th class="n">Cost</th></tr></thead><tbody>${
     evs.map(e => `<tr>
-      <td class="muted" title="${escapeHtml(new Date(e.at).toLocaleString())}">${timeAgo(e.at)}</td>
+      ${timeCellHtml(e.at)}
       <td>${who(e)}</td>
       <td>${agentChip(e.agent)}</td>
       <td>${sourceTagHtml(e.source)}</td>
@@ -1084,19 +1101,8 @@ function filterPills(el, list, current, attr) {
     agents.map(a => `<button class="pill${current === a ? ' active' : ''}" ${attr}="${escapeHtml(a)}">${escapeHtml(agentLabel(a))}</button>`).join('');
 }
 
-document.getElementById('wf-filter').addEventListener('click', e => {
-  const b = e.target.closest('.pill');
-  if (!b) return;
-  wfFilter = b.dataset.agent;
-  renderWorkflowsPage();
-});
-
-document.getElementById('dash-filter').addEventListener('click', e => {
-  const b = e.target.closest('.pill');
-  if (!b) return;
-  dashFilter = b.dataset.agent;
-  renderDashboardsPage();
-});
+onPill('wf-filter', d => { wfFilter = d.agent; renderWorkflowsPage(); });
+onPill('dash-filter', d => { dashFilter = d.agent; renderDashboardsPage(); });
 
 function gitopsHtml(kind) {
   const g = gitops[kind];
@@ -1122,8 +1128,7 @@ async function syncGitops(kind, btn) {
   btn.textContent = 'Syncing…';
   const before = ((gitops[kind] || {}).status || {}).last_sync || '';
   try {
-    const r = await fetch(`/api/${kind}/_gitops/sync`, { method: 'POST' });
-    if (!r.ok) throw new Error((await r.text()) || ('HTTP ' + r.status));
+    await apiSend(`/api/${kind}/_gitops/sync`, 'POST');
   } catch (err) {
     await uiError('Sync failed', err);
     await loadGitops(kind, true);
@@ -1146,7 +1151,7 @@ async function syncGitops(kind, btn) {
 
 function wfStatus(w) {
   if (w.running) return ['running', 'running', ''];
-  if (!w.enabled) return w.disabled_reason ? ['auto', 'auto-paused', w.disabled_reason] : ['paused', 'paused', ''];
+  if (!w.enabled) return pausedStatus(w);
   if (w.last_error) return ['failed', 'failed', w.last_error];
   if (w.last_run) return ['ok', 'ok', ''];
   return ['paused', 'not run yet', ''];
@@ -1155,7 +1160,7 @@ function wfStatus(w) {
 function wfSchedule(w) {
   const type = (w.trigger && w.trigger.type) || (w.cron ? 'schedule' : 'manual');
   if (type === 'schedule') return w.cron ? `<span class="tag">${escapeHtml(w.cron)}</span>` : '<span class="muted">manual</span>';
-  if (type === 'on_success' || type === 'on_failure') {
+  if (wfIsEvent(type)) {
     return `<span class="muted">${type === 'on_success' ? 'after success of' : 'after failure of'}</span><span class="sub">${escapeHtml((w.trigger && w.trigger.ref) || '')}</span>`;
   }
   return `<span class="muted">${escapeHtml(type)}</span>`;
@@ -1235,7 +1240,6 @@ function renderWorkflowsPage() {
     </tr></thead><tbody>${rows.map(w => {
       const aid = safeId(w.agent), wid = safeId(w.id);
       if (!aid || !wid) return '';
-      const [cls, label, title] = wfStatus(w);
       const url = detailPath('workflow', aid, wid);
       const managed = w.source === 'gitops';
       return `<tr>
@@ -1243,8 +1247,8 @@ function renderWorkflowsPage() {
           <span class="sub" title="${escapeHtml(w.description || '')}">${escapeHtml(w.short_name || w.id)}${w.description ? ' · ' + escapeHtml(w.description) : ''}</span></td>
         <td>${agentChip(w.agent)}</td>
         <td>${wfSchedule(w)}</td>
-        <td><span class="status-pill ${cls}" title="${escapeHtml(title)}">${label}</span></td>
-        <td class="muted" title="${w.last_run ? escapeHtml(new Date(w.last_run).toLocaleString()) : ''}">${w.last_run ? timeAgo(w.last_run) : '—'}</td>
+        <td>${statusPillHtml(wfStatus(w))}</td>
+        ${timeCellHtml(w.last_run)}
         <td><div class="actions">
           <a class="btn-mini" href="${url}" data-link>Open</a>
           <button class="btn-mini" type="button" onclick="runWorkflow('${aid}','${wid}', this)"${w.running || !w.enabled ? ' disabled' : ''} title="${w.enabled ? 'Run now, outside the schedule' : 'Paused; resume it from its page first'}">Run</button>
@@ -1255,28 +1259,11 @@ function renderWorkflowsPage() {
 }
 
 async function runWorkflow(agentId, id, btn) {
-  if (!(await uiConfirm('It uses the agent’s LLM tool loop and counts toward usage.', { title: 'Run this workflow now?', okLabel: 'Run now' }))) return;
-  if (btn) { btn.disabled = true; btn.textContent = 'Queued'; }
-  try {
-    const r = await fetch(`/api/workflows/${encodeURIComponent(agentId)}/${encodeURIComponent(id)}/run`, { method: 'POST' });
-    if (!r.ok) throw new Error((await r.text()) || ('HTTP ' + r.status));
-  } catch (err) {
-    await uiError('Failed to start workflow', err);
-  }
-  delete lastFetched.workflows;
-  setTimeout(loadWorkflows, 1500);
+  if (await entityRun('workflow', { agent: agentId, id }, btn)) setTimeout(loadWorkflows, 1500);
 }
 
 async function deleteWorkflow(agentId, id) {
-  if (!(await uiConfirm('This stops its schedule and removes its stored data.', { title: 'Delete this workflow?', tone: 'danger', okLabel: 'Delete' }))) return;
-  try {
-    const r = await fetch(`/api/workflows/${encodeURIComponent(agentId)}/${encodeURIComponent(id)}`, { method: 'DELETE' });
-    if (!r.ok && r.status !== 204) throw new Error('HTTP ' + r.status);
-    delete lastFetched.workflows;
-    await loadWorkflows();
-  } catch (err) {
-    await uiError('Failed to delete workflow', err);
-  }
+  if (await entityDelete('workflow', agentId, id)) await loadWorkflows();
 }
 
 /* Dashboards page */
@@ -1328,7 +1315,6 @@ function renderDashboardsPage() {
     </tr></thead><tbody>${rows.map(d => {
       const aid = safeId(d.agent), did = safeId(d.id);
       if (!aid || !did) return '';
-      const [cls, label, title] = dashStatus(d);
       const url = detailPath('dashboard', aid, did);
       const managed = d.source === 'gitops';
       return `<tr>
@@ -1337,8 +1323,8 @@ function renderDashboardsPage() {
         <td>${agentChip(d.agent)}</td>
         <td>${dashKind(d, byId)}</td>
         <td><span class="tag">${escapeHtml(d.sync_interval || '—')}</span></td>
-        <td><span class="status-pill ${cls}" title="${escapeHtml(title)}">${label}</span></td>
-        <td class="muted" title="${d.last_sync ? escapeHtml(new Date(d.last_sync).toLocaleString()) : ''}">${d.last_sync ? timeAgo(d.last_sync) : '—'}</td>
+        <td>${statusPillHtml(dashStatus(d))}</td>
+        ${timeCellHtml(d.last_sync)}
         <td><div class="actions">
           <a class="btn-mini" href="${url}" data-link>Open</a>
           ${managed ? '' : `<button class="btn-mini danger" type="button" onclick="deleteDashboard('${aid}','${did}')">Delete</button>`}
@@ -1348,15 +1334,7 @@ function renderDashboardsPage() {
 }
 
 async function deleteDashboard(agentId, id) {
-  if (!(await uiConfirm('This stops its sync and removes its stored data.', { title: 'Delete this dashboard?', tone: 'danger', okLabel: 'Delete' }))) return;
-  try {
-    const r = await fetch(`/api/dashboards/${encodeURIComponent(agentId)}/${encodeURIComponent(id)}`, { method: 'DELETE' });
-    if (!r.ok && r.status !== 204) throw new Error('HTTP ' + r.status);
-    delete lastFetched.dashboards;
-    await loadDashboards();
-  } catch (err) {
-    await uiError('Failed to delete dashboard', err);
-  }
+  if (await entityDelete('dashboard', agentId, id)) await loadDashboards();
 }
 
 /* Projects page */
@@ -1372,7 +1350,7 @@ document.getElementById('proj-new-btn').addEventListener('click', () => projectF
 
 function projStatus(p) {
   const active = (p.stats && p.stats.active_sessions) || 0;
-  if (!p.enabled) return p.disabled_reason ? ['auto', 'auto-paused', p.disabled_reason] : ['paused', 'paused', ''];
+  if (!p.enabled) return pausedStatus(p);
   if (active > 0) return ['running', 'working', `${plural(active, 'session')} in progress`];
   if (p.last_error) return ['failed', 'failing', p.last_error];
   if (p.last_tick) return ['ok', 'active', ''];
@@ -1405,7 +1383,6 @@ function projSummaryHtml(list) {
 function projRowHtml(p) {
   const pid = safeId(p.id);
   if (!pid) return '';
-  const [cls, label, title] = projStatus(p);
   const s = p.stats || {};
   const r = p.repo || {};
   const url = detailPath('project', '', pid);
@@ -1414,12 +1391,12 @@ function projRowHtml(p) {
   return `<tr>
       <td><a href="${url}" data-link>${escapeHtml(p.name || p.id)}</a>
         <span class="sub" title="${escapeHtml(sub)}">${escapeHtml(sub)}</span></td>
-      <td><span class="status-pill ${cls}" title="${escapeHtml(title)}">${label}</span></td>
+      <td>${statusPillHtml(projStatus(p))}</td>
       <td class="n">${fmtInt(s.prs_open)}</td>
       <td class="n">${fmtInt(s.prs_merged)}</td>
       <td class="n">${projRate(s.merge_rate, (s.prs_merged || 0) + (s.prs_closed || 0))}</td>
       <td class="n">${fmtInt(s.resolved)}</td>
-      <td class="muted" title="${p.last_tick ? escapeHtml(new Date(p.last_tick).toLocaleString()) : ''}">${p.last_tick ? timeAgo(p.last_tick) : '—'}</td>
+      ${timeCellHtml(p.last_tick)}
       <td><div class="actions"><a class="btn-mini" href="${url}" data-link>Open</a></div></td>
     </tr>`;
 }
@@ -1483,12 +1460,7 @@ function renderChanges() {
 }
 
 /* Pull requests page */
-document.getElementById('pr-filter').addEventListener('click', e => {
-  const b = e.target.closest('.pill');
-  if (!b) return;
-  prFilter = b.dataset.agent;
-  renderPullsPage();
-});
+onPill('pr-filter', d => { prFilter = d.agent; renderPullsPage(); });
 
 (function bindPullsSearch() {
   const input = document.getElementById('pr-search');
@@ -1551,8 +1523,8 @@ function renderPullsPage() {
         <td>${prOrigin(p)}</td>
         <td>${p.source ? sourceTagHtml(p.source) : '<span class="muted">—</span>'}</td>
         <td><span class="status-pill ${p.draft ? 'paused' : 'ok'}">${p.draft ? 'draft' : 'ready for review'}</span></td>
-        <td class="muted" title="${escapeHtml(new Date(p.created_at).toLocaleString())}">${timeAgo(p.created_at)}</td>
-        <td class="muted" title="${escapeHtml(new Date(p.updated_at).toLocaleString())}">${timeAgo(p.updated_at)}</td>
+        ${timeCellHtml(p.created_at)}
+        ${timeCellHtml(p.updated_at)}
         <td><div class="actions"><a class="btn-mini" href="${url}" target="_blank" rel="noopener">Open</a></div></td>
       </tr>`;
     }).join('')}</tbody></table>`;
@@ -1586,18 +1558,8 @@ function ticketStatusClass(status) {
   return 'paused';
 }
 
-document.getElementById('ticket-filter').addEventListener('click', e => {
-  const b = e.target.closest('.pill');
-  if (!b) return;
-  ticketFilter = b.dataset.project;
-  renderTicketsPage();
-});
-document.getElementById('ticket-role').addEventListener('click', e => {
-  const b = e.target.closest('.pill');
-  if (!b) return;
-  ticketRole = b.dataset.role;
-  renderTicketsPage();
-});
+onPill('ticket-filter', d => { ticketFilter = d.project; renderTicketsPage(); });
+onPill('ticket-role', d => { ticketRole = d.role; renderTicketsPage(); });
 (() => {
   const input = document.getElementById('ticket-search');
   input.addEventListener('input', () => { ticketQuery = input.value.trim().toLowerCase(); renderTicketsPage(); });
@@ -1647,8 +1609,8 @@ function renderTicketsPage() {
         <td>${t.priority ? escapeHtml(t.priority) : '<span class="muted">—</span>'}</td>
         <td>${t.assignee ? escapeHtml(t.assignee) : '<span class="muted">—</span>'}</td>
         <td>${t.reporter ? escapeHtml(t.reporter) : '<span class="muted">—</span>'}</td>
-        <td class="muted" title="${escapeHtml(new Date(t.updated).toLocaleString())}">${timeAgo(t.updated)}</td>
-        <td class="muted" title="${t.created ? escapeHtml(new Date(t.created).toLocaleString()) : ''}">${t.created ? timeAgo(t.created) : '—'}</td>
+        ${timeCellHtml(t.updated)}
+        ${timeCellHtml(t.created)}
         <td><div class="actions"><a class="btn-mini" href="${url}" target="_blank" rel="noopener">Open</a></div></td>
       </tr>`;
     }).join('')}</tbody></table>`;
@@ -1741,7 +1703,7 @@ function backendFileRow(o, label) {
       <td><button type="button" class="tree-name" data-file="${escapeHtml(o.key)}">${FILE_ICON}<span>${escapeHtml(label)}</span></button></td>
       <td class="muted">object</td>
       <td class="n">${fmtBytes(o.size)}</td>
-      <td class="muted" title="${escapeHtml(new Date(o.last_modified).toLocaleString())}">${timeAgo(o.last_modified)}</td>
+      ${timeCellHtml(o.last_modified)}
     </tr>`;
 }
 
@@ -1764,7 +1726,7 @@ function renderBackendListing() {
       <td><button type="button" class="tree-name" data-dir="${escapeHtml(path + d.name + '/')}">${FOLDER_ICON}<span>${escapeHtml(d.name)}/</span></button></td>
       <td class="muted">${plural(d.count, 'object')}</td>
       <td class="n">${fmtBytes(d.size)}</td>
-      <td class="muted" title="${escapeHtml(new Date(d.modified).toLocaleString())}">${timeAgo(d.modified)}</td>
+      ${timeCellHtml(d.modified)}
     </tr>`).join('');
   return listPanel(backendCrumbs(path), head + dirRows + files.map(o => backendFileRow(o, o.name)).join('') + '</tbody></table>');
 }
@@ -1833,12 +1795,7 @@ function renderBackendPage() {
   body.innerHTML = `<div class="backend-grid${file ? ' with-file' : ''}">${renderBackendListing()}${file}</div>`;
 }
 
-document.getElementById('backend-tabs').addEventListener('click', e => {
-  const b = e.target.closest('.pill');
-  if (!b) return;
-  backendState.tab = b.dataset.tab;
-  renderBackendPage();
-});
+onPill('backend-tabs', d => { backendState.tab = d.tab; renderBackendPage(); });
 document.getElementById('backend-body').addEventListener('click', e => {
   const dir = e.target.closest('[data-dir]');
   if (dir) { backendState.path = dir.dataset.dir; backendState.file = null; renderBackendPage(); return; }
@@ -2345,17 +2302,8 @@ function convBase(agent) { return `/api/chat/${encodeURIComponent(agent)}/conver
 async function apiListConversations(agent) { return fetchJSON(convBase(agent)); }
 async function apiCreateConversation(agent) { return fetchJSON(convBase(agent), { method: 'POST' }); }
 async function apiGetConversation(agent, id) { return fetchJSON(`${convBase(agent)}/${encodeURIComponent(id)}`); }
-async function apiDeleteConversation(agent, id) {
-  const r = await fetch(`${convBase(agent)}/${encodeURIComponent(id)}`, { method: 'DELETE' });
-  if (!r.ok && r.status !== 204) throw new Error('HTTP ' + r.status);
-}
-async function apiRenameConversation(agent, id, title) {
-  return fetchJSON(`${convBase(agent)}/${encodeURIComponent(id)}`, {
-    method: 'PATCH',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ title }),
-  });
-}
+async function apiDeleteConversation(agent, id) { return apiSend(`${convBase(agent)}/${encodeURIComponent(id)}`, 'DELETE'); }
+async function apiRenameConversation(agent, id, title) { return apiSend(`${convBase(agent)}/${encodeURIComponent(id)}`, 'PATCH', { title }); }
 
 async function openChat(id) {
   const agent = agentById(id);
@@ -2981,9 +2929,32 @@ async function apiSend(url, method, body) {
   if (!r.ok) {
     let text = (await r.text()).trim();
     try { const j = JSON.parse(text); if (j && typeof j.error === 'string') text = j.error; } catch (_) {}
-    throw new Error(text || ('HTTP ' + r.status));
+    const err = httpError(r.status);
+    if (text) err.message = text;
+    throw err;
   }
   return r.status === 204 ? null : r.json();
+}
+
+// Skills and MCP connectors share their enable and delete actions.
+const ITEM_KINDS = {
+  skill: { api: '/api/skills/', cache: 'skills', load: () => loadSkills(), deleteNote: 'Agents stop following it immediately.' },
+  connector: { api: '/api/mcp/', cache: 'mcp', load: () => loadMCP(), deleteNote: 'Its tools disappear from the agents immediately.' },
+};
+
+async function itemSend(kind, id, method, body) {
+  const k = ITEM_KINDS[kind];
+  try {
+    await apiSend(k.api + encodeURIComponent(id), method, body);
+  } catch (err) {
+    await uiError(`Failed to ${method === 'DELETE' ? 'delete' : 'update'} ${kind}`, err);
+  }
+  delete lastFetched[k.cache];
+  await k.load();
+}
+
+async function itemDelete(kind, id) {
+  if (await uiConfirm(ITEM_KINDS[kind].deleteNote, { title: `Delete this ${kind}?`, tone: 'danger', okLabel: 'Delete' })) await itemSend(kind, id, 'DELETE');
 }
 
 function scopeChips(agents) {
@@ -3047,7 +3018,7 @@ function renderChatsPage() {
       <td><a href="/ui/${encodeURIComponent(chatsAgent)}/chat" onclick="event.preventDefault();openFullChat('${chatsAgent}','${c.id}')">${escapeHtml(c.title || 'New chat')}</a><span class="sub">started ${timeAgo(c.created_at)}</span></td>
       <td>${agentChip(chatsAgent)}</td>
       <td class="n">${fmtInt(c.message_count)}</td>
-      <td class="muted" title="${escapeHtml(new Date(c.updated_at).toLocaleString())}">${timeAgo(c.updated_at)}</td>
+      ${timeCellHtml(c.updated_at)}
       <td><div class="actions">
         <button class="btn-mini" type="button" onclick="openFullChat('${chatsAgent}','${c.id}')">Open</button>
         <button class="btn-mini" type="button" onclick="renameChatFromList('${c.id}')">Rename</button>
@@ -3056,13 +3027,7 @@ function renderChatsPage() {
     </tr>`).join('')}</tbody></table>`;
 }
 
-document.getElementById('chat-agent-pills').addEventListener('click', e => {
-  const b = e.target.closest('.pill');
-  if (!b) return;
-  chatsAgent = b.dataset.agent;
-  chatsList = null;
-  renderChatsPage();
-});
+onPill('chat-agent-pills', d => { chatsAgent = d.agent; chatsList = null; renderChatsPage(); });
 
 document.getElementById('chat-new-btn').addEventListener('click', async () => {
   if (!chatsAgent) return;
@@ -3200,12 +3165,7 @@ function renderSkillsPage() {
   builtinEl.innerHTML = builtin.length ? builtin.map(skillCard).join('') : emptyHtml('No built-in skills apply here.');
 }
 
-document.getElementById('skill-filter').addEventListener('click', e => {
-  const b = e.target.closest('.pill');
-  if (!b) return;
-  skillFilter = b.dataset.agent;
-  renderSkillsPage();
-});
+onPill('skill-filter', d => { skillFilter = d.agent; renderSkillsPage(); });
 document.getElementById('skill-new-btn').addEventListener('click', () => skillForm(null));
 
 function skillForm(s) {
@@ -3243,26 +3203,8 @@ function editSkill(id) {
   if (s) skillForm(s);
 }
 
-async function toggleSkill(id, enabled) {
-  try {
-    await apiSend(`/api/skills/${encodeURIComponent(id)}`, 'PATCH', { enabled });
-  } catch (err) {
-    await uiError('Failed to update skill', err);
-  }
-  delete lastFetched.skills;
-  await loadSkills();
-}
-
-async function deleteSkill(id) {
-  if (!(await uiConfirm('Agents stop following it immediately.', { title: 'Delete this skill?', tone: 'danger', okLabel: 'Delete' }))) return;
-  try {
-    await apiSend(`/api/skills/${encodeURIComponent(id)}`, 'DELETE');
-  } catch (err) {
-    await uiError('Failed to delete skill', err);
-  }
-  delete lastFetched.skills;
-  await loadSkills();
-}
+function toggleSkill(id, enabled) { return itemSend('skill', id, 'PATCH', { enabled }); }
+function deleteSkill(id) { return itemDelete('skill', id); }
 
 /* MCP connectors */
 async function loadMCP() {
@@ -3383,26 +3325,8 @@ function editConnector(id) {
   if (c) connectorForm(c);
 }
 
-async function toggleConnector(id, enabled) {
-  try {
-    await apiSend(`/api/mcp/${encodeURIComponent(id)}`, 'PATCH', { enabled });
-  } catch (err) {
-    await uiError('Failed to update connector', err);
-  }
-  delete lastFetched.mcp;
-  await loadMCP();
-}
-
-async function deleteConnector(id) {
-  if (!(await uiConfirm('Its tools disappear from the agents immediately.', { title: 'Delete this connector?', tone: 'danger', okLabel: 'Delete' }))) return;
-  try {
-    await apiSend(`/api/mcp/${encodeURIComponent(id)}`, 'DELETE');
-  } catch (err) {
-    await uiError('Failed to delete connector', err);
-  }
-  delete lastFetched.mcp;
-  await loadMCP();
-}
+function toggleConnector(id, enabled) { return itemSend('connector', id, 'PATCH', { enabled }); }
+function deleteConnector(id) { return itemDelete('connector', id); }
 
 async function testConnector(id, btn) {
   if (btn) { btn.disabled = true; btn.textContent = 'Testing…'; }

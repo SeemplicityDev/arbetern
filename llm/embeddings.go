@@ -11,6 +11,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/justmike1/arbetern/internal/text"
 )
 
 const (
@@ -93,10 +95,7 @@ func (e *Embedder) Embed(ctx context.Context, texts []string) ([][]float32, erro
 	}
 	clipped := make([]string, len(texts))
 	for i, t := range texts {
-		if len(t) > maxEmbeddingInputChars {
-			t = t[:maxEmbeddingInputChars]
-		}
-		clipped[i] = t
+		clipped[i] = text.TruncatePlain(t, maxEmbeddingInputChars)
 	}
 	br := breakerFor("embeddings:"+e.model, "Embeddings ("+e.model+")")
 	if !br.allow() {

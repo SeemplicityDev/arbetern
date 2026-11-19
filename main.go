@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"embed"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -174,55 +173,9 @@ func integrationToolNames(id string) []string {
 	return commands.ToolsForIntegration(id)
 }
 
-// agentsCacheTTL is how long the discovered agents list is served from memory
-// before the next request rebuilds it. Agent discovery walks the agents/
-// directory and parses several YAML files per agent, so caching avoids redoing
-// that work on every landing-page load.
+// agentsCacheTTL is how long the discovered agents list is served from memory:
+// discovery walks the agents/ directory and parses several YAML files per agent.
 const agentsCacheTTL = 5 * time.Minute
-
-// agentsCache is a process-wide, thread-safe TTL cache for the /api/agents
-// payload. Every viewer shares the same snapshot, so a page refresh just
-// re-serves the cached list until the TTL elapses, at which point the next
-// request rebuilds it. Concurrent requests during a miss are single-flighted by
-// the mutex, and a failed rebuild falls back to the last good snapshot.
-type agentsCache struct {
-	mu        sync.Mutex
-	data      []prompts.AgentConfig
-	expiresAt time.Time
-}
-
-// get returns the cached agents list, rebuilding it when empty or expired. The
-// returned slice is only ever replaced wholesale (never mutated in place), so
-// callers may read it after the lock is released.
-func (c *agentsCache) get() ([]prompts.AgentConfig, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.data != nil && time.Now().Before(c.expiresAt) {
-		return c.data, nil
-	}
-	agents, err := prompts.DiscoverAgents("")
-	if err != nil {
-		if c.data != nil {
-			return c.data, nil // serve the last good snapshot on transient errors
-		}
-		return nil, err
-	}
-	c.data = agents
-	c.expiresAt = time.Now().Add(agentsCacheTTL)
-	return agents, nil
-}
-
-// seed installs the roster discovered at startup so the first landing-page
-// request is served from memory instead of re-walking the agents directory.
-func (c *agentsCache) seed(agents []prompts.AgentConfig) {
-	if len(agents) == 0 {
-		return
-	}
-	c.mu.Lock()
-	c.data = agents
-	c.expiresAt = time.Now().Add(agentsCacheTTL)
-	c.mu.Unlock()
-}
 
 // changelogCacheTTL is how long the commit list behind the Changelog page is
 // served from memory.
@@ -331,14 +284,12 @@ func registerGitOpsRoutes(apiMux *http.ServeMux, kindPlural string, authorize fu
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("Cache-Control", "no-store")
 		st := statusFn()
 		if st == nil {
-			_ = json.NewEncoder(w).Encode(map[string]any{"enabled": false})
+			httpx.WriteJSON(w, http.StatusOK, map[string]any{"enabled": false})
 			return
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"enabled": true, "status": st})
+		httpx.WriteJSON(w, http.StatusOK, map[string]any{"enabled": true, "status": st})
 	})
 	apiMux.HandleFunc("/api/"+kindPlural+"/_gitops/sync", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -579,57 +530,42 @@ func emailAllowed(email string, allow []string) bool {
 	return false
 }
 
-// emailUserIDCache memoises Slack users.lookupByEmail results. The chat-UI
-// authorizer resolves the OAuth-proxy email to a Slack user on every request
-// to evaluate allowed_teams membership, so both positive and negative lookups
-// are cached for a TTL to stay well within Slack's rate limits.
-//
-// Resolving emails to Slack users requires the users:read.email scope on the
-// bot token.
+// lookupCacheMax bounds the Slack lookup caches: their keys arrive in request
+// headers and events, which are not a closed set.
+const lookupCacheMax = 4096
+
+// emailUserIDCache memoises Slack users.lookupByEmail, misses and failures
+// included: the chat-UI authorizer asks on every request and has to stay inside
+// Slack's rate limits. Resolving an email needs the users:read.email scope.
 type emailUserIDCache struct {
-	mu      sync.RWMutex
-	entries map[string]emailUserIDEntry
-	ttl     time.Duration
+	ids *ttlcache.Keyed[string, string]
 }
 
-type emailUserIDEntry struct {
-	userID  string
-	fetched time.Time
+func newEmailUserIDCache(slackClient *slack.Client, ttl time.Duration) *emailUserIDCache {
+	if slackClient == nil {
+		return &emailUserIDCache{}
+	}
+	return &emailUserIDCache{ids: ttlcache.NewKeyed(ttl, lookupCacheMax, func(_ context.Context, email string) (string, error) {
+		user, err := slackClient.GetUserByEmail(email)
+		if err != nil {
+			log.Printf("[rbac] slack lookup by email %q failed: %v", redactEmail(email), err)
+			return "", nil
+		}
+		if user == nil {
+			return "", nil
+		}
+		return user.ID, nil
+	})}
 }
 
-func newEmailUserIDCache(ttl time.Duration) *emailUserIDCache {
-	return &emailUserIDCache{entries: make(map[string]emailUserIDEntry), ttl: ttl}
-}
-
-// resolve returns the Slack user ID for an email address, or "" when the email
-// is empty, no Slack client is configured, the user can't be found, or the
-// lookup fails. Results (including misses) are cached for the configured TTL.
-func (c *emailUserIDCache) resolve(slackClient *slack.Client, email string) string {
+func (c *emailUserIDCache) resolve(email string) string {
 	email = strings.ToLower(strings.TrimSpace(email))
-	if email == "" || slackClient == nil {
+	if email == "" || c.ids == nil {
 		return ""
 	}
-
-	c.mu.RLock()
-	entry, ok := c.entries[email]
-	if ok && time.Since(entry.fetched) < c.ttl {
-		c.mu.RUnlock()
-		return entry.userID
-	}
-	c.mu.RUnlock()
-
-	user, err := slackClient.GetUserByEmail(email)
-	userID := ""
-	if err != nil {
-		log.Printf("[rbac] slack lookup by email %q failed: %v", redactEmail(email), err)
-	} else if user != nil {
-		userID = user.ID
-	}
-
-	c.mu.Lock()
-	c.entries[email] = emailUserIDEntry{userID: userID, fetched: time.Now()}
-	c.mu.Unlock()
-	return userID
+	// Not the request's context: an abandoned wait would read as a denial.
+	id, _ := c.ids.Get(context.Background(), email)
+	return id
 }
 
 type userNameCache struct {
@@ -707,38 +643,6 @@ type identity struct {
 	ResolvedAt         time.Time          `json:"resolved_at"`
 }
 
-// lookupCache memoises a slow lookup for a while, negatives included, so the
-// hourly profile pass does not re-ask Slack about what it already knows.
-type lookupCache[T any] struct {
-	mu      sync.Mutex
-	entries map[string]lookupEntry[T]
-	ttl     time.Duration
-}
-
-type lookupEntry[T any] struct {
-	value  T
-	cached time.Time
-}
-
-func newLookupCache[T any](ttl time.Duration) *lookupCache[T] {
-	return &lookupCache[T]{entries: make(map[string]lookupEntry[T]), ttl: ttl}
-}
-
-func (c *lookupCache[T]) get(key string, fetch func() T) T {
-	c.mu.Lock()
-	if e, ok := c.entries[key]; ok && time.Since(e.cached) < c.ttl {
-		c.mu.Unlock()
-		return e.value
-	}
-	c.mu.Unlock()
-
-	value := fetch()
-	c.mu.Lock()
-	c.entries[key] = lookupEntry[T]{value: value, cached: time.Now()}
-	c.mu.Unlock()
-	return value
-}
-
 // slackPerson is one users.info answer, kept whole because the profile pass
 // wants both halves of it: who the person is and which other key they are
 // recorded under.
@@ -746,6 +650,8 @@ type slackPerson struct {
 	facts   commands.PersonFacts
 	aliases []string
 }
+
+const profileLookupTTL = 24 * time.Hour
 
 // billingAgentPlatform attributes spend that belongs to the platform itself
 // rather than to any agent's work — currently only the written profiles.
@@ -763,54 +669,67 @@ type profileEnricher struct {
 	slack    *slack.Client
 	models   *llm.Client
 	billing  *billing.Store
-	people   *lookupCache[slackPerson]
-	channels *lookupCache[channelLabel]
+	people   *ttlcache.Keyed[string, slackPerson]
+	channels *ttlcache.Keyed[string, channelLabel]
 	// scopeWarned keeps the missing-scope notice to one line per process.
 	scopeWarned atomic.Bool
 }
 
 func newProfileEnricher(slackClient *slack.Client, models *llm.Client, bill *billing.Store) *profileEnricher {
-	return &profileEnricher{
-		slack:    slackClient,
-		models:   models,
-		billing:  bill,
-		people:   newLookupCache[slackPerson](24 * time.Hour),
-		channels: newLookupCache[channelLabel](24 * time.Hour),
-	}
+	p := &profileEnricher{slack: slackClient, models: models, billing: bill}
+	p.people = ttlcache.NewKeyed(profileLookupTTL, lookupCacheMax, p.fetchPerson)
+	p.channels = ttlcache.NewKeyed(profileLookupTTL, lookupCacheMax, p.fetchChannel)
+	return p
 }
 
-func (p *profileEnricher) lookup(id string) slackPerson {
+func (p *profileEnricher) lookup(ctx context.Context, id string) slackPerson {
 	if p.slack == nil || !slack.IsUserID(id) {
 		return slackPerson{}
 	}
-	return p.people.get(id, func() slackPerson {
-		user, err := p.slack.GetUserInfo(id)
-		if err != nil {
-			log.Printf("[user-context] slack users.info %s failed: %v", id, err)
-			return slackPerson{}
-		}
-		if user == nil {
-			return slackPerson{}
-		}
-		out := slackPerson{facts: commands.PersonFacts{
-			Name:     slack.DisplayName(user),
-			Title:    user.Profile.Title,
-			Timezone: text.FirstNonBlank(user.TZLabel, user.TZ),
-		}}
-		if email := strings.TrimSpace(user.Profile.Email); email != "" {
-			out.aliases = []string{commands.UserContextID(email)}
-		}
-		return out
-	})
+	person, _ := p.people.Get(ctx, id)
+	return person
 }
 
-func (p *profileEnricher) Link(_ context.Context, id string) []string {
-	return p.lookup(id).aliases
+// fetchPerson and fetchChannel never report an error, so a miss is cached like
+// a hit and the hourly profile pass does not re-ask Slack what it already knows.
+func (p *profileEnricher) fetchPerson(_ context.Context, id string) (slackPerson, error) {
+	user, err := p.slack.GetUserInfo(id)
+	if err != nil {
+		log.Printf("[user-context] slack users.info %s failed: %v", id, err)
+		return slackPerson{}, nil
+	}
+	if user == nil {
+		return slackPerson{}, nil
+	}
+	out := slackPerson{facts: commands.PersonFacts{
+		Name:     slack.DisplayName(user),
+		Title:    user.Profile.Title,
+		Timezone: text.FirstNonBlank(user.TZLabel, user.TZ),
+	}}
+	if email := strings.TrimSpace(user.Profile.Email); email != "" {
+		out.aliases = []string{commands.UserContextID(email)}
+	}
+	return out, nil
 }
 
-func (p *profileEnricher) Person(_ context.Context, ids []string) commands.PersonFacts {
+func (p *profileEnricher) fetchChannel(_ context.Context, id string) (channelLabel, error) {
+	name, err := p.slack.GetChannelName(id)
+	if err != nil {
+		return channelLabel{reason: p.channelNameReason(id, err)}, nil
+	}
+	if name == "" {
+		return channelLabel{reason: "Slack returned no name for this channel."}, nil
+	}
+	return channelLabel{label: "#" + name}, nil
+}
+
+func (p *profileEnricher) Link(ctx context.Context, id string) []string {
+	return p.lookup(ctx, id).aliases
+}
+
+func (p *profileEnricher) Person(ctx context.Context, ids []string) commands.PersonFacts {
 	for _, id := range ids {
-		if facts := p.lookup(id).facts; facts.Name != "" || facts.Title != "" {
+		if facts := p.lookup(ctx, id).facts; facts.Name != "" || facts.Title != "" {
 			return facts
 		}
 	}
@@ -824,7 +743,7 @@ type channelLabel struct {
 	reason string
 }
 
-func (p *profileEnricher) ChannelName(_ context.Context, id string) (string, string) {
+func (p *profileEnricher) ChannelName(ctx context.Context, id string) (string, string) {
 	if p.slack == nil || id == "" {
 		return "", ""
 	}
@@ -833,16 +752,7 @@ func (p *profileEnricher) ChannelName(_ context.Context, id string) (string, str
 	if strings.HasPrefix(id, "D") {
 		return "Direct message", ""
 	}
-	out := p.channels.get(id, func() channelLabel {
-		name, err := p.slack.GetChannelName(id)
-		if err != nil {
-			return channelLabel{reason: p.channelNameReason(id, err)}
-		}
-		if name == "" {
-			return channelLabel{reason: "Slack returned no name for this channel."}
-		}
-		return channelLabel{label: "#" + name}
-	})
+	out, _ := p.channels.Get(ctx, id)
 	return out.label, out.reason
 }
 
@@ -890,27 +800,28 @@ func (p *profileEnricher) Summarize(ctx context.Context, system, user string) (s
 }
 
 type identityCache struct {
-	mu      sync.Mutex
-	entries map[string]identity
-	ttl     time.Duration
+	jira    *atlassian.Client
+	byEmail *ttlcache.Keyed[string, identity]
 }
 
-func newIdentityCache(ttl time.Duration) *identityCache {
-	return &identityCache{entries: make(map[string]identity), ttl: ttl}
+func newIdentityCache(ttl time.Duration, slackClient *slack.Client, jira *atlassian.Client, site string) *identityCache {
+	c := &identityCache{jira: jira}
+	c.byEmail = ttlcache.NewKeyed(ttl, lookupCacheMax, func(_ context.Context, email string) (identity, error) {
+		return resolveIdentity(email, slackClient, jira, site), nil
+	})
+	return c
 }
 
-func (c *identityCache) lookup(email string, slackClient *slack.Client, jira *atlassian.Client, site string) identity {
-	jiraReady := jira != nil && jira.Ready()
+func (c *identityCache) lookup(email string) identity {
 	if email == "" {
-		return identity{Anonymous: true, AtlassianConnected: jiraReady}
+		return identity{Anonymous: true, AtlassianConnected: c.jira != nil && c.jira.Ready()}
 	}
-	c.mu.Lock()
-	if e, ok := c.entries[email]; ok && time.Since(e.ResolvedAt) < c.ttl {
-		c.mu.Unlock()
-		return e
-	}
-	c.mu.Unlock()
+	id, _ := c.byEmail.Get(context.Background(), email)
+	return id
+}
 
+func resolveIdentity(email string, slackClient *slack.Client, jira *atlassian.Client, site string) identity {
+	jiraReady := jira != nil && jira.Ready()
 	id := identity{Email: email, AtlassianConnected: jiraReady, ResolvedAt: time.Now()}
 	if slackClient != nil {
 		if u, err := slackClient.GetUserByEmail(email); err != nil {
@@ -941,9 +852,6 @@ func (c *identityCache) lookup(email string, slackClient *slack.Client, jira *at
 			id.Atlassian = &atlassianIdentity{AccountID: u.AccountID, DisplayName: u.DisplayName, Email: u.EmailAddress, Avatar: u.AvatarURLs["48x48"], Site: site}
 		}
 	}
-	c.mu.Lock()
-	c.entries[email] = id
-	c.mu.Unlock()
 	return id
 }
 
@@ -984,7 +892,7 @@ func uiRBACAllowed(r *http.Request, allowedEmails, allowedTeams []string, slackC
 
 	// Layer 2: fall back to Slack team membership resolved from the email.
 	if len(allowedTeams) > 0 && email != "" {
-		if userID := emailCache.resolve(slackClient, email); userID != "" && groupCache.isMember(slackClient, userID, allowedTeams) {
+		if userID := emailCache.resolve(email); userID != "" && groupCache.isMember(slackClient, userID, allowedTeams) {
 			return true
 		}
 	}
@@ -2451,7 +2359,7 @@ func main() {
 	rbacCache := newGroupMemberCache(5 * time.Minute)
 	// Cache for resolving OAuth-proxy emails → Slack user IDs, used by the
 	// chat-UI authorizer to fall back to allowed_teams membership.
-	emailUserCache := newEmailUserIDCache(5 * time.Minute)
+	emailUserCache := newEmailUserIDCache(slackClient, 5*time.Minute)
 
 	// Map of agentID → Router so the events handler can dispatch thread replies.
 	routers := make(map[string]*commands.Router, len(agents))
@@ -2669,7 +2577,7 @@ func main() {
 		// authorizer already made for this request, so it is served from cache
 		// — so the turn is attributed to the person in usage reporting instead
 		// of to one shared web-chat bucket.
-		return router.RunChat(ctx, owner, emailUserCache.resolve(slackClient, owner), msgs, userMessage, tracker)
+		return router.RunChat(ctx, owner, emailUserCache.resolve(owner), msgs, userMessage, tracker)
 	})
 	chatRegistry.UseJournal(inflight)
 	if err := chatRegistry.Load(bootCtx); err != nil {
@@ -3031,29 +2939,28 @@ func main() {
 	// all viewers, so repeated landing-page loads re-render from the cache
 	// instead of re-walking the agents/ directory on every request.
 	apiMux := http.NewServeMux()
-	agentList := &agentsCache{}
-	agentList.seed(agents)
+	agentList := ttlcache.New(agentsCacheTTL, func(context.Context) ([]prompts.AgentConfig, error) {
+		return prompts.DiscoverAgents("")
+	})
+	agentList.Set(agents)
 	apiMux.HandleFunc("/api/agents", func(w http.ResponseWriter, r *http.Request) {
-		agents, err := agentList.get()
+		agents, err := agentList.Get(r.Context())
 		if err != nil {
 			http.Error(w, fmt.Sprintf("failed to discover agents: %v", err), http.StatusInternalServerError)
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(agents)
+		httpx.WriteJSON(w, http.StatusOK, agents)
 	})
 
-	identities := newIdentityCache(10 * time.Minute)
+	identities := newIdentityCache(10*time.Minute, slackClient, jiraClient, cfg.AtlassianURL)
 	apiMux.HandleFunc("/api/me", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("Cache-Control", "no-store")
-		_ = json.NewEncoder(w).Encode(struct {
+		httpx.WriteJSON(w, http.StatusOK, struct {
 			identity
 			MCPAdmin     bool     `json:"mcp_admin"`
 			BackendAdmin bool     `json:"backend_admin"`
 			ProjectAdmin bool     `json:"project_admin"`
 			SkillAgents  []string `json:"skill_agents"`
-		}{identities.lookup(clientEmail(r), slackClient, jiraClient, cfg.AtlassianURL), canManageMCP(r), canViewBackend(r), cfg.ProjectsEnabled && canManageProjects(r), skillAgentsFor(r)})
+		}{identities.lookup(clientEmail(r)), canManageMCP(r), canViewBackend(r), cfg.ProjectsEnabled && canManageProjects(r), skillAgentsFor(r)})
 	})
 
 	// API: the signed-in person's own stored context, aggregated across every
@@ -3066,7 +2973,7 @@ func main() {
 			return
 		}
 		w.Header().Set("Cache-Control", "no-store")
-		me := identities.lookup(clientEmail(r), slackClient, jiraClient, cfg.AtlassianURL)
+		me := identities.lookup(clientEmail(r))
 		if me.Anonymous {
 			httpx.WriteJSON(w, http.StatusOK, map[string]bool{"anonymous": true})
 			return
@@ -3090,8 +2997,7 @@ func main() {
 		if headerTitle == "" {
 			headerTitle = "arbetern"
 		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{"header": headerTitle, "projects": cfg.ProjectsEnabled})
+		httpx.WriteJSON(w, http.StatusOK, map[string]any{"header": headerTitle, "projects": cfg.ProjectsEnabled})
 	})
 
 	// API: integrations — serves cached integration permissions (refreshed hourly).
@@ -3099,15 +3005,13 @@ func main() {
 		integrationsMu.RLock()
 		data := integrationsCache
 		integrationsMu.RUnlock()
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(describeIntegrations(data))
+		httpx.WriteJSON(w, http.StatusOK, describeIntegrations(data))
 	})
 
 	// API: thread session stats (observability).
 	apiMux.HandleFunc("/api/sessions", func(w http.ResponseWriter, r *http.Request) {
 		active, opened, expired, explicit := sessions.Stats(r.Context())
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{
+		httpx.WriteJSON(w, http.StatusOK, map[string]any{
 			"active":        active,
 			"total_opened":  opened,
 			"total_expired": expired,
@@ -3139,8 +3043,7 @@ func main() {
 			http.Error(w, fmt.Sprintf("failed to fetch commits: %v", err), http.StatusInternalServerError)
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(commits)
+		httpx.WriteJSON(w, http.StatusOK, commits)
 	})
 
 	// API: open pull requests the agents authored, found by the body marker.
@@ -3189,8 +3092,7 @@ func main() {
 			http.Error(w, fmt.Sprintf("failed to fetch pull requests: %v", err), http.StatusInternalServerError)
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(prs)
+		httpx.WriteJSON(w, http.StatusOK, prs)
 	})
 
 	// API: unresolved Jira issues assigned to or reported by the integration's own account.
@@ -3211,8 +3113,7 @@ func main() {
 		if issues == nil {
 			issues = []atlassian.OwnIssue{}
 		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(issues)
+		httpx.WriteJSON(w, http.StatusOK, issues)
 	})
 	if jiraReady() {
 		safego.Go("warm: tickets", func() {
@@ -3364,9 +3265,7 @@ func main() {
 				http.Error(w, "search failed", http.StatusInternalServerError)
 				return
 			}
-			w.Header().Set("Content-Type", "application/json")
-			w.Header().Set("Cache-Control", "no-store")
-			_ = json.NewEncoder(w).Encode(map[string]any{"query": q, "kind": kind, "hits": hits})
+			httpx.WriteJSON(w, http.StatusOK, map[string]any{"query": q, "kind": kind, "hits": hits})
 		})
 	}
 

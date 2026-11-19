@@ -2,9 +2,12 @@ package ttlcache
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"time"
 )
+
+var errFetchPanicked = errors.New("ttlcache: fetch panicked")
 
 // Keyed caches one value per key for a TTL, single-flighting concurrent
 // misses on the same key. Failures are not cached: the entry is dropped so a
@@ -50,17 +53,32 @@ func (c *Keyed[K, V]) Get(ctx context.Context, key K) (V, error) {
 	c.evictLocked()
 	c.mu.Unlock()
 
-	e.val, e.err = c.fetch(ctx, key)
-	close(e.ready)
-	if e.err != nil {
-		c.mu.Lock()
-		// Only drop our own entry: a later miss may already have replaced it.
-		if cur, ok := c.entries[key]; ok && cur == e {
-			delete(c.entries, key)
+	// Waiters may hold a context that never ends, so a fetch that panics must
+	// still release them and must not leave its entry cached.
+	fetched := false
+	defer func() {
+		if !fetched {
+			e.err = errFetchPanicked
+			c.finish(key, e)
 		}
-		c.mu.Unlock()
-	}
+	}()
+	e.val, e.err = c.fetch(ctx, key)
+	fetched = true
+	c.finish(key, e)
 	return e.val, e.err
+}
+
+func (c *Keyed[K, V]) finish(key K, e *keyedEntry[V]) {
+	close(e.ready)
+	if e.err == nil {
+		return
+	}
+	c.mu.Lock()
+	// Only drop our own entry: a later miss may already have replaced it.
+	if cur, ok := c.entries[key]; ok && cur == e {
+		delete(c.entries, key)
+	}
+	c.mu.Unlock()
 }
 
 // Cached returns the value for key when it is already cached and fresh.

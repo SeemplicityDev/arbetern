@@ -1,6 +1,10 @@
 package llm
 
-import "encoding/json"
+import (
+	"encoding/json"
+
+	"github.com/justmike1/arbetern/internal/text"
+)
 
 // extractAPIErrorMessage attempts to parse an OpenAI-style JSON error body
 // and return just the human-readable message. Falls back to the raw body if
@@ -16,7 +20,7 @@ func extractAPIErrorMessage(body []byte) string {
 	}
 	// Truncate long raw bodies to keep log lines reasonable.
 	if len(body) > 300 {
-		return string(body[:300]) + "…"
+		return text.TruncatePlain(string(body), 300) + "…"
 	}
 	return string(body)
 }

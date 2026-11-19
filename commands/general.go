@@ -3163,7 +3163,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 			content := r.Content
 			if len(content) > maxFileContentLen {
 				totalLen := len(content)
-				content = content[:maxFileContentLen] + fmt.Sprintf(
+				content = text.TruncatePlain(content, maxFileContentLen) + fmt.Sprintf(
 					"\n... (TRUNCATED — %d of %d chars shown)",
 					maxFileContentLen, totalLen)
 			}
@@ -3200,7 +3200,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		}
 		if len(content) > maxFileContentLen {
 			totalLen := len(content)
-			content = content[:maxFileContentLen] + fmt.Sprintf(
+			content = text.TruncatePlain(content, maxFileContentLen) + fmt.Sprintf(
 				"\n... (TRUNCATED — showing %d of %d chars, %.0f%% of file hidden, %d lines total. "+
 					"To read the hidden part, call get_file_content again on this same path with "+
 					"start_line/end_line covering the region you need — do NOT conclude the code is absent "+
@@ -3857,7 +3857,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 				patch := f.Patch
 				const maxPatch = 6000
 				if len(patch) > maxPatch {
-					patch = patch[:maxPatch] + "\n… (patch truncated)"
+					patch = text.TruncatePlain(patch, maxPatch) + "\n… (patch truncated)"
 				}
 				fmt.Fprintf(&sb, "%s\n", patch)
 			} else {
@@ -4601,7 +4601,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 			if i.Description != "" {
 				desc := i.Description
 				if len(desc) > 500 {
-					desc = desc[:500] + "... (truncated)"
+					desc = text.TruncatePlain(desc, 500) + "... (truncated)"
 				}
 				fmt.Fprintf(&sb, "  Description: %s\n", desc)
 			}
@@ -4907,7 +4907,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		for _, c := range comments {
 			body := strings.TrimSpace(c.Body)
 			if len(body) > 800 {
-				body = body[:800] + "…"
+				body = text.TruncatePlain(body, 800) + "…"
 			}
 			fmt.Fprintf(&sb, "\n— %s (%s) [%s]\n%s\n", c.Author.DisplayName, c.Created, c.ID, body)
 		}
@@ -5273,7 +5273,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		}
 		body := page.Body
 		if len(body) > 12000 {
-			body = body[:12000] + "\n... (truncated — page content is longer than shown)"
+			body = text.TruncatePlain(body, 12000) + "\n... (truncated — page content is longer than shown)"
 		}
 		link := page.WebURL
 		if link == "" {
@@ -5457,7 +5457,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 			raw, _ := json.MarshalIndent(result.Records, "", "  ")
 			output := string(raw)
 			if len(output) > 8000 {
-				output = output[:8000] + "\n... (truncated)"
+				output = text.TruncatePlain(output, 8000) + "\n... (truncated)"
 			}
 			log.Printf("[user=%s channel=%s] SOQL returned %d records (generic)", userID, channelID, result.TotalSize)
 			return fmt.Sprintf("Query returned %d record(s):\n```\n%s\n```", result.TotalSize, output)

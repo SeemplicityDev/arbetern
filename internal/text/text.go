@@ -55,8 +55,12 @@ func trimToRune(s string, n int) string {
 	if n >= len(s) {
 		return s
 	}
-	for n > 0 && !utf8.RuneStart(s[n]) {
-		n--
+	// UTF-8 puts a rune start within UTFMax-1 bytes; further back the input is
+	// not text, and the cut stays where it was asked for.
+	for i := n; i >= 0 && n-i < utf8.UTFMax; i-- {
+		if i == 0 || utf8.RuneStart(s[i]) {
+			return s[:i]
+		}
 	}
 	return s[:n]
 }

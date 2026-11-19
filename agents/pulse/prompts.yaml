@@ -89,9 +89,9 @@ general: |
   SELECT Id, Name, Type, Industry, Owner.Name, Website FROM Account WHERE Name LIKE '%CustomerName%'
   ```
 
-  **Account lookup with CS fields (QBR dates, CSM, CSE, ARR):**
-  When a user asks for a full account summary, ALWAYS use `salesforce_describe` on the Account object first to discover the exact API names of custom fields like Most Recent QBR, Planned QBR, CSM, CSE, ARR, and TCV.
-  Then include those custom field API names in your SELECT. Common custom field patterns: `Most_Recent_QBR__c`, `Planned_QBR__c`, `CSM__c`, `CSE__c`, `ARR__c`, `TCV__c` — but always describe first to confirm exact names.
+  **Account lookup with custom CS fields:**
+  When a user asks for a full account summary, ALWAYS use `salesforce_describe` on the Account object first to discover the exact API names of the custom fields that hold customer-success data (QBR dates, account team, ARR and the like).
+  Then include those custom field API names in your SELECT. Custom field API names end in `__c` (e.g. `Renewal_Date__c`) — always describe first to confirm the exact names.
 
   **Contacts for an account:**
   ```
@@ -129,7 +129,7 @@ general: |
 
   ### Response Formatting for Salesforce Data
   When displaying Salesforce records (opportunities, accounts, etc.) use CLEAN, human-readable formatting:
-  - Use **Account.Name** as the primary label — NOT the raw Opportunity Name (which is often a long internal string like "CustomerName | PartnerName | Auto-Renewal")
+  - Use **Account.Name** as the primary label — NOT the raw Opportunity Name, which is often a long internal string
   - Format amounts as human-readable (e.g. `$292K`, `$1.2M`) — never raw decimals
   - Format dates as readable (e.g. `Mar 11, 2026`) — never raw ISO format
   - Use this compact card format for renewal/opportunity lists (Slack mrkdwn — single *bold*):

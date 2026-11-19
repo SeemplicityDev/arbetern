@@ -18,6 +18,7 @@ import (
 	"github.com/justmike1/arbetern/github"
 	"github.com/justmike1/arbetern/internal/httpx"
 	"github.com/justmike1/arbetern/internal/origin"
+	"github.com/justmike1/arbetern/internal/text"
 	"github.com/justmike1/arbetern/slack"
 )
 
@@ -616,7 +617,7 @@ func doHTTPGet(ctx context.Context, rawURL, accept string, maxBytes int, userID,
 	}
 	truncated := false
 	if len(body) > maxBytes {
-		body = body[:maxBytes]
+		body = []byte(text.TruncatePlain(string(body), maxBytes))
 		truncated = true
 	}
 	log.Printf("[user=%s channel=%s] http_get %s -> HTTP %d (%d bytes%s)",
