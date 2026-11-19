@@ -409,6 +409,7 @@ func (r *Registry) dispatchRounds(ctx context.Context, p *Project, limits Limits
 		if !added || rv == nil || rv.active() == nil {
 			continue
 		}
+		r.alignBranch(ctx, p, want.watch)
 		var fired bool
 		led, fired = r.fireRound(ctx, p, led, want.watch.taskID, rv.active().N, out)
 		if !fired {
@@ -416,6 +417,27 @@ func (r *Registry) dispatchRounds(ctx context.Context, p *Project, limits Limits
 		}
 	}
 	out.ledger = led
+}
+
+// alignBranch has GitHub merge the base into a pull request branch that fell behind it, so the round starts from both. GitHub's own
+// merge keeps approvals, which a session's merge commit would not; a branch that conflicts with its base is left to the round.
+func (r *Registry) alignBranch(ctx context.Context, p *Project, w prWatch) {
+	if p.Review.effective().MergeMethod == "rebase" || (w.pr.Mergeable != nil && !*w.pr.Mergeable) {
+		return
+	}
+	behind, err := r.gh.CommitsBehind(ctx, w.owner, w.repo, w.pr.BaseRef, w.pr.HeadSHA)
+	switch {
+	case err != nil:
+		log.Printf("[projects] %s task %s: comparing pull request #%d with %s: %v", p.ID, w.taskID, w.number, w.pr.BaseRef, err)
+		return
+	case behind == 0:
+		return
+	}
+	if err := r.gh.UpdatePullRequestBranch(ctx, w.owner, w.repo, w.number, w.pr.HeadSHA); err != nil {
+		log.Printf("[projects] %s task %s: bringing pull request #%d up to date with %s before its round: %v", p.ID, w.taskID, w.number, w.pr.BaseRef, err)
+		return
+	}
+	log.Printf("[projects] %s task %s: asked GitHub to merge %s into pull request #%d before its round (%s behind)", p.ID, w.taskID, w.pr.BaseRef, w.number, plural(behind, "commit"))
 }
 
 // fireRound reports whether dispatching may continue.

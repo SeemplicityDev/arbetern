@@ -114,6 +114,9 @@ func (g *gateway) reportRound(ctx context.Context, s *session, a reportArgs) (st
 	if problem == "" && description != "" {
 		problem = checkRoundDescription(s.project, description)
 	}
+	if problem == "" && o.Title != "" {
+		problem = titleProblem(s.project, o.Title)
+	}
 	if problem == "" && o.Status == OutcomeFixed && o.Branch != "" {
 		if err := s.pushAllowed(o.Branch); err != nil {
 			problem = "Report the pull request's branch or a name derived from it: " + err.Error() + "."
@@ -166,10 +169,14 @@ func (g *gateway) reportRound(ctx context.Context, s *session, a reportArgs) (st
 	if fact != "" {
 		extra = append(extra, fact)
 	}
+	title, fact := g.retitle(pctx, s, owner, repo, number, o.Title)
+	if fact != "" {
+		extra = append(extra, fact)
+	}
 	if _, err := g.r.gh.CommentOnPullRequest(ctx, owner, repo, number, roundComment(s.project, rd, o, owner, repo, head, posted, rerun, extra)); err != nil {
 		log.Printf("[projects] %s task %s round %d: posting the round summary: %v", s.project.ID, taskID, n, err)
 	}
-	res := roundResult{outcome: o, head: head, replies: posted, rerun: rerun, described: described, bodySHA: sha}
+	res := roundResult{outcome: o, head: head, replies: posted, rerun: rerun, described: described, bodySHA: sha, title: title}
 	changed, err := g.apply(pctx, s, func(l *Ledger) bool { return l.finishRound(taskID, n, res, now) })
 	if err != nil {
 		log.Printf("[projects] %s task %s round %d: recording the report: %v", s.project.ID, taskID, n, err)
@@ -238,6 +245,31 @@ func (g *gateway) planDescription(ctx context.Context, s *session, owner, repo s
 		return descriptionPlan{edited: true, reason: "someone edited it on GitHub since arbetern wrote it"}
 	}
 	return descriptionPlan{next: &next, body: prBody(s.project, t, next)}
+}
+
+// retitle renames the pull request to a round's title, laid out by the conventions, while its title is still the one arbetern set.
+func (g *gateway) retitle(ctx context.Context, s *session, owner, repo string, number int, title string) (applied, fact string) {
+	t := s.task
+	if title == "" || t.PR == nil {
+		return "", ""
+	}
+	next := prTitle(s.project, t, title)
+	if next == t.PR.Title {
+		return "", ""
+	}
+	pr, err := g.r.gh.PullRequestState(ctx, owner, repo, number)
+	switch {
+	case err != nil:
+		log.Printf("[projects] %s task %s round %d: reading the pull request title: %v", s.project.ID, t.ID, s.roundN, err)
+		return "", "The pull request title was left as is: GitHub could not be read."
+	case pr.Title != t.PR.Title:
+		return "", "The pull request title was left as is: someone renamed it on GitHub since arbetern set it."
+	}
+	if err := g.r.gh.EditPullRequestTitle(ctx, owner, repo, number, next); err != nil {
+		log.Printf("[projects] %s task %s round %d: renaming the pull request: %v", s.project.ID, t.ID, s.roundN, err)
+		return "", "The pull request title could not be updated: GitHub refused the edit."
+	}
+	return next, "Renamed the pull request to " + codeSpan(next) + "."
 }
 
 // arbeternWrote reports whether body is still the description arbetern last wrote: by its hash, or, for a pull request opened before hashes were kept, by the rendered summary and the marker.

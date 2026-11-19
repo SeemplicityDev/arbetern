@@ -131,6 +131,15 @@ func (c *Client) CommitsAhead(ctx context.Context, owner, repo, base, head strin
 	return cmp.GetAheadBy(), nil
 }
 
+// CommitsBehind reports how many commits base has that head does not.
+func (c *Client) CommitsBehind(ctx context.Context, owner, repo, base, head string) (int, error) {
+	cmp, _, err := c.api.Repositories.CompareCommits(ctx, owner, repo, base, head, &gh.ListOptions{PerPage: 1})
+	if err != nil {
+		return 0, fmt.Errorf("failed to compare %s...%s: %w", base, head, err)
+	}
+	return cmp.GetBehindBy(), nil
+}
+
 // ProjectPRMarker renders the hidden body marker for a pull request opened by a project task.
 func ProjectPRMarker(project, task string) string {
 	return renderPRMarker([][2]string{

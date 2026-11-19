@@ -234,13 +234,19 @@ func roundConflict(rd *Round, branch, base string) string {
 
 func roundRules(p *Project, t *Task, rd *Round) string {
 	branch, base := t.Branch, p.repoFor(t).BaseBranch
+	rebase := p.Review.effective().MergeMethod == "rebase"
+	pull := "git pull --no-rebase --no-edit origin " + branch
+	if rebase {
+		pull = "git pull --rebase origin " + branch
+	}
 	rules := []string{
 		"Start from the pull request branch, not the default branch: `git fetch origin " + branch + " && git checkout -B " + branch + " origin/" + branch + "`.",
 		"Fix what the failing checks and review comments ask for, within this pull request's scope. Keep each change minimal and in the repository's style.",
 		"For every failing check, find its cause in the job log or in the CI's report among the comments below, and fix the ones this change caused. Say in `summary` which checks failed, why, and what you changed for each.",
-		"Commit, then push to the pull request branch with `git push origin HEAD:" + branch + "`. Never force-push or rewrite its history: if the push is refused because the branch moved, run `git pull --rebase origin " + branch + "` and push again. If it is refused for another reason, report `cannot_fix` with what git answered. The gateway refuses pushes to any other branch than this one and names starting with `" + branch + "-`.",
+		"Commit, then push to the pull request branch with `git push origin HEAD:" + branch + "`. Never force-push or rewrite its history: if the push is refused because the branch moved, run `" + pull + "` and push again. If it is refused for another reason, report `cannot_fix` with what git answered. The gateway refuses pushes to any other branch than this one and names starting with `" + branch + "-`.",
 		"Call `report_outcome` exactly once: `fixed` when you pushed commits (with `branch`), `answered` when nothing needed changing, `cannot_fix` when what is left needs a person.",
 		"Put what you changed and why in `summary`; it is posted on the pull request.",
+		"When this round changes what the pull request does, pass a `title` that says what it does now; arbetern renames the pull request.",
 		"When a check failed for reasons unrelated to this change, such as a flaky test or an outage, explain it and pass `rerun_checks: true` instead of changing code.",
 		"When what is left is a decision only a person can make, pass it as `question` with the options named.",
 		"Never push to the base branch `" + base + "`. Never start other sessions.",
@@ -254,6 +260,9 @@ func roundRules(p *Project, t *Task, rd *Round) string {
 	}
 	if len(rd.Items) > 0 {
 		rules = slices.Insert(rules, 4, "Pass one entry in `replies` for every review comment above: its `id` and a short answer saying what you changed and why, or why you changed nothing. Each answer is posted as a reply to that comment.")
+	}
+	if !rebase {
+		rules = slices.Insert(rules, 1, "arbetern asked GitHub to merge `"+base+"` into the branch before this round when it was behind. Before you push, make sure the branch still contains the latest `origin/"+base+"`: run `git fetch origin "+base+"`, and when `git merge-base --is-ancestor origin/"+base+" HEAD` fails, run `git merge --no-edit origin/"+base+"` and resolve any conflicts keeping both sides' intent. Never rebase.")
 	}
 	return "## Rules for this round\n\n- " + strings.Join(rules, "\n- ")
 }

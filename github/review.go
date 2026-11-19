@@ -306,6 +306,14 @@ func (c *Client) EditPullRequestBody(ctx context.Context, owner, repo string, nu
 	return nil
 }
 
+// EditPullRequestTitle replaces a pull request's title.
+func (c *Client) EditPullRequestTitle(ctx context.Context, owner, repo string, number int, title string) error {
+	if _, _, err := c.api.PullRequests.Edit(ctx, owner, repo, number, &gh.PullRequest{Title: &title}); err != nil {
+		return fmt.Errorf("failed to edit the title of PR #%d: %w", number, err)
+	}
+	return nil
+}
+
 // BranchHead returns the commit a branch points at.
 func (c *Client) BranchHead(ctx context.Context, owner, repo, branch string) (string, error) {
 	ref, _, err := c.api.Git.GetRef(ctx, owner, repo, "heads/"+branch)

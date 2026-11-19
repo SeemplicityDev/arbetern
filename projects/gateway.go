@@ -588,11 +588,18 @@ func (a reportArgs) outcome(p *Project, base string, now time.Time) (o Outcome, 
 	if o.Title == "" {
 		return o, "title is required when status is fixed."
 	}
-	if pattern := p.Conventions.TitlePattern; pattern != "" && !regexp.MustCompile(pattern).MatchString(o.Title) {
-		return o, "title " + strconvQuote(o.Title) + " does not follow the repository's convention: it must match " + pattern + "."
+	if problem := titleProblem(p, o.Title); problem != "" {
+		return o, problem
 	}
 	o.Branch, problem = checkPushBranch(a.Branch, base)
 	return o, problem
+}
+
+func titleProblem(p *Project, title string) string {
+	if pattern := p.Conventions.TitlePattern; pattern != "" && !regexp.MustCompile(pattern).MatchString(title) {
+		return "title " + strconvQuote(title) + " does not follow the repository's convention: it must match " + pattern + "."
+	}
+	return ""
 }
 
 func (g *gateway) boundRepo(ctx context.Context, s *session) (name, base string) {

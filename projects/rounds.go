@@ -125,6 +125,7 @@ type roundResult struct {
 	rerun     bool
 	described *Outcome
 	bodySHA   string
+	title     string // the pull request's new title, when the round renamed it
 }
 
 func isActiveRound(status string) bool { return status == StatusDispatching || status == StatusRunning }
@@ -517,6 +518,9 @@ func recordRoundResult(t *Task, rv *ReviewState, rd *Round, res roundResult, now
 	if d := res.described; d != nil && t.Outcome != nil && t.PR != nil {
 		t.Outcome.Summary, t.Outcome.Question = d.Summary, d.Question
 		t.PR.BodySHA = res.bodySHA
+	}
+	if res.title != "" && t.PR != nil {
+		t.PR.Title = res.title
 	}
 	switch {
 	case o.Question != "":
