@@ -435,10 +435,11 @@ or `repo` changed.
   resolves a vulnerable version. A package whose alerts are still open
   `recurrence_grace_hours` after its pull request merged has recurred and gets a
   fresh attempt budget; one that stays clear through `recurrence_window_hours`
-  is resolved. A new advisory for the same package counts the same way. When
-  people finish a fix after the merge, such as regenerating lockfiles a session
-  cannot regenerate offline, raise `recurrence_grace_hours` to cover the time
-  that takes.
+  is resolved. A new advisory for the same package counts the same way. With
+  [`pypi_release`](#mcp-tools) a session can update the affected `uv.lock`
+  entries in place, so their alerts close at the merge. When people finish a
+  fix after the merge, such as relocking a lockfile that needs packages it does
+  not hold yet, raise `recurrence_grace_hours` to cover the time that takes.
 - **Failures.** A repository with Dependabot alerts turned off is skipped. Any
   other failure to read a repository's alerts fails the whole read, which keeps
   the previous candidates and verdicts, and the tick reports it.
@@ -866,6 +867,7 @@ model streams, git transfers and transcripts may take up to 30 minutes.
 | `report_outcome` | `status`: `fixed`, `not_reproducible`, `cannot_fix` or `already_fixed` (a follow-up round takes `fixed`, `answered` or `cannot_fix`); `summary` (required, up to 4000, or 12,000 when the conventions make it the whole description); `title` (up to 120) and `branch`, both required for `fixed` in a first session, `branch` for `fixed` in a round; `repository`, required for `fixed` in an organization-scoped first session (the repository the branch was pushed to); `testing` (up to 2000); `question` (up to 1000, a decision for reviewers, with `fixed`); `headline` (up to 300, one line for the channel); `ticket` (`summary` up to 250, `description` up to 4000, and the `fields` the conventions let the session set), required for `fixed` when the project files tickets; in a round, `replies` (`id` and `body` up to 2000, one per comment), `rerun_checks`, and `description` (up to 12,000, the whole corrected pull request description, only with `description: session`) | For `fixed`, arbetern checks the title against the conventions' pattern, checks that the branch is the one the work order named or a name derived from it (the same rule the git proxy enforces), is not the base branch, exists on GitHub and has commits ahead of the base, files the ticket, places the convention branch, then reuses an open pull request from that branch or opens one, as a draft with `review.draft` or a `question`. A problem comes back as a tool error the session can act on, such as a branch that is not pushed yet. A `fixed` report is checked at most 10 times per work order; after that the session must report another status. Any other status records the outcome and starts the group's cooldown. In a round, see [Rounds](#rounds). Calling it again returns what was recorded |
 | `record_learning` | `note`, 1–500 characters | Saves a durable fact into project memory for later sessions, at most five per work order. The note is redacted first |
 | arbetern's integration tools | as on the Integrations page | The read-only tools of every integration the deployment is connected to: Datadog logs, aggregates, metrics, monitors and dashboards; GitHub files, search, commits, pull requests and workflow runs; Jira and Confluence reads; and the rest. arbetern runs them with its own credentials and returns the text. The one write is `transition_jira_issue`, which moves a Jira issue to another status: its arguments only name an issue, a status or transition and a resolution that Jira already has, so no text a session read can leave through it. Nothing else that writes, posts or uploads is offered, and neither are the raw S3 object reads nor `http_get`: a session fetches nothing from outside but through the gateway |
+| `pypi_release` | `package`; optional `version`, `requires_python` (the lockfile's), `upload_time` (default true) | Reads public release metadata from pypi.org. Without a version, it lists the newest releases with their dates and Requires-Python. With one, it returns the release's Requires-Python and Requires-Dist and its sdist and wheels as uv.lock lines: url, sha256 hash, size and upload time, sorted as uv sorts them. It keeps only the wheels for the Python versions `requires_python` admits, the same ones uv keeps. A session can then update a `uv.lock` entry without network access and without typing a hash. The host is fixed and names and versions are validated; answers are cached for ten minutes. Sessions only: no chat agent is offered it |
 | The project's MCP connectors | as the connector lists them | The tools of the enabled connectors the project names in `connectors` that are open to every agent, named `mcp_<connector>_<tool>` as arbetern's agents see them. arbetern calls them with the connector's stored credentials and logs each call |
 
 The pull request is titled with the session's title. Its body holds a
@@ -1172,11 +1174,13 @@ browser request.
 - **Tools.** Sessions get the gateway's MCP server and nothing else from
   outside: `WebSearch` and `WebFetch` are denied, `--strict-mcp-config` ignores
   any MCP server a repository might configure, and the integration tools
-  offered are the read-only ones and `transition_jira_issue`, plus the tools of
-  the MCP connectors the project names, which an admin picks as read-only.
-  Claude Code's non-essential traffic, telemetry and auto-updates are off.
+  offered are the read-only ones, `pypi_release` and `transition_jira_issue`,
+  plus the tools of the MCP connectors the project names, which an admin picks
+  as read-only. Claude Code's non-essential traffic, telemetry and auto-updates
+  are off.
 - **What leaves the cluster.** Model calls go to the Anthropic API through the
-  gateway, and git traffic to GitHub through the gateway. The work order (goal,
+  gateway, and git traffic to GitHub through the gateway. A `pypi_release` call
+  sends only a validated package name and version to pypi.org. The work order (goal,
   instructions, redacted samples, notes, skills) and whatever the session reads
   with the tools go to the model. The arguments a session passes to a project's
   MCP connector go to that connector's server, sent by arbetern with the

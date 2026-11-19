@@ -60,6 +60,9 @@ const (
 	ToolLookupCVE = "lookup_cve"
 	ToolSearchCVE = "search_cve"
 
+	// PyPI.
+	ToolPyPIRelease = "pypi_release"
+
 	// Salesforce.
 	ToolSalesforceQuery    = "salesforce_query"
 	ToolSalesforceDescribe = "salesforce_describe"
@@ -180,6 +183,7 @@ const (
 
 // CompressionExemptTools return exact figures the model computes with; Headroom can drop every row of such a table.
 var CompressionExemptTools = []string{
+	ToolPyPIRelease,
 	ToolDatabricksQuery,
 	ToolClickHouseQuery,
 	ToolClickHouseUsageCost,
@@ -253,6 +257,9 @@ var toolIntegration = map[string]string{
 	// NVD.
 	ToolLookupCVE: integrationNVD,
 	ToolSearchCVE: integrationNVD,
+
+	// PyPI.
+	ToolPyPIRelease: integrationPyPI,
 
 	// Salesforce.
 	ToolSalesforceQuery:    integrationSalesforce,

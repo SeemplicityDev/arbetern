@@ -1162,6 +1162,7 @@ github/              # GitHub REST API client (repos, PRs, files, workflows)
 llm/                 # LLM inference client + tool types (Anthropic API, AWS Bedrock, Azure OpenAI, GitHub Models), model labels, model router client
 atlassian/           # Atlassian Cloud REST API client (Jira + Confluence)
 nvd/                 # NVD (National Vulnerability Database) CVE API client
+pypi/                # PyPI JSON API client: release metadata and the uv.lock lines of a release, for project sessions
 salesforce/          # Salesforce REST API client (SOQL queries, OAuth 2.0)
 chorus/              # Chorus (ZoomInfo) REST API client (call intelligence, deal momentum)
 google/              # Google Drive + Sheets client (service-account JWT, shared-folder discovery, streaming reads, batched writes)

@@ -37,6 +37,7 @@ import (
 	"github.com/justmike1/arbetern/llm"
 	"github.com/justmike1/arbetern/mcp"
 	"github.com/justmike1/arbetern/nvd"
+	"github.com/justmike1/arbetern/pypi"
 	"github.com/justmike1/arbetern/salesforce"
 	"github.com/justmike1/arbetern/slack"
 	"github.com/justmike1/arbetern/workflows"
@@ -49,6 +50,8 @@ var knownExtensions map[string]bool
 // maxFileContentLen is the character limit for file content returned by the
 // get_file_content tool. Files longer than this are truncated with a warning.
 const maxFileContentLen = 32000
+
+const pypiReleaseList = 30
 
 // extensionRe matches tokens that look like file extensions (e.g. ".yaml", ".go")
 // or filenames with extensions (e.g. "main.go", "deploy.yaml") in user text.
@@ -73,6 +76,7 @@ type GeneralHandler struct {
 	codeModelsClient  *llm.Client
 	jiraClient        *atlassian.Client
 	nvdClient         *nvd.Client
+	pypiClient        *pypi.Client
 	sfClient          *salesforce.Client
 	chorusClient      *chorus.Client
 	datadogClients    *datadog.MultiClient
@@ -1287,6 +1291,26 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 						"results_per_page":{"type":"integer","description":"Number of results to return (default: 5, max: 20)"}
 					},
 					"required":["keyword"]
+				}`),
+			},
+		})
+	}
+
+	if h.canUseIntegration(integrationPyPI) && h.pypiClient != nil {
+		tools = append(tools, llm.Tool{
+			Type: "function",
+			Function: llm.ToolFunction{
+				Name:        ToolPyPIRelease,
+				Description: "Read a Python package's public release metadata from PyPI. Without version: its latest version and newest releases with their dates and Requires-Python. With version: that release's Requires-Python and Requires-Dist, and its sdist and wheels exactly as uv.lock records them (url, sha256 hash, size, upload time), keeping only the wheels for the Python versions requires_python admits. Use it to pick a version, to check what a release of a library requires, and to update a uv.lock entry without network access.",
+				Parameters: json.RawMessage(`{
+					"type":"object",
+					"properties":{
+						"package":{"type":"string","description":"Package name as on PyPI, such as 'requests'"},
+						"version":{"type":"string","description":"A release, such as '2.32.3'; omit to list the releases"},
+						"requires_python":{"type":"string","description":"The lockfile's requires-python, such as '>=3.10' or '==3.12.*'; wheels for other Python versions are left out, as uv leaves them out"},
+						"upload_time":{"type":"boolean","description":"Include upload-time in the uv.lock lines (default true); false for a lockfile whose entries carry none"}
+					},
+					"required":["package"]
 				}`),
 			},
 		})
@@ -5354,6 +5378,42 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		}
 		log.Printf("[user=%s channel=%s] searched NVD for '%s' (%d results)", userID, channelID, args.Keyword, total)
 		return sb.String()
+
+	case ToolPyPIRelease:
+		if h.pypiClient == nil {
+			return "Error: PyPI is not available."
+		}
+		args, errMsg := parseToolArgs[struct {
+			Package        string `json:"package"`
+			Version        string `json:"version"`
+			RequiresPython string `json:"requires_python"`
+			UploadTime     *bool  `json:"upload_time"`
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
+		}
+		if strings.TrimSpace(args.Version) == "" {
+			p, err := h.pypiClient.Project(ctx, args.Package)
+			if err != nil {
+				return fmt.Sprintf("Error reading %s from PyPI: %v", args.Package, err)
+			}
+			log.Printf("[user=%s channel=%s] listed PyPI releases of %s", userID, channelID, p.Name)
+			return pypi.FormatProject(p, pypiReleaseList)
+		}
+		requiresPython := strings.TrimSpace(args.RequiresPython)
+		if err := pypi.CheckRequiresPython(requiresPython); err != nil {
+			return "Error: " + err.Error()
+		}
+		rel, err := h.pypiClient.Release(ctx, args.Package, args.Version)
+		if err != nil {
+			return fmt.Sprintf("Error reading %s %s from PyPI: %v", args.Package, args.Version, err)
+		}
+		lock, skipped, err := rel.LockLines(requiresPython, args.UploadTime == nil || *args.UploadTime)
+		if err != nil {
+			return "Error: " + err.Error()
+		}
+		log.Printf("[user=%s channel=%s] read PyPI release %s %s", userID, channelID, rel.Name, rel.Version)
+		return pypi.FormatRelease(rel, lock, skipped, requiresPython)
 
 	case ToolSalesforceQuery:
 		if errMsg := requireReady("Salesforce", h.sfClient); errMsg != "" {

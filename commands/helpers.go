@@ -216,6 +216,7 @@ func isNilClient(c OAuthClient) bool {
 // catalogue in tools.go can name their owner without gating them.
 const (
 	integrationNVD         = "nvd"
+	integrationPyPI        = "pypi"
 	integrationSalesforce  = "salesforce"
 	integrationChorus      = "chorus"
 	integrationAtlassian   = "atlassian" // Jira + Confluence (shared client).
@@ -251,6 +252,8 @@ const (
 var restrictedIntegrations = map[string][]string{
 	// Security agent: CVE / vulnerability lookups via NVD.
 	integrationNVD: {"goldsai"},
+	// PyPI release metadata: project sessions only, which are not gated by agent.
+	integrationPyPI: {},
 	// Customer-success agent: CRM + conversation intelligence.
 	integrationSalesforce: {"pulse"},
 	integrationChorus:     {"pulse"},

@@ -28,6 +28,7 @@ import (
 	"github.com/justmike1/arbetern/llm"
 	"github.com/justmike1/arbetern/mcp"
 	"github.com/justmike1/arbetern/nvd"
+	"github.com/justmike1/arbetern/pypi"
 	"github.com/justmike1/arbetern/salesforce"
 	"github.com/justmike1/arbetern/slack"
 	"github.com/justmike1/arbetern/workflows"
@@ -40,6 +41,7 @@ type Router struct {
 	codeModelsClient  *llm.Client
 	jiraClient        *atlassian.Client
 	nvdClient         *nvd.Client
+	pypiClient        *pypi.Client
 	sfClient          *salesforce.Client
 	chorusClient      *chorus.Client
 	datadogClients    *datadog.MultiClient
@@ -85,6 +87,7 @@ func NewRouter(slackClient SlackClient, ghClient *github.Client, modelsClient *l
 		codeModelsClient:  codeModelsClient,
 		jiraClient:        jiraClient,
 		nvdClient:         nvdClient,
+		pypiClient:        pypi.NewClient(),
 		sfClient:          sfClient,
 		chorusClient:      chorusClient,
 		datadogClients:    datadogClients,
@@ -285,6 +288,7 @@ func (r *Router) newGeneralHandler(userContext string, session *ThreadSession) *
 		codeModelsClient:  r.codeModelsClient,
 		jiraClient:        r.jiraClient,
 		nvdClient:         r.nvdClient,
+		pypiClient:        r.pypiClient,
 		sfClient:          r.sfClient,
 		chorusClient:      r.chorusClient,
 		datadogClients:    r.datadogClients,

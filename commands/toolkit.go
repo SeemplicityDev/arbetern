@@ -14,7 +14,7 @@ var readOnlyTools = []string{
 	ToolGetRepoDefaultBranch, ToolResolveOwner, ToolSearchFiles, ToolListDirectory, ToolGetPullRequest, ToolListPullRequests,
 	ToolSearchPullRequests, ToolFindOpenPullRequests, ToolListCommits, ToolGetCommit, ToolSearchCode, ToolSearchCodeOrg, ToolGetWorkflowRun,
 	ToolSlackConversationsHistory, ToolSlackConversationsReplies, ToolFetchThreadContext, ToolGetSlackUserInfo, ToolLookupSlackUser,
-	ToolLookupCVE, ToolSearchCVE,
+	ToolLookupCVE, ToolSearchCVE, ToolPyPIRelease,
 	ToolSalesforceQuery, ToolSalesforceDescribe,
 	ToolChorusListConversations, ToolChorusGetConversation, ToolChorusGetSalesQualification,
 	ToolListJiraProjects, ToolSearchJiraIssues, ToolGetJiraIssue, ToolGetJiraLabelAuthor, ToolListJiraComments,

@@ -1315,7 +1315,7 @@ async function projectForm(p) {
   const alertFields = `<div data-signal="dependabot"${alerts ? '' : ' hidden'}>`
     + formField('Severities', `<div class="chip-row">${PJF_SEVERITIES.map(s => check('pjf-sev-' + s, severities.includes(s), s)).join('')}</div>`, 'None ticked takes every severity. Each repository’s open alerts are read every hour and grouped by package.')
     + formField('Ecosystems', input('pjf-ecosystems', alerts ? (sig.ecosystems || []).join(', ') : '', ' maxlength="200" placeholder="pip, npm"' + code), 'Optional, comma-separated. Empty takes every ecosystem.')
-    + formField('Pattern', input('pjf-apattern', alerts ? sig.pattern : '', ' maxlength="500" placeholder="^(requests|urllib3)$|^services/"' + code), 'Optional regular expression. An alert is kept when it matches its package name or its manifest path.')
+    + formField('Pattern', input('pjf-apattern', alerts ? sig.pattern : '', ' maxlength="500" placeholder="^(requests|jinja2)$|^services/"' + code), 'Optional regular expression. An alert is kept when it matches its package name or its manifest path.')
     + '</div>';
   const metricFields = `<div data-signal="datadog_metrics"${metric ? '' : ' hidden'}>`
     + `<div class="form-grid2">${formField('Sites', `<div class="chip-row">${check('pjf-site-us', sites.includes('us'), 'US')}${check('pjf-site-eu', sites.includes('eu'), 'EU')}</div>`)}${formField('Window', input('pjf-window', sig.window, ' placeholder="48h"' + code), 'Each series is summed over this window, 1h to 168h.')}</div>`
