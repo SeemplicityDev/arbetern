@@ -688,6 +688,9 @@ func (g *gateway) reportOutcome(ctx context.Context, s *session, raw json.RawMes
 		if err := s.pushAllowed(o.Branch); err != nil {
 			problem = "Report the branch your work order named: " + err.Error() + "."
 		}
+		if problem == "" {
+			problem = g.placeholderProblem(ctx, s.project, repo, "summary", o.Summary)
+		}
 		if tc := s.project.Conventions.Ticket; problem == "" && tc != nil {
 			var summary, description string
 			var fields map[string]any

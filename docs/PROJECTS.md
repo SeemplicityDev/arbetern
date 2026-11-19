@@ -535,8 +535,9 @@ round started by checks, a conflict or a bot comment leaves the question open,
 even when it reports `cannot_fix`, and a round that answers a person's comment
 closes it unless the session asks again. A round's own question replaces it. With
 `description: session`, a round may also pass the whole corrected description
-in `description`, for a review comment about it; the brief quotes the current
-one in full. arbetern rewrites the description only while it is still the one
+in `description`, for a review comment about it or to fill in placeholders of
+the repository's template left in it; the brief quotes the current one in
+full. arbetern rewrites the description only while it is still the one
 arbetern last wrote, so a description someone edited on GitHub, such as a
 ticked checkbox, is kept: a round that passed `description` is told so before
 anything is posted and reports again without it, and any other change it
@@ -718,7 +719,7 @@ Every key is optional.
 | `branch` | The branch the pull request is opened from, from the placeholders `{ticket}`, `{title}`, `{task}` and `{project}`, such as `{ticket}/{title}`. It must contain `{ticket}` or `{task}`. Empty opens the pull request from the session's own `claude/` branch |
 | `title` | The pull request title from `{title}` (the session's title) and `{ticket}`, such as `{title} \| {ticket}` |
 | `title_pattern` | RE2 the session's title must match, such as a conventional-commit pattern `^(feat\|fix\|chore)(\([^()]+\))?!?: \S.*$`. `report_outcome` refuses any other title and says why |
-| `description` | `session` posts the session's `summary`, up to 12,000 characters, as the whole pull request description, for repositories with a pull request template. Empty lays the description out from the summary and testing |
+| `description` | `session` posts the session's `summary`, up to 12,000 characters, as the whole pull request description, for repositories with a pull request template. `report_outcome` refuses a summary or round `description` that still holds an angle-bracket placeholder copied from the repository's template, such as `<why this file first>`, and names them. Empty lays the description out from the summary and testing |
 
 `{title}` in a branch is the session's title without a conventional-commit type,
 as a slug of up to 50 characters.

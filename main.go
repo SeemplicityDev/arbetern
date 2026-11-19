@@ -3172,6 +3172,9 @@ func main() {
 			if prs[i].Agent == "" {
 				prs[i].Agent = agentFromTitle(prs[i].Title, knownAgents)
 			}
+			if prs[i].RequestedBy == "" {
+				prs[i].RequestedBy = userNames.resolve(slackClient, prs[i].RequesterID)
+			}
 		}
 		return prs, nil
 	})

@@ -112,7 +112,9 @@ func (g *gateway) reportRound(ctx context.Context, s *session, a reportArgs) (st
 	o, replies, problem := a.roundOutcome(rd, prRepo.BaseBranch, waiting, now)
 	description := strings.TrimSpace(stripControl(a.Description))
 	if problem == "" && description != "" {
-		problem = checkRoundDescription(s.project, description)
+		if problem = checkRoundDescription(s.project, description); problem == "" {
+			problem = g.placeholderProblem(ctx, s.project, prRepo, "description", description)
+		}
 	}
 	if problem == "" && o.Title != "" {
 		problem = titleProblem(s.project, o.Title)

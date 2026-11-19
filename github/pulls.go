@@ -23,7 +23,7 @@ var legacyPRMarkers = []string{"Automated via Slack by", "requested via Slack by
 
 var (
 	prMarkerRe     = regexp.MustCompile(`<!-- arbetern((?: [a-z]+=[^\s>]+)*) -->`)
-	prRequesterRe  = regexp.MustCompile(`via Slack by (.+?)[._]*(?:\r?\n|$)`)
+	prRequesterRe  = regexp.MustCompile(`(?:Automated|requested) via [A-Za-z][A-Za-z ]{0,40}? by (.+?)[._]*(?:\r?\n|$)`)
 	slackMentionRe = regexp.MustCompile(`\s*\(?<@([A-Z0-9]+)(?:\|[^>]*)?>\)?`)
 )
 
@@ -69,6 +69,7 @@ type AutomatedPR struct {
 	Source      string    `json:"source,omitempty"`
 	RequestedBy string    `json:"requested_by,omitempty"`
 	RequesterID string    `json:"requester_id,omitempty"`
+	Project     string    `json:"project,omitempty"`
 	Comments    int       `json:"comments"`
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
@@ -123,6 +124,7 @@ func (c *Client) ListOpenAutomatedPullRequests(ctx context.Context) ([]Automated
 				Source:      attrs["source"],
 				RequestedBy: name,
 				RequesterID: id,
+				Project:     attrs["project"],
 				Comments:    issue.GetComments(),
 				CreatedAt:   issue.GetCreatedAt().Time,
 				UpdatedAt:   issue.GetUpdatedAt().Time,

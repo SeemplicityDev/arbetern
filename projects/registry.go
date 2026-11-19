@@ -91,6 +91,8 @@ type Registry struct {
 	states *ttlcache.Keyed[stateKey, *projectState]
 	login  *ttlcache.Cache[string]
 	orgs   *ttlcache.Keyed[string, []github.OrgRepository]
+
+	prTemplates *ttlcache.Keyed[string, string]
 }
 
 type tickTask struct {
@@ -132,6 +134,7 @@ func New(deps Deps) *Registry {
 		defer cancel()
 		return r.gh.ListOrgRepositories(ctx, owner)
 	})
+	r.prTemplates = ttlcache.NewKeyed(prTemplateTTL, 64, r.fetchPRTemplate)
 	return r
 }
 

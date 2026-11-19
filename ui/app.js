@@ -637,6 +637,7 @@ async function loadProjects() {
     projectsState = { list: null, error: err };
   }
   renderProjectsPage();
+  renderPullsPage();
   renderFleet();
 }
 
@@ -1486,7 +1487,17 @@ document.getElementById('pr-filter').addEventListener('click', e => {
   });
 })();
 
+function prProject(p) {
+  return p.project ? (projectsState.list || []).find(x => x.id === p.project) || null : null;
+}
+
 function prRequester(p) {
+  if (p.project) {
+    const proj = prProject(p);
+    const pid = proj && safeId(proj.id);
+    if (!pid) return '<span class="muted">a project</span>';
+    return `<a href="${detailPath('project', '', pid)}" data-link title="Project">${escapeHtml(proj.name || pid)}</a>`;
+  }
   if (!p.requested_by && !p.requester_id) return '<span class="muted">—</span>';
   return `<span title="${escapeHtml(p.requester_id || '')}">${escapeHtml(p.requested_by || p.requester_id)}</span>`;
 }
@@ -1506,7 +1517,7 @@ function renderPullsPage() {
   const words = prQuery.split(/\s+/).filter(Boolean);
   const rows = list.filter(p => prFilter === 'all' || p.agent === prFilter).filter(p => {
     if (!words.length) return true;
-    const hay = [p.title, p.repo, '#' + p.number, p.requested_by, p.requester_id, p.agent ? agentLabel(p.agent) : '', p.source].join('\n').toLowerCase();
+    const hay = [p.title, p.repo, '#' + p.number, p.requested_by, p.requester_id, (prProject(p) || {}).name, p.agent ? agentLabel(p.agent) : '', p.source].join('\n').toLowerCase();
     return words.every(w => hay.includes(w));
   });
   note.hidden = !words.length;

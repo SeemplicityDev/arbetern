@@ -65,6 +65,7 @@ const (
 	viewTimeout        = 10 * time.Second
 	viewCacheTTL       = 5 * time.Second
 	orgReposTTL        = 10 * time.Minute
+	prTemplateTTL      = 30 * time.Minute
 	maxStagger         = 60 * time.Second
 	dispatchLostAfter  = 15 * time.Minute
 	runningGrace       = 30 * time.Minute
