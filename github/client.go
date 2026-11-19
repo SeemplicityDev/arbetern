@@ -939,15 +939,16 @@ type PRSummary struct {
 	MergedAt time.Time
 	// Repo is the "owner/name" the PR belongs to. Only set by searches that
 	// span more than one repository, where the caller cannot infer it.
-	Repo    string
-	Author  string
-	URL     string
-	BaseRef string
-	HeadRef string
-	HeadSHA string
-	Body    string
-	Diff    string
-	Files   []PRFile
+	Repo     string
+	Author   string
+	URL      string
+	BaseRef  string
+	HeadRef  string
+	HeadRepo string
+	HeadSHA  string
+	Body     string
+	Diff     string
+	Files    []PRFile
 	// Additions, Deletions and ChangedFiles are GitHub's totals for the PR; Files can list fewer.
 	Additions    int
 	Deletions    int
@@ -971,15 +972,16 @@ func (c *Client) GetPullRequestRefs(ctx context.Context, owner, repo string, num
 		return nil, fmt.Errorf("failed to get PR #%d: %w", number, err)
 	}
 	return &PRSummary{
-		Number:  number,
-		Title:   pr.GetTitle(),
-		State:   pr.GetState(),
-		Merged:  pr.GetMerged(),
-		Author:  pr.GetUser().GetLogin(),
-		URL:     pr.GetHTMLURL(),
-		BaseRef: pr.GetBase().GetRef(),
-		HeadRef: pr.GetHead().GetRef(),
-		Body:    pr.GetBody(),
+		Number:   number,
+		Title:    pr.GetTitle(),
+		State:    pr.GetState(),
+		Merged:   pr.GetMerged(),
+		Author:   pr.GetUser().GetLogin(),
+		URL:      pr.GetHTMLURL(),
+		BaseRef:  pr.GetBase().GetRef(),
+		HeadRef:  pr.GetHead().GetRef(),
+		HeadRepo: pr.GetHead().GetRepo().GetFullName(),
+		Body:     pr.GetBody(),
 	}, nil
 }
 

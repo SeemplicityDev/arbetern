@@ -56,6 +56,8 @@ var mutatingTools = map[string]bool{
 	"delete_file":        true,
 	"move_file":          true,
 	"regex_replace_file": true,
+	"close_pull_request": true,
+	"delete_branch":      true,
 	"post_slack_message": true,
 	"create_dashboard":   true,
 	"create_workflow":    true,

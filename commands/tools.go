@@ -41,6 +41,8 @@ const (
 	ToolGetWorkflowRun       = "get_workflow_run"
 	ToolRerunFailedJobs      = "rerun_failed_jobs"
 	ToolRerunWorkflow        = "rerun_workflow"
+	ToolClosePullRequest     = "close_pull_request"
+	ToolDeleteBranch         = "delete_branch"
 
 	// Slack.
 	ToolFetchChannelContext       = "fetch_channel_context"
@@ -233,6 +235,8 @@ var toolIntegration = map[string]string{
 	ToolGetWorkflowRun:       integrationGitHub,
 	ToolRerunFailedJobs:      integrationGitHub,
 	ToolRerunWorkflow:        integrationGitHub,
+	ToolClosePullRequest:     integrationGitHub,
+	ToolDeleteBranch:         integrationGitHub,
 
 	// Slack (open to all agents).
 	ToolFetchChannelContext:       integrationSlack,

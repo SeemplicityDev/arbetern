@@ -262,6 +262,16 @@ func (bm *BranchManager) forget(repoKey string) {
 	bm.session.Save()
 }
 
+// Release stops treating branch as the repo's active branch, so later writes open a new pull request.
+func (bm *BranchManager) Release(owner, repo, branch string) {
+	if bm == nil {
+		return
+	}
+	if active := bm.ActiveBranch(owner, repo); active != nil && active.BranchName == branch {
+		bm.forget(owner + "/" + repo)
+	}
+}
+
 // CommitResult is returned by CommitAndPR with the outcome of the operation.
 type CommitResult struct {
 	PrURL   string

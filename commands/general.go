@@ -1111,6 +1111,39 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 		{
 			Type: "function",
 			Function: llm.ToolFunction{
+				Name:        ToolClosePullRequest,
+				Description: "Close a pull request YOU opened, without merging it, and delete its head branch. Use it when the user asks to close, cancel, drop or abandon a pull request of yours. Pull requests anyone else opened are refused. The head branch is deleted only when every commit on it beyond the base branch is yours and no other open pull request uses it; otherwise it is kept and the result says why. Calling it on a PR that is already closed or merged only cleans up its branch.",
+				Parameters: json.RawMessage(`{
+					"type":"object",
+					"properties":{
+						"repo":{"type":"string","description":"Repository name (without owner)"},
+						"number":{"type":"integer","description":"Pull request number"},
+						"url":{"type":"string","description":"Full GitHub PR URL (alternative to repo+number)."},
+						"comment":{"type":"string","description":"Optional comment posted on the pull request before it is closed, such as why it is no longer needed."},
+						"delete_branch":{"type":"boolean","description":"Default true. false closes the pull request and keeps its head branch."}
+					},
+					"required":[]
+				}`),
+			},
+		},
+		{
+			Type: "function",
+			Function: llm.ToolFunction{
+				Name:        ToolDeleteBranch,
+				Description: "Delete a branch YOU created, such as one left behind by a pull request of yours that was closed or merged. Refused for the default branch, a branch with an open pull request from it or into it, and a branch with commits beyond its base that someone else wrote. To close one of your pull requests and remove its branch, use close_pull_request instead.",
+				Parameters: json.RawMessage(`{
+					"type":"object",
+					"properties":{
+						"repo":{"type":"string","description":"Repository name (without owner)"},
+						"branch":{"type":"string","description":"Branch name"}
+					},
+					"required":["repo","branch"]
+				}`),
+			},
+		},
+		{
+			Type: "function",
+			Function: llm.ToolFunction{
 				Name:        ToolReplyInThread,
 				Description: "Post a message as a threaded reply to a specific Slack message. Use this when the user asks you to reply inside someone's thread or respond to a particular message. You need the thread_ts of the target message from the channel context. IMPORTANT: Messages marked [BOT] are this bot's own messages — never reply to those. Always use the thread_ts of the HUMAN user's message (e.g. the person mentioned by name like 'Alex', 'Sam', etc.).",
 				Parameters: json.RawMessage(`{
@@ -3949,6 +3982,106 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		}
 		log.Printf("[user=%s channel=%s] successfully triggered full rerun of %s/%s/%d", userID, channelID, owner, repo, runID)
 		return fmt.Sprintf("Successfully triggered full re-run of workflow run %d in %s/%s. All jobs will run again: %s", runID, owner, repo, args.URL)
+
+	case ToolClosePullRequest:
+		args, errMsg := parseToolArgs[struct {
+			Repo         string `json:"repo"`
+			Number       int    `json:"number"`
+			URL          string `json:"url"`
+			Comment      string `json:"comment"`
+			DeleteBranch *bool  `json:"delete_branch"`
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
+		}
+		owner, err := h.ghClient.ResolveOwner(ctx)
+		if err != nil {
+			return fmt.Sprintf("Error resolving owner: %v", err)
+		}
+		if args.URL != "" {
+			prOwner, prRepo, prNum, parseErr := github.ParsePRURL(args.URL)
+			if parseErr != nil {
+				return preconditionErrf("Error parsing PR URL: %v", parseErr)
+			}
+			owner, args.Repo, args.Number = prOwner, prRepo, prNum
+		}
+		if args.Repo == "" || args.Number <= 0 {
+			return preconditionErrf("Error: pass repo and number, or url.")
+		}
+		pr, err := h.ghClient.GetPullRequestRefs(ctx, owner, args.Repo, args.Number)
+		if err != nil {
+			return fmt.Sprintf("Error reading PR: %v", err)
+		}
+		own, err := h.ghClient.OpenedBySelf(ctx, pr.Author, pr.Body)
+		if err != nil {
+			return fmt.Sprintf("Error checking who opened PR #%d: %v", args.Number, err)
+		}
+		if !own {
+			return preconditionErrf("Error: PR #%d in %s/%s (author %s) was not opened by you, so it was left as it is. Only pull requests you opened, whose description carries your marker, can be closed.", args.Number, owner, args.Repo, pr.Author)
+		}
+
+		var sb strings.Builder
+		if pr.State == "open" {
+			if comment := strings.TrimSpace(args.Comment); comment != "" {
+				if _, err := h.ghClient.CommentOnPullRequest(ctx, owner, args.Repo, args.Number, comment); err != nil {
+					fmt.Fprintf(&sb, "The comment could not be posted: %v\n", err)
+				}
+			}
+			if err := h.ghClient.ClosePullRequest(ctx, owner, args.Repo, args.Number); err != nil {
+				return fmt.Sprintf("Error closing PR #%d: %v", args.Number, err)
+			}
+			log.Printf("[user=%s channel=%s] closed PR #%d in %s/%s", userID, channelID, args.Number, owner, args.Repo)
+			fmt.Fprintf(&sb, "Closed PR #%d in %s/%s without merging: %s\n", args.Number, owner, args.Repo, pr.URL)
+		} else {
+			fmt.Fprintf(&sb, "PR #%d in %s/%s was already %s: %s\n", args.Number, owner, args.Repo, github.PRStateLabel(pr), pr.URL)
+		}
+		h.branchMgr.Release(owner, args.Repo, pr.HeadRef)
+
+		if args.DeleteBranch != nil && !*args.DeleteBranch {
+			fmt.Fprintf(&sb, "Branch %s was kept, as asked.", pr.HeadRef)
+			return sb.String()
+		}
+		if !strings.EqualFold(pr.HeadRepo, owner+"/"+args.Repo) {
+			fmt.Fprintf(&sb, "Branch %s was kept: it is not a branch of %s/%s.", pr.HeadRef, owner, args.Repo)
+			return sb.String()
+		}
+		switch kept, err := h.ghClient.DeleteOwnBranch(ctx, owner, args.Repo, pr.HeadRef, pr.BaseRef); {
+		case err != nil:
+			fmt.Fprintf(&sb, "Branch %s could not be deleted: %v", pr.HeadRef, err)
+		case kept != "":
+			fmt.Fprintf(&sb, "Branch %s was kept: %s.", pr.HeadRef, kept)
+		default:
+			log.Printf("[user=%s channel=%s] deleted branch %s in %s/%s", userID, channelID, pr.HeadRef, owner, args.Repo)
+			fmt.Fprintf(&sb, "Deleted branch %s.", pr.HeadRef)
+		}
+		return sb.String()
+
+	case ToolDeleteBranch:
+		args, errMsg := parseToolArgs[struct {
+			Repo   string `json:"repo"`
+			Branch string `json:"branch"`
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
+		}
+		branch := strings.TrimPrefix(strings.TrimSpace(args.Branch), "refs/heads/")
+		if args.Repo == "" || branch == "" {
+			return preconditionErrf("Error: repo and branch are required.")
+		}
+		owner, err := h.ghClient.ResolveOwner(ctx)
+		if err != nil {
+			return fmt.Sprintf("Error resolving owner: %v", err)
+		}
+		kept, err := h.ghClient.DeleteOwnBranch(ctx, owner, args.Repo, branch, "")
+		if err != nil {
+			return fmt.Sprintf("Error deleting branch %s: %v", branch, err)
+		}
+		if kept != "" {
+			return preconditionErrf("Error: branch %s in %s/%s was not deleted: %s.", branch, owner, args.Repo, kept)
+		}
+		h.branchMgr.Release(owner, args.Repo, branch)
+		log.Printf("[user=%s channel=%s] deleted branch %s in %s/%s", userID, channelID, branch, owner, args.Repo)
+		return fmt.Sprintf("Deleted branch %s in %s/%s.", branch, owner, args.Repo)
 
 	case ToolReplyInThread:
 		args, errMsg := parseToolArgs[struct {
