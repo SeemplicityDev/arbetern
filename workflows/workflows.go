@@ -630,6 +630,15 @@ func (r *Registry) Get(agent, id string) (*Workflow, bool) {
 	return w, true
 }
 
+// Name returns a workflow's name without checking whether it is running.
+func (r *Registry) Name(agent, id string) (string, bool) {
+	w, ok := r.docs.Get(store.Key(agent, id))
+	if !ok {
+		return "", false
+	}
+	return w.Name, true
+}
+
 // List returns all workflows, optionally filtered by agent, sorted by creation time asc.
 func (r *Registry) List(agent string) []*Workflow {
 	out := make([]*Workflow, 0)

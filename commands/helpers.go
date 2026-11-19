@@ -102,13 +102,27 @@ func slackAttribution(userID, userName string) string {
 func (h *GeneralHandler) buildPRBody(userID, userName, supplied, fallback string) string {
 	body := fallback
 	if supplied = strings.TrimSpace(supplied); supplied != "" {
-		body = supplied + "\n\n---\n_Automated via " + h.prOrigin() + " by " + slackAttribution(userID, userName) + "_"
+		body = supplied + "\n\n---\n_Automated via " + h.prAttribution(userID, userName) + "_"
 	}
-	user := ""
-	if slackUserIDRe.MatchString(strings.TrimSpace(userID)) {
-		user = strings.TrimSpace(userID)
+	user, workflow := strings.TrimSpace(userID), ""
+	if h.source() == billing.SourceWorkflow {
+		user, workflow = "", strings.TrimSpace(h.billingWorkflowID)
 	}
-	return body + "\n" + github.PRMarker(h.agentID, h.billingSource, user)
+	if !slackUserIDRe.MatchString(user) {
+		user = ""
+	}
+	return body + "\n" + github.PRMarker(h.agentID, h.billingSource, user, workflow)
+}
+
+func (h *GeneralHandler) prAttribution(userID, userName string) string {
+	if h.source() != billing.SourceWorkflow {
+		return h.prOrigin() + " by " + slackAttribution(userID, userName)
+	}
+	name := strings.TrimSpace(strings.NewReplacer(`"`, "'", "\n", " ", "\r", " ").Replace(h.billingWorkflowName))
+	if name == "" {
+		return "a workflow"
+	}
+	return `the "` + name + `" workflow`
 }
 
 // prOrigin names the entry path a write-tool call arrived through, for the

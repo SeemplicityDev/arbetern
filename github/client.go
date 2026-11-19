@@ -1811,6 +1811,14 @@ const (
 var logDownloadClient = &http.Client{Timeout: 60 * time.Second}
 
 func (c *Client) getJobLogs(ctx context.Context, owner, repo string, jobID int64) (string, error) {
+	raw, err := c.downloadJobLog(ctx, owner, repo, jobID)
+	if err != nil {
+		return "", err
+	}
+	return trimJobLog(raw, maxJobLogSize), nil
+}
+
+func (c *Client) downloadJobLog(ctx context.Context, owner, repo string, jobID int64) (string, error) {
 	logURL, _, err := c.api.Actions.GetWorkflowJobLogs(ctx, owner, repo, jobID, 2)
 	if err != nil {
 		return "", fmt.Errorf("failed to get log URL for job %d: %w", jobID, err)
@@ -1832,7 +1840,7 @@ func (c *Client) getJobLogs(ctx context.Context, owner, repo string, jobID int64
 	if err != nil {
 		return "", fmt.Errorf("failed to read job logs: %w", err)
 	}
-	return trimJobLog(string(body), maxJobLogSize), nil
+	return string(body), nil
 }
 
 var logTimestampRe = regexp.MustCompile(`(?m)^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+Z `)

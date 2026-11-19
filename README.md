@@ -900,10 +900,12 @@ with unknown attributes left out. It marks the PR as arbetern-written whatever
 entry path opened it, and is how the console's Pull requests page finds the
 agents' open PRs; bodies written before it existed are recognised by the
 attribution phrases above. A pull request opened for a [project](#projects)
-carries `source=project project=<id> task=<task>` in place of `user=`. The
-page names the requester from the footer, whatever the entry path, or from
-their Slack profile when the footer holds only the mention, and lists a
-project's pull requests under the project's name, linked to its page.
+carries `source=project project=<id> task=<task>` in place of `user=`. A
+workflow run's footer names the workflow, `_Automated via the "<name>"
+workflow_`, not its owner, and its marker carries `workflow=<id>` in place of
+`user=`. The page names the requester from the footer, or from their Slack
+profile when the footer holds only the mention, and lists a project's or a
+workflow's pull requests under its name, linked to its page.
 
 Only the write call that opens a PR establishes its body — later calls
 grouped into that same PR ignore their `pr_body` argument.

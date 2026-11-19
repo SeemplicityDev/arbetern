@@ -17,19 +17,23 @@ import (
 
 // prMarkerPrefix opens the HTML comment every arbetern-written PR body ends
 // with; legacyPRMarkers are the attribution phrases older bodies carry.
-const prMarkerPrefix = "<!-- arbetern"
+const (
+	prMarkerPrefix   = "<!-- arbetern"
+	workflowPRSource = "workflow"
+)
 
 var legacyPRMarkers = []string{"Automated via Slack by", "requested via Slack by"}
 
 var (
 	prMarkerRe     = regexp.MustCompile(`<!-- arbetern((?: [a-z]+=[^\s>]+)*) -->`)
 	prRequesterRe  = regexp.MustCompile(`(?:Automated|requested) via [A-Za-z][A-Za-z ]{0,40}? by (.+?)[._]*(?:\r?\n|$)`)
+	prWorkflowRe   = regexp.MustCompile(`via the "([^"\n]{1,200})" workflow`)
 	slackMentionRe = regexp.MustCompile(`\s*\(?<@([A-Z0-9]+)(?:\|[^>]*)?>\)?`)
 )
 
 // PRMarker renders the body marker; empty attributes are left out.
-func PRMarker(agent, source, user string) string {
-	return renderPRMarker([][2]string{{"agent", agent}, {"source", source}, {"user", user}})
+func PRMarker(agent, source, user, workflow string) string {
+	return renderPRMarker([][2]string{{"agent", agent}, {"source", source}, {"user", user}, {"workflow", markerValue(workflow)}})
 }
 
 func renderPRMarker(attrs [][2]string) string {
@@ -60,19 +64,21 @@ func IsAutomatedPRBody(body string) bool {
 // AutomatedPR is an open pull request arbetern authored, as listed by the
 // console's Pull requests page.
 type AutomatedPR struct {
-	Repo        string    `json:"repo"`
-	Number      int       `json:"number"`
-	Title       string    `json:"title"`
-	URL         string    `json:"url"`
-	Draft       bool      `json:"draft"`
-	Agent       string    `json:"agent,omitempty"`
-	Source      string    `json:"source,omitempty"`
-	RequestedBy string    `json:"requested_by,omitempty"`
-	RequesterID string    `json:"requester_id,omitempty"`
-	Project     string    `json:"project,omitempty"`
-	Comments    int       `json:"comments"`
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	Repo         string    `json:"repo"`
+	Number       int       `json:"number"`
+	Title        string    `json:"title"`
+	URL          string    `json:"url"`
+	Draft        bool      `json:"draft"`
+	Agent        string    `json:"agent,omitempty"`
+	Source       string    `json:"source,omitempty"`
+	RequestedBy  string    `json:"requested_by,omitempty"`
+	RequesterID  string    `json:"requester_id,omitempty"`
+	Project      string    `json:"project,omitempty"`
+	Workflow     string    `json:"workflow,omitempty"`
+	WorkflowName string    `json:"workflow_name,omitempty"`
+	Comments     int       `json:"comments"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
 }
 
 const maxAutomatedPRPages = 3
@@ -107,28 +113,34 @@ func (c *Client) ListOpenAutomatedPullRequests(ctx context.Context) ([]Automated
 				continue
 			}
 			attrs := parsePRMarker(body)
-			var name, id string
-			if attrs["source"] != projectPRSource {
-				name, id = parsePRRequester(body)
+			pr := AutomatedPR{
+				Repo:      owner + "/" + repo,
+				Number:    number,
+				Title:     issue.GetTitle(),
+				URL:       issue.GetHTMLURL(),
+				Draft:     issue.GetDraft(),
+				Agent:     attrs["agent"],
+				Source:    attrs["source"],
+				Project:   attrs["project"],
+				Workflow:  attrs["workflow"],
+				Comments:  issue.GetComments(),
+				CreatedAt: issue.GetCreatedAt().Time,
+				UpdatedAt: issue.GetUpdatedAt().Time,
 			}
-			if attrs["user"] != "" {
-				id = attrs["user"]
+			switch pr.Source {
+			case projectPRSource:
+			case workflowPRSource:
+				// A workflow's owner did not ask for its pull requests, so the workflow is named instead.
+				if m := prWorkflowRe.FindStringSubmatch(body); m != nil {
+					pr.WorkflowName = strings.TrimSpace(m[1])
+				}
+			default:
+				pr.RequestedBy, pr.RequesterID = parsePRRequester(body)
+				if attrs["user"] != "" {
+					pr.RequesterID = attrs["user"]
+				}
 			}
-			out = append(out, AutomatedPR{
-				Repo:        owner + "/" + repo,
-				Number:      number,
-				Title:       issue.GetTitle(),
-				URL:         issue.GetHTMLURL(),
-				Draft:       issue.GetDraft(),
-				Agent:       attrs["agent"],
-				Source:      attrs["source"],
-				RequestedBy: name,
-				RequesterID: id,
-				Project:     attrs["project"],
-				Comments:    issue.GetComments(),
-				CreatedAt:   issue.GetCreatedAt().Time,
-				UpdatedAt:   issue.GetUpdatedAt().Time,
-			})
+			out = append(out, pr)
 		}
 		if resp == nil || resp.NextPage == 0 {
 			break

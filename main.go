@@ -3175,6 +3175,11 @@ func main() {
 			if prs[i].RequestedBy == "" {
 				prs[i].RequestedBy = userNames.resolve(slackClient, prs[i].RequesterID)
 			}
+			if prs[i].Workflow != "" {
+				if name, ok := wfRegistry.Name(prs[i].Agent, prs[i].Workflow); ok {
+					prs[i].WorkflowName = name
+				}
+			}
 		}
 		return prs, nil
 	})

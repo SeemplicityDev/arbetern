@@ -1074,11 +1074,13 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 			Type: "function",
 			Function: llm.ToolFunction{
 				Name:        ToolGetWorkflowRun,
-				Description: "Fetch details and logs for a GitHub Actions workflow run. Use this PROACTIVELY whenever you see a failed CI/CD notification, a GitHub Actions URL, or the user mentions a build/deploy/pipeline failure. Returns the run status, jobs, steps, annotations, and actual log output for any failed jobs so you can diagnose the root cause. When you only have a pull request, get_pull_request lists its failed checks with their run URLs.",
+				Description: "Fetch details and logs for a GitHub Actions workflow run. Use this PROACTIVELY whenever you see a failed CI/CD notification, a GitHub Actions URL, or the user mentions a build/deploy/pipeline failure. Returns the run status, jobs, steps, annotations, and actual log output for any failed jobs so you can diagnose the root cause. When you only have a pull request, get_pull_request lists its failed checks with their run URLs. With job and contains it returns instead the lines of that one job's log that contain the given texts, whatever the job's conclusion: use it to quote what a job did, such as the package versions a passing build resolved.",
 				Parameters: json.RawMessage(`{
 					"type":"object",
 					"properties":{
-						"url":{"type":"string","description":"Full GitHub Actions workflow run URL (e.g., 'https://github.com/org/repo/actions/runs/12345'). Extract this from channel context messages — look for 'View Workflow Run' button URLs or similar links."}
+						"url":{"type":"string","description":"Full GitHub Actions workflow run URL (e.g., 'https://github.com/org/repo/actions/runs/12345'). Extract this from channel context messages — look for 'View Workflow Run' button URLs or similar links."},
+						"job":{"type":"string","description":"Part of one job's name, such as 'build-packages'; needs contains"},
+						"contains":{"type":"array","items":{"type":"string"},"description":"With job: up to 8 texts; a log line is returned when it contains any of them, ignoring case"}
 					},
 					"required":["url"]
 				}`),
@@ -3364,7 +3366,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		}
 
 		userName := h.slackUserName(userID)
-		prBody := h.buildPRBody(userID, userName, args.PRBody, fmt.Sprintf("Automated change requested via %s by %s.\n\nChange: %s", h.prOrigin(), slackAttribution(userID, userName), args.Description))
+		prBody := h.buildPRBody(userID, userName, args.PRBody, fmt.Sprintf("Automated change requested via %s.\n\nChange: %s", h.prAttribution(userID, userName), args.Description))
 		result, err := h.branchMgr.CommitAndPR(ctx, owner, args.Repo, baseBranch, userID, args.Description, prBody, targetBranch, args.PRTitle, []string{args.Path},
 			func(branch string) error {
 				commitMsg := fmt.Sprintf("%s: %s", h.agentID, args.Description)
@@ -3408,7 +3410,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		}
 
 		userName := h.slackUserName(userID)
-		prBody := h.buildPRBody(userID, userName, args.PRBody, fmt.Sprintf("Automated file creation requested via %s by %s.\n\nChange: %s\nNew file: `%s`", h.prOrigin(), slackAttribution(userID, userName), args.Description, args.Path))
+		prBody := h.buildPRBody(userID, userName, args.PRBody, fmt.Sprintf("Automated file creation requested via %s.\n\nChange: %s\nNew file: `%s`", h.prAttribution(userID, userName), args.Description, args.Path))
 		result, err := h.branchMgr.CommitAndPR(ctx, owner, args.Repo, baseBranch, userID, args.Description, prBody, targetBranch, args.PRTitle, []string{args.Path},
 			func(branch string) error {
 				commitMsg := fmt.Sprintf("%s: %s", h.agentID, args.Description)
@@ -3457,7 +3459,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		}
 
 		userName := h.slackUserName(userID)
-		prBody := h.buildPRBody(userID, userName, args.PRBody, fmt.Sprintf("Automated file deletion requested via %s by %s.\n\nChange: %s\nDeleted file: `%s`", h.prOrigin(), slackAttribution(userID, userName), args.Description, args.Path))
+		prBody := h.buildPRBody(userID, userName, args.PRBody, fmt.Sprintf("Automated file deletion requested via %s.\n\nChange: %s\nDeleted file: `%s`", h.prAttribution(userID, userName), args.Description, args.Path))
 		result, err := h.branchMgr.CommitAndPR(ctx, owner, args.Repo, baseBranch, userID, args.Description, prBody, targetBranch, args.PRTitle, []string{args.Path},
 			func(branch string) error {
 				commitMsg := fmt.Sprintf("%s: %s", h.agentID, args.Description)
@@ -3517,7 +3519,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		}
 
 		userName := h.slackUserName(userID)
-		prBody := h.buildPRBody(userID, userName, args.PRBody, fmt.Sprintf("Automated file rename requested via %s by %s.\n\nChange: %s\nRenamed: `%s` → `%s`", h.prOrigin(), slackAttribution(userID, userName), args.Description, fromPath, toPath))
+		prBody := h.buildPRBody(userID, userName, args.PRBody, fmt.Sprintf("Automated file rename requested via %s.\n\nChange: %s\nRenamed: `%s` → `%s`", h.prAttribution(userID, userName), args.Description, fromPath, toPath))
 		result, err := h.branchMgr.CommitAndPR(ctx, owner, args.Repo, baseBranch, userID, args.Description, prBody, targetBranch, args.PRTitle, []string{fromPath, toPath},
 			func(branch string) error {
 				commitMsg := fmt.Sprintf("%s: %s", h.agentID, args.Description)
@@ -3580,7 +3582,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 			userID, channelID, matches, args.Pattern, args.Repo, args.Path)
 
 		userName := h.slackUserName(userID)
-		prBody := h.buildPRBody(userID, userName, args.PRBody, fmt.Sprintf("Automated regex replacement requested via %s by %s.\n\nChange: %s\nPattern: `%s` → `%s`\nMatches replaced: %d", h.prOrigin(), slackAttribution(userID, userName), args.Description, args.Pattern, args.Replacement, matches))
+		prBody := h.buildPRBody(userID, userName, args.PRBody, fmt.Sprintf("Automated regex replacement requested via %s.\n\nChange: %s\nPattern: `%s` → `%s`\nMatches replaced: %d", h.prAttribution(userID, userName), args.Description, args.Pattern, args.Replacement, matches))
 		result, err := h.branchMgr.CommitAndPR(ctx, owner, args.Repo, baseBranch, userID, args.Description, prBody, targetBranch, args.PRTitle, []string{args.Path},
 			func(branch string) error {
 				commitMsg := fmt.Sprintf("%s: %s", h.agentID, args.Description)
@@ -3953,7 +3955,9 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 
 	case ToolGetWorkflowRun:
 		args, errMsg := parseToolArgs[struct {
-			URL string `json:"url"`
+			URL      string   `json:"url"`
+			Job      string   `json:"job"`
+			Contains []string `json:"contains"`
 		}](argsJSON)
 		if errMsg != "" {
 			return errMsg
@@ -3961,6 +3965,17 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		owner, repo, runID, err := github.ParseWorkflowRunURL(args.URL)
 		if err != nil {
 			return fmt.Sprintf("Error parsing workflow run URL: %v", err)
+		}
+		if strings.TrimSpace(args.Job) != "" || len(args.Contains) > 0 {
+			if strings.TrimSpace(args.Job) == "" || len(args.Contains) == 0 || len(args.Contains) > github.MaxJobLogTerms {
+				return fmt.Sprintf("Error: job and contains go together: name one job and 1 to %d texts to look for in its log.", github.MaxJobLogTerms)
+			}
+			lines, err := h.ghClient.WorkflowJobLogLines(ctx, owner, repo, runID, args.Job, args.Contains)
+			if err != nil {
+				return fmt.Sprintf("Error reading the job log: %v", err)
+			}
+			log.Printf("[user=%s channel=%s] searched job %q of workflow run %s/%s/%d (%d lines)", userID, channelID, lines.Job, owner, repo, runID, lines.Matched)
+			return github.FormatJobLogLines(args.URL, args.Contains, lines)
 		}
 		log.Printf("[user=%s channel=%s] fetching workflow run %s/%s/%d", userID, channelID, owner, repo, runID)
 		summary, err := h.ghClient.GetWorkflowRunSummary(ctx, owner, repo, runID)
