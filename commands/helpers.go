@@ -15,9 +15,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/justmike1/arbetern/billing"
 	"github.com/justmike1/arbetern/github"
 	"github.com/justmike1/arbetern/internal/httpx"
+	"github.com/justmike1/arbetern/internal/origin"
 	"github.com/justmike1/arbetern/slack"
 )
 
@@ -70,77 +70,28 @@ func parseSlackBlocks(raw json.RawMessage) ([]json.RawMessage, error) {
 	return blocks, nil
 }
 
-// slackAttribution renders the requesting Slack user for a GitHub-facing PR
-// body: the human name followed by the raw mention token, e.g.
-// "Jane Doe (<@U123>)". GitHub does not resolve <@U123>, so a reviewer looking
-// at the PR sees only an opaque ID; the name is what tells them who actually
-// asked for the change. The ID stays because it is the stable key back to the
-// Slack profile. userName is best-effort — it falls back to the bare mention
-// when the profile lookup found no name, and to a neutral phrase when there is
-// no Slack identity at all (a web-chat turn), rather than emitting "<@>".
-func slackAttribution(userID, userName string) string {
-	userID = strings.TrimSpace(userID)
-	userName = strings.TrimSpace(userName)
-	switch {
-	case userID == "" && userName == "":
-		return "an unresolved user"
-	case userID == "":
-		return userName
-	case userName == "":
-		return "<@" + userID + ">"
-	default:
-		return userName + " (<@" + userID + ">)"
+func (h *GeneralHandler) attribution(userID, userName string) github.Attribution {
+	a := github.Attribution{Agent: h.agentID, Source: h.source()}
+	if a.Source == origin.Workflow {
+		a.WorkflowID, a.WorkflowName = h.billingWorkflowID, h.billingWorkflowName
+		return a
 	}
+	if userID = strings.TrimSpace(userID); slack.IsUserID(userID) {
+		a.UserID = userID
+	}
+	a.UserName = userName
+	return a
 }
 
-// buildPRBody returns the PR body for a write-tool call. When the caller
-// supplied pr_body (trimmed non-empty) we use it verbatim and append a
-// one-line Slack attribution footer so reviewers still know which user /
-// workflow originated the change. Otherwise we fall back to the generic
-// template the tool historically used. Either way the body ends with the
-// marker the console's Pull requests page looks for.
 func (h *GeneralHandler) buildPRBody(userID, userName, supplied, fallback string) string {
+	a := h.attribution(userID, userName)
+	// Every fallback already names a.Phrase(); only a supplied body needs the footer.
 	body := fallback
 	if supplied = strings.TrimSpace(supplied); supplied != "" {
-		body = supplied + "\n\n---\n_Automated via " + h.prAttribution(userID, userName) + "_"
+		body = supplied + "\n\n---\n_Automated via " + a.Phrase() + "_"
 	}
-	user, workflow := strings.TrimSpace(userID), ""
-	if h.source() == billing.SourceWorkflow {
-		user, workflow = "", strings.TrimSpace(h.billingWorkflowID)
-	}
-	if !slackUserIDRe.MatchString(user) {
-		user = ""
-	}
-	return body + "\n" + github.PRMarker(h.agentID, h.billingSource, user, workflow)
+	return body + "\n" + a.Marker()
 }
-
-func (h *GeneralHandler) prAttribution(userID, userName string) string {
-	if h.source() != billing.SourceWorkflow {
-		return h.prOrigin() + " by " + slackAttribution(userID, userName)
-	}
-	name := strings.TrimSpace(strings.NewReplacer(`"`, "'", "\n", " ", "\r", " ").Replace(h.billingWorkflowName))
-	if name == "" {
-		return "a workflow"
-	}
-	return `the "` + name + `" workflow`
-}
-
-// prOrigin names the entry path a write-tool call arrived through, for the
-// attribution line reviewers read on the PR it opens.
-func (h *GeneralHandler) prOrigin() string {
-	switch h.source() {
-	case billing.SourceChat:
-		return "the web chat"
-	case billing.SourceWorkflow:
-		return "a scheduled workflow"
-	case billing.SourceDashboard:
-		return "a dashboard render"
-	default:
-		return "Slack"
-	}
-}
-
-var slackUserIDRe = regexp.MustCompile(`^[UW][A-Z0-9]{6,}$`)
 
 // requireDescription rejects a write-tool call that arrived with a blank
 // description. description becomes the commit message, the PR title (when
@@ -542,7 +493,7 @@ func resolveWriteBranch(ctx context.Context, ghClient *github.Client, bm *Branch
 	if err != nil {
 		return "", preconditionErrf("Error reading pull request #%d: %v", prNumber, err)
 	}
-	if pr.State != "open" {
+	if pr.State != github.PRStateOpen {
 		return "", preconditionErrf("Error: PR #%d in %s/%s is %s, so changes cannot be added to it. Open a new pull request instead (omit pr_number and pr_url).",
 			prNumber, owner, repo, github.PRStateLabel(pr))
 	}

@@ -15,7 +15,14 @@ import (
 // ErrMergeableNow means GitHub would not turn auto-merge on because the pull request can be merged now.
 var ErrMergeableNow = errors.New("the pull request can be merged now")
 
-var graphQLMergeMethods = map[string]string{"squash": "SQUASH", "rebase": "REBASE", "merge": "MERGE"}
+// Merge methods a pull request can be merged with.
+const (
+	MergeSquash = "squash"
+	MergeRebase = "rebase"
+	MergeCommit = "merge"
+)
+
+var graphQLMergeMethods = map[string]string{MergeSquash: "SQUASH", MergeRebase: "REBASE", MergeCommit: "MERGE"}
 
 const maxCompareFiles = 300
 

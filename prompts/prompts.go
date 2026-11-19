@@ -7,6 +7,8 @@ import (
 	"strings"
 
 	"go.yaml.in/yaml/v3"
+
+	"github.com/justmike1/arbetern/internal/origin"
 )
 
 const defaultAgentsDir = "agents"
@@ -200,11 +202,11 @@ const outputKeyPrefix = "output_"
 // going — "slack", "chat", "workflow", "dashboard" — or "" when the source is
 // unknown or has no block. The same answer is read by very different renderers,
 // so the destination decides the syntax.
-func (ap *AgentPrompts) OutputPrompt(source string) string {
+func (ap *AgentPrompts) OutputPrompt(source origin.Source) string {
 	if ap == nil || source == "" {
 		return ""
 	}
-	return ap.Get(outputKeyPrefix + source)
+	return ap.Get(outputKeyPrefix + string(source))
 }
 
 // SystemPrompt builds a system prompt by joining all global keys (in their

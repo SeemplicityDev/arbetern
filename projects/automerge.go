@@ -223,7 +223,7 @@ func approvals(reviews []github.DiscussionItem) []github.DiscussionItem {
 	latest := map[string]github.DiscussionItem{}
 	var order []string
 	for _, it := range reviews {
-		if it.Bot || !it.Trusted() || it.State != "APPROVED" && it.State != "CHANGES_REQUESTED" && it.State != "DISMISSED" {
+		if it.Bot || !it.Trusted() || it.State != github.ReviewApproved && it.State != github.ReviewChangesRequested && it.State != github.ReviewDismissed {
 			continue
 		}
 		k := strings.ToLower(it.Author)
@@ -235,9 +235,9 @@ func approvals(reviews []github.DiscussionItem) []github.DiscussionItem {
 	var out []github.DiscussionItem
 	for _, k := range order {
 		switch it := latest[k]; it.State {
-		case "CHANGES_REQUESTED":
+		case github.ReviewChangesRequested:
 			return nil
-		case "APPROVED":
+		case github.ReviewApproved:
 			out = append(out, it)
 		}
 	}
@@ -270,7 +270,7 @@ func mergeReady(rv *ReviewState, w prWatch) bool {
 	return rv.Phase == PhaseDone && rv.DoneHead == w.pr.HeadSHA && w.ci == ciPassed && !rv.Conflict && !w.pr.Draft
 }
 
-func mergeHold(rv *ReviewState, w prWatch, need []string) bool {
+func mergeHold(rv *ReviewState, w prWatch, need []Trigger) bool {
 	return len(need) > 0 || len(w.items) > 0 || rv.Waiting != "" || rv.Conflict || len(w.failed) > 0 && rv.ChecksHandled != w.pr.HeadSHA
 }
 
@@ -435,7 +435,7 @@ func (l *Ledger) mergedByArbetern(id string, now time.Time) bool {
 }
 
 // followAutoMerge reports false when auto-merge could not be turned off, so nothing else may act on the pull request this tick.
-func (r *Registry) followAutoMerge(ctx context.Context, p *Project, led *Ledger, w prWatch, review Review, need []string, now time.Time) (*Ledger, bool) {
+func (r *Registry) followAutoMerge(ctx context.Context, p *Project, led *Ledger, w prWatch, review Review, need []Trigger, now time.Time) (*Ledger, bool) {
 	k := p.ID
 	_, rv := led.review(w.taskID)
 	m := cmp.Or(rv.AutoMerge, &MergeState{})
@@ -667,7 +667,7 @@ func (r *Registry) keepUpToDate(ctx context.Context, p *Project, led *Ledger, w 
 		return led
 	}
 	switch {
-	case review.MergeMethod == "rebase":
+	case review.MergeMethod == github.MergeRebase:
 		return r.noteMerge(ctx, p, led, w, "The branch is behind its base. With rebase merges, a person brings it up to date.", w.pr.HeadSHA, true)
 	case m.Updates >= maxBranchUpdates:
 		return r.noteMerge(ctx, p, led, w, fmt.Sprintf("The branch fell behind its base again after %s by arbetern. Over to a person.", plural(maxBranchUpdates, "update")), "", true)

@@ -60,7 +60,6 @@ const (
 	ToolLookupCVE = "lookup_cve"
 	ToolSearchCVE = "search_cve"
 
-	// PyPI.
 	ToolPyPIRelease = "pypi_release"
 
 	// Salesforce.
@@ -258,7 +257,6 @@ var toolIntegration = map[string]string{
 	ToolLookupCVE: integrationNVD,
 	ToolSearchCVE: integrationNVD,
 
-	// PyPI.
 	ToolPyPIRelease: integrationPyPI,
 
 	// Salesforce.

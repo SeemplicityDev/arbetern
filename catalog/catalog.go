@@ -17,6 +17,7 @@ import (
 	"github.com/justmike1/arbetern/dashboards"
 	"github.com/justmike1/arbetern/internal/safego"
 	"github.com/justmike1/arbetern/internal/store"
+	"github.com/justmike1/arbetern/internal/text"
 	"github.com/justmike1/arbetern/internal/vectors"
 	"github.com/justmike1/arbetern/workflows"
 )
@@ -86,12 +87,7 @@ func (c *Index) Enabled() bool { return c != nil && c.ix.Load() != nil }
 
 func itemKey(kind, agent, id string) string { return keyPrefix + kind + "/" + agent + "/" + id }
 
-func clip(s string) string {
-	if len(s) > maxText {
-		return s[:maxText]
-	}
-	return s
-}
+func clip(s string) string { return text.TruncatePlain(s, maxText) }
 
 func (c *Index) desired() map[string]item {
 	out := map[string]item{}

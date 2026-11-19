@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/justmike1/arbetern/internal/text"
 )
 
 const (
@@ -39,19 +41,19 @@ type otelSource struct {
 func logsSource(ds Datasource) otelSource {
 	cfg, _ := ds.JSONData["logs"].(map[string]any)
 	return otelSource{
-		database: firstNonEmpty(str(cfg, "defaultDatabase"), str(ds.JSONData, "defaultDatabase"), "default"),
-		table:    firstNonEmpty(str(cfg, "defaultTable"), "otel_logs"),
-		timeCol:  firstNonEmpty(str(cfg, "timeColumn"), "Timestamp"),
-		levelCol: firstNonEmpty(str(cfg, "levelColumn"), "SeverityText"),
-		msgCol:   firstNonEmpty(str(cfg, "messageColumn"), "Body"),
+		database: text.FirstNonBlank(str(cfg, "defaultDatabase"), str(ds.JSONData, "defaultDatabase"), "default"),
+		table:    text.FirstNonBlank(str(cfg, "defaultTable"), "otel_logs"),
+		timeCol:  text.FirstNonBlank(str(cfg, "timeColumn"), "Timestamp"),
+		levelCol: text.FirstNonBlank(str(cfg, "levelColumn"), "SeverityText"),
+		msgCol:   text.FirstNonBlank(str(cfg, "messageColumn"), "Body"),
 	}
 }
 
 func tracesSource(ds Datasource) otelSource {
 	cfg, _ := ds.JSONData["traces"].(map[string]any)
 	return otelSource{
-		database: firstNonEmpty(str(cfg, "defaultDatabase"), str(ds.JSONData, "defaultDatabase"), "default"),
-		table:    firstNonEmpty(str(cfg, "defaultTable"), "otel_traces"),
+		database: text.FirstNonBlank(str(cfg, "defaultDatabase"), str(ds.JSONData, "defaultDatabase"), "default"),
+		table:    text.FirstNonBlank(str(cfg, "defaultTable"), "otel_traces"),
 		timeCol:  "Timestamp",
 	}
 }

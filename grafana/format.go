@@ -91,7 +91,7 @@ func FormatSummary(d *Dashboard) string {
 		meta = append(meta, "tags "+strings.Join(d.Tags, ", "))
 	}
 	if d.TimeFrom != "" {
-		meta = append(meta, "default range "+d.TimeFrom+" → "+firstNonEmpty(d.TimeTo, "now"))
+		meta = append(meta, "default range "+d.TimeFrom+" → "+text.FirstNonBlank(d.TimeTo, "now"))
 	}
 	if d.Refresh != "" {
 		meta = append(meta, "refresh "+d.Refresh)
@@ -130,7 +130,7 @@ func FormatSummary(d *Dashboard) string {
 				fmt.Fprintf(&sb, "_Row: %s_\n", row)
 			}
 		}
-		fmt.Fprintf(&sb, "• %d · *%s* (%s)", p.ID, text.Truncate(firstNonEmpty(p.Title, "untitled"), 100), p.Type)
+		fmt.Fprintf(&sb, "• %d · *%s* (%s)", p.ID, text.Truncate(text.FirstNonBlank(p.Title, "untitled"), 100), p.Type)
 		switch {
 		case p.LibraryPanel != "" && len(p.Targets) == 0:
 			sb.WriteString(" · library panel")
@@ -226,7 +226,7 @@ func FormatPanelQueries(d *Dashboard, panelID int) string {
 		if len(p.Targets) == 0 {
 			continue
 		}
-		fmt.Fprintf(&sb, "\n*%d · %s* (%s)", p.ID, text.Truncate(firstNonEmpty(p.Title, "untitled"), 100), p.Type)
+		fmt.Fprintf(&sb, "\n*%d · %s* (%s)", p.ID, text.Truncate(text.FirstNonBlank(p.Title, "untitled"), 100), p.Type)
 		if p.Row != "" {
 			fmt.Fprintf(&sb, " · row %s", p.Row)
 		}
@@ -236,7 +236,7 @@ func FormatPanelQueries(d *Dashboard, panelID int) string {
 			if ref == nil || ref.UID == "" {
 				ref = p.Datasource
 			}
-			fmt.Fprintf(&sb, "%s", firstNonEmpty(t.RefID, "?"))
+			fmt.Fprintf(&sb, "%s", text.FirstNonBlank(t.RefID, "?"))
 			if ref != nil {
 				fmt.Fprintf(&sb, " · datasource `%s`", ref.UID)
 				if ref.Type != "" {
@@ -364,7 +364,7 @@ func FormatRun(res *RunResult) string {
 		sb.WriteString("\n")
 		title := fmt.Sprintf("panel %d", pr.ID)
 		if pr.Panel != nil {
-			title = fmt.Sprintf("%d · %s", pr.ID, firstNonEmpty(pr.Panel.Title, "untitled"))
+			title = fmt.Sprintf("%d · %s", pr.ID, text.FirstNonBlank(pr.Panel.Title, "untitled"))
 		}
 		fmt.Fprintf(&sb, "*%s*", title)
 		if pr.Panel != nil {

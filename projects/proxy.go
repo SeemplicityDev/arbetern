@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/justmike1/arbetern/billing"
+	"github.com/justmike1/arbetern/internal/origin"
 )
 
 var (
@@ -39,7 +40,6 @@ const (
 	usageFlushEvery  = 5 * time.Minute
 	upstreamTimeout  = 10 * time.Minute
 	zeroOID          = "0000000000000000000000000000000000000000"
-	sourceProject    = "project"
 	billingAgent     = "projects"
 	pushRefPrefix    = "refs/heads/" + BranchPrefix
 	modelPathPrefix  = "/anthropic"
@@ -521,7 +521,7 @@ func (m *usageMeter) flush(match func(usageKey) bool) {
 		delete(m.sums, k)
 		events = append(events, billing.Event{
 			Agent:              billingAgent,
-			Source:             sourceProject,
+			Source:             origin.Project,
 			WorkflowID:         k.project,
 			WorkflowName:       k.name,
 			Model:              k.model,

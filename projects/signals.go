@@ -1,8 +1,10 @@
 package projects
 
 import (
+	"context"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -10,6 +12,65 @@ import (
 	"github.com/justmike1/arbetern/internal/redact"
 	"github.com/justmike1/arbetern/internal/text"
 )
+
+// SignalType names where a project finds the problems it fixes.
+type SignalType string
+
+const (
+	SignalDatadog        SignalType = "datadog"
+	SignalDatadogMetrics SignalType = "datadog_metrics"
+	SignalDependabot     SignalType = "dependabot"
+)
+
+// signalKind is what differs between signal types outside their own scan and brief code.
+type signalKind struct {
+	noun         string
+	headline     string
+	needsDatadog bool
+	normalize    func(s *Signal, in Signal) error
+	scan         func(r *Registry, ctx context.Context, p *Project, led *Ledger, limits Limits, out *tickOutcome, force bool) (*Ledger, error)
+}
+
+var signalTypes = []SignalType{SignalDatadog, SignalDatadogMetrics, SignalDependabot}
+
+var signalKinds = map[SignalType]signalKind{
+	SignalDatadog: {
+		noun:         "error group",
+		headline:     "naming what failed, where, and how much",
+		needsDatadog: true,
+		normalize:    normalizeLogs,
+		scan:         (*Registry).scan,
+	},
+	SignalDatadogMetrics: {
+		noun:         "metric series",
+		headline:     "naming what failed, where, and how much",
+		needsDatadog: true,
+		normalize:    normalizeMetrics,
+		scan:         (*Registry).scanMetrics,
+	},
+	SignalDependabot: {
+		noun:      "vulnerable dependency",
+		headline:  "naming the package, the version it moves to, and the repository",
+		normalize: normalizeDependabot,
+		scan:      (*Registry).scanDependabot,
+	},
+}
+
+// kindOf falls back to Datadog logs, the only signal a descriptor without a type can hold.
+func kindOf(t SignalType) signalKind {
+	if k, ok := signalKinds[t]; ok {
+		return k
+	}
+	return signalKinds[SignalDatadog]
+}
+
+func quotedSignalTypes() string {
+	quoted := make([]string, len(signalTypes))
+	for i, t := range signalTypes {
+		quoted[i] = strconv.Quote(string(t))
+	}
+	return orList(quoted)
+}
 
 func scanWindow(cursor string, lookback time.Duration, now time.Time) (since, until time.Time) {
 	until = now.Add(-ingestionLag)

@@ -11,7 +11,6 @@ import (
 	"github.com/justmike1/arbetern/atlassian"
 	"github.com/justmike1/arbetern/aws"
 	"github.com/justmike1/arbetern/azure"
-	"github.com/justmike1/arbetern/billing"
 	"github.com/justmike1/arbetern/catalog"
 	"github.com/justmike1/arbetern/chorus"
 	"github.com/justmike1/arbetern/clickhouse"
@@ -24,6 +23,7 @@ import (
 	"github.com/justmike1/arbetern/google"
 	"github.com/justmike1/arbetern/grafana"
 	"github.com/justmike1/arbetern/internal/journal"
+	"github.com/justmike1/arbetern/internal/origin"
 	"github.com/justmike1/arbetern/internal/progress"
 	"github.com/justmike1/arbetern/llm"
 	"github.com/justmike1/arbetern/mcp"
@@ -313,7 +313,7 @@ func (r *Router) newGeneralHandler(userContext string, session *ThreadSession) *
 		session:           session,
 		userContextStore:  r.userContextStore,
 		billing:           r.billing,
-		billingSource:     billing.SourceSlack,
+		billingSource:     origin.Slack,
 		perf:              r.perf,
 		tiers:             r.tiers,
 	}
@@ -441,7 +441,7 @@ func (r *Router) RunWorkflow(ctx context.Context, userID, workflowID, workflowNa
 		"Execute the instruction autonomously using tools.", r.agentID)
 	h := r.newGeneralHandler(userContext, nil)
 	h.headless = true
-	h.billingSource = billing.SourceWorkflow
+	h.billingSource = origin.Workflow
 	h.billingWorkflowID = workflowID
 	h.billingWorkflowName = workflowName
 	h.modelOverride = model
@@ -466,7 +466,7 @@ func (r *Router) RunDashboardPrompt(ctx context.Context, userID, dashboardID, da
 		"Produce the requested report and RETURN it as your final message — do NOT call post_slack_message or any mutating tool.", r.agentID)
 	h := r.newGeneralHandler(userContext, nil)
 	h.headless = true
-	h.billingSource = billing.SourceDashboard
+	h.billingSource = origin.Dashboard
 	h.billingWorkflowID = dashboardID
 	h.billingWorkflowName = dashboardName
 	return h.ExecuteHeadless(ctx, userID, prompt)
@@ -500,11 +500,11 @@ func (r *Router) RunChat(ctx context.Context, userEmail, userSlackID string, his
 	h := r.newGeneralHandler(userContext, nil)
 	h.headless = true
 	h.requesterEmail = userEmail
-	h.billingSource = billing.SourceChat
+	h.billingSource = origin.Chat
 	attrUser := strings.TrimSpace(userSlackID)
 	// Only a real member ID is trusted as an identity: anything else would put
 	// an unverified name into usage reporting and into whatever the turn opens.
-	if !slackUserIDRe.MatchString(attrUser) {
+	if !slack.IsUserID(attrUser) {
 		attrUser = chatFallbackUser
 	}
 	return h.ExecuteChat(ctx, attrUser, history, userMessage, tracker)

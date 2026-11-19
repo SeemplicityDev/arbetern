@@ -203,7 +203,7 @@ func FormatLogs(res *LogSearchResult) string {
 			for _, r := range counts {
 				var keys []string
 				for _, a := range res.CountBy {
-					keys = append(keys, firstNonEmpty(asString(r[strings.Trim(a, "`")]), "(empty)"))
+					keys = append(keys, text.FirstNonBlank(asString(r[strings.Trim(a, "`")]), "(empty)"))
 				}
 				n, _ := toFloat(r["n"])
 				parts = append(parts, strings.Join(keys, " · ")+" "+humanCount(n))
@@ -388,7 +388,7 @@ func FormatTraces(res *TraceResult) string {
 			fmt.Fprintf(&sb, " — %d %s\n", len(spans), plural(len(spans), "span", "spans"))
 			for _, r := range spans {
 				fmt.Fprintf(&sb, "• %s %s · %s (%s) · %s ms · %s", formatCell(r["ts"]), asString(r["service"]), asString(r["span"]), asString(r["kind"]),
-					formatCell(r["duration_ms"]), firstNonEmpty(asString(r["status"]), "unset"))
+					formatCell(r["duration_ms"]), text.FirstNonBlank(asString(r["status"]), "unset"))
 				if m := asString(r["status_message"]); m != "" {
 					fmt.Fprintf(&sb, " — %s", oneLine(m, 200))
 				}
@@ -421,7 +421,7 @@ func FormatTraces(res *TraceResult) string {
 			fmt.Fprintf(&sb, "%s spans:\n", order)
 			for _, r := range spans {
 				fmt.Fprintf(&sb, "• %s %s · %s · %s ms · %s · trace %s\n", formatCell(r["ts"]), asString(r["service"]), asString(r["span"]),
-					formatCell(r["duration_ms"]), firstNonEmpty(asString(r["status"]), "unset"), asString(r["trace_id"]))
+					formatCell(r["duration_ms"]), text.FirstNonBlank(asString(r["status"]), "unset"), asString(r["trace_id"]))
 			}
 		}
 		if sb.Len() > maxOutputChars {

@@ -66,7 +66,7 @@ type Manifest struct {
 	Path         string `json:"path"`
 	Relationship string `json:"relationship,omitempty"` // direct | transitive | inconclusive | unknown
 	Scope        string `json:"scope,omitempty"`        // runtime | development
-	Alerts       []int  `json:"alerts"`                 // alert numbers, the most severe first, up to 10
+	Alerts       []int  `json:"alerts"`                 // most severe first
 	Count        int    `json:"count"`                  // open alerts on this manifest
 }
 
@@ -81,9 +81,9 @@ type Group struct {
 	FirstSeen     string   `json:"first_seen"`
 	LastSeen      string   `json:"last_seen"`
 	Samples       []Sample `json:"samples,omitempty"` // redacted and truncated (message 1000, stack tail 4096)
-	Site          string   `json:"site,omitempty"`    // metric series from here on
-	Tags          []string `json:"tags,omitempty"`
-	Value         float64  `json:"value,omitempty"` // sum over the window
+	Site          string   `json:"site,omitempty"`    // Datadog site of a log group or a series; empty when seen on both
+	Tags          []string `json:"tags,omitempty"`    // metric series from here on
+	Value         float64  `json:"value,omitempty"`   // sum over the window
 	Kept          float64  `json:"kept,omitempty"`
 	Share         float64  `json:"share,omitempty"`  // value / (value + kept)
 	Reason        string   `json:"reason,omitempty"` // share | threshold | fill
@@ -92,6 +92,17 @@ type Group struct {
 	EvidenceQuery string   `json:"evidence_query,omitempty"`
 
 	Dependency *Dependency `json:"dependency,omitempty"`
+}
+
+// kind tells what a group is from its shape: a task keeps its group after the project's signal type changes.
+func (g Group) kind() SignalType {
+	switch {
+	case g.Dependency != nil:
+		return SignalDependabot
+	case len(g.Tags) > 0:
+		return SignalDatadogMetrics
+	}
+	return SignalDatadog
 }
 
 func (g Group) repo() string {
@@ -109,7 +120,7 @@ func (g *Group) refresh(seen Group) {
 	}
 }
 
-// trim drops what only a session at work reads. It replaces the dependency rather than editing it, since other groups may point to the same one.
+// Replaces the dependency rather than editing it: other groups may point to the same one.
 func (g *Group) trim() {
 	g.Samples = nil
 	if d := g.Dependency; d != nil {
@@ -134,24 +145,24 @@ type PR struct {
 
 // Outcome is what a session reported through report_outcome.
 type Outcome struct {
-	Status     string `json:"status"`            // fixed | not_reproducible | cannot_fix | already_fixed | answered
-	Summary    string `json:"summary"`           // ≤4000
-	Testing    string `json:"testing,omitempty"` // ≤2000
-	Title      string `json:"title,omitempty"`   // ≤120
-	Branch     string `json:"branch,omitempty"`
-	Question   string `json:"question,omitempty"` // ≤1000, a decision reviewers are asked to make
-	Headline   string `json:"headline,omitempty"` // one line for the project's channel
-	ReportedAt string `json:"reported_at"`
+	Status     OutcomeStatus `json:"status"`
+	Summary    string        `json:"summary"`           // ≤4000
+	Testing    string        `json:"testing,omitempty"` // ≤2000
+	Title      string        `json:"title,omitempty"`   // ≤120
+	Branch     string        `json:"branch,omitempty"`
+	Question   string        `json:"question,omitempty"` // ≤1000, a decision reviewers are asked to make
+	Headline   string        `json:"headline,omitempty"` // one line for the project's channel
+	ReportedAt string        `json:"reported_at"`
 
-	QuestionResolved bool `json:"question_resolved,omitempty"` // a round settled the open question itself
+	QuestionResolved bool `json:"question_resolved,omitempty"`
 }
 
-// Task is one dispatched attempt at one error group.
+// Task is one dispatched attempt at one group.
 type Task struct {
 	ID             string       `json:"id"`
 	Fingerprint    string       `json:"fingerprint"`
 	Group          Group        `json:"group"`
-	Status         string       `json:"status"`
+	Status         Status       `json:"status"`
 	Attempt        int          `json:"attempt"`
 	SessionID      string       `json:"session_id,omitempty"`
 	Branch         string       `json:"branch,omitempty"`
@@ -180,7 +191,7 @@ type Task struct {
 	FinishedAt     string       `json:"finished_at,omitempty"`
 }
 
-// Candidate is an error group or metric series waiting for a session.
+// Candidate is a group waiting for a session.
 type Candidate struct {
 	Group Group `json:"group"`
 	Rank  int   `json:"rank,omitempty"` // metric series: admission order
@@ -190,7 +201,7 @@ type Candidate struct {
 type Track struct {
 	Attempts      int    `json:"attempts"`
 	LastTask      string `json:"last_task,omitempty"`
-	LastStatus    string `json:"last_status,omitempty"`
+	LastStatus    Status `json:"last_status,omitempty"`
 	CooldownUntil string `json:"cooldown_until,omitempty"`
 	MergedAt      string `json:"merged_at,omitempty"`
 	Recurrence    string `json:"recurrence,omitempty"`
@@ -283,7 +294,7 @@ func latest(a, b string) string {
 	return a
 }
 
-func isTerminal(status string) bool {
+func isTerminal(status Status) bool {
 	switch status {
 	case StatusMerged, StatusClosed, StatusNoFix, StatusFailed:
 		return true
@@ -291,7 +302,7 @@ func isTerminal(status string) bool {
 	return false
 }
 
-func isActive(status string) bool { return status == StatusDispatching || status == StatusRunning }
+func isActive(status Status) bool { return status == StatusDispatching || status == StatusRunning }
 
 func round(v float64, places int) float64 {
 	p := math.Pow(10, float64(places))
@@ -470,17 +481,21 @@ func openingFresh(t *Task, now time.Time) bool {
 	return err == nil && now.Sub(at) < openingStaleAfter
 }
 
-func (l *Ledger) finish(t *Task, status string, now time.Time) {
+func (l *Ledger) finish(t *Task, status Status, now time.Time) {
 	t.Status = status
 	t.FinishedAt = stamp(now)
 	t.UpdatedAt = t.FinishedAt
 	t.Opening = ""
 	t.Group.trim()
 	if t.Review != nil {
+		ended := "the task ended"
+		if status == StatusMerged || status == StatusClosed {
+			ended = "the pull request is " + string(status)
+		}
 		for i := range t.Review.Rounds {
 			rd := &t.Review.Rounds[i]
-			if isActiveRound(rd.Status) {
-				rd.Status, rd.Error, rd.FinishedAt = StatusFailed, "the pull request is "+status, t.FinishedAt
+			if isActive(rd.Status) {
+				rd.Status, rd.Error, rd.FinishedAt = StatusFailed, ended, t.FinishedAt
 			}
 			dropRoundBodies(rd)
 		}
@@ -543,7 +558,7 @@ func (l *Ledger) markRunning(id string, st *started, now time.Time) bool {
 	return true
 }
 
-func (l *Ledger) failTask(id string, from []string, reason string, now time.Time) bool {
+func (l *Ledger) failTask(id string, from []Status, reason string, now time.Time) bool {
 	t := l.task(id)
 	if t == nil || !slices.Contains(from, t.Status) {
 		return false
@@ -807,13 +822,13 @@ func (l *Ledger) reconcile(limits Limits, now time.Time) bool {
 		}
 	}
 	for _, id := range lost {
-		l.failTask(id, []string{StatusDispatching}, lostDispatch, now)
+		l.failTask(id, []Status{StatusDispatching}, lostDispatch, now)
 	}
 	for _, id := range ended {
-		l.failTask(id, []string{StatusRunning}, "session ended without a report (exit: "+l.task(id).ExitReason+")", now)
+		l.failTask(id, []Status{StatusRunning}, "session ended without a report (exit: "+l.task(id).ExitReason+")", now)
 	}
 	for _, id := range expired {
-		l.failTask(id, []string{StatusRunning}, "session timed out", now)
+		l.failTask(id, []Status{StatusRunning}, "session timed out", now)
 	}
 	rounds := l.reconcileRounds(timeout, now)
 	return len(lost)+len(ended)+len(expired) > 0 || rounds
@@ -844,10 +859,10 @@ func (l *Ledger) reconcileJobs(present, finished map[string]bool, now time.Time)
 		}
 	}
 	for _, id := range tasks {
-		l.failTask(id, []string{StatusRunning}, jobFinished, now)
+		l.failTask(id, []Status{StatusRunning}, jobFinished, now)
 	}
 	for _, r := range rounds {
-		l.failRound(r.task, r.n, []string{StatusRunning}, jobFinished, now)
+		l.failRound(r.task, r.n, []Status{StatusRunning}, jobFinished, now)
 	}
 	return len(tasks)+len(rounds) > 0
 }
@@ -874,7 +889,7 @@ func sessionFinished(t *Task, round int) (finishedAt string, running bool) {
 		switch {
 		case rd == nil || isTerminal(t.Status):
 			return ended, false
-		case isActiveRound(rd.Status):
+		case isActive(rd.Status):
 			return "", true
 		}
 		return cmp.Or(rd.FinishedAt, ended), false
@@ -916,7 +931,7 @@ func (l *Ledger) sessionEnded(id, reason, branch string, turns int, now time.Tim
 		if branch != "" {
 			t.Branch = branch
 		}
-		l.failTask(id, []string{StatusRunning}, "session ended without a report (exit: "+cmp.Or(reason, "unknown")+")", now)
+		l.failTask(id, []Status{StatusRunning}, "session ended without a report (exit: "+cmp.Or(reason, "unknown")+")", now)
 		changed = true
 	}
 	return changed
@@ -1018,7 +1033,10 @@ func (l *Ledger) applyScan(from, signal string, groups, sightings []Group, next 
 	return true
 }
 
-// applySnapshot replaces the candidates with what a scan of the current state found, such as metric series or open alerts.
+func (l *Ledger) snapshotDue(signal string, force bool, now time.Time) bool {
+	return force || l.Signal != signal || now.Sub(parseTime(l.Cursor)) >= snapshotRescan
+}
+
 func (l *Ledger) applySnapshot(signal string, groups []Group, grace time.Duration, limits Limits, now time.Time) bool {
 	l.Cursor, l.SiteCursors = now.UTC().Format(time.RFC3339Nano), nil
 	if l.Signal != signal {

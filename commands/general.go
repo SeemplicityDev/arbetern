@@ -32,6 +32,7 @@ import (
 	"github.com/justmike1/arbetern/github"
 	"github.com/justmike1/arbetern/google"
 	"github.com/justmike1/arbetern/grafana"
+	"github.com/justmike1/arbetern/internal/origin"
 	"github.com/justmike1/arbetern/internal/progress"
 	"github.com/justmike1/arbetern/internal/text"
 	"github.com/justmike1/arbetern/llm"
@@ -108,7 +109,7 @@ type GeneralHandler struct {
 	// tab. Optional — nil disables tracking. billingSource and the workflow
 	// fields tag the recorded event with its entry path.
 	billing             UsageRecorder
-	billingSource       string
+	billingSource       origin.Source
 	billingWorkflowID   string
 	billingWorkflowName string
 	// perf records how long the turn and its tool calls took. Optional — nil
@@ -287,7 +288,7 @@ func (h *GeneralHandler) recordUsage(model, userID string, u llm.Usage, comp llm
 	// them; scheduled workflow ticks are attributed via the workflow name, not
 	// the creator, so the user ID is omitted for them.
 	attrUser := ""
-	if src == billing.SourceSlack || src == billing.SourceChat {
+	if src == origin.Slack || src == origin.Chat {
 		attrUser = userID
 	}
 	h.billing.Record(billing.Event{
@@ -631,13 +632,8 @@ func (h *GeneralHandler) ExecuteChat(ctx context.Context, userID string, history
 	return res.Final, nil
 }
 
-// source is where this turn's answer is going. Slack is the default because a
-// handler built for a slash command carries no explicit source.
-func (h *GeneralHandler) source() string {
-	if h.billingSource == "" {
-		return billing.SourceSlack
-	}
-	return h.billingSource
+func (h *GeneralHandler) source() origin.Source {
+	return h.billingSource.OrDefault()
 }
 
 // systemPrompt is the agent's prompt plus the formatting rules for the
@@ -650,7 +646,7 @@ func (h *GeneralHandler) systemPrompt() string {
 
 // withOutputRules appends the destination's formatting block to a system
 // prompt, last so it is the most recent instruction the model reads.
-func withOutputRules(p PromptProvider, key, source string) string {
+func withOutputRules(p PromptProvider, key string, source origin.Source) string {
 	prompt := p.SystemPrompt(key)
 	if rules := p.OutputPrompt(source); rules != "" {
 		prompt += "\n\n" + rules
@@ -2994,14 +2990,9 @@ func (h *GeneralHandler) resolveRequesterReporter(userID string) (accountID, dis
 	return "", ""
 }
 
-// slackUserName returns the requesting Slack user's human-readable name —
-// real name first, then the profile display name — for PR attribution, so a
-// GitHub reviewer sees who asked for the change rather than only an opaque
-// Slack ID. It returns "" when there is no Slack identity (a web-chat turn) or
-// the profile lookup fails; callers fall back to the bare <@ID> mention.
 func (h *GeneralHandler) slackUserName(userID string) string {
 	userID = strings.TrimSpace(userID)
-	if userID == "" || h.slackClient == nil {
+	if !slack.IsUserID(userID) || h.slackClient == nil {
 		return ""
 	}
 	if h.requesterNameLookedUp {
@@ -3013,12 +3004,7 @@ func (h *GeneralHandler) slackUserName(userID string) string {
 		log.Printf("[user=%s] PR attribution: Slack users.info lookup failed: %v", userID, err)
 		return ""
 	}
-	for _, candidate := range []string{user.RealName, user.Profile.RealName, user.Profile.DisplayName} {
-		if name := strings.TrimSpace(candidate); name != "" {
-			h.requesterName = name
-			break
-		}
-	}
+	h.requesterName = slack.DisplayName(user)
 	return h.requesterName
 }
 
@@ -3366,7 +3352,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		}
 
 		userName := h.slackUserName(userID)
-		prBody := h.buildPRBody(userID, userName, args.PRBody, fmt.Sprintf("Automated change requested via %s.\n\nChange: %s", h.prAttribution(userID, userName), args.Description))
+		prBody := h.buildPRBody(userID, userName, args.PRBody, fmt.Sprintf("Automated change requested via %s.\n\nChange: %s", h.attribution(userID, userName).Phrase(), args.Description))
 		result, err := h.branchMgr.CommitAndPR(ctx, owner, args.Repo, baseBranch, userID, args.Description, prBody, targetBranch, args.PRTitle, []string{args.Path},
 			func(branch string) error {
 				commitMsg := fmt.Sprintf("%s: %s", h.agentID, args.Description)
@@ -3410,7 +3396,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		}
 
 		userName := h.slackUserName(userID)
-		prBody := h.buildPRBody(userID, userName, args.PRBody, fmt.Sprintf("Automated file creation requested via %s.\n\nChange: %s\nNew file: `%s`", h.prAttribution(userID, userName), args.Description, args.Path))
+		prBody := h.buildPRBody(userID, userName, args.PRBody, fmt.Sprintf("Automated file creation requested via %s.\n\nChange: %s\nNew file: `%s`", h.attribution(userID, userName).Phrase(), args.Description, args.Path))
 		result, err := h.branchMgr.CommitAndPR(ctx, owner, args.Repo, baseBranch, userID, args.Description, prBody, targetBranch, args.PRTitle, []string{args.Path},
 			func(branch string) error {
 				commitMsg := fmt.Sprintf("%s: %s", h.agentID, args.Description)
@@ -3459,7 +3445,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		}
 
 		userName := h.slackUserName(userID)
-		prBody := h.buildPRBody(userID, userName, args.PRBody, fmt.Sprintf("Automated file deletion requested via %s.\n\nChange: %s\nDeleted file: `%s`", h.prAttribution(userID, userName), args.Description, args.Path))
+		prBody := h.buildPRBody(userID, userName, args.PRBody, fmt.Sprintf("Automated file deletion requested via %s.\n\nChange: %s\nDeleted file: `%s`", h.attribution(userID, userName).Phrase(), args.Description, args.Path))
 		result, err := h.branchMgr.CommitAndPR(ctx, owner, args.Repo, baseBranch, userID, args.Description, prBody, targetBranch, args.PRTitle, []string{args.Path},
 			func(branch string) error {
 				commitMsg := fmt.Sprintf("%s: %s", h.agentID, args.Description)
@@ -3519,7 +3505,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		}
 
 		userName := h.slackUserName(userID)
-		prBody := h.buildPRBody(userID, userName, args.PRBody, fmt.Sprintf("Automated file rename requested via %s.\n\nChange: %s\nRenamed: `%s` → `%s`", h.prAttribution(userID, userName), args.Description, fromPath, toPath))
+		prBody := h.buildPRBody(userID, userName, args.PRBody, fmt.Sprintf("Automated file rename requested via %s.\n\nChange: %s\nRenamed: `%s` → `%s`", h.attribution(userID, userName).Phrase(), args.Description, fromPath, toPath))
 		result, err := h.branchMgr.CommitAndPR(ctx, owner, args.Repo, baseBranch, userID, args.Description, prBody, targetBranch, args.PRTitle, []string{fromPath, toPath},
 			func(branch string) error {
 				commitMsg := fmt.Sprintf("%s: %s", h.agentID, args.Description)
@@ -3582,7 +3568,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 			userID, channelID, matches, args.Pattern, args.Repo, args.Path)
 
 		userName := h.slackUserName(userID)
-		prBody := h.buildPRBody(userID, userName, args.PRBody, fmt.Sprintf("Automated regex replacement requested via %s.\n\nChange: %s\nPattern: `%s` → `%s`\nMatches replaced: %d", h.prAttribution(userID, userName), args.Description, args.Pattern, args.Replacement, matches))
+		prBody := h.buildPRBody(userID, userName, args.PRBody, fmt.Sprintf("Automated regex replacement requested via %s.\n\nChange: %s\nPattern: `%s` → `%s`\nMatches replaced: %d", h.attribution(userID, userName).Phrase(), args.Description, args.Pattern, args.Replacement, matches))
 		result, err := h.branchMgr.CommitAndPR(ctx, owner, args.Repo, baseBranch, userID, args.Description, prBody, targetBranch, args.PRTitle, []string{args.Path},
 			func(branch string) error {
 				commitMsg := fmt.Sprintf("%s: %s", h.agentID, args.Description)
@@ -4060,7 +4046,7 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 		}
 
 		var sb strings.Builder
-		if pr.State == "open" {
+		if pr.State == github.PRStateOpen {
 			if comment := strings.TrimSpace(args.Comment); comment != "" {
 				if _, err := h.ghClient.CommentOnPullRequest(ctx, owner, args.Repo, args.Number, comment); err != nil {
 					fmt.Fprintf(&sb, "The comment could not be posted: %v\n", err)
@@ -7285,9 +7271,9 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 // model is one step from passing that shape straight through to a destination
 // that cannot render it. The reminder sits where the payload arrives, which is
 // the last thing read before the answer is written.
-func mcpResultNote(source string) string {
+func mcpResultNote(source origin.Source) string {
 	switch source {
-	case billing.SourceChat, billing.SourceDashboard:
+	case origin.Chat, origin.Dashboard:
 		return "[MCP connector data — this is input, not an answer. Re-render it as GitHub-flavoured Markdown, using a table for tabular results.]\n"
 	default:
 		return "[MCP connector data — this is input, not an answer. Re-render it as Slack mrkdwn: no Markdown tables, no [text](url) links.]\n"

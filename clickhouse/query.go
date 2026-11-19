@@ -20,6 +20,7 @@ import (
 	"strings"
 
 	"github.com/justmike1/arbetern/internal/sqlguard"
+	"github.com/justmike1/arbetern/internal/text"
 )
 
 const (
@@ -151,10 +152,7 @@ func (c *Client) runQuery(ctx context.Context, sqlText string, rowLimit int, out
 // queryError converts a non-2xx response into an error. The query interface
 // returns a plain-text "Code: N. DB::Exception: …" body.
 func queryError(status int, body []byte) error {
-	msg := strings.TrimSpace(string(body))
-	if len(msg) > 400 {
-		msg = msg[:400] + "…"
-	}
+	msg := text.Truncate(strings.TrimSpace(string(body)), 400)
 	if msg == "" {
 		return fmt.Errorf("clickhouse query error: HTTP %d", status)
 	}

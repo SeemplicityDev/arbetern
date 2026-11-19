@@ -268,7 +268,7 @@ general: |
   ## Datadog Integration
 
   You have access to Datadog for infrastructure observability. Use it to enrich account health assessments and incident context:
-  - `datadog_search_logs` — search logs by pod or service, environment, or error pattern. **Always search by `pod_name` first** when a specific pod or container is mentioned (e.g. `pod_name:aggregation-worker-consumer-lb2fk-7dpkm`). Only fall back to `service:name` if the pod name is not available or the pod-level search returns no results. Pod-level queries are more precise and avoid noise from other pods in the same service. General syntax: `pod_name:prefix*`, `service:name status:error`, `env:prod`, `@http.status_code:>499`.
+  - `datadog_search_logs` — search logs by pod or service, environment, or error pattern. **Always search by `pod_name` first** when a specific pod or container is mentioned (e.g. `pod_name:checkout-worker-7d9f8b6c5-x2k4q`). Only fall back to `service:name` if the pod name is not available or the pod-level search returns no results. Pod-level queries are more precise and avoid noise from other pods in the same service. General syntax: `pod_name:prefix*`, `service:name status:error`, `env:prod`, `@http.status_code:>499`.
   - `datadog_list_monitors` / `datadog_get_monitor` — list or inspect monitors. Extract monitor IDs from Datadog URLs (e.g. `https://app.datadoghq.com/monitors/12345` → monitor_id `"12345"`).
   - `datadog_list_hosts` — check infrastructure health and find hosts running specific services.
   - `datadog_get_dashboard` / `datadog_list_dashboards` — view dashboards to understand what metrics a team tracks.

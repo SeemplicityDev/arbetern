@@ -182,6 +182,15 @@ func (r *Registry) Load(ctx context.Context) error {
 // Count is the number of stored projects.
 func (r *Registry) Count() int { return r.docs.Len() }
 
+// Name returns a project's name.
+func (r *Registry) Name(id string) (string, bool) {
+	p, ok := r.docs.Get(docKey(id))
+	if !ok {
+		return "", false
+	}
+	return p.Name, true
+}
+
 // RunUsageMeter records sessions' model usage every few minutes until ctx ends, then once more.
 func (r *Registry) RunUsageMeter(ctx context.Context) { r.usage.run(ctx) }
 
@@ -213,7 +222,7 @@ func (r *Registry) trigger(ctx context.Context, id string) error {
 	q := r.tasks
 	r.mu.RUnlock()
 	if q != nil {
-		err := q.Enqueue(ctx, QueueTopic, tickTask{ID: id, Trigger: "manual"})
+		err := q.Enqueue(ctx, QueueTopic, tickTask{ID: id, Trigger: tickManual})
 		if err == nil {
 			return nil
 		}
@@ -222,7 +231,7 @@ func (r *Registry) trigger(ctx context.Context, id string) error {
 	safego.Go("projects: tick "+id, func() {
 		tctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), queueTimeout)
 		defer cancel()
-		r.tick(tctx, id, "manual")
+		r.tick(tctx, id, tickManual)
 	})
 	return nil
 }
@@ -318,7 +327,7 @@ func (r *Registry) startRunner(p *Project) {
 				return
 			case <-time.After(wait):
 			}
-			safego.Run("projects: tick "+id, func() { r.tick(ctx, id, "schedule") })
+			safego.Run("projects: tick "+id, func() { r.tick(ctx, id, tickSchedule) })
 			wait = every
 		}
 	}()
@@ -775,7 +784,7 @@ func (r *Registry) remove(id string) error {
 				continue
 			}
 			for _, rd := range t.Review.Rounds {
-				if rd.Bound || isActiveRound(rd.Status) {
+				if rd.Bound || isActive(rd.Status) {
 					r.deleteBinding(ctx, rd.SessionID)
 				}
 			}

@@ -4,8 +4,6 @@ import (
 	"bytes"
 	"cmp"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -33,8 +31,7 @@ type seriesSum struct {
 func (m seriesSum) key() string { return m.site + "\x00" + strings.Join(m.tags, ",") }
 
 func seriesFingerprint(site string, tags []string) string {
-	sum := sha256.Sum256([]byte("metric\x00" + site + "\x00" + strings.Join(tags, ",")))
-	return hex.EncodeToString(sum[:8])
+	return hash8("metric", site, strings.Join(tags, ","))
 }
 
 func seriesTags(s datadog.MetricSeries) []string {
@@ -76,7 +73,7 @@ func metricSums(ctx context.Context, client *datadog.Client, query string, from,
 func (r *Registry) scanMetrics(ctx context.Context, p *Project, led *Ledger, limits Limits, out *tickOutcome, force bool) (*Ledger, error) {
 	now := time.Now().UTC()
 	signal := p.signalKey()
-	if !force && led.Signal == signal && now.Sub(parseTime(led.Cursor)) < metricRescan {
+	if !led.snapshotDue(signal, force, now) {
 		return led, nil
 	}
 	window := p.Signal.window()

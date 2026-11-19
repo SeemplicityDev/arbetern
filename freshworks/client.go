@@ -23,6 +23,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/justmike1/arbetern/internal/text"
 )
 
 const (
@@ -120,11 +122,7 @@ func doJSON(ctx context.Context, httpClient *http.Client, method, fullURL, authH
 		return fmt.Errorf("reading response: %w", err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		snippet := strings.TrimSpace(string(respBody))
-		if len(snippet) > 500 {
-			snippet = snippet[:500] + "…"
-		}
-		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, snippet)
+		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, text.Truncate(strings.TrimSpace(string(respBody)), 500))
 	}
 	if out == nil {
 		return nil

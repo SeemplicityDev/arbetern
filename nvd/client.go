@@ -83,11 +83,7 @@ func FormatCVE(cve *CVEItem) string {
 	// Description (first English one).
 	for _, d := range cve.Descriptions {
 		if d.Lang == "en" {
-			desc := d.Value
-			if len(desc) > 500 {
-				desc = desc[:500] + "…"
-			}
-			sb.WriteString(desc + "\n\n")
+			sb.WriteString(text.Truncate(d.Value, 500) + "\n\n")
 			break
 		}
 	}

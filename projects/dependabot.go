@@ -3,8 +3,6 @@ package projects
 import (
 	"cmp"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"log"
@@ -14,12 +12,10 @@ import (
 	"time"
 
 	"github.com/justmike1/arbetern/github"
+	"github.com/justmike1/arbetern/pypi"
 )
 
-var (
-	alertSeverities = []string{"low", "medium", "high", "critical"}
-	pipSeparatorsRe = regexp.MustCompile(`[-_.]+`)
-)
+var alertSeverities = []string{"low", "medium", "high", "critical"}
 
 func severityRank(s string) int { return slices.Index(alertSeverities, s) }
 
@@ -34,7 +30,7 @@ func alertSeverity(s string) string {
 func (r *Registry) scanDependabot(ctx context.Context, p *Project, led *Ledger, limits Limits, out *tickOutcome, force bool) (*Ledger, error) {
 	now := time.Now().UTC()
 	signal := p.signalKey()
-	if !force && led.Signal == signal && now.Sub(parseTime(led.Cursor)) < alertRescan {
+	if !led.snapshotDue(signal, force, now) {
 		return led, nil
 	}
 	if r.gh == nil {
@@ -115,18 +111,16 @@ func alertGroups(owner, repo string, alerts []github.DependabotAlert, keep *rege
 	return groups
 }
 
-// packageKey compares package names as their ecosystem does: pip ignores case and treats runs of '-', '_' and '.' alike.
 func packageKey(ecosystem, name string) string {
 	ecosystem, name = strings.ToLower(ecosystem), strings.ToLower(name)
 	if ecosystem == "pip" {
-		name = pipSeparatorsRe.ReplaceAllString(name, "-")
+		name = pypi.Normalize(name)
 	}
 	return ecosystem + "/" + name
 }
 
 func alertFingerprint(owner, repo, pkg string) string {
-	sum := sha256.Sum256([]byte("dependabot\x00" + strings.ToLower(owner+"/"+repo) + "\x00" + pkg))
-	return hex.EncodeToString(sum[:8])
+	return hash8("dependabot", strings.ToLower(owner+"/"+repo), pkg)
 }
 
 func dependencyGroup(fingerprint, repo string, alerts []github.DependabotAlert, now time.Time) Group {
@@ -166,7 +160,6 @@ func dependencyGroup(fingerprint, repo string, alerts []github.DependabotAlert, 
 	return g
 }
 
-// rankAlertGroups puts the most severe dependency with the most alerts first; one with no patched release waits behind the rest.
 func rankAlertGroups(groups []Group) {
 	patched := func(g Group) int {
 		if slices.ContainsFunc(g.Dependency.Advisories, func(a Advisory) bool { return a.Patched != "" }) {

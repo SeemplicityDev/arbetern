@@ -28,6 +28,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/justmike1/arbetern/internal/origin"
 	"github.com/justmike1/arbetern/internal/safego"
 	"github.com/justmike1/arbetern/internal/store"
 )
@@ -58,11 +59,11 @@ const (
 
 // Turn is one finished agent turn.
 type Turn struct {
-	At      time.Time `json:"at"`
-	Agent   string    `json:"agent"`
-	Source  string    `json:"source"`
-	Model   string    `json:"model"`
-	Outcome string    `json:"outcome"`
+	At      time.Time     `json:"at"`
+	Agent   string        `json:"agent"`
+	Source  origin.Source `json:"source"`
+	Model   string        `json:"model"`
+	Outcome string        `json:"outcome"`
 	// DurationMS is the wall clock of the whole turn; FirstResponseMS is how
 	// long the first model round took, which is what a waiting requester feels
 	// before anything at all happens.
@@ -222,7 +223,7 @@ func (m *monthData) addTurn(e Turn) {
 	m.Totals.add(e)
 	turnBucket(m.Days, dayKey(e.At)).add(e)
 	turnBucket(m.Agents, e.Agent).add(e)
-	turnBucket(m.Sources, e.Source).add(e)
+	turnBucket(m.Sources, string(e.Source)).add(e)
 	turnBucket(m.Models, e.Model).add(e)
 }
 

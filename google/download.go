@@ -28,6 +28,9 @@ import (
 	"strconv"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/justmike1/arbetern/internal/httpx"
+	"github.com/justmike1/arbetern/internal/text"
 )
 
 const (
@@ -155,7 +158,7 @@ func (c *Client) ReadFile(ctx context.Context, fileID string, opts ReadFileOptio
 	defer func() { _ = body.Close() }()
 	out.ContentType = contentType
 	if out.ContentType == "" {
-		out.ContentType = firstNonEmpty(exportAs, meta.MimeType)
+		out.ContentType = text.FirstNonBlank(exportAs, meta.MimeType)
 	}
 
 	reader := bufio.NewReader(io.LimitReader(body, maxStreamBytes))
@@ -186,13 +189,13 @@ func (c *Client) ReadFile(ctx context.Context, fileID string, opts ReadFileOptio
 		return out, nil
 	}
 
-	text := string(buf)
+	content := string(buf)
 	if out.Truncated {
 		// A cut mid-rune would otherwise emit a replacement char at the seam.
-		text = strings.ToValidUTF8(trimPartialRune(text), "")
+		content = strings.ToValidUTF8(trimPartialRune(content), "")
 	}
-	out.Content = text
-	out.BytesRead = len(text)
+	out.Content = content
+	out.BytesRead = len(content)
 	return out, nil
 }
 
@@ -242,7 +245,7 @@ func (c *Client) stream(ctx context.Context, fullURL, rangeHeader string) (io.Re
 	var lastErr error
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		if attempt > 0 {
-			if err := sleepCtx(ctx, backoff(attempt, 0)); err != nil {
+			if err := sleepCtx(ctx, httpx.Backoff(attempt, 0)); err != nil {
 				return nil, "", err
 			}
 		}
@@ -279,7 +282,7 @@ func (c *Client) stream(ctx context.Context, fullURL, rangeHeader string) (io.Re
 		// An error body is small; read it for the message, then decide.
 		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 8000))
 		_ = resp.Body.Close()
-		if retryableStatus(resp.StatusCode) && attempt < maxRetries {
+		if httpx.RetryableStatus(resp.StatusCode) && attempt < maxRetries {
 			lastErr = apiError(resp.StatusCode, errBody)
 			logf("[google] HTTP %d downloading %s — retrying (attempt %d/%d)",
 				resp.StatusCode, redactURL(fullURL), attempt+1, maxRetries)
@@ -375,7 +378,7 @@ func binaryNote(meta *DriveFile, contentType string) string {
 		size = " (" + humanBytes(n) + ")"
 	}
 	base := fmt.Sprintf("%q is %s%s, which is binary — arbetern does not extract text from it",
-		meta.Name, shortMime(firstNonEmpty(contentType, meta.MimeType)), size)
+		meta.Name, shortMime(text.FirstNonBlank(contentType, meta.MimeType)), size)
 	switch {
 	case strings.Contains(strings.ToLower(contentType), "pdf"):
 		return base + ". If the same content exists as a Google Doc or a text/CSV file in the folder, read that instead; otherwise share the link with the user."
@@ -407,15 +410,6 @@ func containsStr(list []string, v string) bool {
 		}
 	}
 	return false
-}
-
-func firstNonEmpty(vals ...string) string {
-	for _, v := range vals {
-		if strings.TrimSpace(v) != "" {
-			return v
-		}
-	}
-	return ""
 }
 
 // ExportFormatsFor returns the text conversions available for a MIME type, for

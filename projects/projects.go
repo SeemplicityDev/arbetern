@@ -2,6 +2,7 @@
 package projects
 
 import (
+	"cmp"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -20,37 +21,53 @@ import (
 	"github.com/justmike1/arbetern/llm"
 )
 
+// Status is where a task or a follow-up round stands.
+type Status string
+
+const (
+	StatusDispatching Status = "dispatching"
+	StatusRunning     Status = "running"
+	StatusPROpen      Status = "pr_open"
+	StatusMerged      Status = "merged"
+	StatusClosed      Status = "closed" // PR closed without merge
+	StatusNoFix       Status = "no_fix" // session reported it could not or need not fix
+	StatusFailed      Status = "failed" // dispatch failed, lost, timed out, or ended without a report
+
+	RoundDone Status = "done"
+)
+
+// OutcomeStatus is what a session reported through report_outcome.
+type OutcomeStatus string
+
+const (
+	OutcomeFixed           OutcomeStatus = "fixed"
+	OutcomeNotReproducible OutcomeStatus = "not_reproducible"
+	OutcomeCannotFix       OutcomeStatus = "cannot_fix"
+	OutcomeAlreadyFixed    OutcomeStatus = "already_fixed"
+	OutcomeAnswered        OutcomeStatus = "answered" // follow-up round only: replied without changing code
+)
+
+var (
+	taskOutcomes  = []OutcomeStatus{OutcomeFixed, OutcomeNotReproducible, OutcomeCannotFix, OutcomeAlreadyFixed}
+	roundOutcomes = []OutcomeStatus{OutcomeFixed, OutcomeAnswered, OutcomeCannotFix}
+)
+
+// Phase is where the follow-through of an open pull request stands.
+type Phase string
+
+const (
+	PhaseChecking  Phase = "checking"  // waiting for checks, comments or the quiet period
+	PhaseFixing    Phase = "fixing"    // a follow-up round is running
+	PhaseWaiting   Phase = "waiting"   // a question or blocker needs a person
+	PhaseDone      Phase = "done"      // checks pass and every comment is answered
+	PhaseExhausted Phase = "exhausted" // the follow-up rounds are used up
+)
+
 const (
 	Prefix        = "projects/"
 	StatePrefix   = "project-state/"
 	SessionPrefix = "project-sessions/"
 	QueueTopic    = "project-tick"
-
-	SignalDatadog        = "datadog"
-	SignalDatadogMetrics = "datadog_metrics"
-	SignalDependabot     = "dependabot"
-
-	StatusDispatching = "dispatching"
-	StatusRunning     = "running"
-	StatusPROpen      = "pr_open"
-	StatusMerged      = "merged"
-	StatusClosed      = "closed" // PR closed without merge
-	StatusNoFix       = "no_fix" // session reported it could not or need not fix
-	StatusFailed      = "failed" // dispatch failed, lost, timed out, or ended without a report
-
-	OutcomeFixed           = "fixed"
-	OutcomeNotReproducible = "not_reproducible"
-	OutcomeCannotFix       = "cannot_fix"
-	OutcomeAlreadyFixed    = "already_fixed"
-	OutcomeAnswered        = "answered" // follow-up round only: replied without changing code
-
-	PhaseChecking  = "checking"  // waiting for checks, comments or the quiet period
-	PhaseFixing    = "fixing"    // a follow-up round is running
-	PhaseWaiting   = "waiting"   // a question or blocker needs a person
-	PhaseDone      = "done"      // checks pass and every comment is answered
-	PhaseExhausted = "exhausted" // the follow-up rounds are used up
-
-	RoundDone = "done"
 
 	BranchPrefix = "claude/"
 
@@ -107,8 +124,9 @@ const (
 	maxSkills          = 20
 	maxConnectors      = 10
 
-	metricRescan        = time.Hour
-	alertRescan         = time.Hour
+	snapshotRescan      = time.Hour
+	tickManual          = "manual"
+	tickSchedule        = "schedule"
 	maxGroupAdvisories  = 200
 	maxAdvisorySummary  = 20
 	maxAdvisoryChars    = 300
@@ -158,13 +176,13 @@ const (
 	defaultMergeDelay    = 30
 	minMergeDelay        = 5
 	maxMergeDelay        = 1440
-	defaultMergeMethod   = "squash"
+	defaultMergeMethod   = github.MergeSquash
 	maxBranchUpdates     = 3
 	maxBaseMerges        = 20
 	maxLineage           = 100
 )
 
-var mergeMethods = []string{"squash", "rebase", "merge"}
+var mergeMethods = []string{github.MergeSquash, github.MergeRebase, github.MergeCommit}
 
 var (
 	ownerRe      = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$`)
@@ -191,21 +209,21 @@ type Repo struct {
 
 // Signal is where a project finds the problems it fixes: Datadog log error groups, Datadog metric series that cross a threshold, or open Dependabot alerts.
 type Signal struct {
-	Type           string    `json:"type"`                      // "datadog" | "datadog_metrics" | "dependabot"
-	Site           string    `json:"site,omitempty"`            // logs: "us" | "eu"
-	Sites          []string  `json:"sites,omitempty"`           // "us" and/or "eu"; a log signal on one site keeps it in Site
-	Query          string    `json:"query"`                     // logs: search query; metrics: grouped query of what went wrong
-	Pattern        string    `json:"pattern,omitempty"`         // optional RE2 over kind, pattern and samples (logs), the series tags (metrics), or an alert's package and manifest (dependabot)
-	GroupPattern   string    `json:"group_pattern,omitempty"`   // logs: optional RE2 whose capture groups name the group of each matching event, across services and sites
-	Lookback       string    `json:"lookback,omitempty"`        // logs: Go duration for the first scan, default "24h", 1h–168h
-	KeptQuery      string    `json:"kept_query,omitempty"`      // metrics: grouped query of what the same series handled correctly
-	Window         string    `json:"window,omitempty"`          // metrics: Go duration each series is summed over, default "48h", 1h–168h
-	Threshold      float64   `json:"threshold,omitempty"`       // metrics: a series breaches when its sum exceeds it
-	ShareThreshold float64   `json:"share_threshold,omitempty"` // metrics: a series breaches when query / (query + kept) exceeds it
-	Fill           bool      `json:"fill,omitempty"`            // metrics: spare capacity takes the largest series that breach nothing
-	Evidence       *Evidence `json:"evidence,omitempty"`        // metrics: the logs that explain a series
-	Severities     []string  `json:"severities,omitempty"`      // dependabot: alert severities to fix; empty takes every severity
-	Ecosystems     []string  `json:"ecosystems,omitempty"`      // dependabot: package ecosystems such as pip; empty takes every ecosystem
+	Type           SignalType `json:"type"`
+	Site           string     `json:"site,omitempty"`            // logs: "us" | "eu"
+	Sites          []string   `json:"sites,omitempty"`           // "us" and/or "eu"; a log signal on one site keeps it in Site
+	Query          string     `json:"query"`                     // logs: search query; metrics: grouped query of what went wrong
+	Pattern        string     `json:"pattern,omitempty"`         // optional RE2 over kind, pattern and samples (logs), the series tags (metrics), or an alert's package and manifest (dependabot)
+	GroupPattern   string     `json:"group_pattern,omitempty"`   // logs: optional RE2 whose capture groups name the group of each matching event, across services and sites
+	Lookback       string     `json:"lookback,omitempty"`        // logs: Go duration for the first scan, default "24h", 1h–168h
+	KeptQuery      string     `json:"kept_query,omitempty"`      // metrics: grouped query of what the same series handled correctly
+	Window         string     `json:"window,omitempty"`          // metrics: Go duration each series is summed over, default "48h", 1h–168h
+	Threshold      float64    `json:"threshold,omitempty"`       // metrics: a series breaches when its sum exceeds it
+	ShareThreshold float64    `json:"share_threshold,omitempty"` // metrics: a series breaches when query / (query + kept) exceeds it
+	Fill           bool       `json:"fill,omitempty"`            // metrics: spare capacity takes the largest series that breach nothing
+	Evidence       *Evidence  `json:"evidence,omitempty"`        // metrics: the logs that explain a series
+	Severities     []string   `json:"severities,omitempty"`      // dependabot: alert severities to fix; empty takes every severity
+	Ecosystems     []string   `json:"ecosystems,omitempty"`      // dependabot: package ecosystems such as pip; empty takes every ecosystem
 }
 
 // Evidence names the logs fetched for a metric series when it is dispatched.
@@ -244,7 +262,7 @@ type Limits struct {
 	MaxOpenPRs            int `json:"max_open_prs"`            // 1–20, default 3 (open PRs + active sessions)
 	MaxActiveSessions     int `json:"max_active_sessions"`     // 1–5, default 1
 	MaxSessionsPerDay     int `json:"max_sessions_per_day"`    // 1–48, default 6 (UTC day)
-	MaxAttempts           int `json:"max_attempts"`            // 1–5, default 2, per error group
+	MaxAttempts           int `json:"max_attempts"`            // 1–5, default 2, per group
 	CooldownHours         int `json:"cooldown_hours"`          // 1–720, default 72, after a closed PR or no_fix
 	SessionTimeoutMinutes int `json:"session_timeout_minutes"` // 30–600, default 240
 	RecurrenceGraceHours  int `json:"recurrence_grace_hours"`  // 0–168, default 24 (deploy lag after merge)
@@ -352,23 +370,27 @@ func (s Signal) key() string {
 		parts = append(parts, strings.Join(s.Sites, ","), s.GroupPattern)
 	}
 	if s.metric() {
-		parts = append(parts, s.Type, strings.Join(s.Sites, ","), s.KeptQuery, s.window().String(),
+		parts = append(parts, string(s.Type), strings.Join(s.Sites, ","), s.KeptQuery, s.window().String(),
 			strconv.FormatFloat(s.Threshold, 'g', -1, 64), strconv.FormatFloat(s.ShareThreshold, 'g', -1, 64), strconv.FormatBool(s.Fill))
 	}
 	if s.dependabot() {
-		parts = append(parts, s.Type, strings.Join(s.Severities, ","), strings.Join(s.Ecosystems, ","))
+		parts = append(parts, string(s.Type), strings.Join(s.Severities, ","), strings.Join(s.Ecosystems, ","))
 	}
+	return hash8(parts...)
+}
+
+// hash8 names stored fingerprints and signal keys: changing what it hashes orphans every task and candidate.
+func hash8(parts ...string) string {
 	sum := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
 	return hex.EncodeToString(sum[:8])
 }
 
-// signalKey is the key of what the project's scans read: Dependabot alerts are read from the project's repositories, so they count too.
 func (p *Project) signalKey() string {
 	if !p.Signal.dependabot() {
 		return p.Signal.key()
 	}
-	sum := sha256.Sum256([]byte(p.Signal.key() + "\x00" + strings.ToLower(p.Repo.String())))
-	return hex.EncodeToString(sum[:8])
+	// Dependabot alerts are read from the project's repositories, so the repository scope is part of the key.
+	return hash8(p.Signal.key(), strings.ToLower(p.Repo.String()))
 }
 
 func (s Session) maxTurns() int {
@@ -511,13 +533,14 @@ func (p *Project) repoFor(t *Task) Repo {
 }
 
 func (s *Signal) normalize() error {
-	s.Type = strings.ToLower(strings.TrimSpace(s.Type))
-	if s.Type == "" {
-		s.Type = SignalDatadog
+	in := *s
+	typ := SignalType(strings.ToLower(strings.TrimSpace(string(in.Type))))
+	if typ == "" {
+		typ = SignalDatadog
 	}
-	s.Query = strings.TrimSpace(s.Query)
-	if strings.TrimSpace(s.Pattern) == "" {
-		s.Pattern = ""
+	*s = Signal{Type: typ, Query: strings.TrimSpace(in.Query)}
+	if strings.TrimSpace(in.Pattern) != "" {
+		s.Pattern = in.Pattern
 	}
 	if err := checkText("signal.pattern", s.Pattern, 0, 500); err != nil {
 		return err
@@ -527,17 +550,11 @@ func (s *Signal) normalize() error {
 			return invalidf("signal.pattern is not a valid regular expression: %v", err)
 		}
 	}
-	switch s.Type {
-	case SignalDatadog:
-		s.Severities, s.Ecosystems = nil, nil
-		return s.normalizeLogs()
-	case SignalDatadogMetrics:
-		s.Severities, s.Ecosystems = nil, nil
-		return s.normalizeMetrics()
-	case SignalDependabot:
-		return s.normalizeDependabot()
+	kind, ok := signalKinds[typ]
+	if !ok {
+		return invalidf("signal.type must be %s", quotedSignalTypes())
 	}
-	return invalidf("signal.type must be %q, %q or %q", SignalDatadog, SignalDatadogMetrics, SignalDependabot)
+	return kind.normalize(s, in)
 }
 
 func normalizeSite(v string) (string, error) {
@@ -548,19 +565,19 @@ func normalizeSite(v string) (string, error) {
 	return v, nil
 }
 
-func (s *Signal) normalizeLogs() error {
-	picked, err := pickSites(s.Sites, s.Site)
+func normalizeLogs(s *Signal, in Signal) error {
+	picked, err := pickSites(in.Sites, in.Site)
 	if err != nil {
 		return err
 	}
-	s.Site, s.Sites = "", picked
+	s.Sites = picked
 	if len(picked) == 1 {
 		s.Site, s.Sites = picked[0], nil
 	}
 	if err := checkText("signal.query", s.Query, 1, 1000); err != nil {
 		return err
 	}
-	s.GroupPattern = strings.TrimSpace(s.GroupPattern)
+	s.GroupPattern = strings.TrimSpace(in.GroupPattern)
 	if err := checkText("signal.group_pattern", s.GroupPattern, 0, 500); err != nil {
 		return err
 	}
@@ -569,11 +586,7 @@ func (s *Signal) normalizeLogs() error {
 			return invalidf("signal.group_pattern is not a valid RE2 expression: %v", err)
 		}
 	}
-	s.Lookback = strings.TrimSpace(s.Lookback)
-	if s.Lookback == "" {
-		s.Lookback = humanDuration(defaultLookback)
-	}
-	s.KeptQuery, s.Window, s.Threshold, s.ShareThreshold, s.Fill, s.Evidence = "", "", 0, 0, false, nil
+	s.Lookback = cmp.Or(strings.TrimSpace(in.Lookback), humanDuration(defaultLookback))
 	return checkDuration("signal.lookback", s.Lookback, minLookback, maxLookback)
 }
 
@@ -598,13 +611,13 @@ func pickSites(sites []string, site string) ([]string, error) {
 	return picked, nil
 }
 
-func (s *Signal) normalizeMetrics() error {
-	picked, err := pickSites(s.Sites, s.Site)
+func normalizeMetrics(s *Signal, in Signal) error {
+	picked, err := pickSites(in.Sites, in.Site)
 	if err != nil {
 		return err
 	}
-	s.Sites, s.Site, s.Lookback, s.GroupPattern = picked, "", "", ""
-	s.KeptQuery = strings.TrimSpace(s.KeptQuery)
+	s.Sites = picked
+	s.KeptQuery = strings.TrimSpace(in.KeptQuery)
 	for _, q := range []struct{ field, v string }{{"signal.query", s.Query}, {"signal.kept_query", s.KeptQuery}} {
 		lo := 1
 		if q.field == "signal.kept_query" {
@@ -617,13 +630,11 @@ func (s *Signal) normalizeMetrics() error {
 			return invalidf("%s must group its series, such as sum:errors{*} by {service}", q.field)
 		}
 	}
-	s.Window = strings.TrimSpace(s.Window)
-	if s.Window == "" {
-		s.Window = humanDuration(defaultWindow)
-	}
+	s.Window = cmp.Or(strings.TrimSpace(in.Window), humanDuration(defaultWindow))
 	if err := checkDuration("signal.window", s.Window, minLookback, maxLookback); err != nil {
 		return err
 	}
+	s.Threshold, s.ShareThreshold, s.Fill, s.Evidence = in.Threshold, in.ShareThreshold, in.Fill, in.Evidence
 	switch {
 	case math.IsNaN(s.Threshold) || math.IsInf(s.Threshold, 0) || s.Threshold < 0:
 		return invalidf("signal.threshold must be zero or more")
@@ -640,11 +651,10 @@ func (s *Signal) normalizeMetrics() error {
 	return s.Evidence.normalize()
 }
 
-func (s *Signal) normalizeDependabot() error {
-	s.Site, s.Sites, s.Query, s.GroupPattern, s.Lookback = "", nil, "", "", ""
-	s.KeptQuery, s.Window, s.Threshold, s.ShareThreshold, s.Fill, s.Evidence = "", "", 0, 0, false, nil
+func normalizeDependabot(s *Signal, in Signal) error {
+	s.Query = ""
 	var severities []string
-	for _, v := range s.Severities {
+	for _, v := range in.Severities {
 		v = strings.ToLower(strings.TrimSpace(v))
 		if severityRank(v) < 0 {
 			return invalidf("signal.severities: %q is not one of critical, high, medium or low", v)
@@ -656,7 +666,7 @@ func (s *Signal) normalizeDependabot() error {
 	slices.SortFunc(severities, func(a, b string) int { return severityRank(b) - severityRank(a) })
 	s.Severities = severities
 	var ecosystems []string
-	for _, v := range s.Ecosystems {
+	for _, v := range in.Ecosystems {
 		v = strings.ToLower(strings.TrimSpace(v))
 		if !ecosystemRe.MatchString(v) {
 			return invalidf("signal.ecosystems: %q is not a package ecosystem such as pip or npm", v)

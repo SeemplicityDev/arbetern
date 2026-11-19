@@ -10,6 +10,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 
@@ -22,6 +23,24 @@ const maxErrorResponseBody = 1 << 20 // 1 MB
 type Client struct {
 	api   *slack.Client
 	token string
+}
+
+var userIDRe = regexp.MustCompile(`^[UW][A-Z0-9]{6,}$`)
+
+// IsUserID reports whether id has the shape of a Slack member id.
+func IsUserID(id string) bool { return userIDRe.MatchString(id) }
+
+// DisplayName returns a user's real name, or the profile's real or display name when it is blank.
+func DisplayName(u *slack.User) string {
+	if u == nil {
+		return ""
+	}
+	for _, name := range []string{u.RealName, u.Profile.RealName, u.Profile.DisplayName} {
+		if name = strings.TrimSpace(name); name != "" {
+			return name
+		}
+	}
+	return ""
 }
 
 func NewClient(botToken string) *Client {

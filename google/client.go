@@ -40,16 +40,16 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"math/big"
 	"net/http"
 	"net/url"
 	"regexp"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/justmike1/arbetern/internal/httpx"
 	"github.com/justmike1/arbetern/internal/safego"
+	"github.com/justmike1/arbetern/internal/text"
 )
 
 // Google API endpoints. Variables rather than constants so a test can point
@@ -568,7 +568,7 @@ func (c *Client) apiRequest(ctx context.Context, method, fullURL string, payload
 		if err := sleepCtx(ctx, nextWait); err != nil {
 			return err
 		}
-		nextWait = backoff(attempt+1, 0)
+		nextWait = httpx.Backoff(attempt+1, 0)
 
 		if err := bkt.wait(ctx); err != nil {
 			return err
@@ -620,9 +620,9 @@ func (c *Client) apiRequest(ctx context.Context, method, fullURL string, payload
 			}
 			return nil
 
-		case retryableStatus(resp.StatusCode) && attempt < maxRetries:
+		case httpx.RetryableStatus(resp.StatusCode) && attempt < maxRetries:
 			lastErr = apiError(resp.StatusCode, respBody)
-			nextWait = backoff(attempt+1, retryAfter(resp.Header.Get("Retry-After")))
+			nextWait = httpx.Backoff(attempt+1, httpx.RetryAfter(resp.Header))
 			log.Printf("[google] retrying in %s (attempt %d/%d) on %s — %s",
 				nextWait.Round(time.Millisecond), attempt+1, maxRetries, redactURL(fullURL), ErrorDetail(lastErr))
 			continue
@@ -635,72 +635,6 @@ func (c *Client) apiRequest(ctx context.Context, method, fullURL string, payload
 		lastErr = fmt.Errorf("google request exhausted %d attempts", maxRetries+1)
 	}
 	return lastErr
-}
-
-// retryableStatus reports whether a status code is worth retrying: 429 (rate
-// limit / quota) and the transient 5xx family. Everything else — 400 bad range,
-// 403 not shared with the service account, 404 wrong ID — is a caller error
-// that retrying only delays.
-func retryableStatus(code int) bool {
-	switch code {
-	case http.StatusTooManyRequests,
-		http.StatusInternalServerError,
-		http.StatusBadGateway,
-		http.StatusServiceUnavailable,
-		http.StatusGatewayTimeout:
-		return true
-	}
-	return false
-}
-
-// backoff returns the delay before the given attempt: exponential (1s, 2s, 4s,
-// 8s, 16s) capped at 30s, with up to 250ms of jitter so parallel targets in one
-// tick do not retry in lockstep. A server-supplied Retry-After wins when longer.
-func backoff(attempt int, serverHint time.Duration) time.Duration {
-	if attempt < 1 {
-		attempt = 1
-	}
-	d := time.Second << (attempt - 1)
-	if d > 30*time.Second {
-		d = 30 * time.Second
-	}
-	if serverHint > d {
-		d = serverHint
-	}
-	if d > time.Minute {
-		d = time.Minute
-	}
-	return d + jitter(250*time.Millisecond)
-}
-
-// jitter returns a uniform random duration in [0, max), using crypto/rand
-// because the package pulls it in for signing anyway.
-func jitter(max time.Duration) time.Duration {
-	if max <= 0 {
-		return 0
-	}
-	n, err := rand.Int(rand.Reader, big.NewInt(int64(max)))
-	if err != nil {
-		return max / 2
-	}
-	return time.Duration(n.Int64())
-}
-
-// retryAfter parses a Retry-After header in its delay-seconds or HTTP-date form.
-func retryAfter(v string) time.Duration {
-	v = strings.TrimSpace(v)
-	if v == "" {
-		return 0
-	}
-	if secs, err := strconv.Atoi(v); err == nil && secs > 0 {
-		return time.Duration(secs) * time.Second
-	}
-	if t, err := http.ParseTime(v); err == nil {
-		if d := time.Until(t); d > 0 {
-			return d
-		}
-	}
-	return 0
 }
 
 func sleepCtx(ctx context.Context, d time.Duration) error {
@@ -815,10 +749,7 @@ func ErrorDetail(err error) string {
 
 // snippet trims a response body for inclusion in an error message.
 func snippet(body []byte) string {
-	s := strings.TrimSpace(string(body))
-	if len(s) > 400 {
-		return s[:400] + "…"
-	}
+	s := text.Truncate(strings.TrimSpace(string(body)), 400)
 	if s == "" {
 		return "(empty body)"
 	}

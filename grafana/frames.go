@@ -38,7 +38,7 @@ func decodeFrame(f dsFrame) Frame {
 		}
 	}
 	for i, sf := range f.Schema.Fields {
-		fld := Field{Name: firstNonEmpty(sf.Config.DisplayNameFromDS, sf.Name), Type: sf.Type, Labels: sf.Labels}
+		fld := Field{Name: text.FirstNonBlank(sf.Config.DisplayNameFromDS, sf.Name), Type: sf.Type, Labels: sf.Labels}
 		if i < len(f.Data.Values) {
 			fld.Values = make([]any, len(f.Data.Values[i]))
 			for j, raw := range f.Data.Values[i] {
@@ -165,7 +165,7 @@ func renderSeries(sb *strings.Builder, f Frame, timeIdx int, nums, labels []int)
 			parts := make([]string, 0, len(labels)+1)
 			for _, li := range labels {
 				if r < len(f.Fields[li].Values) {
-					parts = append(parts, f.Fields[li].Name+"="+firstNonEmpty(text.Truncate(formatCell(f.Fields[li].Values[r]), 60), "(empty)"))
+					parts = append(parts, f.Fields[li].Name+"="+text.FirstNonBlank(text.Truncate(formatCell(f.Fields[li].Values[r]), 60), "(empty)"))
 				}
 			}
 			key := strings.Join(parts, ", ")

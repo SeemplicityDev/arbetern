@@ -6,23 +6,30 @@ import (
 	"time"
 )
 
-const (
-	triggerChecks   = "checks"
-	triggerFeedback = "feedback"
-	triggerConflict = "conflict"
+// Trigger is a reason a follow-up round starts.
+type Trigger string
 
-	ciPending = "pending"
-	ciPassed  = "passed"
-	ciFailed  = "failed"
-	ciNone    = "none"
+const (
+	triggerChecks   Trigger = "checks"
+	triggerFeedback Trigger = "feedback"
+	triggerConflict Trigger = "conflict"
+)
+
+type ciStatus string
+
+const (
+	ciPending ciStatus = "pending"
+	ciPassed  ciStatus = "passed"
+	ciFailed  ciStatus = "failed"
+	ciNone    ciStatus = "none"
 )
 
 // ReviewState follows one open pull request until its checks pass and every review comment has an answer.
 type ReviewState struct {
-	Phase           string   `json:"phase"`
+	Phase           Phase    `json:"phase"`
 	Head            string   `json:"head,omitempty"`
 	HeadAt          string   `json:"head_at,omitempty"` // when this head was first seen
-	CI              string   `json:"ci,omitempty"`      // pending | passed | failed | none
+	CI              ciStatus `json:"ci,omitempty"`
 	FailedChecks    []string `json:"failed_checks,omitempty"`
 	Conflict        bool     `json:"conflict,omitempty"`
 	Pending         int      `json:"pending,omitempty"` // review comments waiting for an answer
@@ -52,8 +59,8 @@ type ReviewState struct {
 // Round is one follow-up session on an open pull request.
 type Round struct {
 	N            int            `json:"n"`
-	Trigger      []string       `json:"trigger"` // checks | feedback | conflict
-	Status       string         `json:"status"`  // dispatching | running | done | failed
+	Trigger      []Trigger      `json:"trigger"`
+	Status       Status         `json:"status"` // dispatching | running | done | failed
 	SessionID    string         `json:"session_id,omitempty"`
 	Turns        int            `json:"turns,omitempty"`
 	HeadBefore   string         `json:"head_before,omitempty"`
@@ -101,7 +108,7 @@ type CheckFailure struct {
 type observation struct {
 	head         string
 	seenHead     string // the head the ledger held when the pull request was read
-	ci           string
+	ci           ciStatus
 	failed       []string
 	conflict     bool
 	pending      int
@@ -128,8 +135,6 @@ type roundResult struct {
 	title     string // the pull request's new title, when the round renamed it
 }
 
-func isActiveRound(status string) bool { return status == StatusDispatching || status == StatusRunning }
-
 // personSpoke reports whether a person, not a bot, commented in the round: only a person can answer an open question.
 func personSpoke(rd *Round) bool {
 	return slices.ContainsFunc(rd.Items, func(f Feedback) bool { return !f.Bot })
@@ -146,7 +151,7 @@ func (r *ReviewState) round(n int) *Round {
 
 func (r *ReviewState) active() *Round {
 	for i := range r.Rounds {
-		if isActiveRound(r.Rounds[i].Status) {
+		if isActive(r.Rounds[i].Status) {
 			return &r.Rounds[i]
 		}
 	}
@@ -280,7 +285,7 @@ func (l *Ledger) addRound(id string, rd Round, maxRounds int, now time.Time) boo
 	if slices.Contains(rd.Trigger, triggerFeedback) {
 		rd.Items = slices.DeleteFunc(slices.Clone(rd.Items), func(f Feedback) bool { return rv.isHandled(f.ID) })
 		if len(rd.Items) == 0 {
-			rd.Trigger = slices.DeleteFunc(slices.Clone(rd.Trigger), func(s string) bool { return s == triggerFeedback })
+			rd.Trigger = slices.DeleteFunc(slices.Clone(rd.Trigger), func(t Trigger) bool { return t == triggerFeedback })
 			if len(rd.Trigger) == 0 {
 				return false
 			}
@@ -319,7 +324,7 @@ func (l *Ledger) roundRunning(id string, n int, st *started, now time.Time) bool
 	return true
 }
 
-func (l *Ledger) failRound(id string, n int, from []string, reason string, now time.Time) bool {
+func (l *Ledger) failRound(id string, n int, from []Status, reason string, now time.Time) bool {
 	t, rv := l.review(id)
 	if rv == nil {
 		return false
@@ -411,7 +416,7 @@ func (l *Ledger) roundEnded(id string, n int, reason string, turns int, now time
 		changed = true
 	}
 	if rd.Status == StatusRunning && rd.Outcome == nil && !roundReportFresh(rd, now) {
-		l.failRound(id, n, []string{StatusRunning}, "session ended without a report (exit: "+cmp.Or(reason, "unknown")+")", now)
+		l.failRound(id, n, []Status{StatusRunning}, "session ended without a report (exit: "+cmp.Or(reason, "unknown")+")", now)
 		changed = true
 	}
 	return changed
@@ -467,14 +472,14 @@ func (l *Ledger) reconcileRounds(timeout time.Duration, now time.Time) bool {
 		}
 	}
 	for _, r := range lost {
-		l.failRound(r.task, r.n, []string{StatusDispatching}, lostDispatch, now)
+		l.failRound(r.task, r.n, []Status{StatusDispatching}, lostDispatch, now)
 	}
 	for _, r := range ended {
 		_, rv := l.review(r.task)
-		l.failRound(r.task, r.n, []string{StatusRunning}, "session ended without a report (exit: "+rv.round(r.n).ExitReason+")", now)
+		l.failRound(r.task, r.n, []Status{StatusRunning}, "session ended without a report (exit: "+rv.round(r.n).ExitReason+")", now)
 	}
 	for _, r := range expired {
-		l.failRound(r.task, r.n, []string{StatusRunning}, "session timed out", now)
+		l.failRound(r.task, r.n, []Status{StatusRunning}, "session timed out", now)
 	}
 	return len(lost)+len(ended)+len(expired) > 0
 }

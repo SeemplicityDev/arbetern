@@ -3,7 +3,6 @@ package github
 import (
 	"context"
 	"fmt"
-	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -12,73 +11,24 @@ import (
 
 	gh "github.com/google/go-github/v91/github"
 
+	"github.com/justmike1/arbetern/internal/origin"
 	"github.com/justmike1/arbetern/internal/safego"
 )
-
-// prMarkerPrefix opens the HTML comment every arbetern-written PR body ends
-// with; legacyPRMarkers are the attribution phrases older bodies carry.
-const (
-	prMarkerPrefix   = "<!-- arbetern"
-	workflowPRSource = "workflow"
-)
-
-var legacyPRMarkers = []string{"Automated via Slack by", "requested via Slack by"}
-
-var (
-	prMarkerRe     = regexp.MustCompile(`<!-- arbetern((?: [a-z]+=[^\s>]+)*) -->`)
-	prRequesterRe  = regexp.MustCompile(`(?:Automated|requested) via [A-Za-z][A-Za-z ]{0,40}? by (.+?)[._]*(?:\r?\n|$)`)
-	prWorkflowRe   = regexp.MustCompile(`via the "([^"\n]{1,200})" workflow`)
-	slackMentionRe = regexp.MustCompile(`\s*\(?<@([A-Z0-9]+)(?:\|[^>]*)?>\)?`)
-)
-
-// PRMarker renders the body marker; empty attributes are left out.
-func PRMarker(agent, source, user, workflow string) string {
-	return renderPRMarker([][2]string{{"agent", agent}, {"source", source}, {"user", user}, {"workflow", markerValue(workflow)}})
-}
-
-func renderPRMarker(attrs [][2]string) string {
-	var b strings.Builder
-	b.WriteString(prMarkerPrefix)
-	for _, kv := range attrs {
-		if v := strings.TrimSpace(kv[1]); v != "" {
-			b.WriteString(" " + kv[0] + "=" + v)
-		}
-	}
-	b.WriteString(" -->")
-	return b.String()
-}
-
-// IsAutomatedPRBody reports whether a pull request body was written by arbetern.
-func IsAutomatedPRBody(body string) bool {
-	if strings.Contains(body, prMarkerPrefix) {
-		return true
-	}
-	for _, m := range legacyPRMarkers {
-		if strings.Contains(body, m) {
-			return true
-		}
-	}
-	return false
-}
 
 // AutomatedPR is an open pull request arbetern authored, as listed by the
 // console's Pull requests page.
 type AutomatedPR struct {
-	Repo         string    `json:"repo"`
-	Number       int       `json:"number"`
-	Title        string    `json:"title"`
-	URL          string    `json:"url"`
-	Draft        bool      `json:"draft"`
-	Agent        string    `json:"agent,omitempty"`
-	Source       string    `json:"source,omitempty"`
-	RequestedBy  string    `json:"requested_by,omitempty"`
-	RequesterID  string    `json:"requester_id,omitempty"`
-	Project      string    `json:"project,omitempty"`
-	Workflow     string    `json:"workflow,omitempty"`
-	WorkflowName string    `json:"workflow_name,omitempty"`
-	Comments     int       `json:"comments"`
-	CreatedAt    time.Time `json:"created_at"`
-	UpdatedAt    time.Time `json:"updated_at"`
+	Repo      string        `json:"repo"`
+	Number    int           `json:"number"`
+	Title     string        `json:"title"`
+	URL       string        `json:"url"`
+	Draft     bool          `json:"draft"`
+	Agent     string        `json:"agent,omitempty"`
+	Source    origin.Source `json:"source,omitempty"`
+	Origin    *Origin       `json:"origin,omitempty"`
+	Comments  int           `json:"comments"`
+	CreatedAt time.Time     `json:"created_at"`
+	UpdatedAt time.Time     `json:"updated_at"`
 }
 
 const maxAutomatedPRPages = 3
@@ -112,35 +62,20 @@ func (c *Client) ListOpenAutomatedPullRequests(ctx context.Context) ([]Automated
 			if err != nil {
 				continue
 			}
-			attrs := parsePRMarker(body)
-			pr := AutomatedPR{
+			attribution := ParseAttribution(body)
+			out = append(out, AutomatedPR{
 				Repo:      owner + "/" + repo,
 				Number:    number,
 				Title:     issue.GetTitle(),
 				URL:       issue.GetHTMLURL(),
 				Draft:     issue.GetDraft(),
-				Agent:     attrs["agent"],
-				Source:    attrs["source"],
-				Project:   attrs["project"],
-				Workflow:  attrs["workflow"],
+				Agent:     attribution.Agent,
+				Source:    attribution.Source,
+				Origin:    attribution.Origin(),
 				Comments:  issue.GetComments(),
 				CreatedAt: issue.GetCreatedAt().Time,
 				UpdatedAt: issue.GetUpdatedAt().Time,
-			}
-			switch pr.Source {
-			case projectPRSource:
-			case workflowPRSource:
-				// A workflow's owner did not ask for its pull requests, so the workflow is named instead.
-				if m := prWorkflowRe.FindStringSubmatch(body); m != nil {
-					pr.WorkflowName = strings.TrimSpace(m[1])
-				}
-			default:
-				pr.RequestedBy, pr.RequesterID = parsePRRequester(body)
-				if attrs["user"] != "" {
-					pr.RequesterID = attrs["user"]
-				}
-			}
-			out = append(out, pr)
+			})
 		}
 		if resp == nil || resp.NextPage == 0 {
 			break
@@ -149,33 +84,6 @@ func (c *Client) ListOpenAutomatedPullRequests(ctx context.Context) ([]Automated
 	}
 	sort.SliceStable(out, func(i, j int) bool { return !out[i].Draft && out[j].Draft })
 	return out, nil
-}
-
-func parsePRMarker(body string) map[string]string {
-	attrs := map[string]string{}
-	m := prMarkerRe.FindStringSubmatch(body)
-	if m == nil {
-		return attrs
-	}
-	for _, kv := range strings.Fields(m[1]) {
-		if k, v, ok := strings.Cut(kv, "="); ok {
-			attrs[k] = v
-		}
-	}
-	return attrs
-}
-
-func parsePRRequester(body string) (name, id string) {
-	m := prRequesterRe.FindStringSubmatch(body)
-	if m == nil {
-		return "", ""
-	}
-	who := strings.TrimSpace(m[1])
-	if mm := slackMentionRe.FindStringSubmatch(who); mm != nil {
-		id = mm[1]
-		who = strings.TrimSpace(slackMentionRe.ReplaceAllString(who, ""))
-	}
-	return who, id
 }
 
 // OpenPullRequest is an open pull request with the review requests still pending on it.
@@ -268,7 +176,7 @@ func (c *Client) ListOpenPullRequestsBulk(ctx context.Context, owner string, rep
 
 func (c *Client) listOpenPullRequests(ctx context.Context, owner, repo string) ([]OpenPullRequest, bool, error) {
 	opts := &gh.PullRequestListOptions{
-		State:       "open",
+		State:       PRStateOpen,
 		Sort:        "created",
 		Direction:   "asc",
 		ListOptions: gh.ListOptions{PerPage: 100},

@@ -6,7 +6,6 @@
 package crud
 
 import (
-	"encoding/json"
 	"net/http"
 	"strings"
 
@@ -91,8 +90,7 @@ func Mount(mux, apiMux *http.ServeMux, knownAgents map[string]bool, spec Spec) {
 			return
 		}
 		agent := req.URL.Query().Get("agent")
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(spec.List(agent))
+		httpx.WriteJSON(w, http.StatusOK, spec.List(agent))
 	})
 	apiMux.HandleFunc("/api/"+spec.KindPlural+"/", func(w http.ResponseWriter, req *http.Request) {
 		handleAPIItem(spec, w, req)
@@ -117,9 +115,7 @@ func handleAgentView(agent string, spec Spec, w http.ResponseWriter, req *http.R
 		return
 	}
 	if len(parts) == 2 && parts[1] == "data.json" {
-		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("Cache-Control", "no-store")
-		_ = json.NewEncoder(w).Encode(entity)
+		httpx.WriteJSON(w, http.StatusOK, entity)
 		return
 	}
 	if len(parts) == 2 && parts[1] != "" {
@@ -168,8 +164,7 @@ func handleAPIItem(spec Spec, w http.ResponseWriter, req *http.Request) {
 			http.NotFound(w, req)
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(entity)
+		httpx.WriteJSON(w, http.StatusOK, entity)
 	case http.MethodDelete:
 		if _, src, ok := spec.Get(agent, id); ok && src == "gitops" {
 			http.Error(w, spec.Kind+" is managed via GitOps and cannot be deleted from the UI; remove the file from the source repo instead", http.StatusForbidden)

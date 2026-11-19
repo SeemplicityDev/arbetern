@@ -105,15 +105,10 @@ func (r *Registry) runTick(ctx context.Context, p *Project, trigger string) *tic
 		healthy = false
 	}
 	led = r.closeMergedTickets(ctx, p, led)
-	switch {
-	case p.Signal.dependabot():
-		led, err = r.scanDependabot(ctx, p, led, limits, out, trigger == "manual")
-	case r.deps.Datadog == nil:
+	if kind := kindOf(p.Signal.Type); kind.needsDatadog && r.deps.Datadog == nil {
 		err = errors.New("nothing can be scanned: this deployment has no Datadog credentials")
-	case p.Signal.metric():
-		led, err = r.scanMetrics(ctx, p, led, limits, out, trigger == "manual")
-	default:
-		led, err = r.scan(ctx, p, led, limits, out)
+	} else {
+		led, err = kind.scan(r, ctx, p, led, limits, out, trigger == tickManual)
 	}
 	if err != nil {
 		out.fail("%v", err)
@@ -181,7 +176,7 @@ func (r *Registry) reconcileTasks(ctx context.Context, p *Project, led *Ledger, 
 
 // lostDispatch tells whether a task, or one of its rounds, was just failed for never recording its session; its Job, if any, is then still unknown to the ledger.
 func (r *Registry) lostDispatch(t *Task, now time.Time) bool {
-	recent := func(status, sessionID, finishedAt string) bool {
+	recent := func(status Status, sessionID, finishedAt string) bool {
 		return status == StatusFailed && sessionID == "" && now.Sub(parseTime(finishedAt)) < sessionWrapUp
 	}
 	if recent(t.Status, t.SessionID, t.FinishedAt) {
@@ -234,7 +229,7 @@ func (r *Registry) syncPRs(ctx context.Context, p *Project, led *Ledger, limits 
 				led = next
 			}
 		}
-		if st.State != "closed" {
+		if st.State != github.PRStateClosed {
 			if p.Review.FollowUp {
 				next, err := r.observePR(ctx, p, led, t, owner, repo, number, st, out)
 				if err != nil {
@@ -340,7 +335,7 @@ func (r *Registry) unreadablePR(ctx context.Context, p *Project, led *Ledger, t 
 	transition := func(l *Ledger) bool { return l.markUnreadable(t.ID, now) }
 	if !since.IsZero() && now.Sub(since) > unreadablePRGrace {
 		reason := fmt.Sprintf("pull request #%d has not been readable on GitHub since %s", number, t.PR.UnreadableSince)
-		transition = func(l *Ledger) bool { return l.failTask(t.ID, []string{StatusPROpen}, reason, now) }
+		transition = func(l *Ledger) bool { return l.failTask(t.ID, []Status{StatusPROpen}, reason, now) }
 	}
 	next, changed, err := r.mergeLedger(ctx, p.ID, led, transition)
 	if err != nil {
@@ -406,7 +401,7 @@ func feedbackNote(number int, fb *github.PRFeedback) string {
 	return text.Truncate(redact.Text(note), maxNoteChars)
 }
 
-func (r *Registry) scan(ctx context.Context, p *Project, led *Ledger, limits Limits, out *tickOutcome) (*Ledger, error) {
+func (r *Registry) scan(ctx context.Context, p *Project, led *Ledger, limits Limits, out *tickOutcome, _ bool) (*Ledger, error) {
 	now := time.Now().UTC()
 	var groupBy *regexp.Regexp
 	if p.Signal.GroupPattern != "" {
@@ -558,7 +553,7 @@ func (r *Registry) fireTask(ctx context.Context, p *Project, led *Ledger, taskID
 	now := time.Now().UTC()
 	if err != nil {
 		reason := text.Truncate(err.Error(), maxErrorChars)
-		if next, _, merr := r.mergeLedger(pctx, p.ID, led, func(l *Ledger) bool { return l.failTask(taskID, []string{StatusDispatching}, reason, now) }); merr != nil {
+		if next, _, merr := r.mergeLedger(pctx, p.ID, led, func(l *Ledger) bool { return l.failTask(taskID, []Status{StatusDispatching}, reason, now) }); merr != nil {
 			log.Printf("[projects] %s recording the failure of task %s: %v", p.ID, taskID, merr)
 		} else {
 			led = next

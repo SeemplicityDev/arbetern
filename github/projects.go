@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"strings"
 	"time"
-	"unicode"
 
 	gh "github.com/google/go-github/v91/github"
 )
@@ -14,7 +13,6 @@ const (
 	maxFeedbackPages = 3
 	maxFeedbackItems = 50 // shared by reviews and comments, filled in that order
 	maxFeedbackBody  = 2000
-	projectPRSource  = "project"
 )
 
 var trustedAssociations = []string{"OWNER", "MEMBER", "COLLABORATOR"}
@@ -138,22 +136,4 @@ func (c *Client) CommitsBehind(ctx context.Context, owner, repo, base, head stri
 		return 0, fmt.Errorf("failed to compare %s...%s: %w", base, head, err)
 	}
 	return cmp.GetBehindBy(), nil
-}
-
-// ProjectPRMarker renders the hidden body marker for a pull request opened by a project task.
-func ProjectPRMarker(project, task string) string {
-	return renderPRMarker([][2]string{
-		{"source", projectPRSource},
-		{"project", markerValue(project)},
-		{"task", markerValue(task)},
-	})
-}
-
-// markerValue drops a value that would not survive prMarkerRe and parsePRMarker intact.
-func markerValue(v string) string {
-	v = strings.TrimSpace(v)
-	if strings.ContainsFunc(v, func(r rune) bool { return r == '>' || unicode.IsSpace(r) }) {
-		return ""
-	}
-	return v
 }

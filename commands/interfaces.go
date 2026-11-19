@@ -3,9 +3,11 @@ package commands
 import (
 	"encoding/json"
 
-	"github.com/justmike1/arbetern/billing"
-	"github.com/justmike1/arbetern/metrics"
 	slacklib "github.com/slack-go/slack"
+
+	"github.com/justmike1/arbetern/billing"
+	"github.com/justmike1/arbetern/internal/origin"
+	"github.com/justmike1/arbetern/metrics"
 )
 
 // UsageRecorder receives the cumulative LLM token cost of a finished turn so it
@@ -49,7 +51,7 @@ type PromptProvider interface {
 	// (in YAML order) with the handler-specific key.
 	SystemPrompt(specificKey string) string
 	// OutputPrompt returns the formatting rules for where the answer is going.
-	OutputPrompt(source string) string
+	OutputPrompt(source origin.Source) string
 }
 
 // OAuthClient is implemented by any integration client that uses OAuth and

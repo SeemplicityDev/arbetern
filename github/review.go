@@ -22,6 +22,20 @@ const (
 	DiscussionComment = "comment"
 )
 
+// Values GitHub reports for a pull request's state, a review's state and a check's status.
+const (
+	PRStateOpen   = "open"
+	PRStateClosed = "closed"
+	PRStateAll    = "all"
+
+	ReviewApproved         = "APPROVED"
+	ReviewChangesRequested = "CHANGES_REQUESTED"
+	ReviewDismissed        = "DISMISSED"
+	ReviewCommented        = "COMMENTED"
+
+	CheckCompleted = "completed"
+)
+
 const (
 	maxCheckPages  = 3
 	maxAnnotations = 20
@@ -143,7 +157,7 @@ var failedConclusions = []string{"failure", "timed_out", "cancelled", "action_re
 
 // Failed reports whether the check finished without passing.
 func (c Check) Failed() bool {
-	return c.Status == "completed" && slices.Contains(failedConclusions, c.Conclusion)
+	return c.Status == CheckCompleted && slices.Contains(failedConclusions, c.Conclusion)
 }
 
 const maxListedChecks = 15
@@ -162,7 +176,7 @@ func FormatChecks(sha string, checks []Check) string {
 		case c.Failed():
 			state = "FAILED"
 			failed++
-		case c.Status != "completed":
+		case c.Status != CheckCompleted:
 			pending++
 		default:
 			continue
@@ -222,7 +236,7 @@ func (c *Client) ChecksForRef(ctx context.Context, owner, repo, ref string) ([]C
 		return nil, fmt.Errorf("failed to read the commit status of %s: %w", ref, err)
 	}
 	for _, s := range combined.Statuses {
-		ch := Check{Name: s.GetContext(), Status: "completed", URL: s.GetTargetURL(), Summary: s.GetDescription()}
+		ch := Check{Name: s.GetContext(), Status: CheckCompleted, URL: s.GetTargetURL(), Summary: s.GetDescription()}
 		switch s.GetState() {
 		case "pending":
 			ch.Status = "in_progress"

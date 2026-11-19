@@ -1,7 +1,10 @@
 // Package text holds small string helpers shared across packages.
 package text
 
-import "unicode/utf8"
+import (
+	"strings"
+	"unicode/utf8"
+)
 
 // Ellipsis is appended by Truncate when it shortens a string.
 const Ellipsis = "…"
@@ -67,4 +70,14 @@ func tailFromRune(s string, n int) string {
 		i++
 	}
 	return s[i:]
+}
+
+// FirstNonBlank returns the first value that is not blank, with surrounding space trimmed.
+func FirstNonBlank(vals ...string) string {
+	for _, v := range vals {
+		if s := strings.TrimSpace(v); s != "" {
+			return s
+		}
+	}
+	return ""
 }

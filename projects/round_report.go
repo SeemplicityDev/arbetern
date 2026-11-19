@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log"
+	"slices"
 	"strings"
 	"time"
 
@@ -23,10 +24,8 @@ func (a reportArgs) roundOutcome(rd *Round, base, waiting string, now time.Time)
 	if problem != "" {
 		return o, nil, problem
 	}
-	switch o.Status {
-	case OutcomeFixed, OutcomeAnswered, OutcomeCannotFix:
-	default:
-		return o, nil, "status must be fixed, answered or cannot_fix in a follow-up round."
+	if !slices.Contains(roundOutcomes, o.Status) {
+		return o, nil, "status must be " + orList(roundOutcomes) + " in a follow-up round."
 	}
 	if a.QuestionResolved {
 		switch {
@@ -98,7 +97,7 @@ func (g *gateway) reportRound(ctx context.Context, s *session, a reportArgs) (st
 		return "This follow-up round is no longer in the ledger.", true, nil
 	}
 	if rd.Outcome != nil {
-		return "An outcome (" + rd.Outcome.Status + ") was already recorded for this round. You can stop now.", false, nil
+		return "An outcome (" + string(rd.Outcome.Status) + ") was already recorded for this round. You can stop now.", false, nil
 	}
 	now := time.Now().UTC()
 	prRepo := s.project.repoFor(s.task)
@@ -128,7 +127,7 @@ func (g *gateway) reportRound(ctx context.Context, s *session, a reportArgs) (st
 	case problem != "":
 		return problem, true, nil
 	case rd.Status != StatusRunning:
-		return "This follow-up round is not running (" + rd.Status + ").", true, nil
+		return "This follow-up round is not running (" + string(rd.Status) + ").", true, nil
 	case g.r.gh == nil:
 		return "GitHub is not configured in this deployment, so nothing can be posted.", true, nil
 	}
@@ -139,7 +138,7 @@ func (g *gateway) reportRound(ctx context.Context, s *session, a reportArgs) (st
 	}
 	if rd = s.round(); rd == nil || rd.Reporting != guard {
 		if rd != nil && rd.Outcome != nil {
-			return "An outcome (" + rd.Outcome.Status + ") was already recorded for this round. You can stop now.", false, nil
+			return "An outcome (" + string(rd.Outcome.Status) + ") was already recorded for this round. You can stop now.", false, nil
 		}
 		return "This round's report is already being recorded; call report_outcome again in a minute if it does not finish.", true, nil
 	}
@@ -187,7 +186,7 @@ func (g *gateway) reportRound(ctx context.Context, s *session, a reportArgs) (st
 	if !changed {
 		status := "ended"
 		if rd = s.round(); rd != nil {
-			status = rd.Status
+			status = string(rd.Status)
 		}
 		log.Printf("[projects] %s task %s round %d was %s before its report landed; its replies stay posted", s.project.ID, taskID, n, status)
 		if _, err := g.apply(pctx, s, func(l *Ledger) bool { return l.recordRoundReplies(taskID, n, res, now) }); err != nil {
@@ -249,7 +248,6 @@ func (g *gateway) planDescription(ctx context.Context, s *session, owner, repo s
 	return descriptionPlan{next: &next, body: prBody(s.project, t, next)}
 }
 
-// retitle renames the pull request to a round's title, laid out by the conventions, while its title is still the one arbetern set.
 func (g *gateway) retitle(ctx context.Context, s *session, owner, repo string, number int, title string) (applied, fact string) {
 	t := s.task
 	if title == "" || t.PR == nil {
@@ -280,7 +278,7 @@ func arbeternWrote(p *Project, t *Task, body string) bool {
 		return bodySHA(body) == t.PR.BodySHA
 	}
 	body = strings.ReplaceAll(body, "\r\n", "\n")
-	return strings.Contains(body, summaryBlock(p, t, *t.Outcome)) && strings.Contains(body, github.ProjectPRMarker(p.ID, t.ID))
+	return strings.Contains(body, summaryBlock(p, t, *t.Outcome)) && strings.Contains(body, prMarker(p, t))
 }
 
 func (g *gateway) applyDescription(ctx context.Context, s *session, owner, repo string, number int, plan descriptionPlan) (described *Outcome, sha, fact string) {
@@ -321,7 +319,7 @@ func (g *gateway) landRound(ctx context.Context, rd *Round, owner, repo string, 
 	switch {
 	case err != nil:
 		return "", "Could not read the pull request on GitHub (" + githubProblem(err) + "); call report_outcome again in a minute.", false
-	case pr.State != "open":
+	case pr.State != github.PRStateOpen:
 		return "", "The pull request is no longer open, so nothing can be added to it.", false
 	case branch == pr.HeadRef && pr.HeadSHA == rd.HeadBefore:
 		return "", "Nothing new is on " + branch + " yet: commit, push with `git push origin HEAD:" + branch + "`, then call report_outcome again.", false
@@ -413,7 +411,7 @@ func (g *gateway) rerunChecks(ctx context.Context, s *session, rd *Round, owner,
 }
 
 func roundComment(p *Project, rd *Round, o Outcome, owner, repo, head string, posted int, rerun bool, extra []string) string {
-	label := map[string]string{
+	label := map[OutcomeStatus]string{
 		OutcomeFixed:     "pushed a fix",
 		OutcomeAnswered:  "answered without changing code",
 		OutcomeCannotFix: "needs a person",

@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/justmike1/arbetern/internal/text"
 )
 
 const (
@@ -84,10 +86,10 @@ func (c *Client) RunPanels(ctx context.Context, opts RunOptions) (*RunResult, er
 	}
 	start, end := strings.TrimSpace(opts.Start), strings.TrimSpace(opts.End)
 	if start == "" {
-		start = firstNonEmpty(d.TimeFrom, "now-1h")
+		start = text.FirstNonBlank(d.TimeFrom, "now-1h")
 	}
 	if end == "" {
-		end = firstNonEmpty(d.TimeTo, "now")
+		end = text.FirstNonBlank(d.TimeTo, "now")
 	}
 	from, to, err := TimeRange(start, end, time.Now())
 	if err != nil {
@@ -221,7 +223,10 @@ func (c *Client) buildQuery(ctx context.Context, sc *scope, p *Panel, t Target, 
 	clear(sc.missing)
 	var q map[string]any
 	if sc.kind == "clickhouse" {
-		sql := firstNonEmpty(str(t.Raw, "rawSql"), t.Query)
+		sql := str(t.Raw, "rawSql")
+		if strings.TrimSpace(sql) == "" {
+			sql = t.Query
+		}
 		if strings.TrimSpace(sql) == "" {
 			return nil, label, errors.New("this query has no SQL text (builder-only targets are not supported)")
 		}
@@ -405,13 +410,4 @@ func runConcurrent(n, limit int, fn func(i int)) {
 		}(i)
 	}
 	wg.Wait()
-}
-
-func firstNonEmpty(vals ...string) string {
-	for _, v := range vals {
-		if strings.TrimSpace(v) != "" {
-			return v
-		}
-	}
-	return ""
 }

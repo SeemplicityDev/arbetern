@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"slices"
 
 	"github.com/justmike1/arbetern/llm"
 )
@@ -54,7 +55,7 @@ var workOrderTools = []toolDef{
 		Name:        "report_outcome",
 		Description: "Report the result of the work order exactly once. For status fixed, commit and push first; arbetern checks the branch and opens the pull request, or in a follow-up round adds your commits to it and posts your replies. Otherwise report why no change was made.",
 		InputSchema: objectSchema(map[string]any{
-			"status":  map[string]any{"type": "string", "enum": []string{OutcomeFixed, OutcomeNotReproducible, OutcomeCannotFix, OutcomeAlreadyFixed, OutcomeAnswered}, "description": "answered is for follow-up rounds only; not_reproducible and already_fixed are for first sessions only."},
+			"status":  map[string]any{"type": "string", "enum": reportStatuses(), "description": "answered is for follow-up rounds only; not_reproducible and already_fixed are for first sessions only."},
 			"summary": map[string]any{"type": "string", "maxLength": maxSessionSummary, "description": "What you found and, for fixed, what you changed and why; 4000 characters unless the work order makes it the whole pull request description. In a follow-up round it is posted on the pull request."},
 			"title":   map[string]any{"type": "string", "maxLength": 120, "description": "Pull request title; required for fixed in a first session. In a follow-up round, pass it only when the round changed what the pull request does: arbetern renames the pull request unless someone renamed it on GitHub."},
 			"branch":  map[string]any{"type": "string", "maxLength": 200, "description": "The branch you pushed, as the work order names it; required for fixed."},
@@ -280,4 +281,18 @@ func dispatchRPC(ctx context.Context, method string, params json.RawMessage, too
 		return toolResult{Content: []toolText{{Type: "text", Text: text}}, IsError: isError}, nil
 	}
 	return nil, &rpcError{Code: rpcMethodNotFound, Message: "Method not found"}
+}
+
+func reportStatuses() []string {
+	all := slices.Clone(taskOutcomes)
+	for _, o := range roundOutcomes {
+		if !slices.Contains(all, o) {
+			all = append(all, o)
+		}
+	}
+	names := make([]string, len(all))
+	for i, o := range all {
+		names[i] = string(o)
+	}
+	return names
 }

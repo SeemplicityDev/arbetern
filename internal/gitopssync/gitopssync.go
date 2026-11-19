@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/justmike1/arbetern/github"
+	"github.com/justmike1/arbetern/internal/text"
 )
 
 // SourceMarker is the value written into the entity's Source field for
@@ -302,7 +303,7 @@ func (s *Syncer) run(ctx context.Context, stop, stopped chan struct{}) {
 	s.owner = owner
 	s.mu.Unlock()
 	log.Printf("%s polling %s/%s@%s:%s every %s (prune=%t)",
-		s.prefix, nonEmpty(owner, "<unresolved>"), s.cfg.Repo, nonEmpty(s.cfg.Branch, "<default>"),
+		s.prefix, text.FirstNonBlank(owner, "<unresolved>"), s.cfg.Repo, text.FirstNonBlank(s.cfg.Branch, "<default>"),
 		s.cfg.BasePath, s.cfg.Interval, s.cfg.Prune)
 
 	tick := func() {
@@ -515,13 +516,6 @@ func (s *Syncer) prune(want map[string]desired) int {
 		n++
 	}
 	return n
-}
-
-func nonEmpty(s, fallback string) string {
-	if strings.TrimSpace(s) == "" {
-		return fallback
-	}
-	return s
 }
 
 // makeFetcher returns a FetchFunc that resolves references encountered

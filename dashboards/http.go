@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/justmike1/arbetern/internal/crud"
+	"github.com/justmike1/arbetern/internal/httpx"
 )
 
 // RegisterRoutes wires the per-agent data route and the dashboard CRUD API
@@ -98,9 +99,7 @@ func (r *Registry) handleRender(w http.ResponseWriter, req *http.Request, agent,
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusAccepted)
-	_ = json.NewEncoder(w).Encode(map[string]any{
+	httpx.WriteJSON(w, http.StatusAccepted, map[string]any{
 		"accepted": true,
 		"agent":    agent,
 		"id":       inst.ID,

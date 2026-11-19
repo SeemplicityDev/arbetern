@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/justmike1/arbetern/internal/safego"
+	"github.com/justmike1/arbetern/internal/text"
 )
 
 const (
@@ -306,10 +307,7 @@ func apiError(status int, body []byte) error {
 	if err := json.Unmarshal(body, &e); err == nil && strings.TrimSpace(e.Error) != "" {
 		return fmt.Errorf("clickhouse API error (HTTP %d): %s", status, e.Error)
 	}
-	msg := strings.TrimSpace(string(body))
-	if len(msg) > 300 {
-		msg = msg[:300] + "…"
-	}
+	msg := text.Truncate(strings.TrimSpace(string(body)), 300)
 	if msg == "" {
 		return fmt.Errorf("clickhouse API error: HTTP %d", status)
 	}

@@ -527,7 +527,7 @@ type reportArgs struct {
 
 func (a reportArgs) common(now time.Time, maxSummary int) (o Outcome, problem string) {
 	o = Outcome{
-		Status:     strings.TrimSpace(a.Status),
+		Status:     OutcomeStatus(strings.TrimSpace(a.Status)),
 		Summary:    strings.TrimSpace(stripControl(a.Summary)),
 		Testing:    strings.TrimSpace(stripControl(a.Testing)),
 		Title:      oneLine(a.Title, 4*120),
@@ -574,10 +574,8 @@ func (a reportArgs) outcome(p *Project, base string, now time.Time) (o Outcome, 
 	case len(a.Replies) > 0 || a.RerunChecks || strings.TrimSpace(a.Description) != "" || a.QuestionResolved:
 		return o, "replies, rerun_checks, question_resolved and description belong to follow-up rounds only."
 	}
-	switch o.Status {
-	case OutcomeFixed, OutcomeNotReproducible, OutcomeCannotFix, OutcomeAlreadyFixed:
-	default:
-		return o, "status must be one of fixed, not_reproducible, cannot_fix or already_fixed."
+	if !slices.Contains(taskOutcomes, o.Status) {
+		return o, "status must be one of " + orList(taskOutcomes) + "."
 	}
 	if o.Status != OutcomeFixed {
 		if o.Question != "" {
@@ -658,7 +656,7 @@ func reported(t *Task) (string, bool) {
 	case t.PR != nil:
 		return "Opened pull request " + t.PR.URL + ". You can stop now.", true
 	case t.Outcome != nil:
-		return "An outcome (" + t.Outcome.Status + ") was already recorded for this work order. You can stop now.", true
+		return "An outcome (" + string(t.Outcome.Status) + ") was already recorded for this work order. You can stop now.", true
 	}
 	return "", false
 }
@@ -676,7 +674,7 @@ func (g *gateway) reportOutcome(ctx context.Context, s *session, raw json.RawMes
 	}
 	now := time.Now().UTC()
 	repo := s.project.repoFor(s.task)
-	if strings.TrimSpace(a.Status) == OutcomeFixed {
+	if OutcomeStatus(strings.TrimSpace(a.Status)) == OutcomeFixed {
 		var problem string
 		if repo, problem = g.reportRepo(ctx, s, a.Repository); problem != "" {
 			return problem, true, nil
@@ -706,7 +704,7 @@ func (g *gateway) reportOutcome(ctx context.Context, s *session, raw json.RawMes
 	}
 	switch {
 	case isTerminal(s.task.Status):
-		return "This work order is already finished (" + s.task.Status + ").", true, nil
+		return "This work order is already finished (" + string(s.task.Status) + ").", true, nil
 	case s.task.Status != StatusRunning:
 		return "This work order is not running.", true, nil
 	case o.Status == OutcomeFixed:
@@ -727,7 +725,7 @@ func (g *gateway) reportOutcome(ctx context.Context, s *session, raw json.RawMes
 	g.r.refreshStats(s.project.ID, s.ledger)
 	g.r.notify(s.project, noteNoFix(s.task, o))
 	if key := s.task.Ticket; key != "" && g.r.deps.Tickets != nil {
-		note := defuseMentions("No pull request was opened for this issue. The session reported " + strings.ReplaceAll(o.Status, "_", " ") + ": " + oneLine(o.Summary, 2000))
+		note := defuseMentions("No pull request was opened for this issue. The session reported " + strings.ReplaceAll(string(o.Status), "_", " ") + ": " + oneLine(o.Summary, 2000))
 		projectID := s.project.ID
 		safego.Go("projects: ticket note "+taskID, func() {
 			cctx, cancel := context.WithTimeout(context.Background(), persistTimeout)
@@ -785,7 +783,7 @@ func (g *gateway) openPullRequest(ctx context.Context, s *session, repo Repo, o 
 		if reply, done := reported(s.task); done {
 			return reply, false, nil
 		}
-		return "The work order changed while the pull request was being opened (it is now " + s.task.Status + ").", true, nil
+		return "The work order changed while the pull request was being opened (it is now " + string(s.task.Status) + ").", true, nil
 	}
 	log.Printf("[projects] %s task %s opened %s", p.ID, taskID, url)
 	g.r.refreshStats(p.ID, s.ledger)
@@ -973,7 +971,7 @@ func (g *gateway) recordLearning(ctx context.Context, s *session, raw json.RawMe
 	}
 	switch {
 	case isTerminal(s.task.Status):
-		return "This work order is already finished (" + s.task.Status + ").", true, nil
+		return "This work order is already finished (" + string(s.task.Status) + ").", true, nil
 	case learnings >= maxLearnings:
 		return fmt.Sprintf("You already recorded %d learnings for this work order.", maxLearnings), true, nil
 	}

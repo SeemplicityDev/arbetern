@@ -197,7 +197,7 @@ func (c *Client) fetchRelease(ctx context.Context, key string) (*Release, error)
 	return r, nil
 }
 
-// get decodes one JSON document; a cached fetch is shared by every caller, so one caller's cancellation must not fail it for the others.
+// A cached fetch is shared by every caller, so one caller's cancellation must not fail it for the others.
 func (c *Client) get(ctx context.Context, path string, limit int64, v any) error {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), fetchTimeout)
 	defer cancel()

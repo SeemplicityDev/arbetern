@@ -30,7 +30,7 @@ func (r *Registry) notify(p *Project, text string) {
 }
 
 func subjectLabel(g Group) string {
-	if len(g.Tags) == 0 {
+	if g.kind() != SignalDatadogMetrics {
 		return slackText(groupLabel(g), 200)
 	}
 	values := make([]string, 0, len(g.Tags))
@@ -51,7 +51,7 @@ func prLink(t *Task) string {
 	return fmt.Sprintf("<%s|PR %s#%d>", pr.URL, slackText(t.Repo, 100), pr.Number)
 }
 
-// headline names the task the way its session put it for the channel, else by its series or error group.
+// headline names the task the way its session put it for the channel, else by its group.
 func headline(t *Task) string {
 	if t.Outcome != nil && t.Outcome.Headline != "" {
 		return slackText(t.Outcome.Headline, maxHeadlineChars)
@@ -97,7 +97,7 @@ func noteNoFix(t *Task, o Outcome) string {
 	if o.Status == OutcomeCannotFix {
 		return fmt.Sprintf(":red_circle: %s — need your review: %s%s", head, slackText(o.Summary, 300), belowThreshold(t))
 	}
-	return fmt.Sprintf(":white_circle: %s — %s: %s%s", head, strings.ReplaceAll(o.Status, "_", " "), slackText(o.Summary, 300), belowThreshold(t))
+	return fmt.Sprintf(":white_circle: %s — %s: %s%s", head, strings.ReplaceAll(string(o.Status), "_", " "), slackText(o.Summary, 300), belowThreshold(t))
 }
 
 func noteRound(t *Task, o Outcome) string {

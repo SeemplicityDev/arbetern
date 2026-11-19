@@ -13,6 +13,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/justmike1/arbetern/github"
+	"github.com/justmike1/arbetern/internal/origin"
 	"github.com/justmike1/arbetern/internal/text"
 )
 
@@ -105,7 +106,7 @@ func roundHeader(p *Project, t *Task, rd *Round) string {
 		"- Head commit: " + cmp.Or(rd.HeadBefore, "unknown"),
 		"- Base branch: " + repo.BaseBranch,
 		fmt.Sprintf("- Round: %d of %d", rd.N, p.Review.effective().MaxRounds),
-		"- Why this round: " + strings.Join(rd.Trigger, ", "),
+		"- Why this round: " + joinNames(rd.Trigger, ", "),
 	}
 	return strings.Join(lines, "\n")
 }
@@ -234,7 +235,7 @@ func roundConflict(rd *Round, branch, base string) string {
 
 func roundRules(p *Project, t *Task, rd *Round) string {
 	branch, base := t.Branch, p.repoFor(t).BaseBranch
-	rebase := p.Review.effective().MergeMethod == "rebase"
+	rebase := p.Review.effective().MergeMethod == github.MergeRebase
 	pull := "git pull --no-rebase --no-edit origin " + branch
 	if rebase {
 		pull = "git pull --rebase origin " + branch
@@ -265,6 +266,21 @@ func roundRules(p *Project, t *Task, rd *Round) string {
 		rules = slices.Insert(rules, 1, "arbetern asked GitHub to merge `"+base+"` into the branch before this round when it was behind. Before you push, make sure the branch still contains the latest `origin/"+base+"`: run `git fetch origin "+base+"`, and when `git merge-base --is-ancestor origin/"+base+" HEAD` fails, run `git merge --no-edit origin/"+base+"` and resolve any conflicts keeping both sides' intent. Never rebase.")
 	}
 	return "## Rules for this round\n\n- " + strings.Join(rules, "\n- ")
+}
+
+func joinNames[T ~string](names []T, sep string) string {
+	parts := make([]string, len(names))
+	for i, n := range names {
+		parts[i] = string(n)
+	}
+	return strings.Join(parts, sep)
+}
+
+func orList[T ~string](names []T) string {
+	if len(names) < 2 {
+		return joinNames(names, "")
+	}
+	return joinNames(names[:len(names)-1], ", ") + " or " + string(names[len(names)-1])
 }
 
 func optionalSection(heading, body string) string {
@@ -322,17 +338,17 @@ func briefHeader(p *Project, t *Task) string {
 		"- Repository: " + repository,
 		"- Base branch: " + base,
 		fmt.Sprintf("- Attempt: %d of %d", t.Attempt, p.Limits.effective().MaxAttempts),
-		"- Status: " + t.Status,
+		"- Status: " + string(t.Status),
 	}
 	return strings.Join(lines, "\n")
 }
 
-// briefSubject renders what the task is about and the evidence for it; only the evidence may be cut to fit the work order.
+// Only the evidence may be cut to fit the work order.
 func briefSubject(p *Project, g Group) (facts, evidence string) {
-	switch {
-	case g.Dependency != nil:
+	switch g.kind() {
+	case SignalDependabot:
 		return briefDependency(g), briefManifests(g)
-	case p.Signal.metric():
+	case SignalDatadogMetrics:
 		return briefSeries(g, p.Signal), briefEvidence(g, p.Signal.Evidence)
 	}
 	return briefGroup(g), briefSamples(g.Samples)
@@ -438,8 +454,9 @@ func briefRules(p *Project, t *Task) string {
 		elsewhere = "If the cause is in none of the project's repositories"
 		never = "Never push to a repository's default branch."
 	}
+	kind := kindOf(t.Group.kind())
 	rules := []string{
-		"Work only on this " + subject(p) + "; leave unrelated problems alone.",
+		"Work only on this " + kind.noun + "; leave unrelated problems alone.",
 		"Keep the change minimal and in the repository's existing style.",
 		"Follow the repository's own CLAUDE.md and contributing rules.",
 		"Run the relevant linters and tests when they work offline.",
@@ -452,12 +469,12 @@ func briefRules(p *Project, t *Task) string {
 	if p.Review.FollowUp {
 		rules = append(rules, "When the right fix depends on a decision only a person can make, push your best option anyway and pass the decision as `question`, naming the options so a one-line reply picks one. The pull request waits for a reviewer's answer, and a later session applies it.")
 	}
-	rules = append(rules, conventionRules(p)...)
+	rules = append(rules, conventionRules(p, kind)...)
 	return "## Rules\n\n- " + strings.Join(rules, "\n- ")
 }
 
 // conventionRules tell a session what the repository's conventions ask of its report.
-func conventionRules(p *Project) []string {
+func conventionRules(p *Project, kind signalKind) []string {
 	c := p.Conventions
 	var rules []string
 	if c.TitlePattern != "" {
@@ -480,11 +497,7 @@ func conventionRules(p *Project) []string {
 		}
 		rules = append(rules, rule)
 	}
-	headline := "Pass `headline`: one line for the team's channel naming what failed, where, and how much."
-	if p.Signal.dependabot() {
-		headline = "Pass `headline`: one line for the team's channel naming the package, the version it moves to, and the repository."
-	}
-	return append(rules, headline)
+	return append(rules, "Pass `headline`: one line for the team's channel "+kind.headline+".")
 }
 
 func briefRepository(p *Project, t *Task, repos []github.OrgRepository) string {
@@ -505,7 +518,7 @@ func briefRepository(p *Project, t *Task, repos []github.OrgRepository) string {
 	}
 	return "## Repository\n\n" +
 		"This project fixes problems in whichever of these repositories of `" + p.Repo.Owner + "` holds the cause: " + list + ". " +
-		"Your working directory is empty. First find the repository that owns the code behind this " + subject(p) + " with arbetern's GitHub tools, such as `search_code_org`, `search_files` and `get_file_content`. " +
+		"Your working directory is empty. First find the repository that owns the code behind this " + kindOf(t.Group.kind()).noun + " with arbetern's GitHub tools, such as `search_code_org`, `search_files` and `get_file_content`. " +
 		"Then clone it into the working directory and create your branch from its default branch:\n\n" +
 		"```sh\ngit clone --quiet --no-tags --filter=blob:none https://github.com/" + p.Repo.Owner + "/<repository>.git .\ngit checkout -b " + branch + "\n```\n\n" +
 		"Its CLAUDE.md files were not loaded when this session started, so read them before you edit. The gateway serves only the repositories above, and your first push binds this work order to one of them. " +
@@ -521,21 +534,12 @@ func prLabel(p *Project, pr *PR) string {
 	return fmt.Sprintf("#%d", pr.Number)
 }
 
-func subject(p *Project) string {
-	switch {
-	case p.Signal.metric():
-		return "metric series"
-	case p.Signal.dependabot():
-		return "vulnerable dependency"
-	}
-	return "error group"
-}
-
 func groupLabel(g Group) string {
-	if len(g.Tags) > 0 {
+	switch g.kind() {
+	case SignalDatadogMetrics:
 		return strings.ToUpper(g.Site) + " " + strings.Join(g.Tags, ", ")
-	}
-	if d := g.Dependency; d != nil {
+	case SignalDependabot:
+		d := g.Dependency
 		return d.Package + " (" + d.Ecosystem + ", " + cmp.Or(d.Severity, "unknown severity") + ") in " + d.Repo
 	}
 	label := cmp.Or(g.Kind, oneLine(g.Pattern, 120), "error")
@@ -672,7 +676,7 @@ func briefOutcomes(p *Project, tasks []Task) string {
 	}
 	lines := make([]string, 0, len(tasks))
 	for _, t := range tasks {
-		parts := []string{t.Status, inlineCode(t.Fingerprint)}
+		parts := []string{string(t.Status), inlineCode(t.Fingerprint)}
 		if t.PR != nil && t.PR.Number > 0 {
 			parts = append(parts, "PR "+prLabel(p, t.PR)+" ("+t.PR.State+")")
 		}
@@ -681,7 +685,7 @@ func briefOutcomes(p *Project, tasks []Task) string {
 		}
 		summary := t.Error
 		if t.Outcome != nil {
-			summary = t.Outcome.Status + ": " + t.Outcome.Summary
+			summary = string(t.Outcome.Status) + ": " + t.Outcome.Summary
 		}
 		if s := oneLine(summary, 200); s != "" {
 			parts = append(parts, s)
@@ -720,10 +724,10 @@ func prBody(p *Project, t *Task, o Outcome) string {
 		}
 	}
 	g := t.Group
-	switch {
-	case len(g.Tags) > 0:
+	switch g.kind() {
+	case SignalDatadogMetrics:
 		b.WriteString("\n\n---\n" + seriesLine(p, g) + "\n")
-	case g.Dependency != nil:
+	case SignalDependabot:
 		b.WriteString("\n\n---\n" + alertsLine(p, g) + "\n")
 	default:
 		fmt.Fprintf(&b, "\n\n---\nError group `%s` · service %s · %s · %d occurrences from %s to %s\n",
@@ -733,8 +737,12 @@ func prBody(p *Project, t *Task, o Outcome) string {
 			g.Count, cmp.Or(g.FirstSeen, "unknown"), cmp.Or(g.LastSeen, "unknown"))
 	}
 	b.WriteString("_Opened by the arbetern project \"" + cleanPRText(oneLine(p.Name, 80), 80) + "\"._\n\n")
-	b.WriteString(github.ProjectPRMarker(p.ID, t.ID))
+	b.WriteString(prMarker(p, t))
 	return b.String()
+}
+
+func prMarker(p *Project, t *Task) string {
+	return github.Attribution{Source: origin.Project, ProjectID: p.ID, TaskID: t.ID}.Marker()
 }
 
 func alertsLine(p *Project, g Group) string {

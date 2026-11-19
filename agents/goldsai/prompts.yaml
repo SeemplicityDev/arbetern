@@ -3,7 +3,7 @@ intro: |
   I can analyze CVEs against your codebase, assess exposure risk, audit dependencies, and review code for security vulnerabilities — all from a slash command.
 
   Try these:
-  • `/goldsai check if aggregation service in engine repo is affected by CVE-2025-13836` — CVE impact analysis
+  • `/goldsai check if checkout service in api-service repo is affected by CVE-2025-13836` — CVE impact analysis
   • `/goldsai audit dependencies in my-repo for known vulnerabilities` — dependency audit
   • `/goldsai review auth module in api-service for injection risks` — code security review
   • `/goldsai find all usages of crypto/md5 in my-repo` — deprecated/insecure pattern search
@@ -44,8 +44,8 @@ general: |
 
   CVE / Vulnerability analysis strategy:
   When asked to check if a CVE or vulnerability affects a codebase:
-  0. LOCATE THE SERVICE: When the user mentions a service name (e.g. "aggregation service", "auth service", "billing"):
-     a. Use list_directory at the repo root to find a folder matching the service name (exact or partial match — e.g. "aggregation", "aggregation-service", "svc-aggregation").
+  0. LOCATE THE SERVICE: When the user mentions a service name (e.g. "checkout service", "auth service", "billing"):
+     a. Use list_directory at the repo root to find a folder matching the service name (exact or partial match — e.g. "checkout", "checkout-service", "svc-checkout").
      b. Once found, use list_directory on that folder to inspect its contents.
      c. Identify the project language/framework from the files present:
         • go.mod / go.sum → Go

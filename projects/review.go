@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -30,7 +29,7 @@ type prWatch struct {
 	pr      *github.PRState
 	items   []Feedback
 	context []Feedback
-	ci      string
+	ci      ciStatus
 	failed  []github.Check
 
 	content      string
@@ -43,15 +42,15 @@ type prWatch struct {
 
 type roundWant struct {
 	watch   prWatch
-	trigger []string
+	trigger []Trigger
 }
 
-func ciState(checks []github.Check) (string, []github.Check) {
+func ciState(checks []github.Check) (ciStatus, []github.Check) {
 	pending := false
 	var failed []github.Check
 	for _, c := range checks {
 		switch {
-		case c.Status != "completed":
+		case c.Status != github.CheckCompleted:
 			pending = true
 		case c.Failed():
 			failed = append(failed, c)
@@ -101,7 +100,7 @@ func sortFeedback(items []github.DiscussionItem, self string, rv *ReviewState) (
 			f.Thread = cmp.Or(it.InReplyTo, it.ID)
 			actionable = it.Bot || it.Trusted()
 		case github.DiscussionReview:
-			actionable = actionable && (it.State == "COMMENTED" || it.State == "CHANGES_REQUESTED")
+			actionable = actionable && (it.State == github.ReviewCommented || it.State == github.ReviewChangesRequested)
 		}
 		switch {
 		case actionable && !rv.isHandled(f.ID):
@@ -191,12 +190,12 @@ func (r *Registry) observePR(ctx context.Context, p *Project, led *Ledger, t Tas
 	return next, nil
 }
 
-func needsRound(rv *ReviewState, w prWatch, now time.Time) []string {
+func needsRound(rv *ReviewState, w prWatch, now time.Time) []Trigger {
 	if rv.Phase == PhaseExhausted {
 		return nil
 	}
 	settled := w.ci != ciPending || now.Sub(parseTime(rv.HeadAt)) > ciWaitLimit
-	var need []string
+	var need []Trigger
 	if len(w.items) > 0 && settled {
 		need = append(need, triggerFeedback)
 	}
@@ -303,7 +302,7 @@ func (r *Registry) finishReview(ctx context.Context, p *Project, led *Ledger, w 
 	return next
 }
 
-func (r *Registry) stopFollowing(ctx context.Context, p *Project, led *Ledger, w prWatch, rv *ReviewState, need []string) *Ledger {
+func (r *Registry) stopFollowing(ctx context.Context, p *Project, led *Ledger, w prWatch, rv *ReviewState, need []Trigger) *Ledger {
 	k := p.ID
 	if _, err := r.gh.CommentOnPullRequest(ctx, w.owner, w.repo, w.number, exhaustedComment(p, rv, w, need)); err != nil {
 		log.Printf("[projects] %s task %s: posting the stop note on pull request #%d: %v", k, w.taskID, w.number, err)
@@ -351,13 +350,7 @@ func (r *Registry) checkFailures(ctx context.Context, w prWatch) []CheckFailure 
 	return out
 }
 
-var (
-	logStampRe = regexp.MustCompile(`(?m)^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?Z `)
-	ansiRe     = regexp.MustCompile("\x1b\\[[0-9;?]*[A-Za-z]")
-)
-
 func failureExcerpt(log string, max int) string {
-	log = ansiRe.ReplaceAllString(logStampRe.ReplaceAllString(log, ""), "")
 	if i := strings.Index(log, "##[error]"); i >= 0 {
 		if end := strings.IndexByte(log[i:], '\n'); end >= 0 {
 			log = log[:i+end]
@@ -419,10 +412,9 @@ func (r *Registry) dispatchRounds(ctx context.Context, p *Project, limits Limits
 	out.ledger = led
 }
 
-// alignBranch has GitHub merge the base into a pull request branch that fell behind it, so the round starts from both. GitHub's own
-// merge keeps approvals, which a session's merge commit would not; a branch that conflicts with its base is left to the round.
+// GitHub's own merge keeps approvals, which a session's merge commit would not; a conflicting branch is left to the round.
 func (r *Registry) alignBranch(ctx context.Context, p *Project, w prWatch) {
-	if p.Review.effective().MergeMethod == "rebase" || (w.pr.Mergeable != nil && !*w.pr.Mergeable) {
+	if p.Review.effective().MergeMethod == github.MergeRebase || (w.pr.Mergeable != nil && !*w.pr.Mergeable) {
 		return
 	}
 	behind, err := r.gh.CommitsBehind(ctx, w.owner, w.repo, w.pr.BaseRef, w.pr.HeadSHA)
@@ -453,7 +445,7 @@ func (r *Registry) fireRound(ctx context.Context, p *Project, led *Ledger, taskI
 	now := time.Now().UTC()
 	if err != nil {
 		reason := text.Truncate(err.Error(), maxErrorChars)
-		if next, _, merr := r.mergeLedger(pctx, p.ID, led, func(l *Ledger) bool { return l.failRound(taskID, n, []string{StatusDispatching}, reason, now) }); merr != nil {
+		if next, _, merr := r.mergeLedger(pctx, p.ID, led, func(l *Ledger) bool { return l.failRound(taskID, n, []Status{StatusDispatching}, reason, now) }); merr != nil {
 			log.Printf("[projects] %s recording the failure of task %s round %d: %v", p.ID, taskID, n, merr)
 		} else {
 			led = next
@@ -523,7 +515,7 @@ func doneComment(p *Project, rv *ReviewState, head string) string {
 	return b.String()
 }
 
-func exhaustedComment(p *Project, rv *ReviewState, w prWatch, need []string) string {
+func exhaustedComment(p *Project, rv *ReviewState, w prWatch, need []Trigger) string {
 	var left []string
 	if slices.Contains(need, triggerFeedback) {
 		left = append(left, plural(len(w.items), "unanswered review comment"))

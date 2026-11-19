@@ -89,7 +89,9 @@ const INTEGRATION_LOGOS = {
   anthropic: `<svg viewBox="0 0 24 24"><path style="fill:var(--text-bright)" d="M17.3041 3.541h-3.6718l6.696 16.918H24Zm-10.6082 0L0 20.459h3.7442l1.3693-3.5527h7.0052l1.3693 3.5528h3.7442L10.5363 3.5409Zm-.3712 10.2232 2.2914-5.9456 2.2914 5.9456Z"/></svg>`,
 };
 
-const SOURCE_LABELS = { slack: 'Slack commands', chat: 'Web chat', workflow: 'Scheduled workflows', dashboard: 'Dashboard renders', profile: 'Profile summaries' };
+const SOURCE_LABELS = { slack: 'Slack commands', chat: 'Web chat', workflow: 'Scheduled workflows', dashboard: 'Dashboard renders', profile: 'Profile summaries', project: 'Project sessions' };
+const sourceClass = key => (Object.hasOwn(SOURCE_LABELS, key) ? key : 'other');
+const sourceTagHtml = key => `<span class="tag ${sourceClass(key)}">${escapeHtml(key)}</span>`;
 const SLACK_ID_RE = /^[UW][A-Z0-9]{6,}$/;
 const PAGES = ['overview', 'integrations', 'mcp', 'agents', 'chats', 'skills', 'projects', 'workflows', 'dashboards', 'pulls', 'tickets', 'changelog', 'performance', 'billing', 'backend', 'context'];
 const PAGE_TITLES = {
@@ -243,8 +245,7 @@ function safeImageUrl(value) {
   return url && url.startsWith('https://') ? url : '';
 }
 
-// Agent and descriptor ids are validated server-side against this alphabet;
-// anything else is never interpolated into markup.
+// Mirrors the alphabet the server validates agent and descriptor ids against.
 const SAFE_ID_RE = /^[a-z0-9][a-z0-9-]{0,62}$/;
 function safeId(id) {
   return typeof id === 'string' && SAFE_ID_RE.test(id) ? id : null;
@@ -296,7 +297,7 @@ function tok(n) {
   if (n >= 1e3) return (n / 1e3).toFixed(1) + 'k';
   return '' + n;
 }
-const plural = (n, word) => `${fmtInt(n)} ${word}${n === 1 ? '' : 's'}`;
+const plural = (n, word, many) => `${fmtInt(n)} ${n === 1 ? word : many || word + 's'}`;
 const windowLabel = () => (days ? `last ${days} days` : 'all time');
 const emptyHtml = (text, tall) => `<div class="empty${tall ? ' tall' : ''}">${escapeHtml(text)}</div>`;
 
@@ -637,7 +638,6 @@ async function loadProjects() {
     projectsState = { list: null, error: err };
   }
   renderProjectsPage();
-  renderPullsPage();
   renderFleet();
 }
 
@@ -766,6 +766,13 @@ function userNamesFrom(sum) {
   const names = new Map();
   (sum.by_user || []).forEach(r => { if (r.name) names.set(r.key, r.name); });
   return names;
+}
+
+const EVENT_SUBJECT_LABELS = { workflow: 'scheduled', dashboard: 'dashboard', project: 'project' };
+function eventSubject(e) {
+  if (!e.workflow_name && !e.workflow_id) return null;
+  const label = EVENT_SUBJECT_LABELS[Object.hasOwn(EVENT_SUBJECT_LABELS, e.source) ? e.source : 'workflow'];
+  return { name: e.workflow_name || '', id: e.workflow_id || '', label };
 }
 
 function renderMatrix(sum) {
@@ -930,9 +937,8 @@ function renderSources(sum) {
     .sort((a, b) => b.counts.requests - a.counts.requests);
   const total = rows.reduce((s, r) => s + r.counts.requests, 0);
   if (!total) { el.innerHTML = emptyHtml('No requests in this window.'); return; }
-  const cls = k => (SOURCE_LABELS[k] ? k : 'other');
-  const seg = rows.map(r => `<i class="src-${cls(r.key)}" style="width:${(r.counts.requests / total * 100).toFixed(2)}%" title="${escapeHtml(r.key)}: ${fmtInt(r.counts.requests)}"></i>`).join('');
-  const legend = rows.map(r => `<span><span class="dot src-${cls(r.key)}"></span>${escapeHtml(SOURCE_LABELS[r.key] || r.key)}</span>
+  const seg = rows.map(r => `<i class="src-${sourceClass(r.key)}" style="width:${(r.counts.requests / total * 100).toFixed(2)}%" title="${escapeHtml(r.key)}: ${fmtInt(r.counts.requests)}"></i>`).join('');
+  const legend = rows.map(r => `<span><span class="dot src-${sourceClass(r.key)}"></span>${escapeHtml(SOURCE_LABELS[sourceClass(r.key)] || r.key)}</span>
       <span class="n">${fmtInt(r.counts.requests)}</span><span class="pct">${Math.round(r.counts.requests / total * 100)}%</span>`).join('');
   el.innerHTML = `<div class="seg">${seg}</div><div class="seg-legend">${legend}</div>`;
 }
@@ -1043,7 +1049,8 @@ function renderRecent(sum) {
   document.getElementById('ov-recent-meta').textContent = all.length ? `${evs.length} of ${all.length}` : '';
   if (!evs.length) { el.innerHTML = emptyHtml('No turns recorded yet.'); return; }
   const who = e => {
-    if (e.workflow_name || e.workflow_id) return `${escapeHtml(e.workflow_name || e.workflow_id)}<span class="sub">scheduled</span>`;
+    const subject = eventSubject(e);
+    if (subject) return `${escapeHtml(subject.name || subject.id)}<span class="sub">${subject.label}</span>`;
     if (e.user_id) return `<span title="${escapeHtml(e.user_id)}">${escapeHtml(names.get(e.user_id) || e.user_id)}</span>`;
     return '<span class="muted">—</span>';
   };
@@ -1052,7 +1059,7 @@ function renderRecent(sum) {
       <td class="muted" title="${escapeHtml(new Date(e.at).toLocaleString())}">${timeAgo(e.at)}</td>
       <td>${who(e)}</td>
       <td>${agentChip(e.agent)}</td>
-      <td><span class="tag ${escapeHtml(e.source)}">${escapeHtml(e.source)}</span></td>
+      <td>${sourceTagHtml(e.source)}</td>
       <td class="n">${tok(e.total_tokens)}</td>
       <td class="n cost">${money4(e.cost_usd)}</td>
     </tr>`).join('')}</tbody></table>`;
@@ -1174,7 +1181,7 @@ function searchNote(kind, shown) {
   const st = searchState[kind];
   el.hidden = !st.q;
   if (!st.q) return;
-  el.textContent = `${plural(shown, 'match')} for “${st.q}” · ${st.semantic ? 'ranked by meaning' : 'text match'}`;
+  el.textContent = `${plural(shown, 'match', 'matches')} for “${st.q}” · ${st.semantic ? 'ranked by meaning' : 'text match'}`;
 }
 
 async function runSearch(kind, q) {
@@ -1226,8 +1233,10 @@ function renderWorkflowsPage() {
   el.innerHTML = `<table class="data-table"><thead><tr>
       <th>Workflow</th><th>Agent</th><th>Schedule</th><th>Status</th><th>Last run</th><th></th>
     </tr></thead><tbody>${rows.map(w => {
+      const aid = safeId(w.agent), wid = safeId(w.id);
+      if (!aid || !wid) return '';
       const [cls, label, title] = wfStatus(w);
-      const url = detailPath('workflow', w.agent, w.id);
+      const url = detailPath('workflow', aid, wid);
       const managed = w.source === 'gitops';
       return `<tr>
         <td><a href="${url}" data-link>${escapeHtml(w.name || w.id)}</a>${managed ? ' <span class="tag gitops" title="Managed from git; read-only here">gitops</span>' : ''}
@@ -1238,8 +1247,8 @@ function renderWorkflowsPage() {
         <td class="muted" title="${w.last_run ? escapeHtml(new Date(w.last_run).toLocaleString()) : ''}">${w.last_run ? timeAgo(w.last_run) : '—'}</td>
         <td><div class="actions">
           <a class="btn-mini" href="${url}" data-link>Open</a>
-          <button class="btn-mini" type="button" onclick="runWorkflow('${w.agent}','${w.id}', this)"${w.running || !w.enabled ? ' disabled' : ''} title="${w.enabled ? 'Run now, outside the schedule' : 'Paused; resume it from its page first'}">Run</button>
-          ${managed ? '' : `<button class="btn-mini danger" type="button" onclick="deleteWorkflow('${w.agent}','${w.id}')">Delete</button>`}
+          <button class="btn-mini" type="button" onclick="runWorkflow('${aid}','${wid}', this)"${w.running || !w.enabled ? ' disabled' : ''} title="${w.enabled ? 'Run now, outside the schedule' : 'Paused; resume it from its page first'}">Run</button>
+          ${managed ? '' : `<button class="btn-mini danger" type="button" onclick="deleteWorkflow('${aid}','${wid}')">Delete</button>`}
         </div></td>
       </tr>`;
     }).join('')}</tbody></table>`;
@@ -1317,8 +1326,10 @@ function renderDashboardsPage() {
   el.innerHTML = `<table class="data-table"><thead><tr>
       <th>Dashboard</th><th>Agent</th><th>Kind</th><th>Refresh</th><th>Status</th><th>Last sync</th><th></th>
     </tr></thead><tbody>${rows.map(d => {
+      const aid = safeId(d.agent), did = safeId(d.id);
+      if (!aid || !did) return '';
       const [cls, label, title] = dashStatus(d);
-      const url = detailPath('dashboard', d.agent, d.id);
+      const url = detailPath('dashboard', aid, did);
       const managed = d.source === 'gitops';
       return `<tr>
         <td><a href="${url}" data-link>${escapeHtml(d.name || d.id)}</a>${managed ? ' <span class="tag gitops" title="Managed from git; read-only here">gitops</span>' : ''}
@@ -1330,7 +1341,7 @@ function renderDashboardsPage() {
         <td class="muted" title="${d.last_sync ? escapeHtml(new Date(d.last_sync).toLocaleString()) : ''}">${d.last_sync ? timeAgo(d.last_sync) : '—'}</td>
         <td><div class="actions">
           <a class="btn-mini" href="${url}" data-link>Open</a>
-          ${managed ? '' : `<button class="btn-mini danger" type="button" onclick="deleteDashboard('${d.agent}','${d.id}')">Delete</button>`}
+          ${managed ? '' : `<button class="btn-mini danger" type="button" onclick="deleteDashboard('${aid}','${did}')">Delete</button>`}
         </div></td>
       </tr>`;
     }).join('')}</tbody></table>`;
@@ -1437,7 +1448,7 @@ function renderProjectsPage() {
     return words.every(w => hay.includes(w));
   }).sort((a, b) => (a.name || '').localeCompare(b.name || ''));
   note.hidden = !words.length;
-  if (words.length) note.textContent = `${fmtInt(rows.length)} ${rows.length === 1 ? 'match' : 'matches'} for “${projQuery}”`;
+  if (words.length) note.textContent = `${plural(rows.length, 'match', 'matches')} for “${projQuery}”`;
   if (!rows.length) {
     const none = canCreateProject() ? 'No projects yet. Create one to keep fixing what Datadog or Dependabot finds in your repositories.' : 'No projects yet.';
     el.innerHTML = emptyHtml(words.length ? 'No project matches this filter.' : none, true);
@@ -1487,25 +1498,22 @@ document.getElementById('pr-filter').addEventListener('click', e => {
   });
 })();
 
-function prProject(p) {
-  return p.project ? (projectsState.list || []).find(x => x.id === p.project) || null : null;
+function prOriginLink(o, title, unnamed, href) {
+  if (!o.name) return `<span class="muted">${unnamed}</span>`;
+  if (!href) return `<span title="${title}">${escapeHtml(o.name)}</span>`;
+  return `<a href="${href}" data-link title="${title}">${escapeHtml(o.name)}</a>`;
 }
 
-function prRequester(p) {
-  if (p.project) {
-    const proj = prProject(p);
-    const pid = proj && safeId(proj.id);
-    if (!pid) return '<span class="muted">a project</span>';
-    return `<a href="${detailPath('project', '', pid)}" data-link title="Project">${escapeHtml(proj.name || pid)}</a>`;
-  }
-  if (p.source === 'workflow') {
-    const wid = safeId(p.workflow), aid = safeId(p.agent);
-    if (!p.workflow_name) return '<span class="muted">a workflow</span>';
-    if (!wid || !aid) return `<span title="Workflow">${escapeHtml(p.workflow_name)}</span>`;
-    return `<a href="${detailPath('workflow', aid, wid)}" data-link title="Workflow">${escapeHtml(p.workflow_name)}</a>`;
-  }
-  if (!p.requested_by && !p.requester_id) return '<span class="muted">—</span>';
-  return `<span title="${escapeHtml(p.requester_id || '')}">${escapeHtml(p.requested_by || p.requester_id)}</span>`;
+const PR_ORIGINS = {
+  user: o => (o.name || o.id ? `<span title="${escapeHtml(o.id || '')}">${escapeHtml(o.name || o.id)}</span>` : ''),
+  workflow: (o, p) => prOriginLink(o, 'Workflow', 'a workflow', safeId(o.id) && safeId(p.agent) && detailPath('workflow', p.agent, o.id)),
+  project: o => prOriginLink(o, 'Project', 'a project', safeId(o.id) && detailPath('project', '', o.id)),
+};
+
+function prOrigin(p) {
+  const o = p.origin;
+  const html = o && Object.hasOwn(PR_ORIGINS, o.kind) ? PR_ORIGINS[o.kind](o, p) : '';
+  return html || '<span class="muted">—</span>';
 }
 
 function renderPullsPage() {
@@ -1523,11 +1531,11 @@ function renderPullsPage() {
   const words = prQuery.split(/\s+/).filter(Boolean);
   const rows = list.filter(p => prFilter === 'all' || p.agent === prFilter).filter(p => {
     if (!words.length) return true;
-    const hay = [p.title, p.repo, '#' + p.number, p.requested_by, p.requester_id, (prProject(p) || {}).name, p.workflow_name, p.agent ? agentLabel(p.agent) : '', p.source].join('\n').toLowerCase();
+    const hay = [p.title, p.repo, '#' + p.number, (p.origin || {}).name, (p.origin || {}).id, p.agent ? agentLabel(p.agent) : '', p.source].join('\n').toLowerCase();
     return words.every(w => hay.includes(w));
   });
   note.hidden = !words.length;
-  if (words.length) note.textContent = `${plural(rows.length, 'match')} for “${prQuery}”`;
+  if (words.length) note.textContent = `${plural(rows.length, 'match', 'matches')} for “${prQuery}”`;
   if (!rows.length) {
     el.innerHTML = emptyHtml(words.length ? 'No pull request matches this filter.' : list.length ? 'No open pull requests for this agent.' : 'No open pull requests. Every PR an agent opens shows up here until it is merged or closed.', true);
     return;
@@ -1540,8 +1548,8 @@ function renderPullsPage() {
         <td><a href="${url}" target="_blank" rel="noopener">${escapeHtml(p.title)}</a>
           <span class="sub">${escapeHtml(p.repo)} #${p.number}${p.comments ? ' · ' + plural(p.comments, 'comment') : ''}</span></td>
         <td>${p.agent ? agentChip(p.agent) : '<span class="muted">—</span>'}</td>
-        <td>${prRequester(p)}</td>
-        <td>${p.source ? `<span class="tag ${escapeHtml(p.source)}">${escapeHtml(p.source)}</span>` : '<span class="muted">—</span>'}</td>
+        <td>${prOrigin(p)}</td>
+        <td>${p.source ? sourceTagHtml(p.source) : '<span class="muted">—</span>'}</td>
         <td><span class="status-pill ${p.draft ? 'paused' : 'ok'}">${p.draft ? 'draft' : 'ready for review'}</span></td>
         <td class="muted" title="${escapeHtml(new Date(p.created_at).toLocaleString())}">${timeAgo(p.created_at)}</td>
         <td class="muted" title="${escapeHtml(new Date(p.updated_at).toLocaleString())}">${timeAgo(p.updated_at)}</td>
@@ -1621,7 +1629,7 @@ function renderTicketsPage() {
     return words.every(w => hay.includes(w));
   });
   note.hidden = !words.length;
-  if (words.length) note.textContent = `${plural(rows.length, 'match')} for “${ticketQuery}”`;
+  if (words.length) note.textContent = `${plural(rows.length, 'match', 'matches')} for “${ticketQuery}”`;
   if (!rows.length) {
     el.innerHTML = emptyHtml(words.length ? 'No ticket matches this filter.' : list.length ? 'No open tickets match this selection.' : 'No open tickets are assigned to or reported by the agents right now.', true);
     return;
@@ -1746,7 +1754,7 @@ function renderBackendListing() {
   const head = '<table class="data-table"><thead><tr><th>Name</th><th>Kind</th><th class="n">Size</th><th>Modified</th></tr></thead><tbody>';
   if (query) {
     const hits = objects.filter(o => o.key.toLowerCase().includes(query)).slice(0, 500);
-    const strip = `${plural(hits.length, 'match')}${hits.length === 500 ? ' (first 500)' : ''} for “${escapeHtml(query)}”`;
+    const strip = `${plural(hits.length, 'match', 'matches')}${hits.length === 500 ? ' (first 500)' : ''} for “${escapeHtml(query)}”`;
     if (!hits.length) return listPanel(strip, emptyHtml('No object key matches this filter.', true));
     return listPanel(strip, head + hits.map(o => backendFileRow(o, o.key)).join('') + '</tbody></table>');
   }
@@ -1781,7 +1789,7 @@ function renderBackendVectors() {
   const query = backendState.query;
   const all = v.vectors || [];
   const rows = all.filter(x => !query || x.key.toLowerCase().includes(query) || JSON.stringify(x.metadata || {}).toLowerCase().includes(query));
-  const strip = query ? `${plural(rows.length, 'match')} for “${escapeHtml(query)}”` : v.truncated ? `Showing the first ${all.length} vectors.` : plural(all.length, 'vector');
+  const strip = query ? `${plural(rows.length, 'match', 'matches')} for “${escapeHtml(query)}”` : v.truncated ? `Showing the first ${all.length} vectors.` : plural(all.length, 'vector');
   if (!rows.length) return listPanel(strip, emptyHtml(query ? 'No vector matches this filter.' : 'The index is empty.', true));
   return listPanel(strip, `<table class="data-table"><thead><tr><th>Key</th><th>Metadata</th></tr></thead><tbody>` +
     rows.map(x => {
@@ -1875,11 +1883,12 @@ function billingRecent(el, evs, names) {
       { label: 'Tokens', n: true }, { label: 'Saved', n: true }, { label: 'Cost', n: true }],
     (evs || []).slice(0, 30),
     e => {
-      const who = e.workflow_name ? ` · ${escapeHtml(e.workflow_name)}` : (e.user_id ? ` · ${escapeHtml(names.get(e.user_id) || e.user_id)}` : '');
+      const subject = eventSubject(e);
+      const who = subject && subject.name ? ` · ${escapeHtml(subject.name)}` : (e.user_id ? ` · ${escapeHtml(names.get(e.user_id) || e.user_id)}` : '');
       const cs = e.compression_saved_tokens || 0, ci = e.compression_input_tokens || 0;
       const saved = cs ? `${tok(cs)} <small class="muted">${ci ? Math.round(cs / ci * 100) : 0}%</small>` : '—';
       return [new Date(e.at).toLocaleString(), agentChip(e.agent),
-        `<span class="tag ${escapeHtml(e.source)}">${escapeHtml(e.source)}</span>${who}`, escapeHtml(e.model),
+        `${sourceTagHtml(e.source)}${who}`, escapeHtml(e.model),
         num(tok(e.total_tokens)), num(saved), num(money4(e.cost_usd), 'cost')];
     });
 }
@@ -1910,7 +1919,7 @@ function renderBilling(d) {
   $('#s-comp').innerHTML = csave ? `${tok(csave)} <small>${cinp ? Math.round(csave / cinp * 100) : 0}%</small>` : '0';
   renderBars($('#bars'), fillDaily(d.daily, days), r => r.counts.cost_usd || 0, v => money4(v), $('#axis-from'), $('#axis-to'));
   billingRows($('#t-agent'), d.by_agent, r => agentChip(r.key));
-  billingRows($('#t-source'), d.by_source, r => `<span class="tag ${escapeHtml(r.key)}">${escapeHtml(r.key)}</span>`);
+  billingRows($('#t-source'), d.by_source, r => sourceTagHtml(r.key));
   billingRows($('#t-user'), d.by_user, r => `<span title="${escapeHtml(r.key)}">${escapeHtml(userLabel(r))}</span>`);
   billingRows($('#t-model'), d.by_model, r => escapeHtml(r.key));
   billingRows($('#t-wf'), d.by_workflow, r => escapeHtml(r.name || r.key) + (r.agent ? ` <small class="muted">${escapeHtml(agentLabel(r.agent))}</small>` : ''));
@@ -2021,7 +2030,7 @@ function renderPerformance() {
   $('p-hist-meta').textContent = l.count ? `${plural(l.count, 'turn')} · ${windowLabel()}` : '';
 
   perfTurnTable($('p-agent'), sum.by_agent, r => agentChip(r.key));
-  perfTurnTable($('p-source'), sum.by_source, r => `<span class="tag ${escapeHtml(r.key)}">${escapeHtml(r.key)}</span>`);
+  perfTurnTable($('p-source'), sum.by_source, r => sourceTagHtml(r.key));
   perfOutcomes($('p-outcome'), sum.by_outcome);
   perfQueue($('p-queue'), sum.queue);
   perfDeps($('p-deps'), sum.deps);
@@ -2124,7 +2133,7 @@ function perfSlowest(el, turns) {
       { label: 'Total', n: true }, { label: 'Model', n: true }, { label: 'Tools', n: true }, { label: 'Rounds', n: true }],
     turns,
     e => [new Date(e.at).toLocaleString(), agentChip(e.agent),
-      `<span class="tag ${escapeHtml(e.source)}">${escapeHtml(e.source)}</span>`, escapeHtml(outcomeLabel(e.outcome)),
+      sourceTagHtml(e.source), escapeHtml(outcomeLabel(e.outcome)),
       num(ms(e.duration_ms)), num(ms(e.model_ms)), num(ms(e.tool_ms)), num(fmtInt(e.rounds))]);
 }
 

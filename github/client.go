@@ -1042,7 +1042,7 @@ func PRStateLabel(s *PRSummary) string {
 	if s.Merged {
 		return "merged"
 	}
-	if s.State == "closed" {
+	if s.State == PRStateClosed {
 		return "closed (not merged)"
 	}
 	return s.State
@@ -1264,7 +1264,7 @@ func (c *Client) GetCommit(ctx context.Context, owner, repo, sha, pathFilter str
 }
 func (c *Client) ListPullRequests(ctx context.Context, owner, repo, state string, limit int) ([]PRSummary, error) {
 	if state == "" {
-		state = "all"
+		state = PRStateAll
 	}
 	if limit <= 0 {
 		limit = 10
@@ -1337,7 +1337,7 @@ func (c *Client) FindSimilarOpenPullRequest(ctx context.Context, owner, repo, ba
 	candidateFiles := makeSet(candidate.ChangedFiles)
 
 	opts := &gh.PullRequestListOptions{
-		State:       "open",
+		State:       PRStateOpen,
 		Sort:        "updated",
 		Direction:   "desc",
 		ListOptions: gh.ListOptions{PerPage: 100},
@@ -1414,7 +1414,7 @@ func (c *Client) FindSimilarOpenPullRequest(ctx context.Context, owner, repo, ba
 // routed onto a PR that already exists instead of opening another one.
 func (c *Client) FindOpenPullRequestByHead(ctx context.Context, owner, repo, branch string) (*PRSummary, error) {
 	opts := &gh.PullRequestListOptions{
-		State:       "open",
+		State:       PRStateOpen,
 		Head:        owner + ":" + branch,
 		ListOptions: gh.ListOptions{PerPage: 10},
 	}
@@ -1736,12 +1736,12 @@ func (c *Client) GetWorkflowRunSummary(ctx context.Context, owner, repo string, 
 		URL:        run.GetHTMLURL(),
 	}
 
-	jobs, _, err := c.api.Actions.ListWorkflowJobs(ctx, owner, repo, runID, nil)
+	jobs, err := c.listRunJobs(ctx, owner, repo, runID)
 	if err != nil {
-		return summary, fmt.Errorf("failed to list jobs for run %d: %w", runID, err)
+		return summary, err
 	}
 
-	for _, job := range jobs.Jobs {
+	for _, job := range jobs {
 		js := WorkflowJobSummary{
 			Name:       job.GetName(),
 			Status:     job.GetStatus(),
@@ -1843,13 +1843,11 @@ func (c *Client) downloadJobLog(ctx context.Context, owner, repo string, jobID i
 	return string(body), nil
 }
 
-var logTimestampRe = regexp.MustCompile(`(?m)^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+Z `)
-
 // trimJobLog strips per-line timestamps and, when the log is longer than
 // limit, keeps the tail plus a window around the first ##[error] marker so the
 // failing step's output survives even when post-job steps follow it.
 func trimJobLog(content string, limit int) string {
-	content = logTimestampRe.ReplaceAllString(content, "")
+	content = cleanJobLog(content)
 	if len(content) <= limit {
 		return content
 	}
@@ -1956,7 +1954,7 @@ const maxPRSearchResults = 50
 func (c *Client) SearchPullRequests(ctx context.Context, org, text, state string) ([]PRSummary, error) {
 	q := fmt.Sprintf("%s type:pr org:%s", text, org)
 	switch state {
-	case "open", "closed":
+	case PRStateOpen, PRStateClosed:
 		q += " state:" + state
 	case "merged":
 		q += " is:merged"

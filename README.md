@@ -326,7 +326,7 @@ URL:
 | Projects | `/ui/projects` | Standing goals arbetern pursues on one repository, or across an organization's repositories, with status, open, ready and merged PRs, merge rate and resolved problems; each opens at `/ui/project/<id>` with its statistics, 30-day chart, tasks with their follow-up rounds and session transcripts, backlog, project memory and editor. Shown only when projects are enabled, and only project admins can change one — see [docs/PROJECTS.md](docs/PROJECTS.md) |
 | Workflows | `/ui/workflows` | Every workflow across agents with schedule, status, last run, run / delete actions and GitOps sync state; each opens at `/ui/<agent>/workflow/<id>` with its flow diagram, prompt or tasks, run history and editor. "Run now" and "Sync now" both return immediately and report through the shared state the page polls, so neither holds a browser request open for the minutes they take |
 | Dashboards | `/ui/dashboards` | Every dashboard across agents (source dashboards, prompt templates, rendered reports) with sync state; each opens at `/ui/<agent>/dashboard/<id>` |
-| Pull requests | `/ui/pulls` | Open pull requests the agents authored, found by the marker every arbetern-written PR body carries: agent, requester, entry source (Slack / chat / workflow / project) and age, filterable by agent; ready-for-review PRs are listed first, drafts last with a draft label |
+| Pull requests | `/ui/pulls` | Open pull requests the agents authored, found by the marker every arbetern-written PR body carries: agent, who or what is behind it (the requester, the workflow or the project), entry source (Slack / chat / workflow / dashboard / project) and age, filterable by agent and searchable by title, repository or requester; ready-for-review PRs are listed first, drafts last with a draft label |
 | Tickets | `/ui/tickets` | Unresolved Jira issues assigned to or reported by the account behind the Atlassian integration: type, status, priority, assignee, reporter, labels and age, filterable by project and by assigned or reported |
 | Backend | `/ui/backend` | Read-only browser of the state bucket laid out as folders, with an object viewer that masks secret-looking values, plus a sample of the vector index; visible only to the Slack user groups or emails in `backendView` (closed when none are set) |
 | Your context | `/ui/context` | A profile of the signed-in person written from their own turns: what they work on, the channels and repositories they keep touching, how they use each agent, and counted metrics — with the turns it was written from behind a History tab. Aggregated across every agent and every identity they are recorded under (Slack ID, email) by the background pass, prose and all, so the page is one object read. Reached from the user button, not the rail, and open to anyone signed in: it reads only what is keyed to the identities the request authenticated as, so it needs no allow-list. See [docs/STATE.md](docs/STATE.md#aggregated-per-person-context) |
@@ -885,14 +885,16 @@ training cutoff.
 
 The `modify_file`, `create_file`, `delete_file`, `move_file`, and `regex_replace_file` tools all accept
 an optional `pr_body` argument. When supplied, the LLM-authored Markdown is
-used verbatim as the PR description (with a single-line `_Automated via
-Slack by Real Name (<@user>)_` attribution footer appended); when omitted, a
-generic template is used as a fallback. The name comes from the requester's
-Slack profile (`users.info`, real name first, then display name) and is
-resolved once per run — GitHub does not render `<@U123>`, so without the name
-a reviewer only sees an opaque ID. The raw mention stays alongside it as the
-stable key back to the Slack profile; when the lookup fails or there is no
-Slack identity (a web-chat turn), the footer degrades to the bare mention.
+used verbatim as the PR description, with a single-line attribution footer
+appended: `_Automated via Slack by Real Name (<@user>)_`, where the entry path
+reads `Slack`, `the web chat` or `a dashboard render`. When omitted, a generic
+template that names the same attribution is used. The name comes from the
+requester's Slack profile (`users.info`, real name first, then display name)
+and is resolved once per run — GitHub does not render `<@U123>`, so without the
+name a reviewer only sees an opaque ID. The raw mention stays alongside it as
+the stable key back to the Slack profile. When the lookup fails the footer
+keeps the bare mention; a turn with no Slack member behind it (a web-chat user
+Slack does not know) reads `an unresolved user`.
 
 Every body, supplied or fallback, also ends with an invisible HTML comment —
 `<!-- arbetern agent=<agent> source=<slack|chat|workflow|dashboard> user=<slack-id> -->`,
@@ -903,9 +905,10 @@ attribution phrases above. A pull request opened for a [project](#projects)
 carries `source=project project=<id> task=<task>` in place of `user=`. A
 workflow run's footer names the workflow, `_Automated via the "<name>"
 workflow_`, not its owner, and its marker carries `workflow=<id>` in place of
-`user=`. The page names the requester from the footer, or from their Slack
-profile when the footer holds only the mention, and lists a project's or a
-workflow's pull requests under its name, linked to its page.
+`user=`. One type in `github/attribution.go` writes and parses both the footer
+and the marker, so the page cannot drift from what the tools write. The page
+lists each pull request under who or what is behind it: the requester, by
+name, or the project or workflow, linked to its page.
 
 Only the write call that opens a PR establishes its body — later calls
 grouped into that same PR ignore their `pr_body` argument.

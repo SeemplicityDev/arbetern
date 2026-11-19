@@ -94,7 +94,7 @@ Once configured, use the agent's slash command in any channel the bot has been i
 ```
 
 ```
-/ovad please add env var KEY=NAME in amplify.tf in devops-infra repository
+/ovad please add env var KEY=NAME in main.tf in infra-live repository
 ```
 
 ## Troubleshooting

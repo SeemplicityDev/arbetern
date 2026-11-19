@@ -13,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/justmike1/arbetern/internal/text"
 )
 
 const (
@@ -195,11 +197,7 @@ func FormatMonitors(monitors []Monitor, site string) string {
 		fmt.Fprintf(&sb, "%s *%s* (ID: %d)\n", emoji, m.Name, m.ID)
 		fmt.Fprintf(&sb, "  Status: %s | Type: %s\n", status, m.Type)
 		if m.Message != "" {
-			msg := m.Message
-			if len(msg) > 300 {
-				msg = msg[:300] + "…"
-			}
-			fmt.Fprintf(&sb, "  Message: %s\n", msg)
+			fmt.Fprintf(&sb, "  Message: %s\n", text.Truncate(m.Message, 300))
 		}
 		if len(m.Tags) > 0 {
 			fmt.Fprintf(&sb, "  Tags: %s\n", strings.Join(m.Tags, ", "))
@@ -226,18 +224,10 @@ func FormatMonitorDetail(m *Monitor, site string) string {
 	fmt.Fprintf(&sb, "• Type: %s\n", m.Type)
 	fmt.Fprintf(&sb, "• Status: %s\n", status)
 	if m.Query != "" {
-		q := m.Query
-		if len(q) > 500 {
-			q = q[:500] + "…"
-		}
-		fmt.Fprintf(&sb, "• Query: `%s`\n", q)
+		fmt.Fprintf(&sb, "• Query: `%s`\n", text.Truncate(m.Query, 500))
 	}
 	if m.Message != "" {
-		msg := m.Message
-		if len(msg) > 500 {
-			msg = msg[:500] + "…"
-		}
-		fmt.Fprintf(&sb, "• Message:\n%s\n", msg)
+		fmt.Fprintf(&sb, "• Message:\n%s\n", text.Truncate(m.Message, 500))
 	}
 	if len(m.Tags) > 0 {
 		fmt.Fprintf(&sb, "• Tags: %s\n", strings.Join(m.Tags, ", "))
@@ -280,11 +270,7 @@ func flattenLogAttrs(prefix string, v interface{}, out *[]string) {
 	case nil:
 		return
 	default:
-		s := fmt.Sprintf("%v", t)
-		if len(s) > 200 {
-			s = s[:200] + "…"
-		}
-		*out = append(*out, prefix+":"+s)
+		*out = append(*out, prefix+":"+text.Truncate(fmt.Sprintf("%v", t), 200))
 	}
 }
 
@@ -305,10 +291,7 @@ func FormatLogSearch(resp *LogSearchResponse, site string) string {
 		svc := attrs.Service
 		host := attrs.Host
 		status := attrs.Status
-		msg := attrs.Message
-		if len(msg) > 300 {
-			msg = msg[:300] + "…"
-		}
+		msg := text.Truncate(attrs.Message, 300)
 
 		statusEmoji := ""
 		switch status {
@@ -428,11 +411,7 @@ func FormatDashboardList(dashboards []DashboardSummary, site string) string {
 	for _, d := range dashboards {
 		fmt.Fprintf(&sb, "• *%s* (ID: %s)\n", d.Title, d.ID)
 		if d.Description != "" {
-			desc := d.Description
-			if len(desc) > 150 {
-				desc = desc[:150] + "…"
-			}
-			fmt.Fprintf(&sb, "  %s\n", desc)
+			fmt.Fprintf(&sb, "  %s\n", text.Truncate(d.Description, 150))
 		}
 		fmt.Fprintf(&sb, "  Layout: %s | Author: %s\n", d.LayoutType, d.AuthorHandle)
 		fmt.Fprintf(&sb, "  URL: <https://app.%s/dashboard/%s|View in Datadog>\n\n", site, d.ID)
@@ -610,11 +589,7 @@ func decodeJSON(resp *http.Response, body []byte, target interface{}) error {
 		return fmt.Errorf("datadog returned empty body (status=%d, content-length=%s)", resp.StatusCode, resp.Header.Get("Content-Length"))
 	}
 	if err := json.Unmarshal(body, target); err != nil {
-		preview := string(body)
-		if len(preview) > 200 {
-			preview = preview[:200] + "…"
-		}
-		return fmt.Errorf("decoding response (status=%d, %d bytes): %w: %s", resp.StatusCode, len(body), err, preview)
+		return fmt.Errorf("decoding response (status=%d, %d bytes): %w: %s", resp.StatusCode, len(body), err, text.Truncate(string(body), 200))
 	}
 	return nil
 }

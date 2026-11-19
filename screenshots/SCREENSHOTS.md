@@ -17,9 +17,10 @@ agent roster with per-agent volume, top users, and where requests come from.
 ## Integrations
 
 Every connector the agents can reach, with its live permission and auth state
-— Slack, GitHub, Jira, Confluence, NVD, Salesforce, Chorus, Datadog, AWS,
-Azure, Databricks, ClickHouse Cloud, Freshworks, Google Drive / Sheets. Each
-card names the credential type behind it; opening one shows scopes and tools.
+— Slack, GitHub, Jira, Confluence, NVD, Salesforce, Chorus, Datadog,
+Anthropic, AWS, Azure, Databricks, ClickHouse Cloud, Freshworks, Document360,
+Grafana, Google Drive / Sheets. Each connected card names the credential type
+behind it; opening one shows scopes and tools.
 
 ![Integrations](integrations.png)
 

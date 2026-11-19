@@ -226,11 +226,7 @@ func (c *Client) ListEngagements(filter EngagementFilter) ([]Engagement, error) 
 		}
 
 		// Diagnostic: log response shape to debug parsing mismatches.
-		preview := string(data)
-		if len(preview) > 300 {
-			preview = preview[:300] + "…"
-		}
-		log.Printf("[chorus] engagements page %d raw (%d bytes): %s", page+1, len(data), preview)
+		log.Printf("[chorus] engagements page %d raw (%d bytes): %s", page+1, len(data), text.Truncate(string(data), 300))
 
 		// First try our expected struct.
 		var pg engagementsPage

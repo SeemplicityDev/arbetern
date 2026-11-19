@@ -12,7 +12,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -41,10 +40,12 @@ import (
 	"github.com/justmike1/arbetern/grafana"
 	"github.com/justmike1/arbetern/internal/httpx"
 	"github.com/justmike1/arbetern/internal/journal"
+	"github.com/justmike1/arbetern/internal/origin"
 	"github.com/justmike1/arbetern/internal/progress"
 	"github.com/justmike1/arbetern/internal/queue"
 	"github.com/justmike1/arbetern/internal/safego"
 	"github.com/justmike1/arbetern/internal/store"
+	"github.com/justmike1/arbetern/internal/text"
 	"github.com/justmike1/arbetern/internal/ttlcache"
 	"github.com/justmike1/arbetern/internal/vectors"
 	"github.com/justmike1/arbetern/llm"
@@ -631,11 +632,6 @@ func (c *emailUserIDCache) resolve(slackClient *slack.Client, email string) stri
 	return userID
 }
 
-// slackUserIDRe matches Slack member IDs, the only user keys worth resolving
-// to a display name (the fallback bucket for an unresolvable chat sender is
-// not one, and is shown as-is).
-var slackUserIDRe = regexp.MustCompile(`^[UW][A-Z0-9]{6,}$`)
-
 type userNameCache struct {
 	mu       sync.Mutex
 	names    map[string]userNameEntry
@@ -656,7 +652,7 @@ func newUserNameCache(ttl time.Duration) *userNameCache {
 // lookup is pending. Misses are fetched in the background so the summary
 // handler never waits on Slack; the name lands on the next refresh.
 func (c *userNameCache) resolve(slackClient *slack.Client, id string) string {
-	if slackClient == nil || !slackUserIDRe.MatchString(id) {
+	if slackClient == nil || !slack.IsUserID(id) {
 		return ""
 	}
 	c.mu.Lock()
@@ -669,17 +665,11 @@ func (c *userNameCache) resolve(slackClient *slack.Client, id string) string {
 	}
 	c.inflight[id] = true
 	safego.Go("billing: resolve user name "+id, func() {
-		name := ""
-		if user, err := slackClient.GetUserInfo(id); err == nil && user != nil {
-			for _, candidate := range []string{user.RealName, user.Profile.RealName, user.Profile.DisplayName} {
-				if n := strings.TrimSpace(candidate); n != "" {
-					name = n
-					break
-				}
-			}
-		} else if err != nil {
+		user, err := slackClient.GetUserInfo(id)
+		if err != nil {
 			log.Printf("[billing] slack users.info %s failed: %v", id, err)
 		}
+		name := slack.DisplayName(user)
 		c.mu.Lock()
 		c.names[id] = userNameEntry{name: name, fetched: time.Now()}
 		delete(c.inflight, id)
@@ -790,7 +780,7 @@ func newProfileEnricher(slackClient *slack.Client, models *llm.Client, bill *bil
 }
 
 func (p *profileEnricher) lookup(id string) slackPerson {
-	if p.slack == nil || !slackUserIDRe.MatchString(id) {
+	if p.slack == nil || !slack.IsUserID(id) {
 		return slackPerson{}
 	}
 	return p.people.get(id, func() slackPerson {
@@ -803,9 +793,9 @@ func (p *profileEnricher) lookup(id string) slackPerson {
 			return slackPerson{}
 		}
 		out := slackPerson{facts: commands.PersonFacts{
-			Name:     firstNonBlank(user.RealName, user.Profile.RealName, user.Profile.DisplayName),
+			Name:     slack.DisplayName(user),
 			Title:    user.Profile.Title,
-			Timezone: firstNonBlank(user.TZLabel, user.TZ),
+			Timezone: text.FirstNonBlank(user.TZLabel, user.TZ),
 		}}
 		if email := strings.TrimSpace(user.Profile.Email); email != "" {
 			out.aliases = []string{commands.UserContextID(email)}
@@ -888,7 +878,7 @@ func (p *profileEnricher) Summarize(ctx context.Context, system, user string) (s
 	if p.billing != nil && usage != nil {
 		p.billing.Record(billing.Event{
 			Agent:              billingAgentPlatform,
-			Source:             billing.SourceProfile,
+			Source:             origin.Profile,
 			Model:              p.models.Model(),
 			PromptTokens:       usage.PromptTokens,
 			CachedPromptTokens: usage.CachedPromptTokens,
@@ -929,11 +919,11 @@ func (c *identityCache) lookup(email string, slackClient *slack.Client, jira *at
 			id.Slack = &slackIdentity{
 				ID:          u.ID,
 				Handle:      u.Name,
-				RealName:    firstNonBlank(u.RealName, u.Profile.RealName),
+				RealName:    text.FirstNonBlank(u.RealName, u.Profile.RealName),
 				DisplayName: u.Profile.DisplayName,
 				Title:       u.Profile.Title,
-				Timezone:    firstNonBlank(u.TZLabel, u.TZ),
-				Avatar:      firstNonBlank(u.Profile.Image72, u.Profile.Image48),
+				Timezone:    text.FirstNonBlank(u.TZLabel, u.TZ),
+				Avatar:      text.FirstNonBlank(u.Profile.Image72, u.Profile.Image48),
 			}
 		}
 	}
@@ -955,15 +945,6 @@ func (c *identityCache) lookup(email string, slackClient *slack.Client, jira *at
 	c.entries[email] = id
 	c.mu.Unlock()
 	return id
-}
-
-func firstNonBlank(values ...string) string {
-	for _, v := range values {
-		if s := strings.TrimSpace(v); s != "" {
-			return s
-		}
-	}
-	return ""
 }
 
 // checkChatRBAC authorizes a chat-UI request for an agent using two layers,
@@ -3163,6 +3144,22 @@ func main() {
 	})
 
 	// API: open pull requests the agents authored, found by the body marker.
+	originNames := map[github.OriginKind]func(pr github.AutomatedPR) (string, bool){
+		github.OriginUser: func(pr github.AutomatedPR) (string, bool) {
+			if pr.Origin.Name != "" {
+				return "", false
+			}
+			name := userNames.resolve(slackClient, pr.Origin.ID)
+			return name, name != ""
+		},
+		github.OriginWorkflow: func(pr github.AutomatedPR) (string, bool) { return wfRegistry.Name(pr.Agent, pr.Origin.ID) },
+		github.OriginProject: func(pr github.AutomatedPR) (string, bool) {
+			if projRegistry == nil {
+				return "", false
+			}
+			return projRegistry.Name(pr.Origin.ID)
+		},
+	}
 	pulls := ttlcache.New(pullsCacheTTL, func(ctx context.Context) ([]github.AutomatedPR, error) {
 		prs, err := ghClient.ListOpenAutomatedPullRequests(ctx)
 		if err != nil {
@@ -3172,13 +3169,12 @@ func main() {
 			if prs[i].Agent == "" {
 				prs[i].Agent = agentFromTitle(prs[i].Title, knownAgents)
 			}
-			if prs[i].RequestedBy == "" {
-				prs[i].RequestedBy = userNames.resolve(slackClient, prs[i].RequesterID)
+			o := prs[i].Origin
+			if o == nil || o.ID == "" {
+				continue
 			}
-			if prs[i].Workflow != "" {
-				if name, ok := wfRegistry.Name(prs[i].Agent, prs[i].Workflow); ok {
-					prs[i].WorkflowName = name
-				}
+			if name, ok := originNames[o.Kind](prs[i]); ok {
+				o.Name = name
 			}
 		}
 		return prs, nil

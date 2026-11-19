@@ -26,13 +26,13 @@ func openedBy(self, author, body string) bool {
 
 // ClosePullRequest closes a pull request without merging it.
 func (c *Client) ClosePullRequest(ctx context.Context, owner, repo string, number int) error {
-	if _, _, err := c.api.PullRequests.Edit(ctx, owner, repo, number, &gh.PullRequest{State: new("closed")}); err != nil {
+	if _, _, err := c.api.PullRequests.Edit(ctx, owner, repo, number, &gh.PullRequest{State: new(PRStateClosed)}); err != nil {
 		return fmt.Errorf("failed to close PR #%d: %w", number, err)
 	}
 	return nil
 }
 
-// DeleteOwnBranch deletes branch if the client's own account made it and otherwise returns why it was kept; an empty base means its last pull request's base, else the default branch.
+// DeleteOwnBranch deletes a branch only the client's own account worked on, or says why it was kept; an empty base means its last pull request's base.
 func (c *Client) DeleteOwnBranch(ctx context.Context, owner, repo, branch, base string) (kept string, err error) {
 	sha, err := c.BranchHead(ctx, owner, repo, branch)
 	if IsNotFound(err) {
@@ -59,7 +59,7 @@ func (c *Client) DeleteOwnBranch(ctx context.Context, owner, repo, branch, base 
 	}
 	ownPR := false
 	for _, pr := range prs {
-		if pr.GetState() == "open" {
+		if pr.GetState() == PRStateOpen {
 			return fmt.Sprintf("pull request #%d is still open from it", pr.GetNumber()), nil
 		}
 		ownPR = ownPR || openedBy(self, pr.GetUser().GetLogin(), pr.GetBody())
@@ -70,7 +70,7 @@ func (c *Client) DeleteOwnBranch(ctx context.Context, owner, repo, branch, base 
 	if base == "" {
 		base = def
 	}
-	into, _, err := c.api.PullRequests.List(ctx, owner, repo, &gh.PullRequestListOptions{State: "open", Base: branch, ListOptions: gh.ListOptions{PerPage: 1}})
+	into, _, err := c.api.PullRequests.List(ctx, owner, repo, &gh.PullRequestListOptions{State: PRStateOpen, Base: branch, ListOptions: gh.ListOptions{PerPage: 1}})
 	if err != nil {
 		return "", fmt.Errorf("failed to list pull requests into %s: %w", branch, err)
 	}
@@ -104,7 +104,7 @@ func (c *Client) DeleteOwnBranch(ctx context.Context, owner, repo, branch, base 
 }
 
 func (c *Client) pullRequestsByHead(ctx context.Context, owner, repo, branch string) ([]*gh.PullRequest, error) {
-	opts := &gh.PullRequestListOptions{State: "all", Head: owner + ":" + branch, ListOptions: gh.ListOptions{PerPage: 30}}
+	opts := &gh.PullRequestListOptions{State: PRStateAll, Head: owner + ":" + branch, ListOptions: gh.ListOptions{PerPage: 30}}
 	prs, _, err := c.api.PullRequests.List(ctx, owner, repo, opts)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list pull requests from %s: %w", branch, err)

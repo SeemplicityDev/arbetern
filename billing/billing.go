@@ -22,6 +22,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/justmike1/arbetern/internal/origin"
 	"github.com/justmike1/arbetern/internal/safego"
 	"github.com/justmike1/arbetern/internal/store"
 )
@@ -40,34 +41,23 @@ const (
 	maxMergeAttempts = 4
 )
 
-// Source labels the entry path that produced a turn.
-const (
-	SourceSlack     = "slack"
-	SourceWorkflow  = "workflow"
-	SourceChat      = "chat"
-	SourceDashboard = "dashboard"
-	// SourceProfile is the platform describing a person from their own turns,
-	// not an agent answering anyone.
-	SourceProfile = "profile"
-)
-
 // Event is one billable LLM turn. Cost is derived from Model + token counts at
 // record time, so callers only supply tokens and metadata. PromptTokens and
 // CompletionTokens are the cumulative counts across all tool-loop rounds.
 type Event struct {
-	At                 time.Time `json:"at"`
-	Agent              string    `json:"agent"`
-	Source             string    `json:"source"`
-	UserID             string    `json:"user_id,omitempty"`
-	WorkflowID         string    `json:"workflow_id,omitempty"`
-	WorkflowName       string    `json:"workflow_name,omitempty"`
-	Model              string    `json:"model"`
-	Requests           int       `json:"requests,omitempty"` // model calls behind an aggregated event; one when absent
-	PromptTokens       int       `json:"prompt_tokens"`
-	CachedPromptTokens int       `json:"cached_prompt_tokens,omitempty"`
-	CacheWriteTokens   int       `json:"cache_write_tokens,omitempty"`
-	CompletionTokens   int       `json:"completion_tokens"`
-	TotalTokens        int       `json:"total_tokens"`
+	At                 time.Time     `json:"at"`
+	Agent              string        `json:"agent"`
+	Source             origin.Source `json:"source"`
+	UserID             string        `json:"user_id,omitempty"`
+	WorkflowID         string        `json:"workflow_id,omitempty"`
+	WorkflowName       string        `json:"workflow_name,omitempty"`
+	Model              string        `json:"model"`
+	Requests           int           `json:"requests,omitempty"` // model calls behind an aggregated event; one when absent
+	PromptTokens       int           `json:"prompt_tokens"`
+	CachedPromptTokens int           `json:"cached_prompt_tokens,omitempty"`
+	CacheWriteTokens   int           `json:"cache_write_tokens,omitempty"`
+	CompletionTokens   int           `json:"completion_tokens"`
+	TotalTokens        int           `json:"total_tokens"`
 	// Compression{Input,Saved}Tokens track Headroom savings for this turn; the
 	// saved-% is derived as CompressionSavedTokens / CompressionInputTokens.
 	CompressionInputTokens int     `json:"compression_input_tokens,omitempty"`
@@ -162,7 +152,7 @@ func (m *monthData) add(e Event) {
 	bucket(m.Days, dayKey(e.At)).add(e)
 	bucket(m.Agents, e.Agent).add(e)
 	bucket(m.Models, e.Model).add(e)
-	bucket(m.Sources, e.Source).add(e)
+	bucket(m.Sources, string(e.Source)).add(e)
 	if e.UserID != "" {
 		bucket(m.Users, e.UserID).add(e)
 		bucket(m.UserAgents, e.UserID+userAgentSep+e.Agent).add(e)
@@ -259,9 +249,7 @@ func (s *Store) Record(e Event) {
 	if e.At.IsZero() {
 		e.At = time.Now().UTC()
 	}
-	if e.Source == "" {
-		e.Source = SourceSlack
-	}
+	e.Source = e.Source.OrDefault()
 	if e.CostUSD == 0 {
 		cost, ok := Cost(e.Model, e.PromptTokens, e.CachedPromptTokens, e.CacheWriteTokens, e.CompletionTokens)
 		e.CostUSD = cost

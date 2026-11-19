@@ -151,7 +151,7 @@ func (c clause) admits(v []int) bool {
 	return false
 }
 
-// pythonVersions reports which minor versions a requires-python specifier admits; a minor counts when any of its patch releases does.
+// A minor version counts when any of its patch releases is admitted.
 func pythonVersions(spec string) (func(major, minor int) bool, error) {
 	clauses, err := parseSpecifier(spec)
 	if err != nil {
@@ -171,7 +171,7 @@ func pythonVersions(spec string) (func(major, minor int) bool, error) {
 	}, nil
 }
 
-// wheelAdmitted reports whether a wheel installs on some Python version admits allows; a tag it cannot read keeps the wheel.
+// A tag it cannot read keeps the wheel.
 func wheelAdmitted(filename string, admits func(major, minor int) bool) bool {
 	parts := strings.Split(strings.TrimSuffix(filename, ".whl"), "-")
 	if len(parts) < 5 {
@@ -181,7 +181,7 @@ func wheelAdmitted(filename string, admits func(major, minor int) bool) bool {
 	return slices.ContainsFunc(strings.Split(parts[len(parts)-3], "."), func(tag string) bool { return tagAdmitted(tag, abi, admits) })
 }
 
-// tagAdmitted reads a python tag such as cp312 or py3: pyXY and abi3 wheels install on their version and every later one, the rest on their version only.
+// pyXY and abi3 wheels install on their version and every later one, the rest on their version only.
 func tagAdmitted(tag, abi string, admits func(major, minor int) bool) bool {
 	i := strings.IndexFunc(tag, unicode.IsDigit)
 	if i <= 0 {

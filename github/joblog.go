@@ -22,7 +22,14 @@ const (
 	MaxJobLogTerms = 8
 )
 
-var ansiRe = regexp.MustCompile("\x1b\\[[0-9;?]*[A-Za-z]")
+var (
+	logTimestampRe = regexp.MustCompile(`(?m)^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z `)
+	ansiRe         = regexp.MustCompile("\x1b\\[[0-9;?]*[A-Za-z]")
+)
+
+func cleanJobLog(raw string) string {
+	return ansiRe.ReplaceAllString(logTimestampRe.ReplaceAllString(raw, ""), "")
+}
 
 // JobLogLines holds the lines of one job's log that matched a search.
 type JobLogLines struct {
@@ -47,7 +54,7 @@ func (c *Client) WorkflowJobLogLines(ctx context.Context, owner, repo string, ru
 		return nil, err
 	}
 	out := &JobLogLines{Job: picked.GetName(), Conclusion: cmp.Or(picked.GetConclusion(), picked.GetStatus())}
-	for line := range strings.SplitSeq(ansiRe.ReplaceAllString(logTimestampRe.ReplaceAllString(raw, ""), ""), "\n") {
+	for line := range strings.SplitSeq(cleanJobLog(raw), "\n") {
 		line = strings.TrimRight(line, " \t\r")
 		lower := strings.ToLower(line)
 		if !containsAny(lower, terms) {
@@ -61,31 +68,40 @@ func (c *Client) WorkflowJobLogLines(ctx context.Context, owner, repo string, ru
 	return out, nil
 }
 
-func (c *Client) runJob(ctx context.Context, owner, repo string, runID int64, name string) (*gh.WorkflowJob, error) {
-	want := strings.ToLower(strings.TrimSpace(name))
-	if want == "" {
-		return nil, errors.New("no job named")
-	}
+func (c *Client) listRunJobs(ctx context.Context, owner, repo string, runID int64) ([]*gh.WorkflowJob, error) {
 	opts := &gh.ListWorkflowJobsOptions{ListOptions: gh.ListOptions{PerPage: 100}}
-	var all, matches []*gh.WorkflowJob
+	var all []*gh.WorkflowJob
 	for page := 0; page < maxRunJobPages; page++ {
 		jobs, resp, err := c.api.Actions.ListWorkflowJobs(ctx, owner, repo, runID, opts)
 		if err != nil {
 			return nil, fmt.Errorf("failed to list jobs for run %d: %w", runID, err)
 		}
-		for _, j := range jobs.Jobs {
-			all = append(all, j)
-			switch lower := strings.ToLower(j.GetName()); {
-			case lower == want:
-				return j, nil
-			case strings.Contains(lower, want):
-				matches = append(matches, j)
-			}
-		}
+		all = append(all, jobs.Jobs...)
 		if resp == nil || resp.NextPage == 0 {
 			break
 		}
 		opts.Page = resp.NextPage
+	}
+	return all, nil
+}
+
+func (c *Client) runJob(ctx context.Context, owner, repo string, runID int64, name string) (*gh.WorkflowJob, error) {
+	want := strings.ToLower(strings.TrimSpace(name))
+	if want == "" {
+		return nil, errors.New("no job named")
+	}
+	all, err := c.listRunJobs(ctx, owner, repo, runID)
+	if err != nil {
+		return nil, err
+	}
+	var matches []*gh.WorkflowJob
+	for _, j := range all {
+		switch lower := strings.ToLower(j.GetName()); {
+		case lower == want:
+			return j, nil
+		case strings.Contains(lower, want):
+			matches = append(matches, j)
+		}
 	}
 	switch len(matches) {
 	case 1:
