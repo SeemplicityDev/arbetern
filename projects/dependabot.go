@@ -131,34 +131,38 @@ func alertFingerprint(owner, repo, pkg string) string {
 
 func dependencyGroup(fingerprint, repo string, alerts []github.DependabotAlert, now time.Time) Group {
 	slices.SortFunc(alerts, func(a, b github.DependabotAlert) int {
-		return cmp.Or(cmp.Compare(severityRank(b.Severity), severityRank(a.Severity)), strings.Compare(a.Manifest, b.Manifest), cmp.Compare(a.Number, b.Number))
+		return cmp.Or(cmp.Compare(severityRank(b.Severity), severityRank(a.Severity)), strings.Compare(a.GHSA, b.GHSA), strings.Compare(a.Manifest, b.Manifest), cmp.Compare(a.Number, b.Number))
 	})
 	top := alerts[0]
 	d := &Dependency{Repo: repo, Ecosystem: oneLine(top.Ecosystem, 40), Package: oneLine(top.Package, 200), Severity: top.Severity}
 	g := Group{Fingerprint: fingerprint, Count: len(alerts), LastSeen: stamp(now), Dependency: d}
+	advisories, manifests := map[string]bool{}, map[string]int{}
 	for _, a := range alerts {
 		g.FirstSeen = earliest(g.FirstSeen, stamp(a.CreatedAt))
-		if len(d.Alerts) < maxGroupAlerts {
-			d.Alerts = append(d.Alerts, Alert{
-				Number:       a.Number,
-				Advisory:     oneLine(a.GHSA, 40),
-				Manifest:     oneLine(a.Manifest, 300),
-				Scope:        oneLine(a.Scope, 20),
-				Relationship: oneLine(a.Relationship, 20),
-				CreatedAt:    stamp(a.CreatedAt),
-			})
+		if !advisories[a.GHSA] && len(d.Advisories) < maxGroupAdvisories {
+			advisories[a.GHSA] = true
+			adv := Advisory{ID: oneLine(a.GHSA, 40), CVE: oneLine(a.CVE, 40), Severity: a.Severity, Vulnerable: oneLine(a.Vulnerable, 200), Patched: oneLine(a.Patched, 100)}
+			if len(d.Advisories) < maxAdvisorySummary {
+				adv.Summary = oneLine(a.Summary, maxAdvisoryChars)
+			}
+			d.Advisories = append(d.Advisories, adv)
 		}
-		if len(d.Advisories) < maxGroupAdvisories && !slices.ContainsFunc(d.Advisories, func(x Advisory) bool { return x.ID == a.GHSA }) {
-			d.Advisories = append(d.Advisories, Advisory{
-				ID:         oneLine(a.GHSA, 40),
-				CVE:        oneLine(a.CVE, 40),
-				Severity:   a.Severity,
-				Summary:    oneLine(a.Summary, maxAdvisoryChars),
-				Vulnerable: oneLine(a.Vulnerable, 200),
-				Patched:    oneLine(a.Patched, 100),
-			})
+		i, seen := manifests[a.Manifest]
+		if !seen {
+			if len(d.Manifests) == maxGroupManifests {
+				continue
+			}
+			i = len(d.Manifests)
+			manifests[a.Manifest] = i
+			d.Manifests = append(d.Manifests, Manifest{Path: oneLine(a.Manifest, 300), Relationship: oneLine(a.Relationship, 20), Scope: oneLine(a.Scope, 20)})
+		}
+		m := &d.Manifests[i]
+		m.Count++
+		if len(m.Alerts) < maxManifestAlerts {
+			m.Alerts = append(m.Alerts, a.Number)
 		}
 	}
+	slices.SortFunc(d.Manifests, func(a, b Manifest) int { return strings.Compare(a.Path, b.Path) })
 	return g
 }
 

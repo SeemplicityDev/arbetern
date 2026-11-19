@@ -424,12 +424,13 @@ or `repo` changed.
   of that repository, as in a single-repository project, and the git proxy
   refuses pushes anywhere else.
 - **The work order** names the package, its highest severity and its number of
-  open alerts, every advisory (GHSA and CVE ids, severity, summary, vulnerable
-  range and first patched version), and a table of the alerts: number,
-  manifest, whether the dependency is direct or transitive, runtime or
-  development scope, and advisory. It keeps up to 20 advisories and 60 alerts
-  per package, the most severe first, and says how many more are open. The pull
-  request description ends with links to the alerts.
+  open alerts, every advisory (GHSA and CVE ids, severity, vulnerable range and
+  first patched version, with the summaries of the 20 most severe), and a table
+  of the manifests that resolve a vulnerable version: path, whether the
+  dependency is direct or transitive, runtime or development scope, and up to
+  ten of its alert numbers. The lists stop at 200 advisories and 60 manifests,
+  and say so when they do. The pull request description ends with a link to the
+  package's open alerts.
 - **Verdicts.** Dependabot closes an alert once the default branch no longer
   resolves a vulnerable version. A package whose alerts are still open
   `recurrence_grace_hours` after its pull request merged has recurred and gets a

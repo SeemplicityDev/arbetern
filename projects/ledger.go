@@ -47,8 +47,8 @@ type Dependency struct {
 	Ecosystem  string     `json:"ecosystem"`
 	Package    string     `json:"package"`
 	Severity   string     `json:"severity"`             // the highest of its alerts
-	Advisories []Advisory `json:"advisories,omitempty"` // up to 20, dropped once its task is finished
-	Alerts     []Alert    `json:"alerts,omitempty"`     // up to 60, dropped once its task is finished
+	Advisories []Advisory `json:"advisories,omitempty"` // most severe first; dropped once its task is finished
+	Manifests  []Manifest `json:"manifests,omitempty"`  // dropped once its task is finished
 }
 
 // Advisory is a security advisory that some of a dependency's alerts report.
@@ -56,19 +56,18 @@ type Advisory struct {
 	ID         string `json:"id"` // GHSA id
 	CVE        string `json:"cve,omitempty"`
 	Severity   string `json:"severity"`
-	Summary    string `json:"summary"`
+	Summary    string `json:"summary,omitempty"` // kept for the most severe advisories only
 	Vulnerable string `json:"vulnerable"`        // vulnerable version range
 	Patched    string `json:"patched,omitempty"` // first patched version; empty while none is published
 }
 
-// Alert is one open Dependabot alert: a manifest that resolves the dependency to a vulnerable version.
-type Alert struct {
-	Number       int    `json:"number"`
-	Advisory     string `json:"advisory"`
-	Manifest     string `json:"manifest"`
-	Scope        string `json:"scope,omitempty"`        // runtime | development
+// Manifest is a file that resolves a dependency to a vulnerable version, with the open alerts that name it.
+type Manifest struct {
+	Path         string `json:"path"`
 	Relationship string `json:"relationship,omitempty"` // direct | transitive | inconclusive | unknown
-	CreatedAt    string `json:"created_at"`
+	Scope        string `json:"scope,omitempty"`        // runtime | development
+	Alerts       []int  `json:"alerts"`                 // alert numbers, the most severe first, up to 10
+	Count        int    `json:"count"`                  // open alerts on this manifest
 }
 
 // Group is an error group, a metric series, or a vulnerable dependency, as the project has seen it so far.

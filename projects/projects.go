@@ -108,11 +108,12 @@ const (
 
 	metricRescan        = time.Hour
 	alertRescan         = time.Hour
-	maxGroupAlerts      = 60
-	maxGroupAdvisories  = 20
+	maxGroupAdvisories  = 200
+	maxAdvisorySummary  = 20
 	maxAdvisoryChars    = 300
+	maxGroupManifests   = 60
+	maxManifestAlerts   = 10
 	maxEcosystems       = 10
-	maxAlertLinks       = 20
 	maxSeriesPerSite    = 5000
 	maxEvidenceCauses   = 5
 	evidenceSearchLimit = 50

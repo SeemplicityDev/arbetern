@@ -742,21 +742,24 @@ function pjdSeriesDetailHtml(g) {
 
 function pjdDependencyDetailHtml(g, owner) {
   const d = g.dependency;
-  const alertUrl = n => (owner && d.repo ? safeExternalUrl(`https://github.com/${encodeURIComponent(owner)}/${encodeURIComponent(d.repo)}/security/dependabot/${encodeURIComponent(n)}`) : '');
+  const base = owner && d.repo ? `https://github.com/${encodeURIComponent(owner)}/${encodeURIComponent(d.repo)}/security/dependabot` : '';
+  const alertLink = n => {
+    const url = base && safeExternalUrl(`${base}/${encodeURIComponent(n)}`);
+    return url ? `<a href="${escapeHtml(url)}" target="_blank" rel="noopener">#${fmtInt(n)}</a>` : '#' + fmtInt(n);
+  };
+  const all = base && safeExternalUrl(`${base}?q=${encodeURIComponent('is:open package:' + (d.package || ''))}`);
   const advisories = (d.advisories || []).map(a => `<li><code>${escapeHtml(a.id)}</code>${a.cve ? ` <code>${escapeHtml(a.cve)}</code>` : ''} <span class="tag">${escapeHtml(a.severity || '')}</span> ${escapeHtml(a.summary || '')}
       <span class="muted">· vulnerable ${escapeHtml(a.vulnerable || '—')} · ${a.patched ? 'patched in ' + escapeHtml(a.patched) : 'no patched release yet'}</span></li>`).join('');
-  const alerts = (d.alerts || []).map(a => {
-    const url = alertUrl(a.number);
-    const label = '#' + fmtInt(a.number);
-    return `<li>${url ? `<a href="${escapeHtml(url)}" target="_blank" rel="noopener">${label}</a>` : label} <code>${escapeHtml(a.manifest || '')}</code>
-      <span class="muted">${escapeHtml([a.relationship, a.scope, a.advisory].filter(Boolean).join(' · '))}</span></li>`;
+  const manifests = (d.manifests || []).map(m => {
+    const more = (m.count || 0) - (m.alerts || []).length;
+    return `<li><code>${escapeHtml(m.path || '')}</code> <span class="muted">${escapeHtml([m.relationship, m.scope].filter(Boolean).join(' · '))}</span>
+      · ${(m.alerts || []).map(alertLink).join(' ')}${more > 0 ? ` <span class="muted">+${fmtInt(more)}</span>` : ''}</li>`;
   }).join('');
-  const more = (g.count || 0) - (d.alerts || []).length;
   return pjdChips([
     ['repository', d.repo], ['package', d.package], ['ecosystem', d.ecosystem], ['severity', d.severity], ['open alerts', fmtInt(g.count)],
     ['first opened', g.first_seen && fmtDateTime(g.first_seen)], ['last seen', g.last_seen && fmtDateTime(g.last_seen)],
-  ]) + (advisories ? `<div class="proj-label">Advisories</div><ul class="proj-causes">${advisories}</ul>` : '')
-    + (alerts ? `<div class="proj-label">Alerts${more > 0 ? ` · ${fmtInt(more)} more not listed` : ''}</div><ul class="proj-causes">${alerts}</ul>` : '');
+  ]) + (advisories ? `<div class="proj-label">Advisories · ${fmtInt((d.advisories || []).length)}</div><ul class="proj-causes">${advisories}</ul>` : '')
+    + (manifests ? `<div class="proj-label">Manifests · ${fmtInt((d.manifests || []).length)}${all ? ` · <a href="${escapeHtml(all)}" target="_blank" rel="noopener">all open alerts</a>` : ''}</div><ul class="proj-causes">${manifests}</ul>` : '');
 }
 
 function pjdGroupDetailHtml(g, owner) {
