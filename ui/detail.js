@@ -1037,7 +1037,7 @@ function pjdMetaHtml(p) {
   const wide = (label, html) => `<div class="meta-item proj-wide"><div class="label">${escapeHtml(label)}</div><div class="value">${html}</div></div>`;
   const kind = pjSignal(sig.type);
   const merge = rv.auto_merge ? `auto-merge after ${fmtInt(rv.auto_merge_delay_minutes || 30)}m (${rv.merge_method || 'squash'})` : '';
-  const follow = rv.follow_up ? [rv.draft ? 'drafts' : '', `${fmtInt(rv.max_rounds)} rounds`, `quiet ${fmtInt(rv.settle_minutes)}m`, merge].filter(Boolean).join(' · ') : 'off';
+  const follow = rv.follow_up ? [rv.draft ? 'drafts' : '', `${fmtInt(rv.max_rounds)} rounds`, `quiet ${fmtInt(rv.settle_minutes)}m`, rv.description_check ? `description check ${rv.description_check}` : '', merge].filter(Boolean).join(' · ') : 'off';
   const skills = listNames(skillsData, p.skills);
   const connectors = listNames(mcpData, p.connectors);
   return `<div class="meta-grid proj-meta">
@@ -1320,6 +1320,7 @@ async function projectForm(p) {
       + check('pjf-follow', rv.follow_up, 'Follow each pull request: answer failing checks and review comments until it is ready')
       + check('pjf-draft', rv.draft, 'Open pull requests as drafts and mark them ready once nothing is left')
       + `<div class="form-grid2">${formField('Follow-up rounds', input('pjf-rounds', rv.max_rounds || '', ' type="number" min="1" max="10" step="1" inputmode="numeric" placeholder="5"'), 'Sessions per pull request, 1–10.')}${formField('Quiet minutes', input('pjf-settle', rv.settle_minutes || '', ' type="number" min="5" max="240" step="1" inputmode="numeric" placeholder="15"'), 'Nothing new for this long before a pull request counts as ready.')}</div>`
+      + formField('Description check', input('pjf-dcheck', rv.description_check, ' maxlength="200" placeholder="CI / review"' + code), 'Optional. A check that reads the description, such as an automated review, named as the pull request lists it. When a follow-up round changes only the description, arbetern re-runs that check’s workflow.')
       + check('pjf-automerge', rv.auto_merge, 'Turn on auto-merge once a ready pull request stays unchanged for the delay')
       + `<div class="form-grid2">${formField('Auto-merge delay, minutes', input('pjf-merge-delay', rv.auto_merge_delay_minutes || '', ' type="number" min="5" max="1440" step="1" inputmode="numeric" placeholder="30"'), '5–1440. New changes, a new check result or a comment start it over, and arbetern checks once more before turning auto-merge on.')}${formField('Merge method', `<select class="form-input" id="pjf-merge-method">${['squash', 'rebase', 'merge'].map(m => `<option value="${m}"${(rv.merge_method || 'squash') === m ? ' selected' : ''}>${m}</option>`).join('')}</select>`, 'One the repository allows.')}</div>`
       + formField('Slack channel', input('pjf-slack', nt.slack_channel, ' maxlength="13" placeholder="C0123456789"' + code), 'Optional channel id. It hears about new pull requests, questions, blocked and ready ones, auto-merge, merges, and an automatic pause.')
@@ -1473,6 +1474,7 @@ function pjfBody(isNew) {
     review: pjfReviewShape({
       follow_up: document.getElementById('pjf-follow').checked, draft: document.getElementById('pjf-draft').checked,
       max_rounds: parseInt(formValue('pjf-rounds'), 10) || 0, settle_minutes: parseInt(formValue('pjf-settle'), 10) || 0,
+      description_check: formValue('pjf-dcheck'),
       auto_merge: document.getElementById('pjf-automerge').checked,
       auto_merge_delay_minutes: parseInt(formValue('pjf-merge-delay'), 10) || 0, merge_method: formValue('pjf-merge-method'),
     }),
@@ -1492,9 +1494,10 @@ function pjfBody(isNew) {
   return body;
 }
 
-// The server keeps the auto-merge fields only while auto-merge is on.
+// The server keeps the auto-merge fields only while auto-merge is on, and the description check only with follow-through.
 function pjfReviewShape(rv) {
   const out = { follow_up: !!rv.follow_up, draft: !!rv.draft, max_rounds: rv.max_rounds || 0, settle_minutes: rv.settle_minutes || 0 };
+  if (rv.follow_up && rv.description_check) out.description_check = rv.description_check;
   if (rv.auto_merge) Object.assign(out, { auto_merge: true, auto_merge_delay_minutes: rv.auto_merge_delay_minutes || 0, merge_method: rv.merge_method || 'squash' });
   return out;
 }

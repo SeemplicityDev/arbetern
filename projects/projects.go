@@ -177,6 +177,7 @@ const (
 	minMergeDelay        = 5
 	maxMergeDelay        = 1440
 	defaultMergeMethod   = github.MergeSquash
+	maxDescriptionCheck  = 200
 	maxBranchUpdates     = 3
 	maxBaseMerges        = 20
 	maxLineage           = 100
@@ -250,6 +251,8 @@ type Review struct {
 	AutoMerge             bool   `json:"auto_merge,omitempty"`               // turn on GitHub auto-merge once a ready pull request stays unchanged for the delay
 	AutoMergeDelayMinutes int    `json:"auto_merge_delay_minutes,omitempty"` // 5–1440, default 30
 	MergeMethod           string `json:"merge_method,omitempty"`             // squash | rebase | merge, default squash
+
+	DescriptionCheck string `json:"description_check,omitempty"` // a check that reads the description, re-run in full after a round changes only the description
 }
 
 // Notify names where a project reports what it does.
@@ -779,6 +782,13 @@ func (r *Review) normalize() error {
 	}
 	if !r.AutoMerge {
 		r.AutoMergeDelayMinutes, r.MergeMethod = 0, ""
+	}
+	r.DescriptionCheck = strings.TrimSpace(r.DescriptionCheck)
+	if len(r.DescriptionCheck) > maxDescriptionCheck {
+		return invalidf("review.description_check must be at most %d characters", maxDescriptionCheck)
+	}
+	if !r.FollowUp {
+		r.DescriptionCheck = ""
 	}
 	*r = r.effective()
 	return nil

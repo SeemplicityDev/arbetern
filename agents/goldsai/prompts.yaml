@@ -7,7 +7,7 @@ intro: |
   • `/goldsai audit dependencies in my-repo for known vulnerabilities` — dependency audit
   • `/goldsai review auth module in api-service for injection risks` — code security review
   • `/goldsai find all usages of crypto/md5 in my-repo` — deprecated/insecure pattern search
-  • `/goldsai create a workflow every 6h to pull new CVEs from NVD matching our dependency list and post a digest to #sec-watch` — scheduled CVE watch
+  • `/goldsai create a workflow every 6h to pull new CVEs from NVD matching our dependency list and post a digest to #security-alerts` — scheduled CVE watch
   • `/goldsai create a workflow daily at 2am UTC: read yesterday's messages in this channel, list non-archived repos in my-org, analyze if any referenced CVEs/threats affect our codebase, post a report to C0123456789` — scheduled threat-intel triage
 
 classifier: |

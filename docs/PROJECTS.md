@@ -461,6 +461,7 @@ every check passes and every review comment has an answer.
 | `review.auto_merge` | false | Turn on GitHub's auto-merge once a pull request is ready and stays unchanged for the delay (see [Auto-merge](#auto-merge)). Needs `follow_up` |
 | `review.auto_merge_delay_minutes` | 30 | How long a ready pull request must stay unchanged before auto-merge goes on, 5–1440 |
 | `review.merge_method` | `squash` | `squash`, `rebase` or `merge`, one the repository allows. `squash` lands the result as one commit; `rebase` and `merge` land each commit of the pull request, and `merge` also the merges of the base branch |
+| `review.description_check` | none | The name of a check that reads the pull request description, such as an automated review, exactly as the pull request lists it. When a follow-up round changes only the description, arbetern re-runs that check's whole workflow run: such a check reads the description only when it runs, and re-running its failed jobs alone would keep its earlier result. Up to 200 characters; needs `follow_up` |
 
 Turning follow-through on for an existing project also follows the pull
 requests it already has open.

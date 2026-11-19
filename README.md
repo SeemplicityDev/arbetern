@@ -765,7 +765,7 @@ create dashboard "Open vulns this quarter" short-name secops-q, every 30m, with:
 <summary><code>/seihin</code> — Sr. Technical PM</summary>
 
 ```
-create dashboard "PM intake queue" short-name pm-intake that syncs every 15m:
+create dashboard "Product requests queue" short-name product-requests that syncs every 15m:
 - jira_search JQL `project = PROD AND status = "Intake" ORDER BY created ASC` max_results 30
 - confluence_search cql `label = "pm-rfc" AND lastModified > now("-14d")`
 ```

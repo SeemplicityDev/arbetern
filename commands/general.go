@@ -1075,7 +1075,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 					"type":"object",
 					"properties":{
 						"url":{"type":"string","description":"Full GitHub Actions workflow run URL (e.g., 'https://github.com/org/repo/actions/runs/12345'). Extract this from channel context messages — look for 'View Workflow Run' button URLs or similar links."},
-						"job":{"type":"string","description":"Part of one job's name, such as 'build-packages'; needs contains"},
+						"job":{"type":"string","description":"Part of one job's name, such as 'build' or 'test'; needs contains"},
 						"contains":{"type":"array","items":{"type":"string"},"description":"With job: up to 8 texts; a log line is returned when it contains any of them, ignoring case"}
 					},
 					"required":["url"]

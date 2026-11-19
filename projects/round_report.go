@@ -163,12 +163,22 @@ func (g *gateway) reportRound(ctx context.Context, s *session, a reportArgs) (st
 		return "The pull request description was edited on GitHub since arbetern wrote it, so arbetern will not replace it: call report_outcome again without description, and say in your reply what the description should change.", true, nil
 	}
 	posted := g.postReplies(ctx, owner, repo, number, replies)
-	rerun := a.RerunChecks && head == rd.HeadBefore && g.rerunChecks(ctx, s, rd, owner, repo)
+	check := s.project.Review.DescriptionCheck
+	redescribe := check != "" && plan.next != nil && head == rd.HeadBefore
+	rerun := a.RerunChecks && head == rd.HeadBefore && !redescribe && g.rerunChecks(ctx, s, rd, owner, repo)
 	pctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), persistTimeout)
 	defer cancel()
 	described, sha, fact := g.applyDescription(pctx, s, owner, repo, number, plan)
 	if fact != "" {
 		extra = append(extra, fact)
+	}
+	if redescribe {
+		// A workflow reads the description only when it runs, and re-running its failed jobs alone keeps their earlier result.
+		if described != nil && g.recheck(pctx, owner, repo, head, check) {
+			extra = append(extra, "Re-ran the workflow of `"+check+"` on `"+shortSHA(head)+"` so it reads the new description.")
+		} else if a.RerunChecks {
+			rerun = g.rerunChecks(pctx, s, rd, owner, repo)
+		}
 	}
 	title, fact := g.retitle(pctx, s, owner, repo, number, o.Title)
 	if fact != "" {
@@ -408,6 +418,29 @@ func (g *gateway) rerunChecks(ctx context.Context, s *session, rd *Round, owner,
 		rerun = true
 	}
 	return rerun
+}
+
+func (g *gateway) recheck(ctx context.Context, owner, repo, head, check string) bool {
+	checks, err := g.r.gh.ChecksForRef(ctx, owner, repo, head)
+	if err != nil {
+		log.Printf("[projects] reading the checks of %s in %s/%s: %v", shortSHA(head), owner, repo, err)
+		return false
+	}
+	for _, c := range checks {
+		if !strings.EqualFold(c.Name, check) || c.Status != github.CheckCompleted || c.Conclusion == "skipped" {
+			continue
+		}
+		o, r, id, err := github.ParseWorkflowRunURL(c.URL)
+		if err != nil || !strings.EqualFold(o, owner) || !strings.EqualFold(r, repo) {
+			continue
+		}
+		if err := g.r.gh.RerunWorkflow(ctx, owner, repo, id); err != nil {
+			log.Printf("[projects] re-running run %d in %s/%s for a new description: %v", id, owner, repo, err)
+			return false
+		}
+		return true
+	}
+	return false
 }
 
 func roundComment(p *Project, rd *Round, o Outcome, owner, repo, head string, posted int, rerun bool, extra []string) string {
