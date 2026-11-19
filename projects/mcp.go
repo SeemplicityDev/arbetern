@@ -78,6 +78,7 @@ var workOrderTools = []toolDef{
 				}, "id", "body")),
 			},
 			"rerun_checks": map[string]any{"type": "boolean", "description": "Follow-up rounds: the failing checks are unrelated to this change, so arbetern re-runs their failed jobs once."},
+			"question_resolved": map[string]any{"type": "boolean", "description": "Follow-up rounds: you settled the pull request's open question yourself, with fixed or answered; say how in summary. arbetern drops the decision callout."},
 			"description": map[string]any{"type": "string", "maxLength": maxSessionSummary,
 				"description": "Follow-up rounds, when the work order allows it: the whole corrected pull request description, replacing the current one."},
 		}, "status", "summary"),

@@ -523,7 +523,7 @@ func recordRoundResult(t *Task, rv *ReviewState, rd *Round, res roundResult, now
 		rv.Waiting = o.Question
 	case o.Status == OutcomeCannotFix:
 		rv.Waiting = oneLine(o.Summary, maxQuestionChars)
-	case personSpoke(rd):
+	case personSpoke(rd) || o.QuestionResolved:
 		rv.Waiting = ""
 	}
 	if rd.HeadAfter != rv.Head {

@@ -521,6 +521,8 @@ type reportArgs struct {
 	RerunChecks bool       `json:"rerun_checks"`
 	Description string     `json:"description"`
 	Repository  string     `json:"repository"`
+
+	QuestionResolved bool `json:"question_resolved"`
 }
 
 func (a reportArgs) common(now time.Time, maxSummary int) (o Outcome, problem string) {
@@ -569,8 +571,8 @@ func (a reportArgs) outcome(p *Project, base string, now time.Time) (o Outcome, 
 	switch {
 	case problem != "":
 		return o, problem
-	case len(a.Replies) > 0 || a.RerunChecks || strings.TrimSpace(a.Description) != "":
-		return o, "replies, rerun_checks and description belong to follow-up rounds only."
+	case len(a.Replies) > 0 || a.RerunChecks || strings.TrimSpace(a.Description) != "" || a.QuestionResolved:
+		return o, "replies, rerun_checks, question_resolved and description belong to follow-up rounds only."
 	}
 	switch o.Status {
 	case OutcomeFixed, OutcomeNotReproducible, OutcomeCannotFix, OutcomeAlreadyFixed:

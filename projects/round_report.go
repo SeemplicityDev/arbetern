@@ -18,7 +18,7 @@ type plannedReply struct {
 	body string
 }
 
-func (a reportArgs) roundOutcome(rd *Round, base string, now time.Time) (Outcome, []plannedReply, string) {
+func (a reportArgs) roundOutcome(rd *Round, base, waiting string, now time.Time) (Outcome, []plannedReply, string) {
 	o, problem := a.common(now, 4000)
 	if problem != "" {
 		return o, nil, problem
@@ -27,6 +27,17 @@ func (a reportArgs) roundOutcome(rd *Round, base string, now time.Time) (Outcome
 	case OutcomeFixed, OutcomeAnswered, OutcomeCannotFix:
 	default:
 		return o, nil, "status must be fixed, answered or cannot_fix in a follow-up round."
+	}
+	if a.QuestionResolved {
+		switch {
+		case waiting == "":
+			return o, nil, "question_resolved needs an open question, and this pull request has none."
+		case o.Question != "":
+			return o, nil, "Pass question_resolved or question, not both: settle the open question, or ask one."
+		case o.Status == OutcomeCannotFix:
+			return o, nil, "question_resolved goes with fixed or answered: what is left after cannot_fix needs a person."
+		}
+		o.QuestionResolved = true
 	}
 	if o.Status == OutcomeFixed {
 		if o.Branch, problem = checkPushBranch(a.Branch, base); problem != "" {
@@ -94,7 +105,11 @@ func (g *gateway) reportRound(ctx context.Context, s *session, a reportArgs) (st
 	if named := strings.TrimSpace(a.Repository); named != "" && !strings.EqualFold(named, prRepo.Name) && !strings.EqualFold(named, prRepo.Owner+"/"+prRepo.Name) {
 		return "In a follow-up round the repository is the pull request's, " + prRepo.Owner + "/" + prRepo.Name + "; leave repository out.", true, nil
 	}
-	o, replies, problem := a.roundOutcome(rd, prRepo.BaseBranch, now)
+	waiting := ""
+	if s.task.Review != nil {
+		waiting = s.task.Review.Waiting
+	}
+	o, replies, problem := a.roundOutcome(rd, prRepo.BaseBranch, waiting, now)
 	description := strings.TrimSpace(stripControl(a.Description))
 	if problem == "" && description != "" {
 		problem = checkRoundDescription(s.project, description)
@@ -208,7 +223,7 @@ func (g *gateway) planDescription(ctx context.Context, s *session, owner, repo s
 	switch {
 	case o.Question != "":
 		next.Question = o.Question
-	case personSpoke(rd):
+	case personSpoke(rd) || o.QuestionResolved:
 		next.Question = ""
 	}
 	if next.Summary == t.Outcome.Summary && next.Question == t.Outcome.Question {

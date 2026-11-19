@@ -250,7 +250,7 @@ func roundRules(p *Project, t *Task, rd *Round) string {
 		rules = append(rules, "When a review comment asks to change the pull request description, pass the whole corrected description in `description`. It replaces the one quoted above, so keep everything that still holds and `{ticket}` where the key belongs.")
 	}
 	if t.Review != nil && t.Review.Waiting != "" {
-		rules = append(rules, "The open question above stays open until a person answers it in this pull request. When a person's comment above answers it, apply the answer; when it is still open, pass it again in `question`.")
+		rules = append(rules, "The open question above stays open until a person answers it or you settle it. When a person's comment above answers it, apply the answer. When the evidence and the project's instructions let you decide it yourself, apply your decision, pass `question_resolved: true` and say in `summary` how you settled it. Otherwise pass it again in `question`.")
 	}
 	if len(rd.Items) > 0 {
 		rules = slices.Insert(rules, 4, "Pass one entry in `replies` for every review comment above: its `id` and a short answer saying what you changed and why, or why you changed nothing. Each answer is posted as a reply to that comment.")

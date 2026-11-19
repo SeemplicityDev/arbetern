@@ -142,6 +142,8 @@ type Outcome struct {
 	Question   string `json:"question,omitempty"` // ≤1000, a decision reviewers are asked to make
 	Headline   string `json:"headline,omitempty"` // one line for the project's channel
 	ReportedAt string `json:"reported_at"`
+
+	QuestionResolved bool `json:"question_resolved,omitempty"` // a round settled the open question itself
 }
 
 // Task is one dispatched attempt at one error group.
