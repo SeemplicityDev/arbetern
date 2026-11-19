@@ -24,7 +24,7 @@ For an App on a personal account, start the link with
 `https://github.com/settings/apps/new?` instead and keep the rest.
 
 ```
-https://github.com/organizations/ORGANIZATION/settings/apps/new?name=Arbetern&description=Arbetern%27s%20GitHub%20identity%3A%20reads%20code%2C%20opens%20and%20follows%20pull%20requests&url=https%3A%2F%2Fgithub.com%2Fjustmike1%2Farbetern&public=false&webhook_active=false&contents=write&pull_requests=write&actions=write&checks=read&statuses=read&administration=read&metadata=read
+https://github.com/organizations/ORGANIZATION/settings/apps/new?name=Arbetern&description=Arbetern%27s%20GitHub%20identity%3A%20reads%20code%2C%20opens%20and%20follows%20pull%20requests&url=https%3A%2F%2Fgithub.com%2Fjustmike1%2Farbetern&public=false&webhook_active=false&contents=write&pull_requests=write&actions=write&checks=read&statuses=read&administration=read&vulnerability_alerts=read&metadata=read
 ```
 
 The link fills in the name, the homepage, a private App (installable only on
@@ -39,7 +39,12 @@ repository permissions:
 | **Checks** | Read-only | Read check runs and their annotations to surface CI errors |
 | **Commit statuses** | Read-only | Read the statuses a [project](PROJECTS.md#following-the-pull-request) waits on |
 | **Administration** | Read-only | Optional: list the teams with access to a repository (`list_repo_teams`) |
+| **Dependabot alerts** | Read-only | Optional: read the open alerts a [project](PROJECTS.md#dependabot-signals) with a Dependabot signal fixes |
 | **Metadata** | Read-only | Required by GitHub for every App |
+
+To add a permission to an App that is already installed, change it under
+**Permissions & events** in the App's settings; an organization owner then has
+to accept the new permission on the installation before it takes effect.
 
 Leave **Workflows** unset. Without it GitHub refuses any push or commit that
 adds or changes a file under `.github/workflows`, which keeps

@@ -1277,6 +1277,7 @@ func githubAppPermissions(ctx context.Context, client *github.Client) []permissi
 		{"checks", "read", "Read check runs and their annotations for CI feedback", false},
 		{"statuses", "read", "Read the commit statuses a project waits on", false},
 		{"administration", "read", "List the teams with access to a repository", false},
+		{"vulnerability_alerts", "read", "Read the open Dependabot alerts a project fixes", false},
 	}
 	granted, err := client.AppPermissions(ctx)
 	if err != nil {

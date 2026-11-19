@@ -22,7 +22,7 @@ func computeStats(l *Ledger, p *Project, now time.Time) Stats {
 		Resolved:             t.Resolved,
 		Recurred:             t.Recurred,
 		ResolutionRate:       ratio(t.Resolved, t.Resolved+t.Recurred),
-		Backlog:              len(l.backlog(p.Signal.key(), p.Limits.effective(), now, 0)),
+		Backlog:              len(l.backlog(p.signalKey(), p.Limits.effective(), now, 0)),
 		Rounds:               t.Rounds,
 		UpdatedAt:            stamp(now),
 	}

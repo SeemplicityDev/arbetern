@@ -1432,13 +1432,13 @@ function renderProjectsPage() {
   const rows = list.filter(p => {
     if (!words.length) return true;
     const r = p.repo || {};
-    const hay = [p.name, p.id, p.description, `${r.owner}/${r.name || ''}`, (r.include || []).join(' '), (p.signal || {}).query].join('\n').toLowerCase();
+    const hay = [p.name, p.id, p.description, `${r.owner}/${r.name || ''}`, (r.include || []).join(' '), (p.signal || {}).type, (p.signal || {}).query].join('\n').toLowerCase();
     return words.every(w => hay.includes(w));
   }).sort((a, b) => (a.name || '').localeCompare(b.name || ''));
   note.hidden = !words.length;
   if (words.length) note.textContent = `${fmtInt(rows.length)} ${rows.length === 1 ? 'match' : 'matches'} for “${projQuery}”`;
   if (!rows.length) {
-    const none = canCreateProject() ? 'No projects yet. Create one to keep fixing what a Datadog query finds in a repository.' : 'No projects yet.';
+    const none = canCreateProject() ? 'No projects yet. Create one to keep fixing what Datadog or Dependabot finds in your repositories.' : 'No projects yet.';
     el.innerHTML = emptyHtml(words.length ? 'No project matches this filter.' : none, true);
     return;
   }

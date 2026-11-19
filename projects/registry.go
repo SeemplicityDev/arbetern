@@ -833,7 +833,7 @@ func (r *Registry) view(id string) (*projectView, bool) {
 		return v, true
 	}
 	v.Tasks = append(v.Tasks, st.ledger.Tasks...)
-	v.Backlog = st.ledger.backlog(p.Signal.key(), p.Limits.effective(), time.Now().UTC(), backlogViewSize)
+	v.Backlog = st.ledger.backlog(p.signalKey(), p.Limits.effective(), time.Now().UTC(), backlogViewSize)
 	v.Memory = append(v.Memory, st.memory.Notes...)
 	return v, true
 }

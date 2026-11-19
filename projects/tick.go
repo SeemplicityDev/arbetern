@@ -105,11 +105,14 @@ func (r *Registry) runTick(ctx context.Context, p *Project, trigger string) *tic
 		healthy = false
 	}
 	led = r.closeMergedTickets(ctx, p, led)
-	if r.deps.Datadog == nil {
+	switch {
+	case p.Signal.dependabot():
+		led, err = r.scanDependabot(ctx, p, led, limits, out, trigger == "manual")
+	case r.deps.Datadog == nil:
 		err = errors.New("nothing can be scanned: this deployment has no Datadog credentials")
-	} else if p.Signal.metric() {
+	case p.Signal.metric():
 		led, err = r.scanMetrics(ctx, p, led, limits, out, trigger == "manual")
-	} else {
+	default:
 		led, err = r.scan(ctx, p, led, limits, out)
 	}
 	if err != nil {
@@ -469,7 +472,7 @@ func (r *Registry) scan(ctx context.Context, p *Project, led *Ledger, limits Lim
 		return led, errors.Join(failed...)
 	}
 	out.groups = len(groups)
-	from, signal := led.scanFrom(), p.Signal.key()
+	from, signal := led.scanFrom(), p.signalKey()
 	updated, _, err := r.mergeLedger(ctx, p.ID, led, func(l *Ledger) bool { return l.applyScan(from, signal, groups, sightings, next, limits, now) })
 	if err != nil {
 		return led, fmt.Errorf("recording the scan: %w", err)
@@ -498,7 +501,7 @@ func (r *Registry) dispatch(ctx context.Context, p *Project, limits Limits, out 
 			return
 		}
 	}
-	led, signal := out.ledger, p.Signal.key()
+	led, signal := out.ledger, p.signalKey()
 	for {
 		now := time.Now().UTC()
 		if !led.hasCapacity(limits, now) {
@@ -513,12 +516,17 @@ func (r *Registry) dispatch(ctx context.Context, p *Project, limits Limits, out 
 			out.fail("fetching the evidence for %s: %v", groupLabel(cand.Group), err)
 			break
 		}
+		repo, err := r.taskRepo(ctx, p, group)
+		if err != nil {
+			out.fail("finding the repository of %s: %v", groupLabel(group), err)
+			break
+		}
 		taskID, err := store.NewID()
 		if err != nil {
 			out.fail("creating a task id: %v", err)
 			break
 		}
-		draft := Task{ID: taskID, Fingerprint: cand.Group.Fingerprint, Group: group}
+		draft := Task{ID: taskID, Fingerprint: cand.Group.Fingerprint, Group: group, Repo: repo.Name, BaseBranch: repo.BaseBranch}
 		next, _, err := r.mergeLedger(ctx, p.ID, led, func(l *Ledger) bool { return l.addTask(draft, limits, now) })
 		if err != nil {
 			out.fail("recording a task: %v", err)

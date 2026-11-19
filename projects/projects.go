@@ -28,6 +28,7 @@ const (
 
 	SignalDatadog        = "datadog"
 	SignalDatadogMetrics = "datadog_metrics"
+	SignalDependabot     = "dependabot"
 
 	StatusDispatching = "dispatching"
 	StatusRunning     = "running"
@@ -106,6 +107,12 @@ const (
 	maxConnectors      = 10
 
 	metricRescan        = time.Hour
+	alertRescan         = time.Hour
+	maxGroupAlerts      = 60
+	maxGroupAdvisories  = 20
+	maxAdvisoryChars    = 300
+	maxEcosystems       = 10
+	maxAlertLinks       = 20
 	maxSeriesPerSite    = 5000
 	maxEvidenceCauses   = 5
 	evidenceSearchLimit = 50
@@ -169,6 +176,7 @@ var (
 	attributeRe  = regexp.MustCompile(`^@?[A-Za-z_][A-Za-z0-9_.-]{0,199}$`)
 	channelIDRe  = regexp.MustCompile(`^[CG][A-Z0-9]{8,12}$`)
 	modelRe      = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:\[\]-]{0,99}$`)
+	ecosystemRe  = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,31}$`)
 )
 
 // Repo is the GitHub repository a project works on.
@@ -179,13 +187,13 @@ type Repo struct {
 	Include    []string `json:"include,omitempty"`     // organization scope: path.Match patterns of repository names, such as "*-engine"
 }
 
-// Signal is where a project finds the problems it fixes: Datadog log error groups, or Datadog metric series that cross a threshold.
+// Signal is where a project finds the problems it fixes: Datadog log error groups, Datadog metric series that cross a threshold, or open Dependabot alerts.
 type Signal struct {
-	Type           string    `json:"type"`                      // "datadog" | "datadog_metrics"
+	Type           string    `json:"type"`                      // "datadog" | "datadog_metrics" | "dependabot"
 	Site           string    `json:"site,omitempty"`            // logs: "us" | "eu"
 	Sites          []string  `json:"sites,omitempty"`           // "us" and/or "eu"; a log signal on one site keeps it in Site
 	Query          string    `json:"query"`                     // logs: search query; metrics: grouped query of what went wrong
-	Pattern        string    `json:"pattern,omitempty"`         // optional RE2 over kind, pattern and samples (logs) or the series tags (metrics)
+	Pattern        string    `json:"pattern,omitempty"`         // optional RE2 over kind, pattern and samples (logs), the series tags (metrics), or an alert's package and manifest (dependabot)
 	GroupPattern   string    `json:"group_pattern,omitempty"`   // logs: optional RE2 whose capture groups name the group of each matching event, across services and sites
 	Lookback       string    `json:"lookback,omitempty"`        // logs: Go duration for the first scan, default "24h", 1h–168h
 	KeptQuery      string    `json:"kept_query,omitempty"`      // metrics: grouped query of what the same series handled correctly
@@ -194,6 +202,8 @@ type Signal struct {
 	ShareThreshold float64   `json:"share_threshold,omitempty"` // metrics: a series breaches when query / (query + kept) exceeds it
 	Fill           bool      `json:"fill,omitempty"`            // metrics: spare capacity takes the largest series that breach nothing
 	Evidence       *Evidence `json:"evidence,omitempty"`        // metrics: the logs that explain a series
+	Severities     []string  `json:"severities,omitempty"`      // dependabot: alert severities to fix; empty takes every severity
+	Ecosystems     []string  `json:"ecosystems,omitempty"`      // dependabot: package ecosystems such as pip; empty takes every ecosystem
 }
 
 // Evidence names the logs fetched for a metric series when it is dispatched.
@@ -322,8 +332,13 @@ func (s Signal) window() time.Duration {
 
 func (s Signal) metric() bool { return s.Type == SignalDatadogMetrics }
 
+func (s Signal) dependabot() bool { return s.Type == SignalDependabot }
+
 func (s Signal) sites() []string {
-	if s.metric() || len(s.Sites) > 0 {
+	switch {
+	case s.dependabot():
+		return nil
+	case s.metric() || len(s.Sites) > 0:
 		return s.Sites
 	}
 	return []string{s.Site}
@@ -338,7 +353,19 @@ func (s Signal) key() string {
 		parts = append(parts, s.Type, strings.Join(s.Sites, ","), s.KeptQuery, s.window().String(),
 			strconv.FormatFloat(s.Threshold, 'g', -1, 64), strconv.FormatFloat(s.ShareThreshold, 'g', -1, 64), strconv.FormatBool(s.Fill))
 	}
+	if s.dependabot() {
+		parts = append(parts, s.Type, strings.Join(s.Severities, ","), strings.Join(s.Ecosystems, ","))
+	}
 	sum := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
+	return hex.EncodeToString(sum[:8])
+}
+
+// signalKey is the key of what the project's scans read: Dependabot alerts are read from the project's repositories, so they count too.
+func (p *Project) signalKey() string {
+	if !p.Signal.dependabot() {
+		return p.Signal.key()
+	}
+	sum := sha256.Sum256([]byte(p.Signal.key() + "\x00" + strings.ToLower(p.Repo.String())))
 	return hex.EncodeToString(sum[:8])
 }
 
@@ -500,11 +527,15 @@ func (s *Signal) normalize() error {
 	}
 	switch s.Type {
 	case SignalDatadog:
+		s.Severities, s.Ecosystems = nil, nil
 		return s.normalizeLogs()
 	case SignalDatadogMetrics:
+		s.Severities, s.Ecosystems = nil, nil
 		return s.normalizeMetrics()
+	case SignalDependabot:
+		return s.normalizeDependabot()
 	}
-	return invalidf("signal.type must be %q or %q", SignalDatadog, SignalDatadogMetrics)
+	return invalidf("signal.type must be %q, %q or %q", SignalDatadog, SignalDatadogMetrics, SignalDependabot)
 }
 
 func normalizeSite(v string) (string, error) {
@@ -605,6 +636,39 @@ func (s *Signal) normalizeMetrics() error {
 		return nil
 	}
 	return s.Evidence.normalize()
+}
+
+func (s *Signal) normalizeDependabot() error {
+	s.Site, s.Sites, s.Query, s.GroupPattern, s.Lookback = "", nil, "", "", ""
+	s.KeptQuery, s.Window, s.Threshold, s.ShareThreshold, s.Fill, s.Evidence = "", "", 0, 0, false, nil
+	var severities []string
+	for _, v := range s.Severities {
+		v = strings.ToLower(strings.TrimSpace(v))
+		if severityRank(v) < 0 {
+			return invalidf("signal.severities: %q is not one of critical, high, medium or low", v)
+		}
+		if !slices.Contains(severities, v) {
+			severities = append(severities, v)
+		}
+	}
+	slices.SortFunc(severities, func(a, b string) int { return severityRank(b) - severityRank(a) })
+	s.Severities = severities
+	var ecosystems []string
+	for _, v := range s.Ecosystems {
+		v = strings.ToLower(strings.TrimSpace(v))
+		if !ecosystemRe.MatchString(v) {
+			return invalidf("signal.ecosystems: %q is not a package ecosystem such as pip or npm", v)
+		}
+		if !slices.Contains(ecosystems, v) {
+			ecosystems = append(ecosystems, v)
+		}
+	}
+	if len(ecosystems) > maxEcosystems {
+		return invalidf("signal.ecosystems holds at most %d ecosystems", maxEcosystems)
+	}
+	slices.Sort(ecosystems)
+	s.Ecosystems = ecosystems
+	return nil
 }
 
 func normalizeAttribute(field, v string) (string, error) {

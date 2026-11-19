@@ -41,7 +41,37 @@ type Cause struct {
 	Count int    `json:"count"`
 }
 
-// Group is an error group, or a metric series, as the project has seen it so far.
+// Dependency is a vulnerable package in one repository, with its open Dependabot alerts.
+type Dependency struct {
+	Repo       string     `json:"repo"`
+	Ecosystem  string     `json:"ecosystem"`
+	Package    string     `json:"package"`
+	Severity   string     `json:"severity"`             // the highest of its alerts
+	Advisories []Advisory `json:"advisories,omitempty"` // up to 20, dropped once its task is finished
+	Alerts     []Alert    `json:"alerts,omitempty"`     // up to 60, dropped once its task is finished
+}
+
+// Advisory is a security advisory that some of a dependency's alerts report.
+type Advisory struct {
+	ID         string `json:"id"` // GHSA id
+	CVE        string `json:"cve,omitempty"`
+	Severity   string `json:"severity"`
+	Summary    string `json:"summary"`
+	Vulnerable string `json:"vulnerable"`        // vulnerable version range
+	Patched    string `json:"patched,omitempty"` // first patched version; empty while none is published
+}
+
+// Alert is one open Dependabot alert: a manifest that resolves the dependency to a vulnerable version.
+type Alert struct {
+	Number       int    `json:"number"`
+	Advisory     string `json:"advisory"`
+	Manifest     string `json:"manifest"`
+	Scope        string `json:"scope,omitempty"`        // runtime | development
+	Relationship string `json:"relationship,omitempty"` // direct | transitive | inconclusive | unknown
+	CreatedAt    string `json:"created_at"`
+}
+
+// Group is an error group, a metric series, or a vulnerable dependency, as the project has seen it so far.
 type Group struct {
 	Fingerprint   string   `json:"fingerprint"`
 	Service       string   `json:"service"`
@@ -61,6 +91,31 @@ type Group struct {
 	Cause         string   `json:"cause,omitempty"`
 	Causes        []Cause  `json:"causes,omitempty"`
 	EvidenceQuery string   `json:"evidence_query,omitempty"`
+
+	Dependency *Dependency `json:"dependency,omitempty"`
+}
+
+func (g Group) repo() string {
+	if g.Dependency == nil {
+		return ""
+	}
+	return g.Dependency.Repo
+}
+
+func (g *Group) refresh(seen Group) {
+	g.Value, g.Kept, g.Share, g.Count = seen.Value, seen.Kept, seen.Share, seen.Count
+	g.LastSeen = latest(g.LastSeen, seen.LastSeen)
+	if seen.Dependency != nil {
+		g.Dependency = seen.Dependency
+	}
+}
+
+// trim drops what only a session at work reads. It replaces the dependency rather than editing it, since other groups may point to the same one.
+func (g *Group) trim() {
+	g.Samples = nil
+	if d := g.Dependency; d != nil {
+		g.Dependency = &Dependency{Repo: d.Repo, Ecosystem: d.Ecosystem, Package: d.Package, Severity: d.Severity}
+	}
 }
 
 // PR is the pull request a task opened.
@@ -419,7 +474,7 @@ func (l *Ledger) finish(t *Task, status string, now time.Time) {
 	t.FinishedAt = stamp(now)
 	t.UpdatedAt = t.FinishedAt
 	t.Opening = ""
-	t.Group.Samples = nil
+	t.Group.trim()
 	if t.Review != nil {
 		for i := range t.Review.Rounds {
 			rd := &t.Review.Rounds[i]
@@ -584,7 +639,7 @@ func (l *Ledger) pinRepo(old Repo) bool {
 
 func (l *Ledger) rebindRepo(id, from string, to Repo) bool {
 	t := l.task(id)
-	if t == nil || t.PR != nil || isTerminal(t.Status) || !strings.EqualFold(t.Repo, from) || to.Name == "" {
+	if t == nil || t.PR != nil || isTerminal(t.Status) || !strings.EqualFold(t.Repo, from) || to.Name == "" || t.Group.repo() != "" {
 		return false
 	}
 	t.Repo, t.BaseBranch = to.Name, to.BaseBranch
@@ -962,7 +1017,8 @@ func (l *Ledger) applyScan(from, signal string, groups, sightings []Group, next 
 	return true
 }
 
-func (l *Ledger) applyMetricScan(signal string, groups []Group, window time.Duration, limits Limits, now time.Time) bool {
+// applySnapshot replaces the candidates with what a scan of the current state found, such as metric series or open alerts.
+func (l *Ledger) applySnapshot(signal string, groups []Group, grace time.Duration, limits Limits, now time.Time) bool {
 	l.Cursor, l.SiteCursors = now.UTC().Format(time.RFC3339Nano), nil
 	if l.Signal != signal {
 		l.Candidates, l.Signal = nil, signal
@@ -971,8 +1027,6 @@ func (l *Ledger) applyMetricScan(signal string, groups []Group, window time.Dura
 	for _, c := range l.Candidates {
 		firstSeen[c.Group.Fingerprint] = c.Group.FirstSeen
 	}
-	// A trailing sum keeps counting losses from before the fix for a whole window.
-	grace := time.Duration(limits.RecurrenceGraceHours)*time.Hour + window
 	cands := make([]Candidate, 0, len(groups))
 	for i, g := range groups {
 		// A fill series breaches nothing, so it says nothing about whether a merged fix held.
@@ -980,8 +1034,7 @@ func (l *Ledger) applyMetricScan(signal string, groups []Group, window time.Dura
 			l.sight(g, grace, limits)
 		}
 		if t := l.openTask(g.Fingerprint); t != nil {
-			t.Group.Value, t.Group.Kept, t.Group.Share, t.Group.Count = g.Value, g.Kept, g.Share, g.Count
-			t.Group.LastSeen = latest(t.Group.LastSeen, g.LastSeen)
+			t.Group.refresh(g)
 			continue
 		}
 		g.FirstSeen = earliest(g.FirstSeen, firstSeen[g.Fingerprint])
@@ -1088,7 +1141,7 @@ func (l *Ledger) compact(limits Limits, now time.Time) {
 	}
 	for i := range l.Tasks {
 		if isTerminal(l.Tasks[i].Status) {
-			l.Tasks[i].Group.Samples = nil
+			l.Tasks[i].Group.trim()
 		}
 	}
 	for i := len(l.Tasks) - 1; i >= 0 && len(l.Tasks) > maxTasks; i-- {

@@ -42,6 +42,7 @@ Grant the following **repository permissions**:
 | **Actions** | Read and Write | Fetch workflow runs and job logs; re-run failed jobs |
 | **Checks** | Read-only | Read check runs and their annotations to surface CI errors |
 | **Commit statuses** | Read-only | Read the statuses a [project](PROJECTS.md#following-the-pull-request) waits on before it marks a pull request ready |
+| **Dependabot alerts** | Read-only | Optional: read the open alerts a [project](PROJECTS.md#dependabot-signals) with a Dependabot signal fixes |
 | **Metadata** | Read-only | Required by GitHub for all fine-grained tokens (auto-selected) |
 
 Leave **Workflows** unset. Without it GitHub refuses any push or commit that adds or changes a file under `.github/workflows`, which keeps [project](PROJECTS.md#security) sessions, whose pushes use this token, from altering CI.
@@ -78,6 +79,7 @@ Check the following scopes:
 |---|---|
 | `repo` | Full access to repositories — read files, create branches, commit, open PRs, and read Actions/Checks data |
 | `read:org` | List organization repositories and resolve which teams have direct access to a repo (powers `list_org_repos` and `list_repo_teams`) |
+| `security_events` | Optional: read the open Dependabot alerts a [project](PROJECTS.md#dependabot-signals) with a Dependabot signal fixes |
 
 ### Step 3: Generate and Copy
 

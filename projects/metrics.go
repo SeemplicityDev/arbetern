@@ -75,7 +75,7 @@ func metricSums(ctx context.Context, client *datadog.Client, query string, from,
 
 func (r *Registry) scanMetrics(ctx context.Context, p *Project, led *Ledger, limits Limits, out *tickOutcome, force bool) (*Ledger, error) {
 	now := time.Now().UTC()
-	signal := p.Signal.key()
+	signal := p.signalKey()
 	if !force && led.Signal == signal && now.Sub(parseTime(led.Cursor)) < metricRescan {
 		return led, nil
 	}
@@ -110,7 +110,9 @@ func (r *Registry) scanMetrics(ctx context.Context, p *Project, led *Ledger, lim
 		return led, err
 	}
 	out.scanned, out.groups = len(all), len(groups)
-	updated, _, err := r.mergeLedger(ctx, p.ID, led, func(l *Ledger) bool { return l.applyMetricScan(signal, groups, window, limits, now) })
+	// A trailing sum keeps counting losses from before the fix for a whole window.
+	grace := time.Duration(limits.RecurrenceGraceHours)*time.Hour + window
+	updated, _, err := r.mergeLedger(ctx, p.ID, led, func(l *Ledger) bool { return l.applySnapshot(signal, groups, grace, limits, now) })
 	if err != nil {
 		return led, fmt.Errorf("recording the scan: %w", err)
 	}

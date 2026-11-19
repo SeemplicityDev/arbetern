@@ -268,7 +268,7 @@ See [docs/GITOPS.md](docs/GITOPS.md). All variables reuse arbetern's GitHub acce
 </details>
 
 <details>
-<summary><b>Projects</b> — Claude Code sessions in sandboxed Jobs that fix what Datadog finds and follow their pull requests through review</summary>
+<summary><b>Projects</b> — Claude Code sessions in sandboxed Jobs that fix what Datadog or Dependabot finds and follow their pull requests through review</summary>
 
 See [docs/PROJECTS.md](docs/PROJECTS.md). The chart sets all of these from its `projects` block.
 
@@ -1171,7 +1171,7 @@ slack/               # Slack webhook handler + response helpers
 prompts/             # YAML prompt loader + agent discovery
 dashboards/          # dashboard registry, sync runner, executor + CRUD API
 workflows/           # workflow engine (monoflow / subflows / event-triggered) + CRUD API
-projects/            # projects: Datadog error groups and metric series fixed by Claude Code sessions in Jobs, PR follow-through, session gateway (MCP, model and git proxies, transcripts), CRUD API
+projects/            # projects: Datadog error groups, metric series and Dependabot alerts fixed by Claude Code sessions in Jobs, PR follow-through, session gateway (MCP, model and git proxies, transcripts), CRUD API
 runner/              # session image: Dockerfile, the session entrypoint and the Stop hook
 billing/             # usage & billing ledger (per agent / model / source / user / workflow) + summary API
 metrics/             # performance series (turn / model-call / tool latency, outcomes) + summary API
