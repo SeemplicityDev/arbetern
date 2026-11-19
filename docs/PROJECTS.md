@@ -719,7 +719,7 @@ Every key is optional.
 | `branch` | The branch the pull request is opened from, from the placeholders `{ticket}`, `{title}`, `{task}` and `{project}`, such as `{ticket}/{title}`. It must contain `{ticket}` or `{task}`. Empty opens the pull request from the session's own `claude/` branch |
 | `title` | The pull request title from `{title}` (the session's title) and `{ticket}`, such as `{title} \| {ticket}` |
 | `title_pattern` | RE2 the session's title must match, such as a conventional-commit pattern `^(feat\|fix\|chore)(\([^()]+\))?!?: \S.*$`. `report_outcome` refuses any other title and says why |
-| `description` | `session` posts the session's `summary`, up to 12,000 characters, as the whole pull request description, for repositories with a pull request template. `report_outcome` refuses a summary or round `description` that still holds an angle-bracket placeholder copied from the repository's template, such as `<why this file first>`, and names them. Empty lays the description out from the summary and testing |
+| `description` | `session` posts the session's `summary`, up to 12,000 characters, as the whole pull request description, for repositories with a pull request template. `report_outcome` refuses a summary or round `description` that still holds an angle-bracket placeholder copied from the repository's template, such as `<why this file first>`, and names them. Sections the template reserves for a person are filled too: the session is the pull request's only author. Empty lays the description out from the summary and testing |
 
 `{title}` in a branch is the session's title without a conventional-commit type,
 as a slug of up to 50 characters.

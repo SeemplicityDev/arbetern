@@ -253,7 +253,7 @@ func roundRules(p *Project, t *Task, rd *Round) string {
 		fmt.Sprintf("Use `record_learning` for durable facts future sessions on this project need (at most %d).", maxLearnings),
 	}
 	if p.Conventions.Description == descriptionSession {
-		rules = append(rules, "When a review comment asks to change the pull request description, or the description quoted above still holds placeholders from the repository's pull request template, pass the whole corrected description in `description`. It replaces the one quoted above, so keep everything that still holds and `{ticket}` where the key belongs; report_outcome refuses a description that still holds a template placeholder.")
+		rules = append(rules, "When a review comment asks to change the pull request description, or the description quoted above still holds placeholders from the repository's pull request template (sections it reserves for a person included), pass the whole corrected description in `description`. It replaces the one quoted above, so keep everything that still holds and `{ticket}` where the key belongs; report_outcome refuses a description that still holds a template placeholder.")
 	}
 	if t.Review != nil && t.Review.Waiting != "" {
 		rules = append(rules, "The open question above stays open until a person answers it or you settle it. When a person's comment above answers it, apply the answer. When the evidence and the project's instructions let you decide it yourself, apply your decision, pass `question_resolved: true` and say in `summary` how you settled it. Otherwise pass it again in `question`.")
@@ -474,7 +474,7 @@ func conventionRules(p *Project) []string {
 		rules = append(rules, rule)
 	}
 	if c.Description == descriptionSession {
-		rule := "Your `summary` becomes the whole pull request description: write it in the layout the project instructions or the repository's pull request template ask for, with every placeholder of the template replaced; report_outcome refuses a summary that still holds one."
+		rule := "Your `summary` becomes the whole pull request description: write it in the layout the project instructions or the repository's pull request template ask for, with every placeholder of the template replaced, in sections it reserves for a person too, since you are the pull request's only author; report_outcome refuses a summary that still holds one."
 		if c.Ticket != nil {
 			rule += " Write `{ticket}` where the issue key belongs; arbetern fills it in."
 		}
