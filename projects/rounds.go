@@ -35,6 +35,7 @@ type ReviewState struct {
 	Pending         int      `json:"pending,omitempty"` // review comments waiting for an answer
 	LastFeedbackAt  string   `json:"last_feedback_at,omitempty"`
 	Waiting         string   `json:"waiting,omitempty"`          // the question or blocker a person has to answer
+	Blocker         *Blocker `json:"blocker,omitempty"`          // set when what waits is failing checks, not a person
 	ChecksHandled   string   `json:"checks_handled,omitempty"`   // head whose failing checks a round already took on
 	ConflictHandled string   `json:"conflict_handled,omitempty"` // head whose conflict a round already took on
 	RerunHead       string   `json:"rerun_head,omitempty"`       // head whose failed jobs were re-run
@@ -54,6 +55,15 @@ type ReviewState struct {
 	RetargetedAt string      `json:"retargeted_at,omitempty"` // when a new base branch changed them; earlier approvals no longer count
 	DoneContent  string      `json:"done_content,omitempty"`  // the changes the last ready note announced
 	AutoMerge    *MergeState `json:"auto_merge,omitempty"`
+}
+
+// Blocker is failing checks a round reported it could not fix.
+type Blocker struct {
+	Head      string   `json:"head"`
+	Checks    []string `json:"checks,omitempty"`
+	At        string   `json:"at"`
+	AlignedAt string   `json:"aligned_at,omitempty"` // when arbetern last merged the base in
+	Aligns    int      `json:"aligns,omitempty"`
 }
 
 // Round is one follow-up session on an open pull request.
@@ -140,6 +150,43 @@ func personSpoke(rd *Round) bool {
 	return slices.ContainsFunc(rd.Items, func(f Feedback) bool { return !f.Bot })
 }
 
+// blocksOnChecks reports whether a cannot_fix report from this round leaves failing checks behind rather than something for a person: a person's comment, or a conflict, which a cannot_fix round never pushes past.
+func blocksOnChecks(rd *Round) bool {
+	return slices.Contains(rd.Trigger, triggerChecks) && !slices.Contains(rd.Trigger, triggerConflict) && !personSpoke(rd)
+}
+
+func newBlocker(rd *Round, now time.Time) *Blocker {
+	if !blocksOnChecks(rd) {
+		return nil
+	}
+	b := &Blocker{Head: rd.HeadAfter, At: stamp(now)}
+	for _, c := range rd.Checks {
+		b.Checks = append(b.Checks, c.Name)
+	}
+	return b
+}
+
+// legacyBlocker finds the blocker of a record kept before blockers were: a wait that is still the last cannot_fix round's summary.
+func legacyBlocker(rv *ReviewState) *Blocker {
+	for i := len(rv.Rounds) - 1; i >= 0; i-- {
+		rd := &rv.Rounds[i]
+		if rd.Outcome == nil || rd.Outcome.Status != OutcomeCannotFix {
+			continue
+		}
+		if rd.Outcome.Question != "" || rv.Waiting != oneLine(rd.Outcome.Summary, maxQuestionChars) {
+			return nil
+		}
+		return newBlocker(rd, cmp.Or(parseTime(rd.FinishedAt), parseTime(rd.CreatedAt)))
+	}
+	return nil
+}
+
+// alignDue spaces arbetern's merges of the base into a blocked branch: an hour after the blocker, then twice as long each time, up to a day.
+func (b *Blocker) alignDue(now time.Time) bool {
+	wait := min(blockedAlignAfter<<min(b.Aligns, 5), blockedAlignMax)
+	return !now.Before(parseTime(latest(b.At, b.AlignedAt)).Add(wait))
+}
+
 func (r *ReviewState) round(n int) *Round {
 	for i := range r.Rounds {
 		if r.Rounds[i].N == n {
@@ -196,6 +243,8 @@ func (r *ReviewState) settle() {
 	case r.Phase == PhaseExhausted:
 	case r.active() != nil:
 		r.Phase = PhaseFixing
+	case r.Waiting != "" && r.Blocker != nil:
+		r.Phase = PhaseBlocked
 	case r.Waiting != "":
 		r.Phase = PhaseWaiting
 	case r.DoneHead != "" && r.DoneHead == r.Head && r.Pending == 0 && r.CI != ciFailed:
@@ -272,6 +321,12 @@ func (l *Ledger) observe(id string, o observation, now time.Time) bool {
 	if !o.lastFeedback.IsZero() {
 		rv.LastFeedbackAt = latest(rv.LastFeedbackAt, stamp(o.lastFeedback))
 	}
+	if rv.Waiting != "" && rv.Blocker == nil {
+		rv.Blocker = legacyBlocker(rv)
+	}
+	if rv.Blocker != nil && rv.Head == o.head && rv.CI == ciPassed {
+		rv.Waiting, rv.Blocker = "", nil
+	}
 	rv.settle()
 	return started || seen || rv.Head != before.Head || rv.CI != before.CI || rv.Conflict != before.Conflict || rv.Pending != before.Pending ||
 		!slices.Equal(rv.FailedChecks, before.FailedChecks) || rv.LastFeedbackAt != before.LastFeedbackAt || rv.Phase != before.Phase
@@ -298,6 +353,16 @@ func (l *Ledger) addRound(id string, rd Round, maxRounds int, now time.Time) boo
 	rv.Rounds = append(rv.Rounds, rd)
 	rv.AutoMerge.disarm()
 	rv.settle()
+	return true
+}
+
+func (l *Ledger) claimAlign(id, head string, now time.Time) bool {
+	_, rv := l.review(id)
+	if rv == nil || rv.Blocker == nil || rv.active() != nil || rv.Head != head || !rv.Blocker.alignDue(now) {
+		return false
+	}
+	rv.Blocker.AlignedAt = stamp(now)
+	rv.Blocker.Aligns++
 	return true
 }
 
@@ -529,11 +594,11 @@ func recordRoundResult(t *Task, rv *ReviewState, rd *Round, res roundResult, now
 	}
 	switch {
 	case o.Question != "":
-		rv.Waiting = o.Question
+		rv.Waiting, rv.Blocker = o.Question, nil
 	case o.Status == OutcomeCannotFix:
-		rv.Waiting = oneLine(o.Summary, maxQuestionChars)
-	case personSpoke(rd) || o.QuestionResolved:
-		rv.Waiting = ""
+		rv.Waiting, rv.Blocker = oneLine(o.Summary, maxQuestionChars), newBlocker(rd, now)
+	case personSpoke(rd) || o.QuestionResolved || rv.Blocker != nil:
+		rv.Waiting, rv.Blocker = "", nil
 	}
 	if rd.HeadAfter != rv.Head {
 		rv.Head, rv.HeadAt = rd.HeadAfter, stamp(now)

@@ -59,6 +59,7 @@ const (
 	PhaseChecking  Phase = "checking"  // waiting for checks, comments or the quiet period
 	PhaseFixing    Phase = "fixing"    // a follow-up round is running
 	PhaseWaiting   Phase = "waiting"   // a question or blocker needs a person
+	PhaseBlocked   Phase = "blocked"   // checks a round could not fix still fail; passing clears it
 	PhaseDone      Phase = "done"      // checks pass and every comment is answered
 	PhaseExhausted Phase = "exhausted" // the follow-up rounds are used up
 )
@@ -144,6 +145,8 @@ const (
 	ciNoChecksGrace     = 10 * time.Minute
 	ciWaitLimit         = time.Hour
 	roundFailedCooldown = 30 * time.Minute
+	blockedAlignAfter   = time.Hour
+	blockedAlignMax     = 24 * time.Hour
 	maxHandled          = 300
 	maxRoundItems       = 15
 	maxContextComments  = 5

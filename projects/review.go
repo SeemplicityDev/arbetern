@@ -199,13 +199,21 @@ func needsRound(rv *ReviewState, w prWatch, now time.Time) []Trigger {
 	if len(w.items) > 0 && settled {
 		need = append(need, triggerFeedback)
 	}
-	if len(w.failed) > 0 && settled && rv.ChecksHandled != w.pr.HeadSHA {
+	if len(w.failed) > 0 && settled && rv.ChecksHandled != w.pr.HeadSHA && !blockedOn(rv.Blocker, w) {
 		need = append(need, triggerChecks)
 	}
 	if rv.Conflict && rv.ConflictHandled != w.pr.HeadSHA {
 		need = append(need, triggerConflict)
 	}
 	return need
+}
+
+// blockedOn reports whether every check failing now is one the blocker left failing, on its changes with at most the base merged in since.
+func blockedOn(b *Blocker, w prWatch) bool {
+	if b == nil || len(b.Checks) == 0 || b.Head != w.pr.HeadSHA && !slices.Contains(w.lineage, b.Head) {
+		return false
+	}
+	return !slices.ContainsFunc(w.failed, func(c github.Check) bool { return !slices.Contains(b.Checks, c.Name) })
 }
 
 func takeOutOfDraft(rv *ReviewState, w prWatch) bool {
@@ -252,6 +260,8 @@ func (r *Registry) advanceReviews(ctx context.Context, p *Project, led *Ledger, 
 			if !parseTime(rv.NextRoundAfter).After(now) {
 				out.rounds = append(out.rounds, roundWant{watch: w, trigger: need})
 			}
+		case rv.Blocker != nil:
+			led = r.alignBlocked(ctx, p, led, w, now)
 		case readyFor(rv, w, review, now):
 			led = r.finishReview(ctx, p, led, w, now)
 		case review.AutoMerge && w.content != "" && mergeReady(rv, w):
@@ -412,17 +422,23 @@ func (r *Registry) dispatchRounds(ctx context.Context, p *Project, limits Limits
 	out.ledger = led
 }
 
-// GitHub's own merge keeps approvals, which a session's merge commit would not; a conflicting branch is left to the round.
-func (r *Registry) alignBranch(ctx context.Context, p *Project, w prWatch) {
+// behindBase counts the base commits the branch lacks, or returns 0 when GitHub cannot merge them in itself.
+func (r *Registry) behindBase(ctx context.Context, p *Project, w prWatch) int {
 	if p.Review.effective().MergeMethod == github.MergeRebase || (w.pr.Mergeable != nil && !*w.pr.Mergeable) {
-		return
+		return 0
 	}
 	behind, err := r.gh.CommitsBehind(ctx, w.owner, w.repo, w.pr.BaseRef, w.pr.HeadSHA)
-	switch {
-	case err != nil:
+	if err != nil {
 		log.Printf("[projects] %s task %s: comparing pull request #%d with %s: %v", p.ID, w.taskID, w.number, w.pr.BaseRef, err)
-		return
-	case behind == 0:
+		return 0
+	}
+	return behind
+}
+
+// GitHub's own merge keeps approvals, which a session's merge commit would not; a conflicting branch is left to the round.
+func (r *Registry) alignBranch(ctx context.Context, p *Project, w prWatch) {
+	behind := r.behindBase(ctx, p, w)
+	if behind == 0 {
 		return
 	}
 	if err := r.gh.UpdatePullRequestBranch(ctx, w.owner, w.repo, w.number, w.pr.HeadSHA); err != nil {
@@ -430,6 +446,31 @@ func (r *Registry) alignBranch(ctx context.Context, p *Project, w prWatch) {
 		return
 	}
 	log.Printf("[projects] %s task %s: asked GitHub to merge %s into pull request #%d before its round (%s behind)", p.ID, w.taskID, w.pr.BaseRef, w.number, plural(behind, "commit"))
+}
+
+// alignBlocked merges the base into a blocked branch as the base moves, so a fix that lands there reaches its checks.
+func (r *Registry) alignBlocked(ctx context.Context, p *Project, led *Ledger, w prWatch, now time.Time) *Ledger {
+	_, rv := led.review(w.taskID)
+	if w.ci != ciFailed || !rv.Blocker.alignDue(now) {
+		return led
+	}
+	behind := r.behindBase(ctx, p, w)
+	if behind == 0 {
+		return led
+	}
+	next, claimed, err := r.mergeLedger(ctx, p.ID, led, func(l *Ledger) bool { return l.claimAlign(w.taskID, w.pr.HeadSHA, now) })
+	if err != nil || !claimed {
+		if err != nil {
+			log.Printf("[projects] %s task %s: claiming the update of blocked pull request #%d: %v", p.ID, w.taskID, w.number, err)
+		}
+		return next
+	}
+	if err := r.gh.UpdatePullRequestBranch(ctx, w.owner, w.repo, w.number, w.pr.HeadSHA); err != nil {
+		log.Printf("[projects] %s task %s: bringing blocked pull request #%d up to date with %s: %v", p.ID, w.taskID, w.number, w.pr.BaseRef, err)
+		return next
+	}
+	log.Printf("[projects] %s task %s: asked GitHub to merge %s into blocked pull request #%d (%s behind) so its checks run again", p.ID, w.taskID, w.pr.BaseRef, w.number, plural(behind, "commit"))
+	return next
 }
 
 // fireRound reports whether dispatching may continue.

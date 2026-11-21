@@ -546,6 +546,18 @@ skipped is named in the round's summary comment. When a round finds that the
 pull request branch no longer contains the head it started from, its summary
 comment says the history was rewritten.
 
+A `cannot_fix` round started by failing checks, with no comment from a person
+and no conflict among its reasons, leaves the pull request *blocked* instead of
+waiting for a person: its checks fail for a reason outside its changes, such
+as a release another repository has to publish. arbetern drops the blocker once
+the checks pass, at any head, or when a later round reports `fixed` or
+`answered`; another `cannot_fix` renews it. While it stands, the same checks
+failing again on the same changes, with at most the base merged in since,
+start no other round, while a conflict or a new comment still does. As the base
+branch moves, arbetern asks GitHub to merge it into the branch so the checks
+run against it: an hour after the blocker at the earliest, then after twice as
+long each time, up to once a day, and never with `review.merge_method: rebase`.
+
 A round whose session ends without a report, or that never starts, is failed,
 and the pull request waits 30 minutes before another one. A Job that could not
 be created does not use up a round.
@@ -561,9 +573,10 @@ the quiet period has passed:
    for a person's review, and the task shows as *ready*.
 
 A new push or comment starts over. A pull request that is ready again with the
-[same changes](#same-changes) gets no second note. A `question` or a
-`cannot_fix` report leaves the pull request waiting for a person, whose next
-comment starts the round that acts on the answer. When a round is needed but
+[same changes](#same-changes) gets no second note. A `question`, or a
+`cannot_fix` report that does not leave it [blocked](#rounds), leaves the pull
+request waiting for a person (*needs a person*), whose next comment starts the
+round that acts on the answer. When a round is needed but
 the rounds are used up, arbetern posts what is left and stops following that
 pull request (*out of rounds*). arbetern never approves, and without
 [auto-merge](#auto-merge) it never merges.
@@ -1337,7 +1350,7 @@ browser request.
 | Job stuck `Pending` or `ContainerCreating` | Image pull (the pull secret must be in the session namespace), node capacity, or the token Secret; `kubectl -n <session namespace> describe job claude-runner-<…>` says which |
 | Sessions cannot resolve names on a cluster with NodeLocal DNSCache | The DNS rule reaches only the `kube-dns` pods. Add UDP and TCP 53 to the node-local address through `sessions.egress.extraRules` |
 | A round ends `cannot_fix` because a branch rule refuses updates to the pull request's branch | A branch rule or ruleset refuses updates to the project's branches, `claude/**` or the names the conventions' `branch` produces, by the token's account. Sessions push with the same token, so add that account to the rule's bypass list |
-| A pull request never gets the ready note | A check still fails after a round called it unrelated and re-ran it once, a question or blocker waits for a person (the task shows *needs a person*), or the rounds ran out. The task's follow-through details on the project page say which |
+| A pull request never gets the ready note | A check still fails after a round called it unrelated and re-ran it once, a question or blocker waits for a person (the task shows *needs a person*), checks a round could not fix still fail (*blocked*), or the rounds ran out. The task's follow-through details on the project page say which |
 | A metric task's work order says no log matched | The evidence attributes do not match the series' tags: a wrong attribute, or log values with capitals or several spaces in a row |
 
 ### Upgrading Claude Code

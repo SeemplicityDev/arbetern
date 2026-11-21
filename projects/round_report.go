@@ -449,6 +449,10 @@ func roundComment(p *Project, rd *Round, o Outcome, owner, repo, head string, po
 		OutcomeAnswered:  "answered without changing code",
 		OutcomeCannotFix: "needs a person",
 	}[o.Status]
+	blocked := o.Status == OutcomeCannotFix && o.Question == "" && blocksOnChecks(rd)
+	if blocked {
+		label = "blocked by failing checks"
+	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "**Follow-up round %d: %s.**\n\n", rd.N, label)
 	b.WriteString(cleanPRText(o.Summary, 4000))
@@ -466,6 +470,13 @@ func roundComment(p *Project, rd *Round, o Outcome, owner, repo, head string, po
 		facts = append(facts, "Re-ran the failed jobs on `"+shortSHA(head)+"`.")
 	}
 	facts = append(facts, extra...)
+	if blocked {
+		resume := "arbetern merges the base branch in as it moves and resumes once these checks pass."
+		if p.Review.effective().MergeMethod == github.MergeRebase {
+			resume = "arbetern resumes once these checks pass."
+		}
+		facts = append(facts, resume+" A comment here starts a round sooner.")
+	}
 	if q := cleanPRText(o.Question, maxQuestionChars); q != "" {
 		facts = append(facts, "**Decision needed:** "+q+" Reply in this pull request and a follow-up round applies the answer.")
 	}

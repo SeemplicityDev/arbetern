@@ -687,6 +687,7 @@ const PJD_PHASES = {
   checking: ['open', 'PR open', 'Waiting for checks, review comments or the quiet period'],
   fixing: ['running', 'fixing', 'A follow-up round is working on the pull request'],
   waiting: ['paused', 'needs a person', 'A question or blocker needs a person'],
+  blocked: ['paused', 'blocked', 'Checks a round could not fix still fail; arbetern resumes once they pass'],
   done: ['ok', 'ready', 'Checks pass and every review comment has an answer'],
   exhausted: ['failed', 'out of rounds', 'The follow-up rounds are used up'],
 };
@@ -747,7 +748,7 @@ function pjdTaskStatus(t) {
   if (t.status === 'pr_open' && rv && rv.phase === 'done' && (rv.auto_merge || {}).on) return ['ok', 'auto-merge', 'Auto-merge is on: GitHub merges it once its branch rules are met'];
   if (t.status === 'pr_open' && rv && PJD_PHASES[rv.phase]) {
     const [cls, label, title] = PJD_PHASES[rv.phase];
-    return [cls, label, (rv.phase === 'waiting' && rv.waiting) || title];
+    return [cls, label, ((rv.phase === 'waiting' || rv.phase === 'blocked') && rv.waiting) || title];
   }
   const s = pjdTaskState(t) || { cls: 'paused', label: t.status || 'unknown' };
   return [s.cls, s.label, t.error || o.summary || ''];
@@ -872,8 +873,9 @@ function pjdReviewHtml(rv) {
     ['phase', (PJD_PHASES[rv.phase] || [])[1] || rv.phase], ['checks', PJD_CI[rv.ci] || rv.ci], ['failing', (rv.failed_checks || []).join(', ')],
     ['unanswered', rv.pending ? fmtInt(rv.pending) : ''], ['conflict', rv.conflict ? 'yes' : ''], ['head', rv.head ? rv.head.slice(0, 7) : ''],
     ['marked ready', rv.ready_at && fmtDateTime(rv.ready_at)], ['done', rv.done_at && fmtDateTime(rv.done_at)], ['auto-merge', pjdMergeLabel(rv.auto_merge || {})],
+    ['base merged in', (rv.blocker || {}).aligned_at && fmtDateTime(rv.blocker.aligned_at)],
   ]);
-  if (rv.waiting) html += `<div class="proj-label">Waiting on a person</div><div class="run-result">${escapeHtml(rv.waiting)}</div>`;
+  if (rv.waiting) html += `<div class="proj-label">${rv.blocker ? 'Blocked by failing checks' : 'Waiting on a person'}</div><div class="run-result">${escapeHtml(rv.waiting)}</div>`;
   if ((rv.auto_merge || {}).note) html += `<div class="proj-label">Auto-merge</div><div class="run-result">${escapeHtml(rv.auto_merge.note)}</div>`;
   const rounds = rv.rounds || [];
   if (rounds.length) html += `<div class="proj-label">Follow-up rounds</div>${rounds.map(pjdRoundHtml).join('')}`;
