@@ -1094,7 +1094,7 @@ while none of those groups has a task open.
 | Resolved | Merged fixes whose error stayed quiet for `recurrence_window_hours` |
 | Recurred | Merged fixes whose error came back after `recurrence_grace_hours` |
 | Resolution rate | Resolved ÷ (resolved + recurred) |
-| Backlog | Error groups that could be dispatched now and wait for capacity |
+| Backlog | Error groups that could be dispatched now and wait for capacity. The project page names the limit that holds them |
 | Daily | Sessions, pull requests opened, merged and closed, per UTC day for the last 30 days |
 
 Recurrence is judged through the project's own query: an error that stops

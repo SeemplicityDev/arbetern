@@ -734,6 +734,25 @@ function pjdLimit(l, key) {
   const out = !v || v < min || v > max ? def : v;
   return key === 'recurrence_grace_hours' && out >= pjdLimit(l, 'recurrence_window_hours') ? 0 : out;
 }
+
+// The limits that keep new work from starting as of the last tick, the checks of Ledger.hasCapacity.
+function pjdHeldBy(p, s, tasks, now = new Date()) {
+  const held = [];
+  const open = (s.prs_open || 0) + tasks.filter(t => t.status === 'dispatching' || t.status === 'running').length;
+  const maxOpen = pjdLimit(p.limits, 'max_open_prs');
+  if (open >= maxOpen) held.push(`${fmtInt(open)} of ${plural(maxOpen, 'pull request')} open or starting`);
+  const maxAtOnce = pjdLimit(p.limits, 'max_active_sessions');
+  if ((s.active_sessions || 0) >= maxAtOnce) held.push(`${fmtInt(s.active_sessions)} of ${plural(maxAtOnce, 'session')} running`);
+  const today = now.toISOString().slice(0, 10);
+  const sessions = ((s.daily || []).find(d => d.date === today) || {}).sessions || 0;
+  const perDay = pjdLimit(p.limits, 'max_sessions_per_day');
+  if (sessions >= perDay) {
+    const reset = new Date(`${today}T00:00:00Z`);
+    reset.setUTCDate(reset.getUTCDate() + 1);
+    held.push(`today's ${plural(sessions, 'session')}, follow-up rounds included, reached the daily cap of ${fmtInt(perDay)}; new work resumes at ${reset.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`);
+  }
+  return held.join(' · ');
+}
 const pjdExpanded = new Set();
 
 function pjdTaskStatus(t) {
@@ -1128,8 +1147,9 @@ function renderProjectDetail(root, p) {
         <th>${kind.noun}</th><th class="n">${kind.count}</th><th>First seen</th><th>Last seen</th>
       </tr></thead><tbody>${backlog.map(c => pjdBacklogRowsHtml(c, r.owner)).join('')}</tbody></table></div>`
     : emptyHtml(p.state_error ? 'The backlog could not be loaded.' : 'Nothing is waiting for a session.');
+  const held = backlog.length ? pjdHeldBy(p, s, tasks) : '';
   const waiting = backlog.length
-    ? `${s.backlog > backlog.length ? `top ${fmtInt(backlog.length)} of ${fmtInt(s.backlog)}` : fmtInt(backlog.length)} waiting for capacity`
+    ? `${s.backlog > backlog.length ? `top ${fmtInt(backlog.length)} of ${fmtInt(s.backlog)}` : fmtInt(backlog.length)} waiting for capacity${held ? ' · ' + escapeHtml(held) : ''}`
     : '';
   const goal = `<section class="panel"><h2>Goal</h2><div class="report proj-doc">${renderMarkdownDoc(p.goal || '')}</div>
       ${p.instructions ? `<h2 class="proj-subhead">Instructions</h2><div class="report proj-doc">${renderMarkdownDoc(p.instructions)}</div>` : ''}</section>`;
