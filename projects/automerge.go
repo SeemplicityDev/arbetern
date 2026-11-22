@@ -220,10 +220,14 @@ func snapshotChange(before, after string) string {
 }
 
 func approvals(reviews []github.DiscussionItem) []github.DiscussionItem {
+	return latestApprovals(reviews, func(it github.DiscussionItem) bool { return !it.Bot && it.Trusted() })
+}
+
+func latestApprovals(reviews []github.DiscussionItem, counts func(github.DiscussionItem) bool) []github.DiscussionItem {
 	latest := map[string]github.DiscussionItem{}
 	var order []string
 	for _, it := range reviews {
-		if it.Bot || !it.Trusted() || it.State != github.ReviewApproved && it.State != github.ReviewChangesRequested && it.State != github.ReviewDismissed {
+		if !counts(it) || it.State != github.ReviewApproved && it.State != github.ReviewChangesRequested && it.State != github.ReviewDismissed {
 			continue
 		}
 		k := strings.ToLower(it.Author)
@@ -244,14 +248,18 @@ func approvals(reviews []github.DiscussionItem) []github.DiscussionItem {
 	return out
 }
 
+func approvesCurrent(a github.DiscussionItem, w prWatch) bool {
+	if a.CommitID != w.pr.HeadSHA && (w.content == "" || a.CommitID != w.content && !slices.Contains(w.lineage, a.CommitID)) {
+		return false
+	}
+	return !a.CreatedAt.Before(w.retargetedAt)
+}
+
 // approver returns an error only when it found no approver and a lookup failed, so the answer may change on a retry.
 func (r *Registry) approver(ctx context.Context, w prWatch) (string, error) {
 	var errs []error
 	for _, a := range approvals(w.reviews) {
-		switch {
-		case a.CommitID != w.pr.HeadSHA && (w.content == "" || a.CommitID != w.content && !slices.Contains(w.lineage, a.CommitID)):
-			continue
-		case a.CreatedAt.Before(w.retargetedAt):
+		if !approvesCurrent(a, w) {
 			continue
 		}
 		ok, err := r.gh.CanPush(ctx, w.owner, w.repo, a.Author)
@@ -264,6 +272,27 @@ func (r *Registry) approver(ctx context.Context, w prWatch) (string, error) {
 		}
 	}
 	return "", errors.Join(errs...)
+}
+
+// mergeApprover also takes an app's approval of the current changes once GitHub reports the pull request approved, since GitHub counts only reviewers its branch rules accept.
+func (r *Registry) mergeApprover(ctx context.Context, w prWatch) (string, error) {
+	who, err := r.approver(ctx, w)
+	if who != "" {
+		return who, nil
+	}
+	decision, derr := r.gh.ReviewDecision(ctx, w.pr.NodeID)
+	if derr != nil {
+		return "", errors.Join(err, derr)
+	}
+	if decision != github.ReviewApproved {
+		return "", err
+	}
+	for _, a := range latestApprovals(w.reviews, func(it github.DiscussionItem) bool { return it.Bot || it.Trusted() }) {
+		if approvesCurrent(a, w) {
+			return a.Author, nil
+		}
+	}
+	return "", err
 }
 
 func mergeReady(rv *ReviewState, w prWatch) bool {
@@ -593,12 +622,12 @@ func (r *Registry) autoMerge(ctx context.Context, p *Project, led *Ledger, w prW
 
 func (r *Registry) mergeNow(ctx context.Context, p *Project, led *Ledger, w prWatch, review Review, armedAt, now time.Time) *Ledger {
 	k := p.ID
-	approver, err := r.approver(ctx, w)
+	approver, err := r.mergeApprover(ctx, w)
 	switch {
 	case approver == "" && err != nil:
 		return r.mergeWaits(ctx, p, led, w, "arbetern could not check who approved these changes: "+github.APIMessage(err), true, armedAt)
 	case approver == "":
-		return r.mergeWaits(ctx, p, led, w, "GitHub has nothing left to wait for, so auto-merge cannot be turned on. arbetern merges once a person with write access approves these changes and no review asks for changes.", false, now)
+		return r.mergeWaits(ctx, p, led, w, "GitHub has nothing left to wait for, so auto-merge cannot be turned on. arbetern merges once a person with write access approves these changes, or GitHub reports them approved, and no review asks for changes.", false, now)
 	}
 	if err := r.gh.MergePullRequest(ctx, w.owner, w.repo, w.number, w.pr.HeadSHA, review.MergeMethod); err != nil {
 		log.Printf("[projects] %s task %s: merging pull request #%d: %v", k, w.taskID, w.number, err)
@@ -672,7 +701,7 @@ func (r *Registry) keepUpToDate(ctx context.Context, p *Project, led *Ledger, w 
 	case m.Updates >= maxBranchUpdates:
 		return r.noteMerge(ctx, p, led, w, fmt.Sprintf("The branch fell behind its base again after %s by arbetern. Over to a person.", plural(maxBranchUpdates, "update")), "", true)
 	}
-	if approver, _ := r.approver(ctx, w); approver == "" {
+	if approver, _ := r.mergeApprover(ctx, w); approver == "" {
 		return led
 	}
 	next, claimed, err := r.mergeLedger(ctx, k, led, func(l *Ledger) bool { return l.claimUpdate(w.taskID, w.pr.HeadSHA, now) })

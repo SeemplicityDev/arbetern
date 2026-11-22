@@ -624,7 +624,10 @@ open, and it is not a draft. Then:
 An approval counts for arbetern only when its author has write access to the
 repository, it approves the current changes (an approval of an earlier head
 with the [same changes](#same-changes) counts), and no
-owner, member or collaborator asks for changes in their latest review. The
+owner, member or collaborator asks for changes in their latest review. An
+app's approval of the current changes, such as a CI reviewer's, counts too once
+GitHub reports the pull request approved, since GitHub counts only reviewers
+its branch rules accept. The
 Slack channel hears when auto-merge goes on. A few cases need more:
 
 - **No review required.** Where the branch rules require no review, GitHub
@@ -1236,10 +1239,13 @@ browser request.
   `review.auto_merge` it never merges one: a person reviews and merges each,
   and the statistics measure exactly those decisions. With it, arbetern turns
   on GitHub's auto-merge only after the delay and a second look, and merges
-  by itself only changes a person with write access approved, so the base
-  branch's rules (required reviews, code owners, required checks) stay the
-  gate. Keep them on: where they require no review, arbetern waits for an
-  approval before it turns auto-merge on.
+  by itself only changes a person with write access approved or GitHub
+  reports approved, so the base branch's rules (required reviews, code owners,
+  required checks) stay the gate. Keep them on: where they require no review,
+  arbetern waits for a person's approval before it turns auto-merge on. For
+  merges no person has to touch, have a CI reviewer approve and require one
+  approval without code-owner review: GitHub never counts an app as a code
+  owner.
 - **Branch rules.** Protect the base branch against direct pushes. Where
   nothing else uses the project's branch names, a ruleset on them and on tags
   that only arbetern's GitHub identity bypasses keeps everything else from creating,
