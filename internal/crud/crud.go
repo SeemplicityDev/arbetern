@@ -1,8 +1,7 @@
 // Package crud provides the shared HTTP handlers for the workflows and
-// dashboards CRUD APIs: the per-agent data.json route, the redirect from the
-// legacy view path into the management console, and the REST list/get/delete
-// verbs with their GitOps 403 gate. Per-package extras (POST /<id>/run,
-// PATCH/PUT for workflows) are wired in via Spec.Custom.
+// dashboards CRUD APIs: the REST list/get/delete verbs with their GitOps 403
+// gate. Per-package extras (POST /<id>/run, PATCH/PUT for workflows) are wired
+// in via Spec.Custom.
 package crud
 
 import (
@@ -69,21 +68,13 @@ func (spec Spec) permit(w http.ResponseWriter, req *http.Request, agent string) 
 	return true
 }
 
-// Mount wires the per-agent routes and the API routes:
+// Mount wires the API routes:
 //
-//	GET    /<agent>/<kind>/<id>            → 302 to /ui/<agent>/<kind>/<id>
-//	GET    /<agent>/<kind>/<id>/data.json  → entity JSON
 //	GET    /api/<plural>                   → List(agent)
 //	GET    /api/<plural>/<agent>/<id>      → Get
 //	DELETE /api/<plural>/<agent>/<id>      → Delete (403 if src == "gitops")
 //	*      /api/<plural>/<agent>/<id>/...  → Spec.Custom
-func Mount(mux, apiMux *http.ServeMux, knownAgents map[string]bool, spec Spec) {
-	for agent := range knownAgents {
-		a := agent
-		mux.HandleFunc("/"+a+"/"+spec.Kind+"/", func(w http.ResponseWriter, req *http.Request) {
-			handleAgentView(a, spec, w, req)
-		})
-	}
+func Mount(apiMux *http.ServeMux, spec Spec) {
 	apiMux.HandleFunc("/api/"+spec.KindPlural, func(w http.ResponseWriter, req *http.Request) {
 		if req.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -95,34 +86,6 @@ func Mount(mux, apiMux *http.ServeMux, knownAgents map[string]bool, spec Spec) {
 	apiMux.HandleFunc("/api/"+spec.KindPlural+"/", func(w http.ResponseWriter, req *http.Request) {
 		handleAPIItem(spec, w, req)
 	})
-}
-
-func handleAgentView(agent string, spec Spec, w http.ResponseWriter, req *http.Request) {
-	trimmed := strings.TrimPrefix(req.URL.Path, "/"+agent+"/"+spec.Kind+"/")
-	parts := strings.SplitN(trimmed, "/", 2)
-	if len(parts) == 0 || parts[0] == "" {
-		http.NotFound(w, req)
-		return
-	}
-	id := parts[0]
-	if !store.IDRe.MatchString(id) {
-		http.Error(w, "invalid "+spec.Kind+" id", http.StatusBadRequest)
-		return
-	}
-	entity, _, ok := spec.Get(agent, id)
-	if !ok {
-		http.NotFound(w, req)
-		return
-	}
-	if len(parts) == 2 && parts[1] == "data.json" {
-		httpx.WriteJSON(w, http.StatusOK, entity)
-		return
-	}
-	if len(parts) == 2 && parts[1] != "" {
-		http.NotFound(w, req)
-		return
-	}
-	http.Redirect(w, req, ViewPath(spec.Kind, agent, id), http.StatusFound)
 }
 
 // ViewPath is the management-console page that renders one entity.

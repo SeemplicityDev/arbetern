@@ -45,33 +45,3 @@ func hostLabel(host string) string {
 	h = strings.TrimPrefix(h, "http://")
 	return strings.TrimRight(h, "/")
 }
-
-// ToCSV renders the full result set (all rows) as RFC-4180-ish CSV. Useful for
-// attaching large results to Slack as a downloadable snippet.
-func ToCSV(r *QueryResult) string {
-	if r == nil || len(r.Columns) == 0 {
-		return ""
-	}
-	var sb strings.Builder
-	header := make([]string, len(r.Columns))
-	for i, c := range r.Columns {
-		header[i] = c.Name
-	}
-	sb.WriteString(csvLine(header))
-	for _, row := range r.Rows {
-		sb.WriteString(csvLine(row))
-	}
-	return sb.String()
-}
-
-func csvLine(cells []string) string {
-	out := make([]string, len(cells))
-	for i, c := range cells {
-		if strings.ContainsAny(c, ",\"\n\r") {
-			out[i] = `"` + strings.ReplaceAll(c, `"`, `""`) + `"`
-		} else {
-			out[i] = c
-		}
-	}
-	return strings.Join(out, ",") + "\n"
-}

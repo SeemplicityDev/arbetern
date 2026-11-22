@@ -3098,11 +3098,6 @@ function canManageSkill(s) {
   return targets.every(id => allowed.has(id));
 }
 
-function canManageAgentUI(agentId) {
-  const allowed = skillAgentsAllowed();
-  return !allowed || allowed.has(agentId);
-}
-
 // Like canManageMCP: optimistic until the identity says otherwise; the API decides.
 function isProjectAdmin() { return !(identityData && identityData.project_admin === false); }
 function canManageProject() { return isProjectAdmin(); }

@@ -654,21 +654,6 @@ func (mc *MultiClient) ForSite(site string) *Client {
 	return nil
 }
 
-// InferSite examines text for Datadog site hints (URLs or domain references)
-// and returns "us", "eu", or "" (unknown — query both).
-func InferSite(text string) string {
-	lower := strings.ToLower(text)
-	hasEU := strings.Contains(lower, "datadoghq.eu")
-	hasUS := strings.Contains(lower, "datadoghq.com")
-	if hasEU && !hasUS {
-		return "eu"
-	}
-	if hasUS && !hasEU {
-		return "us"
-	}
-	return ""
-}
-
 // clients returns the Client(s) to query based on the requested site.
 // site: "us", "eu", or "" (all configured).
 func (mc *MultiClient) clients(site string) []*Client {

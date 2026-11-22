@@ -33,14 +33,8 @@ const maxPlanBytes = 600
 // Elapsed is how long the turn has been running at now.
 func (s Snapshot) Elapsed(now time.Time) time.Duration { return now.Sub(s.StartedAt) }
 
-// Silent is how long since the turn last showed a sign of life, measured from
-// the start for a snapshot written before heartbeats were recorded.
-func (s Snapshot) Silent(now time.Time) time.Duration {
-	if s.Heartbeat.IsZero() {
-		return now.Sub(s.StartedAt)
-	}
-	return now.Sub(s.Heartbeat)
-}
+// Silent is how long since the turn last showed a sign of life.
+func (s Snapshot) Silent(now time.Time) time.Duration { return now.Sub(s.Heartbeat) }
 
 // Line renders the snapshot as one short status sentence.
 func (s Snapshot) Line(now time.Time) string {

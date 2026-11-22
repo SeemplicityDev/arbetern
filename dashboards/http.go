@@ -11,21 +11,20 @@ import (
 	"github.com/justmike1/arbetern/internal/httpx"
 )
 
-// RegisterRoutes wires the per-agent data route and the dashboard CRUD API
-// onto the given mux. Routing/validation/GitOps gating live in internal/crud;
-// this function only adapts the dashboards-specific Get/List/Delete shape and
-// the prompt-dashboard render verb.
+// RegisterRoutes wires the dashboard CRUD API onto the given mux.
+// Routing/validation/GitOps gating live in internal/crud; this function only
+// adapts the dashboards-specific Get/List/Delete shape and the
+// prompt-dashboard render verb.
 //
-//	GET    /<agent>/dashboard/<id>              → 302 to the console page
-//	GET    /<agent>/dashboard/<id>/data.json    → latest stored JSON
 //	GET    /api/dashboards                      → list (optional ?agent=)
+//	GET    /api/dashboards/<agent>/<id>         → latest stored JSON
 //	DELETE /api/dashboards/<agent>/<id>         → delete
 //	POST   /api/dashboards/<agent>/<id>/render  → render a prompt instance
 //
 // State-changing verbs additionally require the caller to pass the owning
 // agent's allow-lists, via the authorize callback supplied by main.
-func (r *Registry) RegisterRoutes(mux *http.ServeMux, apiMux *http.ServeMux, knownAgents map[string]bool, authorize func(*http.Request, string) bool) {
-	crud.Mount(mux, apiMux, knownAgents, crud.Spec{
+func (r *Registry) RegisterRoutes(apiMux *http.ServeMux, authorize func(*http.Request, string) bool) {
+	crud.Mount(apiMux, crud.Spec{
 		Kind:       "dashboard",
 		KindPlural: "dashboards",
 		Get: func(agent, id string) (any, string, bool) {

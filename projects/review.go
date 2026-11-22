@@ -74,7 +74,7 @@ func sortFeedback(items []github.DiscussionItem, self string, rv *ReviewState) (
 	var reports []Feedback
 	for _, it := range items {
 		mine := strings.EqualFold(it.Author, self)
-		// The marker also covers what arbetern posted under an earlier GitHub identity, such as a token's account before a GitHub App.
+		// A comment with arbetern's marker is its own, whichever GitHub identity posted it.
 		if it.Body == "" || mine && (it.Kind != github.DiscussionComment || ownComment(it.Body)) || strings.Contains(it.Body, commentMarker) {
 			continue
 		}

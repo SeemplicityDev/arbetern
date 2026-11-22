@@ -909,11 +909,6 @@ var prURLPattern = regexp.MustCompile(`https://github\.com/([^/]+)/([^/]+)/pull/
 // jiraKeyPattern matches a token that is a whole Jira issue key, like ABC-123.
 var jiraKeyPattern = regexp.MustCompile(`^[A-Z][A-Z0-9]+-[1-9][0-9]*$`)
 
-// ExtractPRURLs returns all GitHub PR URLs found in the given text.
-func ExtractPRURLs(text string) []string {
-	return prURLPattern.FindAllString(text, -1)
-}
-
 // ParsePRURL extracts owner, repo, and PR number from a GitHub PR URL.
 func ParsePRURL(rawURL string) (owner, repo string, number int, err error) {
 	matches := prURLPattern.FindStringSubmatch(rawURL)

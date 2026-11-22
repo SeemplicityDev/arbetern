@@ -411,7 +411,3 @@ func containsStr(list []string, v string) bool {
 	}
 	return false
 }
-
-// ExportFormatsFor returns the text conversions available for a MIME type, for
-// error messages and tool descriptions.
-func ExportFormatsFor(mimeType string) []string { return exportFormats[mimeType] }

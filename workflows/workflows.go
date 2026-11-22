@@ -104,7 +104,7 @@ const (
 // override via the WORKFLOW_RUN_HISTORY environment variable (positive
 // integer). The bound is applied on every persist, so shrinking it takes
 // effect on the next tick — older entries are dropped, never resurrected.
-// The cap exists so a busy hourly workflow doesn't grow data.json
+// The cap exists so a busy hourly workflow doesn't grow its stored descriptor
 // unbounded. It's a package-level var (rather than a const) so the env
 // override can take effect at process start.
 var MaxRunHistory = resolveMaxRunHistory()

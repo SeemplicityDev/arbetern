@@ -121,9 +121,9 @@ to one of:
 ```
 
 When the file is fetched, its contents become the workflow prompt and
-are persisted into the orchestrator's local `data.json` under the usual
-`prompt` field — `prompt_path` is purely a source-of-truth indirection
-for git, never written back to local state. If both `prompt` and
+are persisted into the workflow's stored descriptor in the state bucket under
+the usual `prompt` field — `prompt_path` is purely a source-of-truth
+indirection for git, never written back to the stored state. If both `prompt` and
 `prompt_path` appear in the same descriptor, `prompt_path` wins and a
 warning is logged. Resolution failures (missing file, 404, escapes repo
 root) skip the workflow on that reconcile and surface in the syncer's

@@ -41,7 +41,7 @@ type MergeState struct {
 	NoteHead      string `json:"note_head,omitempty"`       // the head a note about the branch is about; a new head clears it
 	Warned        string `json:"warned,omitempty"`          // the note the Slack channel last heard; a note goes there once it repeats
 	Held          bool   `json:"held,omitempty"`            // a person turned it off, which leaves it off
-	HeldBy        string `json:"held_by,omitempty"`         // empty on holds from before arbetern asked who
+	HeldBy        string `json:"held_by,omitempty"`         // who turned it off
 	UpdateTriedAt string `json:"update_tried_at,omitempty"` // when arbetern last asked GitHub to bring this head up to date
 	Updates       int    `json:"updates,omitempty"`         // branch updates arbetern asked for since the changes last changed
 	BypassTriedAt string `json:"bypass_tried_at,omitempty"` // when arbetern last tried to merge this head past a missing code-owner review
@@ -56,7 +56,7 @@ func (r *Registry) readChanges(ctx context.Context, owner, repo string, pr *gith
 	if err != nil {
 		return nil, err
 	}
-	// A record kept before the base was has none, and is read once more against the base it has now.
+	// A record without a base yet, such as a first read, is no retarget.
 	retarget := rv.ContentBase != "" && rv.ContentBase != pr.BaseRef
 	if rv.ContentHead != "" && !retarget && diff == rv.Diff {
 		if rv.ContentHead == pr.HeadSHA || slices.Contains(rv.Lineage, pr.HeadSHA) {
@@ -410,20 +410,6 @@ func (l *Ledger) mergeOff(id, heldBy string) bool {
 	return changed
 }
 
-func (l *Ledger) attributeHold(id, by string) bool {
-	_, rv := l.review(id)
-	if rv == nil || rv.AutoMerge == nil || !rv.AutoMerge.Held || rv.AutoMerge.HeldBy != "" {
-		return false
-	}
-	m := rv.AutoMerge
-	if by == "" {
-		m.Held, m.Note, m.NoteHead = false, "", ""
-	} else {
-		m.HeldBy, m.Note = by, heldNote(by)
-	}
-	return true
-}
-
 func (l *Ledger) claimUpdate(id, head string, now time.Time) bool {
 	_, rv := l.review(id)
 	if rv == nil || rv.active() != nil || rv.Head != head || rv.AutoMerge == nil {
@@ -505,17 +491,6 @@ func (r *Registry) followAutoMerge(ctx context.Context, p *Project, led *Ledger,
 		change = func(l *Ledger) bool { return l.mergeOff(w.taskID, by) }
 	case review.AutoMerge && w.pr.AutoMerge && !m.On:
 		change = func(l *Ledger) bool { return l.mergeOn(w.taskID, w.content, w.pr.HeadSHA, w.pr.BaseRef, false, now) }
-	case review.AutoMerge && m.Held && m.HeldBy == "":
-		// Held before arbetern asked GitHub who turned auto-merge off.
-		by, err := r.heldBy(ctx, w)
-		if err != nil {
-			log.Printf("[projects] %s task %s: reading who turned off auto-merge on pull request #%d: %v", k, w.taskID, w.number, err)
-			return led, true
-		}
-		if by == "" {
-			log.Printf("[projects] %s task %s: auto-merge on pull request #%d was not turned off by a person, so arbetern follows it again", k, w.taskID, w.number)
-		}
-		change = func(l *Ledger) bool { return l.attributeHold(w.taskID, by) }
 	case m.ArmedAt != "" && (mergeHold(rv, w, need) || len(w.failed) > 0):
 		change = func(l *Ledger) bool { return l.disarmMerge(w.taskID) }
 	default:

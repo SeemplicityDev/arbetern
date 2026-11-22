@@ -84,18 +84,6 @@ func FormatTicket(t *Ticket) string {
 	return sb.String()
 }
 
-// FormatTicketConversations renders a slice of ticket replies/notes.
-func FormatTicketConversations(ticketID int64, convs []TicketConversation) string {
-	var sb strings.Builder
-	fmt.Fprintf(&sb, "*Freshdesk ticket #%d — %d conversation(s)*\n", ticketID, len(convs))
-	if len(convs) == 0 {
-		sb.WriteString("_No conversations._\n")
-		return sb.String()
-	}
-	sb.WriteString(formatConversations(convs))
-	return sb.String()
-}
-
 // FormatNoteAdded confirms a private-note write.
 func FormatNoteAdded(ticketID int64, note *TicketConversation) string {
 	if note == nil {

@@ -252,7 +252,7 @@ func (g *gateway) planDescription(ctx context.Context, s *session, owner, repo s
 		log.Printf("[projects] %s task %s round %d: reading the pull request description: %v", s.project.ID, t.ID, s.roundN, err)
 		return descriptionPlan{reason: "GitHub could not be read"}
 	}
-	if !arbeternWrote(s.project, t, pr.Body) {
+	if !arbeternWrote(t, pr.Body) {
 		return descriptionPlan{edited: true, reason: "someone edited it on GitHub since arbetern wrote it"}
 	}
 	return descriptionPlan{next: &next, body: prBody(s.project, t, next)}
@@ -282,13 +282,8 @@ func (g *gateway) retitle(ctx context.Context, s *session, owner, repo string, n
 	return next, "Renamed the pull request to " + codeSpan(next) + "."
 }
 
-// arbeternWrote reports whether body is still the description arbetern last wrote: by its hash, or, for a pull request opened before hashes were kept, by the rendered summary and the marker.
-func arbeternWrote(p *Project, t *Task, body string) bool {
-	if t.PR.BodySHA != "" {
-		return bodySHA(body) == t.PR.BodySHA
-	}
-	body = strings.ReplaceAll(body, "\r\n", "\n")
-	return strings.Contains(body, summaryBlock(p, t, *t.Outcome)) && strings.Contains(body, prMarker(p, t))
+func arbeternWrote(t *Task, body string) bool {
+	return t.PR.BodySHA != "" && bodySHA(body) == t.PR.BodySHA
 }
 
 func (g *gateway) applyDescription(ctx context.Context, s *session, owner, repo string, number int, plan descriptionPlan) (described *Outcome, sha, fact string) {

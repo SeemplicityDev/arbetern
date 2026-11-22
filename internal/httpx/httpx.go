@@ -3,7 +3,6 @@
 package httpx
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -179,10 +178,4 @@ func SafeClient(timeout time.Duration, maxRedirects int) *http.Client {
 			return ValidateURL(req.URL.String())
 		},
 	}
-}
-
-// Dial is exposed for callers that need the guard outside an http.Client.
-func Dial(ctx context.Context, network, address string) (net.Conn, error) {
-	d := &net.Dialer{Timeout: 10 * time.Second, Control: guardedControl}
-	return d.DialContext(ctx, network, address)
 }

@@ -12,13 +12,11 @@ import (
 	"github.com/justmike1/arbetern/internal/httpx"
 )
 
-// RegisterRoutes wires the per-agent data route and workflow CRUD API onto
-// the given mux. The shared GET/DELETE/list/data.json plumbing lives in
-// internal/crud; the workflow-specific verbs (POST /<id>/run, PATCH/PUT
-// for partial updates) are handled by the Custom hook below.
+// RegisterRoutes wires the workflow CRUD API onto the given mux. The shared
+// GET/DELETE/list plumbing lives in internal/crud; the workflow-specific verbs
+// (POST /<id>/run, PATCH/PUT for partial updates) are handled by the Custom
+// hook below.
 //
-//	GET    /<agent>/workflow/<id>            → 302 to the console page
-//	GET    /<agent>/workflow/<id>/data.json  → latest stored JSON
 //	GET    /api/workflows                    → list (optional ?agent=)
 //	GET    /api/workflows/<agent>/<id>       → get
 //	PATCH  /api/workflows/<agent>/<id>       → partial update
@@ -27,8 +25,8 @@ import (
 //
 // State-changing verbs additionally require the caller to pass the owning
 // agent's allow-lists, via the authorize callback supplied by main.
-func (r *Registry) RegisterRoutes(mux *http.ServeMux, apiMux *http.ServeMux, knownAgents map[string]bool, authorize func(*http.Request, string) bool) {
-	crud.Mount(mux, apiMux, knownAgents, crud.Spec{
+func (r *Registry) RegisterRoutes(apiMux *http.ServeMux, authorize func(*http.Request, string) bool) {
+	crud.Mount(apiMux, crud.Spec{
 		Kind:       "workflow",
 		KindPlural: "workflows",
 		Get: func(agent, id string) (any, string, bool) {
@@ -63,8 +61,8 @@ func (r *Registry) handleCustom(w http.ResponseWriter, req *http.Request, agent,
 		// run for several minutes (LLM tool loops, GitHub API, rate-limit
 		// back-offs); blocking the HTTP response that long ties up the "Run
 		// now" UI button and is usually killed by intermediate proxies before
-		// the tick completes. The caller polls /data.json to see results in
-		// run history. The per-workflow busy try-lock inside runOnce still
+		// the tick completes. The caller polls GET /api/workflows/<agent>/<id>
+		// to see results in run history. The per-workflow busy try-lock inside runOnce still
 		// prevents concurrent runs of the same workflow.
 		if err := r.Trigger(req.Context(), agent, id, "manual:api"); err != nil {
 			http.Error(w, err.Error(), http.StatusNotFound)

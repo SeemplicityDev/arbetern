@@ -80,9 +80,7 @@ func (sl *SocketListener) Start() {
 	safego.Go("slack: socket event loop", sl.handleEvents)
 
 	log.Printf("[socket-mode] connecting to Slack (debug=%v)...", sl.debug)
-	if err := sl.smClient.Run(); err != nil {
-		log.Printf("[socket-mode] fatal: %v", err)
-	}
+	log.Printf("[socket-mode] fatal: %v", sl.smClient.Run())
 }
 
 // handleEvents processes incoming Socket Mode events. Each event is guarded

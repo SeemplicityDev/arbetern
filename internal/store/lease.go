@@ -29,9 +29,6 @@ func NewLease(b *Backend, key, holder string, ttl time.Duration) *Lease {
 	return &Lease{b: b, key: key, holder: holder, ttl: ttl}
 }
 
-// Key is the lease object key.
-func (l *Lease) Key() string { return l.key }
-
 // Acquire takes the lease when it is free or expired. On success the returned
 // context stays live while the lease is held and renewed in the background;
 // release gives the lease up. ok is false when someone else holds it.

@@ -178,24 +178,6 @@ func (s *Syncer) Start(ctx context.Context) {
 	go s.run(ctx, stop, stopped)
 }
 
-func (s *Syncer) Stop() {
-	s.mu.Lock()
-	stop, stopped := s.stop, s.stopped
-	s.mu.Unlock()
-	if stop == nil {
-		return
-	}
-	select {
-	case <-stop:
-	default:
-		close(stop)
-	}
-	select {
-	case <-stopped:
-	case <-time.After(5 * time.Second):
-	}
-}
-
 // OnStatus registers fn to receive a status snapshot whenever a reconcile
 // starts or finishes, so the status can be shared with other replicas.
 func (s *Syncer) OnStatus(fn func(Status)) {
@@ -218,13 +200,6 @@ func (s *Syncer) setRunning(running bool) {
 	s.running = running
 	s.mu.Unlock()
 	s.notify()
-}
-
-// LastResult returns the timestamp and error of the most recent reconcile.
-func (s *Syncer) LastResult() (time.Time, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.lastSync, s.lastErr
 }
 
 // Status returns a snapshot suitable for serving over HTTP.

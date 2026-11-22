@@ -170,21 +170,6 @@ func newBlocker(rd *Round, now time.Time) *Blocker {
 	return b
 }
 
-// legacyBlocker finds the blocker of a record kept before blockers were: a wait that is still the last cannot_fix round's summary.
-func legacyBlocker(rv *ReviewState) *Blocker {
-	for i := len(rv.Rounds) - 1; i >= 0; i-- {
-		rd := &rv.Rounds[i]
-		if rd.Outcome == nil || rd.Outcome.Status != OutcomeCannotFix {
-			continue
-		}
-		if rd.Outcome.Question != "" || rv.Waiting != oneLine(rd.Outcome.Summary, maxQuestionChars) {
-			return nil
-		}
-		return newBlocker(rd, cmp.Or(parseTime(rd.FinishedAt), parseTime(rd.CreatedAt)))
-	}
-	return nil
-}
-
 // alignDue spaces arbetern's merges of the base into a blocked branch: an hour after the blocker, then twice as long each time, up to a day.
 func (b *Blocker) alignDue(now time.Time) bool {
 	wait := min(blockedAlignAfter<<min(b.Aligns, 5), blockedAlignMax)
@@ -293,18 +278,7 @@ func (l *Ledger) observe(id string, o observation, now time.Time) bool {
 	}
 	seen := false
 	if c := o.changes; c != nil && rv.Head == o.head && (rv.ContentHead != o.head || rv.ContentBase != c.base) {
-		switch {
-		case rv.ContentHead == "":
-			// A record from before change epochs keeps what it recorded at a head that carries these changes.
-			lineage := appendLineage(nil, c.walked, o.head)
-			if m := rv.AutoMerge; m != nil && m.OnContent != "" && slices.Contains(lineage, m.OnHead) {
-				m.OnContent = c.epoch
-			}
-			if rv.DoneContent != "" && slices.Contains(lineage, rv.DoneHead) {
-				rv.DoneContent = c.epoch
-			}
-			rv.Lineage = nil
-		case c.fresh:
+		if c.fresh {
 			if rv.AutoMerge != nil {
 				rv.AutoMerge.changesChanged()
 			}
@@ -324,9 +298,6 @@ func (l *Ledger) observe(id string, o observation, now time.Time) bool {
 	rv.FailedChecks = slices.Clone(o.failed)
 	if !o.lastFeedback.IsZero() {
 		rv.LastFeedbackAt = latest(rv.LastFeedbackAt, stamp(o.lastFeedback))
-	}
-	if rv.Waiting != "" && rv.Blocker == nil {
-		rv.Blocker = legacyBlocker(rv)
 	}
 	if rv.Blocker != nil && rv.Head == o.head && rv.CI == ciPassed {
 		rv.Waiting, rv.Blocker = "", nil

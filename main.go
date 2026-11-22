@@ -2912,8 +2912,6 @@ func main() {
 	if len(uiCIDRs) > 0 {
 		log.Printf("UI IP whitelist enabled: %s", cfg.UIAllowedCIDRs)
 	}
-	// Per-route IP gating is no longer needed — globalIPGate (installed on
-	// the server Handler below) covers every non-exempt path in one place.
 	http.Handle("/ui/", uiStatic)
 	// Favicon — exempt from the IP whitelist so it loads from anywhere.
 	http.HandleFunc("/favicon.svg", func(w http.ResponseWriter, r *http.Request) {
@@ -3152,12 +3150,10 @@ func main() {
 
 	http.Handle("/api/", apiMux)
 
-	// Per-agent data routes (/<agent>/<kind>/<id>/data.json, with the bare
-	// path redirecting into the console) and the /api/<kind>s API.
-	dashRegistry.RegisterRoutes(http.DefaultServeMux, apiMux, knownAgents, canManageAgent)
-	wfRegistry.RegisterRoutes(http.DefaultServeMux, apiMux, knownAgents, canManageAgent)
+	dashRegistry.RegisterRoutes(apiMux, canManageAgent)
+	wfRegistry.RegisterRoutes(apiMux, canManageAgent)
 	chatRegistry.RegisterRoutes(apiMux, knownAgents)
-	billingStore.RegisterRoutes(http.DefaultServeMux, apiMux)
+	billingStore.RegisterRoutes(apiMux)
 	perfStore.RegisterRoutes(apiMux)
 	skillRegistry.RegisterRoutes(apiMux, clientEmail)
 	mcpRegistry.RegisterRoutes(apiMux, clientEmail)
@@ -3319,11 +3315,6 @@ func main() {
 			userContextStore.StartGC(held, time.Hour)
 			sessions.StartSweeper(held, time.Minute)
 			catalogIndex.StartSync(held, catalogSyncInterval)
-			if n, err := dashRegistry.PurgeLegacyCache(held); err != nil {
-				log.Printf("[dashboards] legacy cache purge: %v", err)
-			} else if n > 0 {
-				log.Printf("[dashboards] removed %d legacy cache object(s)", n)
-			}
 			<-held.Done()
 			wfRegistry.StopAll()
 			dashRegistry.StopAll()

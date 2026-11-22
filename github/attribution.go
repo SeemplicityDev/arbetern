@@ -13,9 +13,6 @@ const (
 	unresolvedUser = "an unresolved user"
 )
 
-// legacyPRMarkers are the attribution phrases of bodies written before the marker existed.
-var legacyPRMarkers = []string{"Automated via Slack by", "requested via Slack by"}
-
 var (
 	prMarkerRe       = regexp.MustCompile(`<!-- arbetern((?: [a-z]+=[^\s>]+)*) -->`)
 	requesterRe      = regexp.MustCompile(`(?:Automated|requested) via [A-Za-z][A-Za-z ]{0,40}? by (.+?)[._]*(?:\r?\n|$)`)
@@ -145,15 +142,7 @@ func parseRequester(body string) (name, id string) {
 
 // IsAutomatedPRBody reports whether a pull request body was written by arbetern.
 func IsAutomatedPRBody(body string) bool {
-	if strings.Contains(body, prMarkerPrefix) {
-		return true
-	}
-	for _, m := range legacyPRMarkers {
-		if strings.Contains(body, m) {
-			return true
-		}
-	}
-	return false
+	return strings.Contains(body, prMarkerPrefix)
 }
 
 // OriginKind is what stands behind a pull request on the console's Pull requests page.

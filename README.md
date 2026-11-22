@@ -367,7 +367,7 @@ month rollup.
 - Set `UI_HEADER` env var to customize the top-bar title
 - Agents with `chat_enabled` expose a full-screen chat at `/ui/<agent>/chat` — a deep-linkable, reload-safe URL you can bookmark or share
 - Chat replies are produced in the background: sending returns at once, the thread shows elapsed time and tool activity while the agent works, and a reload or another replica picks the in-flight turn up from the stored transcript
-- **Conversations are private to the person who created them.** Each transcript records its owner (the proxy-verified email) and every list, open, rename and delete is scoped to that owner, so the Chats page shows only your own threads. A deployment with no auth proxy has no identity to scope by, and there every caller shares one ownerless set — which is also where conversations created before ownership existed live, so they stop appearing once you put a proxy in front
+- **Conversations are private to the person who created them.** Each transcript records its owner (the proxy-verified email) and every list, open, rename and delete is scoped to that owner, so the Chats page shows only your own threads. A deployment with no auth proxy has no identity to scope by, and there every caller shares one ownerless set.
 - The side rail's collapsed state, the theme and the time window are remembered per browser
 
 ### Authentication (SSO)
@@ -632,7 +632,7 @@ that re-runs every source on the requested interval.
 
 **Viewing:** each dashboard has its own page in the console at `/ui/<agent>/dashboard/<id>`
 (self-refreshing, inside the top bar and side rail), with the raw JSON at
-`/<agent>/dashboard/<id>/data.json`. Every agent card
+`/api/dashboards/<agent>/<id>`. Every agent card
 in the Web UI also shows an **Available dashboards** section listing its short-name
 chips — click to open, `×` to delete.
 
@@ -900,8 +900,7 @@ Every body, supplied or fallback, also ends with an invisible HTML comment —
 `<!-- arbetern agent=<agent> source=<slack|chat|workflow|dashboard> user=<slack-id> -->`,
 with unknown attributes left out. It marks the PR as arbetern-written whatever
 entry path opened it, and is how the console's Pull requests page finds the
-agents' open PRs; bodies written before it existed are recognised by the
-attribution phrases above. A pull request opened for a [project](#projects)
+agents' open PRs. A pull request opened for a [project](#projects)
 carries `source=project project=<id> task=<task>` in place of `user=`. A
 workflow run's footer names the workflow, `_Automated via the "<name>"
 workflow_`, not its owner, and its marker carries `workflow=<id>` in place of

@@ -41,8 +41,6 @@ import (
 const (
 	// Prefix is the object prefix dashboard descriptors are stored under.
 	Prefix = "dashboards/"
-	// legacyCachePrefix held per-account lookups before state moved to the bucket.
-	legacyCachePrefix = Prefix + "_cache/"
 
 	// syncLeaseTTL bounds how long a crashed replica blocks a dashboard's next sync.
 	syncLeaseTTL = 5 * time.Minute
@@ -355,23 +353,6 @@ func (r *Registry) ListSummaries(agent string) []*Dashboard {
 		list[i] = d.Summary()
 	}
 	return list
-}
-
-// PurgeLegacyCache deletes the objects a previous release kept under the
-// dashboards prefix that are not descriptors. It returns how many were removed.
-func (r *Registry) PurgeLegacyCache(ctx context.Context) (int, error) {
-	objs, err := r.b.List(ctx, legacyCachePrefix)
-	if err != nil {
-		return 0, err
-	}
-	removed := 0
-	for _, o := range objs {
-		if err := r.b.Delete(ctx, o.Key, ""); err != nil {
-			return removed, err
-		}
-		removed++
-	}
-	return removed, nil
 }
 
 // Delete stops the sync goroutine and removes the stored descriptor.
@@ -899,8 +880,8 @@ func instanceLabel(inputs map[string]string) string {
 // RenderInstance creates (or overwrites) a rendered instance of the prompt
 // template templateID with the given input values, starts its refresh ticker,
 // and fires an immediate render. It returns the instance shell straight away
-// (Markdown still empty); the caller polls the instance's data.json until the
-// first render lands. This mirrors the workflow "run now" fire-and-forget flow.
+// (Markdown still empty); the caller polls the instance through the API until
+// the first render lands. This mirrors the workflow "run now" fire-and-forget flow.
 //
 // interval overrides the instance's auto-refresh cadence when non-empty and a
 // valid Go duration; otherwise the template's sync_interval is inherited.

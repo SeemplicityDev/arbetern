@@ -249,11 +249,9 @@ func (r *Registry) ListConversations(agent, owner string) ([]ConversationSummary
 	}
 	out := []ConversationSummary{}
 	r.docs.Range(func(key string, t *transcript) {
-		a, id := splitKey(key)
-		if a != agent {
+		if a, _ := splitKey(key); a != agent {
 			return
 		}
-		normalize(t, a, id)
 		if !owns(t, owner) {
 			return
 		}
@@ -290,7 +288,6 @@ func (r *Registry) Conversation(agent, id, owner string) (*transcript, error) {
 	if !ok {
 		return nil, nil
 	}
-	normalize(t, agent, id)
 	if !owns(t, owner) {
 		return nil, ErrForbidden
 	}
@@ -315,7 +312,6 @@ func stalePending(p *progress.Snapshot) bool {
 func (r *Registry) DeleteConversation(ctx context.Context, agent, id, owner string) error {
 	key := store.Key(agent, id)
 	if t, ok := r.docs.Get(key); ok {
-		normalize(t, agent, id)
 		if !owns(t, owner) {
 			return ErrForbidden
 		}
@@ -327,7 +323,6 @@ func (r *Registry) DeleteConversation(ctx context.Context, agent, id, owner stri
 // conversation does not exist.
 func (r *Registry) RenameConversation(ctx context.Context, agent, id, owner, title string) (*transcript, error) {
 	t, err := r.docs.Update(ctx, store.Key(agent, id), func(t *transcript) error {
-		normalize(t, agent, id)
 		if !owns(t, owner) {
 			return ErrForbidden
 		}
@@ -377,8 +372,6 @@ func (r *Registry) purgeExpired(ctx context.Context, retention time.Duration) {
 	cutoff := time.Now().UTC().Add(-retention)
 	var expired []string
 	r.docs.Range(func(key string, t *transcript) {
-		a, id := splitKey(key)
-		normalize(t, a, id)
 		if t.UpdatedAt.Before(cutoff) {
 			expired = append(expired, key)
 		}
@@ -393,38 +386,6 @@ func (r *Registry) purgeExpired(ctx context.Context, retention time.Duration) {
 	}
 	if removed > 0 {
 		log.Printf("chat retention: removed %d conversation(s) inactive for >%s", removed, retention)
-	}
-}
-
-// normalize fills in any legacy or partial record (e.g. the
-// pre-multi-conversation single history.json) so callers always receive a
-// complete transcript.
-func normalize(t *transcript, agent, id string) {
-	if t.ID == "" {
-		t.ID = id
-	}
-	if t.Agent == "" {
-		t.Agent = agent
-	}
-	if t.Title == "" {
-		t.Title = titleFromMessages(t.Messages)
-	}
-	if t.CreatedAt.IsZero() {
-		if len(t.Messages) > 0 {
-			t.CreatedAt = t.Messages[0].Time
-		} else {
-			t.CreatedAt = time.Now().UTC()
-		}
-	}
-	if t.UpdatedAt.IsZero() {
-		if n := len(t.Messages); n > 0 {
-			t.UpdatedAt = t.Messages[n-1].Time
-		} else {
-			t.UpdatedAt = t.CreatedAt
-		}
-	}
-	if t.Messages == nil {
-		t.Messages = []Message{}
 	}
 }
 
@@ -448,7 +409,6 @@ func (r *Registry) Start(agent, id, owner, user, message string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), turnTimeout)
 	var contextMsgs []Message
 	_, err := r.docs.Update(ctx, key, func(t *transcript) error {
-		normalize(t, agent, id)
 		if !owns(t, owner) {
 			return ErrForbidden
 		}
@@ -507,7 +467,6 @@ func (r *Registry) run(ctx context.Context, cancel context.CancelFunc, agent, id
 		fctx, fcancel := context.WithTimeout(context.Background(), finishTimeout)
 		defer fcancel()
 		_, err = r.docs.Update(fctx, key, func(t *transcript) error {
-			normalize(t, agent, id)
 			t.Pending = nil
 			t.Messages = append(t.Messages, msg)
 			t.UpdatedAt = msg.Time
@@ -549,7 +508,6 @@ func (r *Registry) resume(e journal.Entry) error {
 	if !ok {
 		return ErrNotFound
 	}
-	normalize(t, agent, id)
 	if t.Pending == nil {
 		return nil
 	}
@@ -567,9 +525,7 @@ func (r *Registry) resume(e journal.Entry) error {
 // closeOff replaces a pending turn with a notice, so the conversation stops
 // waiting on a reply that is not coming.
 func (r *Registry) closeOff(ctx context.Context, key, notice string) {
-	agent, id := splitKey(key)
 	_, err := r.docs.Update(ctx, key, func(t *transcript) error {
-		normalize(t, agent, id)
 		if t.Pending == nil {
 			return errNoChange
 		}
@@ -615,17 +571,6 @@ func trimContext(msgs []Message) []Message {
 		out = out[len(out)-historyContextLimit:]
 	}
 	return out
-}
-
-// titleFromMessages derives a title from the first non-empty user message,
-// falling back to "New chat".
-func titleFromMessages(msgs []Message) string {
-	for _, m := range msgs {
-		if m.Role == "user" && strings.TrimSpace(m.Content) != "" {
-			return deriveTitle(m.Content)
-		}
-	}
-	return "New chat"
 }
 
 // deriveTitle builds a short conversation title from a message: its first line,

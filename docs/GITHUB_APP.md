@@ -146,8 +146,10 @@ The bot's login is `<slug>[bot]` in the REST API and in searches
    exempt the token's account from branch or title conventions, CODEOWNERS
    entries and rulesets that name it. They need the App's bot account instead.
 3. Rulesets apply to the App unless it is added as a bypass actor. arbetern
-   does not need a bypass: it merges only what the base branch's rules already
-   allow.
+   merges only what the base branch's rules already allow, except for a
+   project with `review.code_owner_stand_in`: that one needs the App on the
+   bypass list of the rulesets that ask for code owners, for pull requests only
+   (see [Auto-merge](PROJECTS.md#auto-merge)).
 4. Deploy with the App's variables while no project pull request has auto-merge
    on. arbetern treats auto-merge that the token's account turned on as someone
    else's and no longer turns it off. It recognizes its earlier comments by

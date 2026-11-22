@@ -476,12 +476,6 @@ func (c *Config) GoogleConfigured() bool {
 	return strings.TrimSpace(c.GoogleCredentialsJSON) != ""
 }
 
-// GoogleFolderPinned returns true when the deployment confines the connector to
-// an explicit folder list rather than discovering its own scope.
-func (c *Config) GoogleFolderPinned() bool {
-	return strings.TrimSpace(c.GoogleDriveFolderIDs) != ""
-}
-
 func Load() (*Config, error) {
 	cfg := &Config{
 		Credentials: Credentials{
