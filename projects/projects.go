@@ -190,6 +190,7 @@ var mergeMethods = []string{github.MergeSquash, github.MergeRebase, github.Merge
 
 var (
 	ownerRe      = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$`)
+	botLoginRe   = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})\[bot\]$`)
 	repoNameRe   = regexp.MustCompile(`^[A-Za-z0-9._-]{1,100}$`)
 	repoGlobRe   = regexp.MustCompile(`^[A-Za-z0-9._*?\[\]-]{1,100}$`)
 	branchRe     = regexp.MustCompile(`^[A-Za-z0-9._/-]{1,200}$`)
@@ -256,6 +257,8 @@ type Review struct {
 	MergeMethod           string `json:"merge_method,omitempty"`             // squash | rebase | merge, default squash
 
 	DescriptionCheck string `json:"description_check,omitempty"` // a check that reads the description, re-run in full after a round changes only the description
+
+	CodeOwnerStandIn string `json:"code_owner_stand_in,omitempty"` // login whose approval lets arbetern merge past a missing code-owner review with its bypass
 }
 
 // Notify names where a project reports what it does.
@@ -783,8 +786,12 @@ func (r *Review) normalize() error {
 	if r.AutoMerge && !r.FollowUp {
 		return invalidf("review.auto_merge needs review.follow_up")
 	}
+	r.CodeOwnerStandIn = strings.TrimSpace(r.CodeOwnerStandIn)
+	if r.CodeOwnerStandIn != "" && !botLoginRe.MatchString(r.CodeOwnerStandIn) {
+		return invalidf("review.code_owner_stand_in must be a GitHub App's login, such as <slug>[bot]")
+	}
 	if !r.AutoMerge {
-		r.AutoMergeDelayMinutes, r.MergeMethod = 0, ""
+		r.AutoMergeDelayMinutes, r.MergeMethod, r.CodeOwnerStandIn = 0, "", ""
 	}
 	r.DescriptionCheck = strings.TrimSpace(r.DescriptionCheck)
 	if len(r.DescriptionCheck) > maxDescriptionCheck {

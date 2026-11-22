@@ -155,6 +155,10 @@ func blocksOnChecks(rd *Round) bool {
 	return slices.Contains(rd.Trigger, triggerChecks) && !slices.Contains(rd.Trigger, triggerConflict) && !personSpoke(rd)
 }
 
+func roundBlocks(rd *Round, o Outcome) bool {
+	return o.Question == "" && (o.Status == OutcomeCannotFix || o.Status == OutcomeAnswered && !o.QuestionResolved) && blocksOnChecks(rd)
+}
+
 func newBlocker(rd *Round, now time.Time) *Blocker {
 	if !blocksOnChecks(rd) {
 		return nil
@@ -595,9 +599,9 @@ func recordRoundResult(t *Task, rv *ReviewState, rd *Round, res roundResult, now
 	switch {
 	case o.Question != "":
 		rv.Waiting, rv.Blocker = o.Question, nil
-	case o.Status == OutcomeCannotFix:
+	case o.Status == OutcomeCannotFix || roundBlocks(rd, o):
 		rv.Waiting, rv.Blocker = oneLine(o.Summary, maxQuestionChars), newBlocker(rd, now)
-	case personSpoke(rd) || o.QuestionResolved || rv.Blocker != nil:
+	case personSpoke(rd) || o.QuestionResolved || rv.Blocker != nil && o.Status == OutcomeFixed:
 		rv.Waiting, rv.Blocker = "", nil
 	}
 	if rd.HeadAfter != rv.Head {

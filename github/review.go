@@ -29,6 +29,7 @@ const (
 	PRStateAll    = "all"
 
 	ReviewApproved         = "APPROVED"
+	ReviewRequired         = "REVIEW_REQUIRED"
 	ReviewChangesRequested = "CHANGES_REQUESTED"
 	ReviewDismissed        = "DISMISSED"
 	ReviewCommented        = "COMMENTED"
@@ -149,6 +150,7 @@ type Check struct {
 	Conclusion string `json:"conclusion,omitempty"`
 	URL        string `json:"url,omitempty"`
 	App        string `json:"app,omitempty"`
+	AppID      int64  `json:"app_id,omitempty"`
 	Title      string `json:"title,omitempty"`
 	Summary    string `json:"summary,omitempty"`
 }
@@ -222,6 +224,7 @@ func (c *Client) ChecksForRef(ctx context.Context, owner, repo, ref string) ([]C
 				Conclusion: r.GetConclusion(),
 				URL:        cmp.Or(r.GetDetailsURL(), r.GetHTMLURL()),
 				App:        r.GetApp().GetSlug(),
+				AppID:      r.GetApp().GetID(),
 				Title:      r.GetOutput().GetTitle(),
 				Summary:    text.Truncate(r.GetOutput().GetSummary(), 2000),
 			})

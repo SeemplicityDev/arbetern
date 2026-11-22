@@ -261,7 +261,7 @@ func roundRules(p *Project, t *Task, rd *Round) string {
 		rules = append(rules, "When a review comment asks to change the pull request description, or the description quoted above still holds placeholders from the repository's pull request template (sections it reserves for a person included), pass the whole corrected description in `description`. It replaces the one quoted above, so keep everything that still holds and `{ticket}` where the key belongs; report_outcome refuses a description that still holds a template placeholder.")
 	}
 	if t.Review != nil && t.Review.Blocker != nil {
-		rules = append(rules, "arbetern drops the blocker above once its checks pass, or when this round reports `fixed` or `answered`, so the checks on anything you push decide it again. When you push nothing and it still stands, report `cannot_fix` again and say what still blocks it; never pass it as a `question`.")
+		rules = append(rules, "arbetern drops the blocker above once its checks pass, or when this round pushes a fix, so the checks on anything you push decide it again. When you push nothing, say in `summary` what still blocks it; never pass it as a `question`.")
 	} else if t.Review != nil && t.Review.Waiting != "" {
 		rules = append(rules, "The open question above stays open until a person answers it or you settle it. When a person's comment above answers it, apply the answer. When the evidence and the project's instructions let you decide it yourself, apply your decision, pass `question_resolved: true` and say in `summary` how you settled it. Otherwise pass it again in `question`.")
 	}

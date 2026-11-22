@@ -462,6 +462,7 @@ every check passes and every review comment has an answer.
 | `review.auto_merge_delay_minutes` | 30 | How long a ready pull request must stay unchanged before auto-merge goes on, 5–1440 |
 | `review.merge_method` | `squash` | `squash`, `rebase` or `merge`, one the repository allows. `squash` lands the result as one commit; `rebase` and `merge` land each commit of the pull request, and `merge` also the merges of the base branch |
 | `review.description_check` | none | The name of a check that reads the pull request description, such as an automated review, exactly as the pull request lists it. When a follow-up round changes only the description, arbetern re-runs that check's whole workflow run: such a check reads the description only when it runs, and re-running its failed jobs alone would keep its earlier result. Up to 200 characters; needs `follow_up` |
+| `review.code_owner_stand_in` | none | A GitHub App's login, such as `<slug>[bot]`, whose approval of the current changes stands in for a code owner's review on this project's pull requests: arbetern then merges past that rule itself (see [Auto-merge](#auto-merge)). Needs `auto_merge` and arbetern's GitHub App on the bypass list of the rulesets that ask for code owners |
 
 Turning follow-through on for an existing project also follows the pull
 requests it already has open.
@@ -546,12 +547,14 @@ skipped is named in the round's summary comment. When a round finds that the
 pull request branch no longer contains the head it started from, its summary
 comment says the history was rewritten.
 
-A `cannot_fix` round started by failing checks, with no comment from a person
-and no conflict among its reasons, leaves the pull request *blocked* instead of
-waiting for a person: its checks fail for a reason outside its changes, such
-as a release another repository has to publish. arbetern drops the blocker once
-the checks pass, at any head, or when a later round reports `fixed` or
-`answered`; another `cannot_fix` renews it. While it stands, the same checks
+A round started by failing checks that pushes nothing, reporting `answered` or
+`cannot_fix` without a question, with no comment from a person and no conflict
+among its reasons, leaves the pull request *blocked* instead of waiting for a
+person: its checks fail for a reason outside its changes, such as a flaky test,
+a break on the base branch or a release another repository has to publish.
+arbetern drops the blocker once the checks pass, at any head (re-run jobs
+included), or when a later round pushes a fix; another round that pushes
+nothing renews it. While it stands, the same checks
 failing again on the same changes, with at most the base merged in since,
 start no other round, while a conflict or a new comment still does. As the base
 branch moves, arbetern asks GitHub to merge it into the branch so the checks
@@ -647,6 +650,30 @@ Slack channel hears when auto-merge goes on. A few cases need more:
   update while the base branch brings workflow changes the token may not write
   (see [GitHub](#github)); arbetern then notes why on the task and tries again
   an hour later.
+- **Only a code owner's review missing.** GitHub never counts an app as a code
+  owner, and its auto-merge never uses a bypass. With
+  `review.code_owner_stand_in`, while arbetern's auto-merge is on and GitHub
+  still reports the pull request blocked, arbetern merges it itself once all of
+  this holds:
+  - the stand-in's latest review approves the current changes, and nobody's
+    latest review asks for changes;
+  - GitHub reports a review still required, and a rule on the base branch asks
+    for code owners;
+  - every other rule already holds: each required check passed (from the app
+    the rule names, if any), the approvals suffice (the stand-in's counts as
+    one, a person's when they have write access), every review thread is
+    resolved and the latest push approved where a rule asks for that, no
+    changed file falls under a pattern a rule gives a specific team to review,
+    and the merge method is allowed.
+
+  A rule type arbetern does not check itself, such as a merge queue, required
+  deployments or code scanning, leaves the merge to GitHub. Where a rule wants
+  the branch up to date, arbetern brings it up to date first. arbetern posts a
+  note naming the stand-in. When a rule holds the merge, the task says which;
+  when GitHub refuses it, for instance because arbetern's GitHub App is not on
+  the bypass list, the task shows why and arbetern tries again an hour later.
+  Put the GitHub App on the bypass list of every ruleset that asks for code
+  owners, for pull requests only.
 - **Something changed.** arbetern turns its auto-merge off at once, even while
   checks are still running, when a comment waits for an answer, a check failed,
   a question or conflict is open, a round is due, or the pull request's changes
@@ -1242,10 +1269,15 @@ browser request.
   by itself only changes a person with write access approved or GitHub
   reports approved, so the base branch's rules (required reviews, code owners,
   required checks) stay the gate. Keep them on: where they require no review,
-  arbetern waits for a person's approval before it turns auto-merge on. For
-  merges no person has to touch, have a CI reviewer approve and require one
-  approval without code-owner review: GitHub never counts an app as a code
-  owner.
+  arbetern waits for a person's approval before it turns auto-merge on.
+  GitHub never counts an app as a code owner. For merges no person has to
+  touch, have a CI reviewer approve, and either require one approval without
+  code-owner review, or name the reviewer's app in
+  `review.code_owner_stand_in` and put arbetern's GitHub App on the bypass
+  list of the rulesets that ask for code owners. That bypass skips every rule
+  of those rulesets on arbetern's merges, so arbetern merges past them only
+  when a code owner's review is all that is missing, checks each other rule
+  itself, and leaves rule types it does not know to GitHub.
 - **Branch rules.** Protect the base branch against direct pushes. Where
   nothing else uses the project's branch names, a ruleset on them and on tags
   that only arbetern's GitHub identity bypasses keeps everything else from creating,

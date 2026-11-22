@@ -1057,7 +1057,7 @@ function pjdMetaHtml(p) {
   const repoUrl = r.owner ? safeExternalUrl(`https://github.com/${encodeURIComponent(r.owner)}${r.name ? '/' + encodeURIComponent(r.name) : ''}`) : '';
   const wide = (label, html) => `<div class="meta-item proj-wide"><div class="label">${escapeHtml(label)}</div><div class="value">${html}</div></div>`;
   const kind = pjSignal(sig.type);
-  const merge = rv.auto_merge ? `auto-merge after ${fmtInt(rv.auto_merge_delay_minutes || 30)}m (${rv.merge_method || 'squash'})` : '';
+  const merge = rv.auto_merge ? `auto-merge after ${fmtInt(rv.auto_merge_delay_minutes || 30)}m (${rv.merge_method || 'squash'})${rv.code_owner_stand_in ? `, ${rv.code_owner_stand_in} stands in for code owners` : ''}` : '';
   const follow = rv.follow_up ? [rv.draft ? 'drafts' : '', `${fmtInt(rv.max_rounds)} rounds`, `quiet ${fmtInt(rv.settle_minutes)}m`, rv.description_check ? `description check ${rv.description_check}` : '', merge].filter(Boolean).join(' · ') : 'off';
   const skills = listNames(skillsData, p.skills);
   const connectors = listNames(mcpData, p.connectors);
@@ -1345,6 +1345,7 @@ async function projectForm(p) {
       + formField('Description check', input('pjf-dcheck', rv.description_check, ' maxlength="200" placeholder="CI / review"' + code), 'Optional. A check that reads the description, such as an automated review, named as the pull request lists it. When a follow-up round changes only the description, arbetern re-runs that check’s workflow.')
       + check('pjf-automerge', rv.auto_merge, 'Turn on auto-merge once a ready pull request stays unchanged for the delay')
       + `<div class="form-grid2">${formField('Auto-merge delay, minutes', input('pjf-merge-delay', rv.auto_merge_delay_minutes || '', ' type="number" min="5" max="1440" step="1" inputmode="numeric" placeholder="30"'), '5–1440. New changes, a new check result or a comment start it over, and arbetern checks once more before turning auto-merge on.')}${formField('Merge method', `<select class="form-input" id="pjf-merge-method">${['squash', 'rebase', 'merge'].map(m => `<option value="${m}"${(rv.merge_method || 'squash') === m ? ' selected' : ''}>${m}</option>`).join('')}</select>`, 'One the repository allows.')}</div>`
+      + formField('Code-owner stand-in', input('pjf-standin', rv.code_owner_stand_in, ' maxlength="50" placeholder="ci-reviewer[bot]"' + code), 'Optional. A GitHub App whose approval of the current changes stands in for a code owner’s review: arbetern merges past that rule once every other rule holds. Needs arbetern’s GitHub App on the bypass list of the rulesets that ask for code owners.')
       + formField('Slack channel', input('pjf-slack', nt.slack_channel, ' maxlength="13" placeholder="C0123456789"' + code), 'Optional channel id. It hears about new pull requests, questions, blocked and ready ones, auto-merge, merges, and an automatic pause.')
       + `<details class="form-more"><summary>Limits</summary><div class="form-grid2">${limits}</div></details>`
       + `<label class="check-row"><input type="checkbox" id="pjf-enabled"${!p || p.enabled ? ' checked' : ''}> Enabled</label>`,
@@ -1499,6 +1500,7 @@ function pjfBody(isNew) {
       description_check: formValue('pjf-dcheck'),
       auto_merge: document.getElementById('pjf-automerge').checked,
       auto_merge_delay_minutes: parseInt(formValue('pjf-merge-delay'), 10) || 0, merge_method: formValue('pjf-merge-method'),
+      code_owner_stand_in: formValue('pjf-standin'),
     }),
     notify: { slack_channel: formValue('pjf-slack') },
     limits: Object.fromEntries(PJD_LIMITS.map(([k]) => [k, parseInt(formValue('pjf-l-' + k), 10) || 0])),
@@ -1521,6 +1523,7 @@ function pjfReviewShape(rv) {
   const out = { follow_up: !!rv.follow_up, draft: !!rv.draft, max_rounds: rv.max_rounds || 0, settle_minutes: rv.settle_minutes || 0 };
   if (rv.follow_up && rv.description_check) out.description_check = rv.description_check;
   if (rv.auto_merge) Object.assign(out, { auto_merge: true, auto_merge_delay_minutes: rv.auto_merge_delay_minutes || 0, merge_method: rv.merge_method || 'squash' });
+  if (rv.auto_merge && rv.code_owner_stand_in) out.code_owner_stand_in = rv.code_owner_stand_in;
   return out;
 }
 

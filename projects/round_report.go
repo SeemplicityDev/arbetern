@@ -449,7 +449,7 @@ func roundComment(p *Project, rd *Round, o Outcome, owner, repo, head string, po
 		OutcomeAnswered:  "answered without changing code",
 		OutcomeCannotFix: "needs a person",
 	}[o.Status]
-	blocked := o.Status == OutcomeCannotFix && o.Question == "" && blocksOnChecks(rd)
+	blocked := roundBlocks(rd, o)
 	if blocked {
 		label = "blocked by failing checks"
 	}

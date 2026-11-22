@@ -31,6 +31,7 @@ type prWatch struct {
 	context []Feedback
 	ci      ciStatus
 	failed  []github.Check
+	checks  []github.Check
 
 	content      string
 	lineage      []string
@@ -179,7 +180,7 @@ func (r *Registry) observePR(ctx context.Context, p *Project, led *Ledger, t Tas
 		return led, err
 	}
 	w := prWatch{
-		taskID: t.ID, owner: owner, repo: repo, number: number, pr: pr, items: items, context: context, ci: ci, failed: failed, reviews: reviews,
+		taskID: t.ID, owner: owner, repo: repo, number: number, pr: pr, items: items, context: context, ci: ci, failed: failed, checks: checks, reviews: reviews,
 		ourAutoMerge: pr.AutoMerge && strings.EqualFold(pr.AutoMergeBy, self),
 	}
 	if _, nrv := next.review(t.ID); nrv != nil && nrv.ContentHead == pr.HeadSHA && nrv.ContentBase == pr.BaseRef {
