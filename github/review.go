@@ -68,8 +68,17 @@ func isBotUser(u *gh.User) bool {
 	return u.GetType() == "Bot" || strings.HasSuffix(login, "[bot]") || login == "copilot"
 }
 
-// PullRequestDiscussion returns the reviews, inline review comments and conversation comments on a pull request, oldest first within each kind.
+// PullRequestDiscussion is PullRequestComments with each body cut to 2,000 bytes.
 func (c *Client) PullRequestDiscussion(ctx context.Context, owner, repo string, number int) ([]DiscussionItem, error) {
+	items, err := c.PullRequestComments(ctx, owner, repo, number)
+	for i := range items {
+		items[i].Body = text.Truncate(items[i].Body, maxFeedbackBody)
+	}
+	return items, err
+}
+
+// PullRequestComments returns the reviews, inline review comments and conversation comments on a pull request with whole bodies, oldest first within each kind.
+func (c *Client) PullRequestComments(ctx context.Context, owner, repo string, number int) ([]DiscussionItem, error) {
 	var items []DiscussionItem
 	add := func(id int64, kind string, user *gh.User, association, state, path string, line int, inReplyTo int64, body, url string, at gh.Timestamp) {
 		items = append(items, DiscussionItem{
@@ -82,7 +91,7 @@ func (c *Client) PullRequestDiscussion(ctx context.Context, owner, repo string, 
 			Path:        path,
 			Line:        line,
 			InReplyTo:   inReplyTo,
-			Body:        text.Truncate(strings.TrimSpace(body), maxFeedbackBody),
+			Body:        strings.TrimSpace(body),
 			URL:         url,
 			CreatedAt:   at.Time,
 		})
@@ -140,6 +149,83 @@ func (c *Client) PullRequestDiscussion(ctx context.Context, owner, repo string, 
 		issueOpts.Page = resp.NextPage
 	}
 	return items, nil
+}
+
+const defaultCommentChars = 3000
+
+// FormatPRComments renders a discussion newest first in up to 64 KiB, only author's items when author is set, each body cut to maxChars (default 3,000).
+func FormatPRComments(ref string, items []DiscussionItem, author string, maxChars int) string {
+	if maxChars <= 0 {
+		maxChars = defaultCommentChars
+	}
+	items = slices.DeleteFunc(slices.Clone(items), func(it DiscussionItem) bool {
+		return it.Body == "" && (it.Kind != DiscussionReview || it.State == ReviewCommented)
+	})
+	if len(items) == 0 {
+		return fmt.Sprintf("No comments or reviews on %s.", ref)
+	}
+	total := len(items)
+	if author != "" {
+		commenters := make([]string, 0, total)
+		for _, it := range items {
+			commenters = append(commenters, it.Author)
+		}
+		items = slices.DeleteFunc(items, func(it DiscussionItem) bool {
+			return !strings.EqualFold(it.Author, author) && !strings.EqualFold(it.Author, author+"[bot]")
+		})
+		if len(items) == 0 {
+			slices.Sort(commenters)
+			return fmt.Sprintf("No comments or reviews by %s on %s. Commenters: %s.", author, ref, strings.Join(slices.Compact(commenters), ", "))
+		}
+	}
+	slices.SortStableFunc(items, func(a, b DiscussionItem) int { return b.CreatedAt.Compare(a.CreatedAt) })
+
+	var sb strings.Builder
+	if author != "" {
+		fmt.Fprintf(&sb, "Comments and reviews by %s on %s, newest first (%d of %d):\n", author, ref, len(items), total)
+	} else {
+		fmt.Fprintf(&sb, "Comments and reviews on %s, newest first (%d):\n", ref, total)
+	}
+	for i, it := range items {
+		entry := formatDiscussionItem(it, maxChars)
+		if i > 0 && sb.Len()+len(entry) > text.DefaultMaxBytes {
+			fmt.Fprintf(&sb, "\n… %d older not shown (output limit); use a smaller max_chars or filter by author.\n", len(items)-i)
+			break
+		}
+		sb.WriteString(entry)
+	}
+	return sb.String()
+}
+
+func formatDiscussionItem(it DiscussionItem, maxChars int) string {
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "\n— %s · %s · %s", it.Author, discussionKind(it), it.CreatedAt.UTC().Format(time.RFC3339))
+	if it.UpdatedAt.After(it.CreatedAt) {
+		sb.WriteString(", updated " + it.UpdatedAt.UTC().Format(time.RFC3339))
+	}
+	if it.URL != "" {
+		sb.WriteString(" · " + it.URL)
+	}
+	sb.WriteString("\n")
+	if len(it.Body) > maxChars {
+		fmt.Fprintf(&sb, "%s… [cut at %d of %d chars]\n", text.TruncatePlain(it.Body, maxChars), maxChars, len(it.Body))
+	} else if it.Body != "" {
+		sb.WriteString(it.Body + "\n")
+	}
+	return sb.String()
+}
+
+func discussionKind(it DiscussionItem) string {
+	switch it.Kind {
+	case DiscussionReview:
+		return "review " + it.State
+	case DiscussionInline:
+		if it.Line > 0 {
+			return fmt.Sprintf("review comment on %s:%d", it.Path, it.Line)
+		}
+		return "review comment on " + it.Path
+	}
+	return "comment"
 }
 
 // Check is one check run or commit status on a commit.

@@ -11,7 +11,7 @@ import (
 // Raw storage reads and http_get stay out: the state bucket holds credentials, and a fetch of any URL is an exfiltration channel.
 var readOnlyTools = []string{
 	ToolListOrgRepos, ToolListUserRepos, ToolListRepoTeams, ToolListRepoTeamsBulk, ToolGetFilesBulk, ToolGetFileContent,
-	ToolGetRepoDefaultBranch, ToolResolveOwner, ToolSearchFiles, ToolListDirectory, ToolGetPullRequest, ToolListPullRequests,
+	ToolGetRepoDefaultBranch, ToolResolveOwner, ToolSearchFiles, ToolListDirectory, ToolGetPullRequest, ToolGetPullRequestComments, ToolListPullRequests,
 	ToolSearchPullRequests, ToolFindOpenPullRequests, ToolListCommits, ToolGetCommit, ToolSearchCode, ToolSearchCodeOrg, ToolGetWorkflowRun,
 	ToolSlackConversationsHistory, ToolSlackConversationsReplies, ToolFetchThreadContext, ToolGetSlackUserInfo, ToolLookupSlackUser,
 	ToolLookupCVE, ToolSearchCVE, ToolPyPIRelease,

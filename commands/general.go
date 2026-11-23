@@ -934,7 +934,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 			Type: "function",
 			Function: llm.ToolFunction{
 				Name:        ToolGetPullRequest,
-				Description: "Get details, changed files, diff, and CI check results of a GitHub pull request by number or URL. Use this to analyze what a PR changed, understand code patterns introduced or removed, and find old/new usage patterns. Failed and pending checks are listed with their URLs; pass a failed GitHub Actions check's URL to get_workflow_run for its logs. To triage pull requests by their description and size, pass include_diff: false for a fraction of the output, and fetch the diff only for the ones whose code you need to read.",
+				Description: "Get details, changed files, diff, and CI check results of a GitHub pull request by number or URL. Use this to analyze what a PR changed, understand code patterns introduced or removed, and find old/new usage patterns. Failed and pending checks are listed with their URLs; pass a failed GitHub Actions check's URL to get_workflow_run for its logs. To triage pull requests by their description and size, pass include_diff: false for a fraction of the output, and fetch the diff only for the ones whose code you need to read. For its comments and reviews use get_pull_request_comments.",
 				Parameters: json.RawMessage(`{
 					"type":"object",
 					"properties":{
@@ -943,6 +943,24 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 						"url":{"type":"string","description":"Full GitHub PR URL (alternative to repo+number). If provided, repo and number are extracted from it."},
 						"include_diff":{"type":"boolean","description":"Default true. false leaves out the diff and the CI checks, and adds the merge time, each changed file's added and deleted line counts, and the totals."},
 						"description_lines_containing":{"type":"string","description":"Shows the description lines that contain this text (case-insensitive, up to 3) instead of the description, e.g. 'risk' for a declared risk line."}
+					},
+					"required":[]
+				}`),
+			},
+		},
+		{
+			Type: "function",
+			Function: llm.ToolFunction{
+				Name:        ToolGetPullRequestComments,
+				Description: "Read the comments on a GitHub pull request: conversation comments, reviews and inline review comments, from people and from bots such as AI reviewers and CI. Returns each one's author, kind, date, URL and body, newest first. Pass author to read a single account's comments, such as a review bot's summary.",
+				Parameters: json.RawMessage(`{
+					"type":"object",
+					"properties":{
+						"repo":{"type":"string","description":"Repository name (without owner)"},
+						"number":{"type":"integer","description":"Pull request number"},
+						"url":{"type":"string","description":"Full GitHub PR URL (alternative to repo+number)."},
+						"author":{"type":"string","description":"Optional GitHub login whose comments and reviews to keep, e.g. 'github-actions[bot]'. A bot matches with or without its [bot] suffix."},
+						"max_chars":{"type":"integer","description":"Most characters shown of each body (default 3000). A longer body is cut and marked with its full length; ask again with a larger value to read more of it."}
 					},
 					"required":[]
 				}`),
@@ -3630,6 +3648,39 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 			}
 		}
 		return out
+
+	case ToolGetPullRequestComments:
+		args, errMsg := parseToolArgs[struct {
+			Repo     string `json:"repo"`
+			Number   int    `json:"number"`
+			URL      string `json:"url"`
+			Author   string `json:"author"`
+			MaxChars int    `json:"max_chars"`
+		}](argsJSON)
+		if errMsg != "" {
+			return errMsg
+		}
+		owner, err := h.ghClient.ResolveOwner(ctx)
+		if err != nil {
+			return fmt.Sprintf("Error resolving owner: %v", err)
+		}
+		if args.URL != "" {
+			prOwner, prRepo, prNum, parseErr := github.ParsePRURL(args.URL)
+			if parseErr != nil {
+				return fmt.Sprintf("Error parsing PR URL: %v", parseErr)
+			}
+			owner, args.Repo, args.Number = prOwner, prRepo, prNum
+		}
+		if args.Repo == "" || args.Number <= 0 {
+			return "Error: pass repo and number, or url."
+		}
+		items, err := h.ghClient.PullRequestComments(ctx, owner, args.Repo, args.Number)
+		if err != nil {
+			return fmt.Sprintf("Error reading PR comments: %v", err)
+		}
+		log.Printf("[user=%s channel=%s] read %d comments and reviews on PR #%d in %s/%s", userID, channelID, len(items), args.Number, owner, args.Repo)
+		author := strings.TrimPrefix(strings.TrimSpace(args.Author), "@")
+		return github.FormatPRComments(fmt.Sprintf("%s/%s#%d", owner, args.Repo, args.Number), items, author, args.MaxChars)
 
 	case ToolListPullRequests:
 		args, errMsg := parseToolArgs[struct {

@@ -14,35 +14,36 @@ package commands
 // guard, and the LLM tool schema all resolve back to these constants).
 const (
 	// GitHub.
-	ToolListOrgRepos         = "list_org_repos"
-	ToolListUserRepos        = "list_user_repos"
-	ToolListRepoTeams        = "list_repo_teams"
-	ToolListRepoTeamsBulk    = "list_repo_teams_bulk"
-	ToolGetFilesBulk         = "get_files_bulk"
-	ToolGetFileContent       = "get_file_content"
-	ToolGetRepoDefaultBranch = "get_repo_default_branch"
-	ToolGetAuthenticatedUser = "get_authenticated_user"
-	ToolResolveOwner         = "resolve_owner"
-	ToolSearchFiles          = "search_files"
-	ToolListDirectory        = "list_directory"
-	ToolModifyFile           = "modify_file"
-	ToolCreateFile           = "create_file"
-	ToolDeleteFile           = "delete_file"
-	ToolMoveFile             = "move_file"
-	ToolRegexReplaceFile     = "regex_replace_file"
-	ToolGetPullRequest       = "get_pull_request"
-	ToolListPullRequests     = "list_pull_requests"
-	ToolSearchPullRequests   = "search_pull_requests"
-	ToolFindOpenPullRequests = "find_open_pull_requests"
-	ToolListCommits          = "list_commits"
-	ToolGetCommit            = "get_commit"
-	ToolSearchCode           = "search_code"
-	ToolSearchCodeOrg        = "search_code_org"
-	ToolGetWorkflowRun       = "get_workflow_run"
-	ToolRerunFailedJobs      = "rerun_failed_jobs"
-	ToolRerunWorkflow        = "rerun_workflow"
-	ToolClosePullRequest     = "close_pull_request"
-	ToolDeleteBranch         = "delete_branch"
+	ToolListOrgRepos           = "list_org_repos"
+	ToolListUserRepos          = "list_user_repos"
+	ToolListRepoTeams          = "list_repo_teams"
+	ToolListRepoTeamsBulk      = "list_repo_teams_bulk"
+	ToolGetFilesBulk           = "get_files_bulk"
+	ToolGetFileContent         = "get_file_content"
+	ToolGetRepoDefaultBranch   = "get_repo_default_branch"
+	ToolGetAuthenticatedUser   = "get_authenticated_user"
+	ToolResolveOwner           = "resolve_owner"
+	ToolSearchFiles            = "search_files"
+	ToolListDirectory          = "list_directory"
+	ToolModifyFile             = "modify_file"
+	ToolCreateFile             = "create_file"
+	ToolDeleteFile             = "delete_file"
+	ToolMoveFile               = "move_file"
+	ToolRegexReplaceFile       = "regex_replace_file"
+	ToolGetPullRequest         = "get_pull_request"
+	ToolGetPullRequestComments = "get_pull_request_comments"
+	ToolListPullRequests       = "list_pull_requests"
+	ToolSearchPullRequests     = "search_pull_requests"
+	ToolFindOpenPullRequests   = "find_open_pull_requests"
+	ToolListCommits            = "list_commits"
+	ToolGetCommit              = "get_commit"
+	ToolSearchCode             = "search_code"
+	ToolSearchCodeOrg          = "search_code_org"
+	ToolGetWorkflowRun         = "get_workflow_run"
+	ToolRerunFailedJobs        = "rerun_failed_jobs"
+	ToolRerunWorkflow          = "rerun_workflow"
+	ToolClosePullRequest       = "close_pull_request"
+	ToolDeleteBranch           = "delete_branch"
 
 	// Slack.
 	ToolFetchChannelContext       = "fetch_channel_context"
@@ -211,35 +212,36 @@ var CompressionExemptTools = []string{
 // integration card and must never be gated.
 var toolIntegration = map[string]string{
 	// GitHub (open to all agents).
-	ToolListOrgRepos:         integrationGitHub,
-	ToolListUserRepos:        integrationGitHub,
-	ToolListRepoTeams:        integrationGitHub,
-	ToolListRepoTeamsBulk:    integrationGitHub,
-	ToolGetFilesBulk:         integrationGitHub,
-	ToolGetFileContent:       integrationGitHub,
-	ToolGetRepoDefaultBranch: integrationGitHub,
-	ToolGetAuthenticatedUser: integrationGitHub,
-	ToolResolveOwner:         integrationGitHub,
-	ToolSearchFiles:          integrationGitHub,
-	ToolListDirectory:        integrationGitHub,
-	ToolModifyFile:           integrationGitHub,
-	ToolCreateFile:           integrationGitHub,
-	ToolDeleteFile:           integrationGitHub,
-	ToolMoveFile:             integrationGitHub,
-	ToolRegexReplaceFile:     integrationGitHub,
-	ToolGetPullRequest:       integrationGitHub,
-	ToolListPullRequests:     integrationGitHub,
-	ToolListCommits:          integrationGitHub,
-	ToolGetCommit:            integrationGitHub,
-	ToolSearchPullRequests:   integrationGitHub,
-	ToolFindOpenPullRequests: integrationGitHub,
-	ToolSearchCode:           integrationGitHub,
-	ToolSearchCodeOrg:        integrationGitHub,
-	ToolGetWorkflowRun:       integrationGitHub,
-	ToolRerunFailedJobs:      integrationGitHub,
-	ToolRerunWorkflow:        integrationGitHub,
-	ToolClosePullRequest:     integrationGitHub,
-	ToolDeleteBranch:         integrationGitHub,
+	ToolListOrgRepos:           integrationGitHub,
+	ToolListUserRepos:          integrationGitHub,
+	ToolListRepoTeams:          integrationGitHub,
+	ToolListRepoTeamsBulk:      integrationGitHub,
+	ToolGetFilesBulk:           integrationGitHub,
+	ToolGetFileContent:         integrationGitHub,
+	ToolGetRepoDefaultBranch:   integrationGitHub,
+	ToolGetAuthenticatedUser:   integrationGitHub,
+	ToolResolveOwner:           integrationGitHub,
+	ToolSearchFiles:            integrationGitHub,
+	ToolListDirectory:          integrationGitHub,
+	ToolModifyFile:             integrationGitHub,
+	ToolCreateFile:             integrationGitHub,
+	ToolDeleteFile:             integrationGitHub,
+	ToolMoveFile:               integrationGitHub,
+	ToolRegexReplaceFile:       integrationGitHub,
+	ToolGetPullRequest:         integrationGitHub,
+	ToolGetPullRequestComments: integrationGitHub,
+	ToolListPullRequests:       integrationGitHub,
+	ToolListCommits:            integrationGitHub,
+	ToolGetCommit:              integrationGitHub,
+	ToolSearchPullRequests:     integrationGitHub,
+	ToolFindOpenPullRequests:   integrationGitHub,
+	ToolSearchCode:             integrationGitHub,
+	ToolSearchCodeOrg:          integrationGitHub,
+	ToolGetWorkflowRun:         integrationGitHub,
+	ToolRerunFailedJobs:        integrationGitHub,
+	ToolRerunWorkflow:          integrationGitHub,
+	ToolClosePullRequest:       integrationGitHub,
+	ToolDeleteBranch:           integrationGitHub,
 
 	// Slack (open to all agents).
 	ToolFetchChannelContext:       integrationSlack,
