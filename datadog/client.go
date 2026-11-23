@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/justmike1/arbetern/internal/series"
 	"github.com/justmike1/arbetern/internal/text"
 )
 
@@ -1130,6 +1131,7 @@ func FormatMetricsQuery(resp *MetricsQueryResponse, site string) string {
 		unit                string
 		min, avg, max, last float64
 		count               int
+		points              []series.Point
 	}
 	rows := make([]row, 0, len(resp.Series))
 	for _, s := range resp.Series {
@@ -1144,6 +1146,9 @@ func FormatMetricsQuery(resp *MetricsQueryResponse, site string) string {
 				continue
 			}
 			v := *pt[1]
+			if pt[0] != nil {
+				r.points = append(r.points, series.Point{At: time.UnixMilli(int64(*pt[0])), Value: v})
+			}
 			if first {
 				r.min, r.max = v, v
 				first = false
@@ -1175,7 +1180,7 @@ func FormatMetricsQuery(resp *MetricsQueryResponse, site string) string {
 	if len(rows) < limit {
 		limit = len(rows)
 	}
-	for _, r := range rows[:limit] {
+	for i, r := range rows[:limit] {
 		unit := ""
 		if r.unit != "" {
 			unit = " " + r.unit
@@ -1192,6 +1197,11 @@ func FormatMetricsQuery(resp *MetricsQueryResponse, site string) string {
 			formatNumber(r.last), unit,
 			r.count,
 		)
+		if i < series.MaxShapes {
+			if shape := series.Shape(r.points); shape != "" {
+				fmt.Fprintf(&sb, "  %s\n", shape)
+			}
+		}
 	}
 	if len(rows) > limit {
 		fmt.Fprintf(&sb, "… and %d more series\n", len(rows)-limit)

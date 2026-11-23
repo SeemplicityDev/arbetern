@@ -1799,13 +1799,14 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 			Type: "function",
 			Function: llm.ToolFunction{
 				Name:        ToolDatadogLogsAggregate,
-				Description: "Compute SERVER-SIDE aggregations and accurate percentiles over Datadog logs (no sampling, no row cap — unlike datadog_search_logs). For each bucket of the group-by facet(s) it returns the event count and, when a measure is given, p50/p95/p99 of that numeric measure, sorted by p95 descending (by count when no measure). Use this for performance baselines and 'how slow is X / which values are worst / how many events per group' questions. Example: query 'service:my-service status:ok', group_by '@resource_name', measure '@duration' → per-resource latency percentiles over the whole window. Omit measure for a count-only breakdown (e.g. group_by '@error_id' to get per-error event counts). Pass MULTIPLE facets (e.g. group_by ['@resource_name','@http.method']) to get a composite breakdown — one row per facet-value combination — instead of a single global number. Omit group_by for one overall bucket. Requires any measure to be a registered Datadog measure facet. Time range defaults to the last 14 days.",
+				Description: "Compute SERVER-SIDE aggregations and accurate percentiles over Datadog logs (no sampling, no row cap — unlike datadog_search_logs). For each bucket of the group-by facet(s) it returns the event count and, when a measure is given, p50/p95/p99 of that numeric measure, sorted by p95 descending (by count when no measure). Use this for performance baselines and 'how slow is X / which values are worst / how many events per group' questions. Example: query 'service:my-service status:ok', group_by '@resource_name', measure '@duration' → per-resource latency percentiles over the whole window. Omit measure for a count-only breakdown (e.g. group_by '@error_id' to get per-error event counts). Pass MULTIPLE facets (e.g. group_by ['@resource_name','@http.method']) to get a composite breakdown — one row per facet-value combination — instead of a single global number. Omit group_by for one overall bucket. Requires any measure to be a registered Datadog measure facet. Time range defaults to the last 14 days. Pass interval (e.g. '5m') to count events per time bucket instead: each of the top 10 groups (at most one group_by facet, no measure) then shows its total, when its rate shifted level and its counts over time — use it to line up when each workload started, stopped or surged against a metric's shift.",
 				Parameters: json.RawMessage(`{
 					"type":"object",
 					"properties":{
 						"query":{"type":"string","description":"Datadog log search query to aggregate over (e.g. 'service:my-service status:ok'). Append exclusions like '-@some_facet:(test* OR demo*)' to drop unwanted values."},
 						"group_by":{"description":"Facet(s) to group by. Either a single facet string (e.g. '@resource_name') or an array of up to 4 facets for a composite breakdown (e.g. ['@resource_name','@http.method']). Datadog allows 10,000 groups per call, so each facet keeps its top values within its parent row: 100 per facet for one or two facets, 50/20/10 for three, 20/10/10/5 for four. Put the facet whose totals matter first. Omit for a single overall bucket (no grouping).","oneOf":[{"type":"string"},{"type":"array","items":{"type":"string"}}]},
 						"measure":{"type":"string","description":"OPTIONAL. Numeric measure facet to compute p50/p95/p99 over (e.g. '@duration', '@network.bytes_written'). Omit for a count-only aggregation (just the event count per bucket). Must be a registered Datadog measure facet when provided."},
+						"interval":{"type":"string","description":"OPTIONAL. Time bucket such as '1m', '5m', '1h' or '1d': returns counts over time per group instead of one total. Pick one that gives tens of buckets over the window (at most 1500)."},
 						"from":{"type":"string","description":"Start of time range: ISO-8601, unix milliseconds, Datadog date math ('now-14d'), or a relative duration ('-24h', '-15m'). Defaults to 14 days ago."},
 						"to":{"type":"string","description":"End of time range, same formats as 'from'. Defaults to now."},
 						"site":{"type":"string","enum":["us","eu"],"description":"Datadog site to query: 'us' (datadoghq.com), 'eu' (datadoghq.eu). Omit to query all configured sites (recommended for platform-wide baselines)."}
@@ -1887,7 +1888,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 			Type: "function",
 			Function: llm.ToolFunction{
 				Name:        ToolDatadogQueryMetrics,
-				Description: "Run a Datadog timeseries metrics query and get per-series aggregates (avg/min/max/last). Use this whenever the user asks about CPU, memory, network, disk, latency, throughput, error rate, or any numeric metric broken down by tags (service, pod, cluster, host, etc.) — this is the ONLY tool that can answer those questions. Returns series sorted by avg descending so low/high utilizers are easy to spot. Do client-side filtering (e.g. \"under 20% CPU\") by reading the series list in the result. Query MUST be a valid Datadog metric expression with an aggregator and scope. Examples: `avg:kubernetes.cpu.usage.total{cluster_name:prod-us} by {kube_service}` (raw CPU usage), `avg:kubernetes.cpu.usage.total{*} by {kube_service} / avg:kubernetes.cpu.limits{*} by {kube_service} * 100` (CPU utilization vs limit, %), `avg:kubernetes.memory.usage{*} by {kube_deployment}`, `sum:kubernetes.pods.running{*} by {cluster_name}`, `avg:system.load.1{*} by {host}`. Prefer `by {kube_service}` or `by {kube_deployment}` when the user asks \"which services/deployments\". Default time window is the last 1 hour. If the initial query returns too many series, re-run with a tighter scope filter.",
+				Description: "Run a Datadog timeseries metrics query and get per-series aggregates (avg/min/max/last); the top 10 series also show when they shifted level (old → new value and the minute it started) and their means per time slot, so query from well before an incident to see when a metric moved. Use this whenever the user asks about CPU, memory, network, disk, latency, throughput, error rate, or any numeric metric broken down by tags (service, pod, cluster, host, etc.) — this is the ONLY tool that can answer those questions. Returns series sorted by avg descending so low/high utilizers are easy to spot. Do client-side filtering (e.g. \"under 20% CPU\") by reading the series list in the result. Query MUST be a valid Datadog metric expression with an aggregator and scope. Examples: `avg:kubernetes.cpu.usage.total{cluster_name:prod-us} by {kube_service}` (raw CPU usage), `avg:kubernetes.cpu.usage.total{*} by {kube_service} / avg:kubernetes.cpu.limits{*} by {kube_service} * 100` (CPU utilization vs limit, %), `avg:kubernetes.memory.usage{*} by {kube_deployment}`, `sum:kubernetes.pods.running{*} by {cluster_name}`, `avg:system.load.1{*} by {host}`. Prefer `by {kube_service}` or `by {kube_deployment}` when the user asks \"which services/deployments\". Default time window is the last 1 hour. If the initial query returns too many series, re-run with a tighter scope filter.",
 				Parameters: json.RawMessage(`{
 					"type":"object",
 					"properties":{
@@ -2238,7 +2239,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 			Type: "function",
 			Function: llm.ToolFunction{
 				Name:        ToolClickHouseQuery,
-				Description: "Run read-only SQL against the configured ClickHouse service and return the result rows as a table. Use for ad-hoc questions over any database and table the connector can read: enumerate databases with SHOW DATABASES, list a database's tables with SHOW TABLES FROM <db> (optionally LIKE '%pattern%'), inspect a table with DESCRIBE <db>.<table>, check existence with EXISTS TABLE <db>.<table>, and count or aggregate rows with SELECT, e.g. SELECT count() FROM <db>.<table> WHERE …. You may send several read-only statements separated by semicolons; ClickHouse returns the result of the LAST one. EVERY statement must be read-only — only SELECT / WITH / SHOW / DESCRIBE / EXISTS / EXPLAIN / VALUES are allowed; INSERT / ALTER / CREATE / DROP / DELETE / SET / SYSTEM and any other write or state change are rejected. When you need to find the right database or table for a request, first discover them with SHOW DATABASES / SHOW TABLES rather than guessing. Quote database and table identifiers that are not simple lowercase words with backticks.",
+				Description: "Run read-only SQL against the configured ClickHouse service and return the result rows as a table. Use for ad-hoc questions over any database and table the connector can read: enumerate databases with SHOW DATABASES, list a database's tables with SHOW TABLES FROM <db> (optionally LIKE '%pattern%'), inspect a table with DESCRIBE <db>.<table>, check existence with EXISTS TABLE <db>.<table>, and count or aggregate rows with SELECT, e.g. SELECT count() FROM <db>.<table> WHERE …. You may send several read-only statements separated by semicolons; ClickHouse returns the result of the LAST one. EVERY statement must be read-only — only SELECT / WITH / SHOW / DESCRIBE / EXISTS / EXPLAIN are allowed; INSERT / ALTER / CREATE / DROP / DELETE / SET / SYSTEM commands, any other write or state change, and table functions that reach outside the database are rejected. The system.* tables (query_log, part_log, mutations, merges, processes) are readable. When you need to find the right database or table for a request, first discover them with SHOW DATABASES / SHOW TABLES rather than guessing. Quote database and table identifiers that are not simple lowercase words with backticks.",
 				Parameters: json.RawMessage(`{
 					"type":"object",
 					"properties":{
@@ -2617,7 +2618,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 				Type: "function",
 				Function: llm.ToolFunction{
 					Name:        ToolGrafanaRunPanelQuery,
-					Description: "Run the saved queries of one or more dashboard panels and return their data, as the panel would show it. This is the only Grafana tool that returns live data. Pass dashboard_uid and up to 8 panel_ids (from grafana_get_dashboard_summary). The dashboard's default time range applies unless you pass start/end. Variables keep the dashboard's saved selections unless overridden: e.g. {\"datasource\":\"<uid>\"} to point the panel at another datasource (uids from grafana_list_datasources), {\"service\":\"api,worker\"} for several values of a multi-value variable, or \"All\". Long time series come back summarised per series (last/avg/min/max/sum); tables are capped in rows. Each panel includes an 'open in Grafana' link to share.",
+					Description: "Run the saved queries of one or more dashboard panels and return their data, as the panel would show it. This is the only Grafana tool that returns live data. Pass dashboard_uid and up to 8 panel_ids (from grafana_get_dashboard_summary). The dashboard's default time range applies unless you pass start/end. Variables keep the dashboard's saved selections unless overridden: e.g. {\"datasource\":\"<uid>\"} to point the panel at another datasource (uids from grafana_list_datasources), {\"service\":\"api,worker\"} for several values of a multi-value variable, or \"All\". Long time series come back summarised per series (last/avg/min/max/sum, plus level shifts with their start times and means per time slot for the top 10); tables are capped in rows. Each panel includes an 'open in Grafana' link to share.",
 					Parameters: json.RawMessage(`{
 						"type":"object",
 						"properties":{
@@ -2714,7 +2715,7 @@ func (h *GeneralHandler) buildTools() []llm.Tool {
 				Type: "function",
 				Function: llm.ToolFunction{
 					Name:        ToolGrafanaQueryMetrics,
-					Description: "Query metrics stored in ClickHouse (ClickStack / OpenTelemetry) on ClickHouse datasources, by default every one. Without metric it lists the metric names reporting in the range with type, unit and the number of reporting services (narrow with search and service). With metric it returns the metric per interval, grouped by group_by ('service' or attribute keys) and summarised per series as last/avg/min/max/sum. Gauges default to avg (also min, max, sum, last, count); counters default to their increase per interval, or rate per second. Filter with service and attributes (metric or resource attributes, * wildcards). Default range: the last hour.",
+					Description: "Query metrics stored in ClickHouse (ClickStack / OpenTelemetry) on ClickHouse datasources, by default every one. Without metric it lists the metric names reporting in the range with type, unit and the number of reporting services (narrow with search and service). With metric it returns the metric per interval, grouped by group_by ('service' or attribute keys) and summarised per series as last/avg/min/max/sum, with level shifts (old → new value and start time) and means per time slot for the top 10. Gauges default to avg (also min, max, sum, last, count); counters default to their increase per interval, or rate per second. Filter with service and attributes (metric or resource attributes, * wildcards). Default range: the last hour.",
 					Parameters: json.RawMessage(`{
 						"type":"object",
 						"properties":{
@@ -5671,18 +5672,29 @@ func (h *GeneralHandler) executeTool(ctx context.Context, channelID, userID, aud
 			return "Error: Datadog integration is not configured. Set DD_API_KEY_US/DD_APP_KEY_US and/or DD_API_KEY_EU/DD_APP_KEY_EU to enable it."
 		}
 		args, errMsg := parseToolArgs[struct {
-			Query   string      `json:"query"`
-			GroupBy groupBySpec `json:"group_by"`
-			Measure string      `json:"measure"`
-			From    string      `json:"from"`
-			To      string      `json:"to"`
-			Site    string      `json:"site"`
+			Query    string      `json:"query"`
+			GroupBy  groupBySpec `json:"group_by"`
+			Measure  string      `json:"measure"`
+			Interval string      `json:"interval"`
+			From     string      `json:"from"`
+			To       string      `json:"to"`
+			Site     string      `json:"site"`
 		}](argsJSON)
 		if errMsg != "" {
 			return errMsg
 		}
 		if args.Query == "" {
 			return "Error: query is required."
+		}
+		if args.Interval != "" {
+			if args.Measure != "" {
+				return "Error: interval counts events over time; drop measure, or drop interval for percentiles."
+			}
+			result, err := h.datadogClients.LogCountsOverTime(ctx, args.Site, args.Query, args.From, args.To, args.GroupBy, args.Interval)
+			if err != nil {
+				return fmt.Sprintf("Error aggregating Datadog logs: %v", err)
+			}
+			return result
 		}
 		result, data, err := h.datadogClients.AggregatePercentilesReport(ctx, args.Site, args.Query, args.From, args.To, args.GroupBy, args.Measure)
 		if err != nil {

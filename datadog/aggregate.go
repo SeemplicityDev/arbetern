@@ -4,9 +4,11 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/justmike1/arbetern/internal/series"
 	"github.com/justmike1/arbetern/internal/text"
 )
 
@@ -30,6 +32,7 @@ type AggregateCompute struct {
 	Aggregation string `json:"aggregation"`
 	Metric      string `json:"metric,omitempty"`
 	Type        string `json:"type,omitempty"` // "total" (default) or "timeseries"
+	Interval    string `json:"interval,omitempty"`
 }
 
 // AggregateSort orders the buckets of a group_by by one of its computes.
@@ -72,13 +75,15 @@ type AggregateResponse struct {
 // from/to accept ISO-8601, unix-ms, or Datadog date-math ("now-14d"); they
 // default to the last 14 days.
 func (c *Client) LogsAggregate(ctx context.Context, query, from, to string, compute []AggregateCompute, groupBy []AggregateGroupBy) (*AggregateResponse, error) {
-	if from == "" {
-		from = time.Now().Add(-14 * 24 * time.Hour).UTC().Format(time.RFC3339)
+	var resp AggregateResponse
+	if err := c.aggregate(ctx, query, from, to, compute, groupBy, &resp); err != nil {
+		return nil, err
 	}
-	if to == "" {
-		to = time.Now().UTC().Format(time.RFC3339)
-	}
-	from, to = NormalizeLogsTime(from), NormalizeLogsTime(to)
+	return &resp, nil
+}
+
+func (c *Client) aggregate(ctx context.Context, query, from, to string, compute []AggregateCompute, groupBy []AggregateGroupBy, out any) error {
+	from, to = logsWindow(from, to)
 	body := aggregateRequest{
 		Compute: compute,
 		Filter: map[string]interface{}{
@@ -89,11 +94,17 @@ func (c *Client) LogsAggregate(ctx context.Context, query, from, to string, comp
 		},
 		GroupBy: groupBy,
 	}
-	var resp AggregateResponse
-	if err := c.post(ctx, "/api/v2/logs/analytics/aggregate", body, &resp); err != nil {
-		return nil, err
+	return c.post(ctx, "/api/v2/logs/analytics/aggregate", body, out)
+}
+
+func logsWindow(from, to string) (string, string) {
+	if from == "" {
+		from = time.Now().Add(-14 * 24 * time.Hour).UTC().Format(time.RFC3339)
 	}
-	return &resp, nil
+	if to == "" {
+		to = time.Now().UTC().Format(time.RFC3339)
+	}
+	return NormalizeLogsTime(from), NormalizeLogsTime(to)
 }
 
 // percentilePreset is the compute set for AggregatePercentiles: always count
@@ -365,4 +376,150 @@ func FormatAggregatePercentiles(resp *AggregateResponse, siteLabel string, facet
 	}
 	sb.WriteString(t.String())
 	return sb.String()
+}
+
+const (
+	maxCountGroups  = 10
+	maxCountBuckets = 1500
+)
+
+type countSeriesResponse struct {
+	Data struct {
+		Buckets []struct {
+			By       map[string]interface{} `json:"by"`
+			Computes map[string][]struct {
+				Time  any     `json:"time"`
+				Value float64 `json:"value"`
+			} `json:"computes"`
+		} `json:"buckets"`
+	} `json:"data"`
+}
+
+// LogCountsOverTime counts matching logs per interval for the top groups of at most one facet, with each group's level shifts.
+func (mc *MultiClient) LogCountsOverTime(ctx context.Context, site, query, from, to string, groupBy []string, interval string) (string, error) {
+	facets := normalizeGroupByFacets(groupBy)
+	if len(facets) > 1 {
+		return "", fmt.Errorf("interval takes at most one group_by facet, got %d", len(facets))
+	}
+	interval = strings.TrimSpace(interval)
+	step, err := parseRelativeDuration(interval)
+	if err != nil || step <= 0 {
+		return "", fmt.Errorf("interval must be a duration such as 1m, 5m, 1h or 1d, got %q", interval)
+	}
+	from, to = logsWindow(from, to)
+	start, startOK := logsInstant(from)
+	end, endOK := logsInstant(to)
+	if startOK && endOK && start.Before(end) {
+		if n := int(end.Sub(start)/step) + 1; n > maxCountBuckets {
+			return "", fmt.Errorf("interval %s gives %d buckets over this window; use a larger interval (at most %d buckets)", interval, n, maxCountBuckets)
+		}
+	} else {
+		start, end = time.Time{}, time.Time{}
+	}
+	cs := mc.clients(site)
+	if len(cs) == 0 {
+		return "", fmt.Errorf("no Datadog client configured for site %q", site)
+	}
+	compute := []AggregateCompute{{Aggregation: "count", Type: "timeseries", Interval: interval}}
+	groupByReq := buildPercentileGroupBy(facets, "")
+	for i := range groupByReq {
+		groupByReq[i].Limit = maxCountGroups
+	}
+	multi := len(cs) > 1
+	var (
+		parts   []string
+		lastErr error
+	)
+	for _, c := range cs {
+		var resp countSeriesResponse
+		if err := c.aggregate(ctx, query, from, to, compute, groupByReq, &resp); err != nil {
+			lastErr = err
+			if multi {
+				parts = append(parts, fmt.Sprintf("*[%s]* Error: %v", c.SiteLabel(), err))
+			}
+			continue
+		}
+		parts = append(parts, formatLogCounts(&resp, c.SiteLabel(), facets, step, start, end))
+	}
+	if len(parts) == 0 && lastErr != nil {
+		return "", lastErr
+	}
+	return strings.Join(parts, "\n\n"), nil
+}
+
+func formatLogCounts(resp *countSeriesResponse, siteLabel string, facets []string, step time.Duration, start, end time.Time) string {
+	type group struct {
+		key    string
+		total  float64
+		points []series.Point
+	}
+	groups := make([]group, 0, len(resp.Data.Buckets))
+	var seen []time.Time
+	for _, b := range resp.Data.Buckets {
+		g := group{key: bucketKey(b.By, facets)}
+		for _, p := range b.Computes["c0"] {
+			if t, ok := bucketTime(p.Time); ok {
+				g.points = append(g.points, series.Point{At: t, Value: p.Value})
+				g.total += p.Value
+				seen = append(seen, t)
+			}
+		}
+		groups = append(groups, g)
+	}
+	sort.Slice(seen, func(i, j int) bool { return seen[i].Before(seen[j]) })
+	var gap time.Duration
+	for i := 1; i < len(seen); i++ {
+		if d := seen[i].Sub(seen[i-1]); d > 0 && (gap == 0 || d < gap) {
+			gap = d
+		}
+	}
+	step = max(step, gap)
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "*[%s]* %s — log count per %s\n", siteLabel, joinFacetNames(facets), series.Duration(step))
+	if len(seen) == 0 {
+		sb.WriteString("_No matching logs in the window._")
+		return sb.String()
+	}
+	if start.IsZero() {
+		start, end = seen[0], seen[len(seen)-1].Add(step)
+	}
+	sort.SliceStable(groups, func(i, j int) bool { return groups[i].total > groups[j].total })
+	for _, g := range groups {
+		slots := map[int64]float64{}
+		for _, p := range g.points {
+			slots[p.At.Truncate(step).Unix()] += p.Value
+		}
+		var pts []series.Point
+		for t := start.Truncate(step); t.Before(end) && len(pts) < maxCountBuckets; t = t.Add(step) {
+			pts = append(pts, series.Point{At: t, Value: slots[t.Unix()]})
+		}
+		fmt.Fprintf(&sb, "• %s — %s total", g.key, strconv.FormatFloat(g.total, 'f', 0, 64))
+		if shape := series.Shape(pts); shape != "" {
+			fmt.Fprintf(&sb, " · %s", shape)
+		}
+		sb.WriteString("\n")
+	}
+	if len(groups) >= maxCountGroups {
+		fmt.Fprintf(&sb, "_Top %d groups by count only._\n", maxCountGroups)
+	}
+	return sb.String()
+}
+
+func logsInstant(v string) (time.Time, bool) {
+	if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 1e11 {
+		return time.UnixMilli(n), true
+	}
+	s, err := parseTimeArg(v, time.Time{})
+	return time.Unix(s, 0), err == nil
+}
+
+func bucketTime(v any) (time.Time, bool) {
+	switch t := v.(type) {
+	case string:
+		ts, err := time.Parse(time.RFC3339, t)
+		return ts, err == nil
+	case float64:
+		return time.UnixMilli(int64(t)), true
+	}
+	return time.Time{}, false
 }

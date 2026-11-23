@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/justmike1/arbetern/internal/series"
 	"github.com/justmike1/arbetern/internal/text"
 )
 
@@ -147,6 +148,7 @@ type seriesStats struct {
 	min, max, sum float64
 	last          float64
 	first, lastT  time.Time
+	points        []series.Point
 }
 
 const maxSeriesLines = 25
@@ -187,6 +189,7 @@ func renderSeries(sb *strings.Builder, f Frame, timeIdx int, nums, labels []int)
 			st.sum += v
 			st.min = math.Min(st.min, v)
 			st.max = math.Max(st.max, v)
+			st.points = append(st.points, series.Point{At: t, Value: v})
 			if st.first.IsZero() || t.Before(st.first) {
 				st.first = t
 			}
@@ -209,6 +212,11 @@ func renderSeries(sb *strings.Builder, f Frame, timeIdx int, nums, labels []int)
 		fmt.Fprintf(sb, "• %s — last %s · avg %s · min %s · max %s · sum %s (%d points, %s → %s)\n",
 			st.name, formatFloat(st.last), formatFloat(st.sum/float64(st.n)), formatFloat(st.min), formatFloat(st.max),
 			formatFloat(st.sum), st.n, formatTime(st.first), formatTime(st.lastT))
+		if i < series.MaxShapes {
+			if shape := series.Shape(st.points); shape != "" {
+				fmt.Fprintf(sb, "  %s\n", shape)
+			}
+		}
 	}
 }
 

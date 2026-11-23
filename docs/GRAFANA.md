@@ -76,9 +76,11 @@ shapes the result for a model.
   `interval` (e.g. `1m`) to choose it.
 - **Output.** Short results come back as rows. A long time series is
   summarised per series — grouped by its label columns — as last / avg / min /
-  max / sum with the point count and span. Each panel carries an *open in
-  Grafana* link with the same range and variables. A failing query is reported
-  next to the query text that was sent, and the other panels still return.
+  max / sum with the point count and span; the top 10 series also show their
+  level shifts with start times and their means per time slot. Each panel
+  carries an *open in Grafana* link with the same range and variables. A
+  failing query is reported next to the query text that was sent, and the
+  other panels still return.
 
 Query variables whose options Grafana computes when the dashboard loads cannot
 be expanded to "All" without a saved option list; the tool asks for explicit

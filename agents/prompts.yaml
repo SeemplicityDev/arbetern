@@ -195,3 +195,13 @@ clarify_before_expedition: |
     • You are in a scheduled-workflow tick (ExecuteHeadless) — tick prompts are expected to be self-contained, never ask the user during a tick.
   - After the user answers, act immediately — do not ask a second clarification round for the same request.
 
+incident_analysis: |
+  ROOT-CAUSE DISCIPLINE (applies whenever you explain an alert, an incident or a saturated resource):
+  - Find the onset first: query the saturated resource from well before the alert and name the minute it moved (the metric tools report each series' level shifts and when they started). Never compare windows whose edges come from a suspect's start time; such a window cannot tell that suspect from anything that began minutes earlier.
+  - List every workload that started, changed or scaled near the onset before ranking any of them. The first plausible suspect is rarely the only one.
+  - Rank suspects by cost, never by log volume: how many operations each ran per time bucket, times what one operation costs the resource. Log lines are not comparable across services. Line each workload's rate shifts up with the resource's.
+  - Errors and timeouts show who suffers, not who causes. A workload timing out on a saturated resource may be a victim.
+  - Check dose-response: the cause's rate should track the resource, including the drop when it pauses or stops.
+  - Verify a mechanism in the code before asserting it, yours or anyone else's. When someone offers another explanation, test its mechanism and timing to the same standard; keep what holds, correct what does not, and never adopt or retract a root cause on timing alone.
+  - Close with what would settle it: the one query or metric that separates the remaining suspects. Run it if you can reach the system; otherwise hand over the exact statement.
+

@@ -90,7 +90,7 @@ Create (or reuse) a database user that can only read, and use it for
 `CLICKHOUSE_QUERY_USER` / `CLICKHOUSE_QUERY_PASSWORD`:
 
 ```sql
-CREATE USER arbetern_ro IDENTIFIED BY 'REPLACE_ME' SETTINGS readonly = 1;
+CREATE USER arbetern_ro IDENTIFIED BY 'REPLACE_ME' SETTINGS readonly = 2;
 GRANT SELECT, SHOW TABLES, SHOW DATABASES ON *.* TO arbetern_ro;
 ```
 
@@ -103,10 +103,12 @@ e.g. `https://abc123.us-east-1.aws.clickhouse.cloud:8443` (find it under
 Read-only is enforced two ways: the recommended `readonly`/SELECT-only user
 **and** an in-code guard that rejects any statement which is not clearly
 read-only before it is ever sent. Only `SELECT` / `WITH` / `SHOW` / `DESCRIBE` /
-`EXISTS` / `EXPLAIN` / `VALUES` are permitted; `INSERT` / `ALTER` / `CREATE` /
-`DROP` / `DELETE` / `SET` / `SYSTEM` and any other write or state change are
-refused (whether standalone or hidden inside a `WITH …` prefix). Result sets are
-capped server-side via `max_result_rows`.
+`EXISTS` / `EXPLAIN` are permitted; `INSERT` / `ALTER` / `CREATE` / `DROP` /
+`DELETE` / `SET` / `SYSTEM` commands and any other write or state change are
+refused (whether standalone or hidden inside a `WITH …` prefix), as are table
+functions that reach outside the database (`url`, `s3`, `remote`, `file`, …).
+The `system.*` tables stay readable. `grafana_query_sql` uses the same guard.
+Result sets are capped server-side via `max_result_rows`.
 
 ### Attribution
 

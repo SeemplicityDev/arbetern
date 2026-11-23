@@ -7,8 +7,8 @@ package clickhouse
 // a name to a database or table lives in the agent's prompt, not here.
 //
 // Read-only is enforced two ways: a SELECT-only database user (recommended in
-// the docs) and readOnlyCH, which rejects any non-read-only statement
-// before it is sent.
+// the docs) and sqlguard.ValidateClickHouse, which rejects any non-read-only
+// statement before it is sent.
 
 import (
 	"context"
@@ -57,7 +57,7 @@ type chQueryResponse struct {
 
 // Query runs read-only SQL against the configured service endpoint and returns
 // the rows. rowLimit caps the rows (<=0 uses the default; above the max is
-// clamped). It rejects anything not clearly read-only (see readOnlyCH).
+// clamped). It rejects anything not clearly read-only (see sqlguard.ValidateClickHouse).
 func (c *Client) Query(ctx context.Context, sqlText string, rowLimit int) (*SQLQueryResult, error) {
 	sqlText = strings.TrimSpace(sqlText)
 	if sqlText == "" {
@@ -66,7 +66,7 @@ func (c *Client) Query(ctx context.Context, sqlText string, rowLimit int) (*SQLQ
 	if c.queryEndpoint == "" || c.queryUser == "" {
 		return nil, fmt.Errorf("ClickHouse SQL query interface is not configured (set clickhouse-query-endpoint and clickhouse-query-user)")
 	}
-	if err := readOnlyCH.Validate(sqlText); err != nil {
+	if err := sqlguard.ValidateClickHouse(sqlText); err != nil {
 		return nil, err
 	}
 	if rowLimit <= 0 || rowLimit > maxQueryRowLimit {
@@ -157,22 +157,4 @@ func queryError(status int, body []byte) error {
 		return fmt.Errorf("clickhouse query error: HTTP %d", status)
 	}
 	return fmt.Errorf("clickhouse query error (HTTP %d): %s", status, msg)
-}
-
-// readOnlyCH is the ClickHouse read-only vocabulary: statements may only
-// begin with a reading verb, and no write / schema / session-changing verb may
-// appear anywhere in them.
-var readOnlyCH = sqlguard.Rules{
-	Lead: map[string]bool{
-		"SELECT": true, "WITH": true, "SHOW": true, "DESCRIBE": true, "DESC": true,
-		"EXISTS": true, "EXPLAIN": true, "VALUES": true,
-	},
-	Mutating: map[string]bool{
-		"INSERT": true, "ALTER": true, "CREATE": true, "DROP": true, "DETACH": true,
-		"ATTACH": true, "RENAME": true, "TRUNCATE": true, "OPTIMIZE": true, "GRANT": true,
-		"REVOKE": true, "KILL": true, "SYSTEM": true, "UPDATE": true, "DELETE": true,
-		"MOVE": true, "FREEZE": true, "UNFREEZE": true, "SET": true, "WATCH": true,
-	},
-	AllowedDesc:   "SELECT / WITH / SHOW / DESCRIBE / EXISTS / EXPLAIN / VALUES",
-	ForbiddenDesc: "INSERT / ALTER / CREATE / DROP / DELETE / SET",
 }
